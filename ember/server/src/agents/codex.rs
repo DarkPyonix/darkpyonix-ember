@@ -1618,4 +1618,64 @@ mod tests {
         assert!(approvals(&clash).is_empty());
         assert!(!app_server_args(&clash).iter().any(|a| a.starts_with("mcp_servers.ember-channels.")));
     }
+
+    /// The elicitation Codex sends for an MCP tool call it was not told to approve, in the shape
+    /// of `McpServerElicitationRequestParams` (codex-cli 0.155.1 schema; not recorded on 0.167.0).
+    fn channel_elicitation(server: &str) -> Value {
+        json!({
+            "threadId": "th", "turnId": "tu", "serverName": server,
+            "mode": "form", "message": "Allow the ember-channels MCP server to run tool \"channel_post\"?",
+            "requestedSchema": { "type": "object", "properties": {} },
+            "_meta": { "codex_approval_kind": "mcp_tool_call" },
+        })
+    }
+
+    #[test]
+    fn fr_t12_codex_layer_session_is_marked_unverified_only_without_the_rule() {
+        let mut req = channel_request();
+        assert!(!channel_post_unverified(&req), "the rule is there: Codex does not ask");
+        req.allowed_tools.clear();
+        assert!(channel_post_unverified(&req));
+        assert!(approvals(&req).is_empty(), "no auto-approve argument");
+        req.mcp_servers.clear();
+        assert!(!channel_post_unverified(&req), "no server, nothing to ask about");
+    }
+
+    #[test]
+    fn fr_t12_codex_layer_channel_elicitation_becomes_an_allow_once_card_with_the_note() {
+        let mut m = Mapper { channel_unverified: true, ..Mapper::default() };
+        let out = m.on_server_request(json!(7), "mcpServer/elicitation/request", &channel_elicitation("ember-channels")).unwrap();
+        let [AgentEvent::ApprovalRequested { approval_id, tool, input, needs_person }] = out.as_slice() else {
+            panic!("{out:?}");
+        };
+        assert_eq!(tool, crate::a2a::CHANNEL_POST_TOOL);
+        assert!(*needs_person, "approve-everything does not answer it");
+        assert_eq!(input["allow_always"], json!(false));
+        assert_eq!(input["note"], json!(CHANNEL_UNVERIFIED_NOTE));
+        assert_eq!(input["log_reason"], json!(CHANNEL_UNVERIFIED_REASON));
+        assert_eq!(input["server"], json!("ember-channels"));
+        let pending = m.approvals.get(approval_id.as_str()).unwrap().clone();
+        assert_eq!(pending.kind, ApprovalKind::Elicitation);
+        assert_eq!(approval_response(&pending, ApprovalDecision::AllowOnce), json!({"action": "accept", "content": {}}));
+        assert_eq!(
+            approval_response(&pending, ApprovalDecision::AllowAlways),
+            json!({"action": "accept", "content": {}}),
+            "there is no per-session answer: allow once"
+        );
+        assert_eq!(approval_response(&pending, ApprovalDecision::Deny), json!({"action": "decline"}));
+
+        // A session with the rule that is asked anyway gets the card without the note.
+        let mut m = Mapper::default();
+        let out = m.on_server_request(json!(8), "mcpServer/elicitation/request", &channel_elicitation("ember-channels")).unwrap();
+        let [AgentEvent::ApprovalRequested { input, .. }] = out.as_slice() else { panic!() };
+        assert!(input.get("note").is_none());
+        assert_eq!(input["allow_always"], json!(false));
+        // Another server's elicitation is still refused.
+        assert!(m.on_server_request(json!(9), "mcpServer/elicitation/request", &channel_elicitation("other")).is_err());
+        // A form that asks for values is not an approval.
+        let mut form = channel_elicitation("ember-channels");
+        form["requestedSchema"]["properties"] = json!({ "x": { "type": "string" } });
+        assert!(m.on_server_request(json!(10), "mcpServer/elicitation/request", &form).is_err());
+        assert!(!CHANNEL_UNVERIFIED_NOTE.contains('\u{2014}'));
+    }
 }

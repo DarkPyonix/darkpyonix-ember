@@ -341,4 +341,18 @@ mod tests {
         assert!(t.body.contains("https://e.x"));
         assert!(!t.body.contains('\n'));
     }
+
+    /// FR-T12: a card the server marks `allow_always: false` has no always button, and a
+    /// server note is the body instead of the raw summary.
+    #[test]
+    fn fr_t12_channel_post_card_offers_allow_once_only_and_shows_the_note() {
+        assert!(offers_allow_always(&json!({"command": "ls"})));
+        assert!(offers_allow_always(&json!({"allow_always": true})));
+        assert!(!offers_allow_always(&json!({"ServerName": "ember-channels", "allow_always": false})));
+        assert!(offers_allow_always(&json!(null)));
+        let note = "서버 이름을 확인하지 못했습니다.";
+        let t = approval_text(None, "mcp__ember-channels__channel_post", &json!({"note": note, "log_reason": "unverified", "allow_always": false}));
+        assert_eq!(t.kind, ApprovalKind::Other);
+        assert_eq!(t.body, note);
+    }
 }

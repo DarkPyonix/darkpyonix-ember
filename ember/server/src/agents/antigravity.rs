@@ -2116,4 +2116,60 @@ mod tests {
         assert_eq!(broker.handle("t", &post).await.unwrap()["decision"], "deny");
         assert!(rx.try_recv().is_err(), "nobody is asked");
     }
+
+    /// agy keys approvals by `call_mcp_tool`, so remembering an "allow always" for the channel
+    /// call would allow every MCP tool of the run: the card offers allow once only, an
+    /// `AllowAlways` answer counts as allow once, and the next call asks again.
+    #[tokio::test]
+    async fn fr_t12_agy_channel_post_offers_allow_once_only() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let broker = HookBroker::new();
+        let run = gated(tx, Duration::from_secs(30));
+        broker.register("t", run.clone());
+        let post = |step| call("call_mcp_tool", step, json!({ "ServerName": "ember-channels", "ToolName": "channel_post" }));
+        for step in [1, 2] {
+            let b = broker.clone();
+            let p = post(step);
+            let waiting = tokio::spawn(async move { b.handle("t", &p).await });
+            let Some(AgentEvent::ApprovalRequested { approval_id, tool, input, needs_person }) = rx.recv().await else {
+                panic!("step {step}: the second call asks again");
+            };
+            assert_eq!(tool, "call_mcp_tool");
+            assert_eq!(input["allow_always"], json!(false), "the card hides the always button");
+            assert_eq!(input["ServerName"], "ember-channels");
+            assert!(!needs_person, "approve-everything may still answer it");
+            run.answer(&approval_id, ApprovalDecision::AllowAlways).unwrap();
+            assert_eq!(waiting.await.unwrap(), Some(allow_reply()));
+            assert!(run.state.lock().unwrap().always_allowed.is_empty(), "no rule is stored");
+        }
+    }
+
+    /// An "allow always" for another tool is remembered as before, and one for another server's
+    /// `call_mcp_tool` does not let the channel call through without a card.
+    #[tokio::test]
+    async fn fr_t12_agy_channel_post_other_tools_keep_allow_always() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let broker = HookBroker::new();
+        let run = gated(tx, Duration::from_secs(30));
+        broker.register("t", run.clone());
+        let other = call("call_mcp_tool", 1, json!({ "ServerName": "browser", "ToolName": "open" }));
+        let b = broker.clone();
+        let p = other.clone();
+        let waiting = tokio::spawn(async move { b.handle("t", &p).await });
+        let Some(AgentEvent::ApprovalRequested { approval_id, input, .. }) = rx.recv().await else { panic!() };
+        assert!(input.get("allow_always").is_none(), "another server's card is unchanged");
+        run.answer(&approval_id, ApprovalDecision::AllowAlways).unwrap();
+        assert_eq!(waiting.await.unwrap(), Some(allow_reply()));
+        assert_eq!(broker.handle("t", &other).await, Some(allow_reply()), "remembered as before");
+        assert!(rx.try_recv().is_err());
+
+        let post = call("call_mcp_tool", 2, json!({ "ServerName": "Ember-Channels", "ToolName": "channel_post" }));
+        let b = broker.clone();
+        let waiting = tokio::spawn(async move { b.handle("t", &post).await });
+        let Some(AgentEvent::ApprovalRequested { approval_id, .. }) = rx.recv().await else {
+            panic!("the channel call still asks");
+        };
+        run.answer(&approval_id, ApprovalDecision::Deny).unwrap();
+        assert_eq!(waiting.await.unwrap().unwrap()["decision"], "deny");
+    }
 }

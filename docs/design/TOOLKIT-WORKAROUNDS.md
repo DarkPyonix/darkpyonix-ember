@@ -2,7 +2,8 @@
 
 Status: **marker pass done on 2026-11-15, not compiled.** The table is read from the source of
 `ember/app/` on branch `feat/673-marker-pass`. Line numbers are that branch's. No row here was
-checked on a display.
+checked on a display. Branch `feat/673-drop-in-pin` then removes the base screens' workarounds
+whose fix is in the pin; those rows are in their own table and name functions, not lines.
 
 Korean follows the English section with the same content.
 
@@ -55,6 +56,17 @@ references to a fix that is already in use (for example `compose-rust#372` besid
 | `src/ui/cr/session.rs` `PaneTerminal` | The terminal pane opened at its top and did not follow new output. | compose-rust#385 | Closed, in the pin since v0.0.5 (`ScrollState::scroll_to`) | The pane's `ScrollColumn` takes `remember_scroll_state()` and `FollowNewest` moves it, as the transcript does. Test `pane_terminal_follows_its_newest_line_with_the_toolkit_scroll_state`. |
 | `src/ui/cr/compat.rs` `SplitPane` | A fixed two-column row stood in for a split pane. It had no caller. | compose-rust#27 | Closed, in the pin (`compose_rust::ui::SplitPane`) | The function is gone. Test `no_stand_in_split_pane_is_left`. |
 
+### Removed on `feat/673-drop-in-pin`, to be confirmed by capture
+
+Branch `feat/673-drop-in-pin` removes the workarounds below. None of it is compiled or seen on a
+display yet: one builder run compiles it, runs the tests and takes the captures named in the last
+column. A row moves out of this table when its capture is judged.
+
+| Place | Workaround | Toolkit issue | What replaced it | Capture that proves it |
+|---|---|---|---|---|
+| `src/ui/cr/vcs.rs` (`SectionList`, the sheet rail, `PaneTabSegment`, `CircleIconButton`, 이 덩어리 전체), `agents.rs` (`SectionNav`), `routines.rs` (`GlyphButton`, the phone's 새 루틴, 편집 and 지금 실행 squares, `RunTile`), `new_channel.rs` (`NewChannelButton`) | An invisible `Button` over a painted box carried focus, role and a name from a fixed set. The three `FocusOverlay` functions, `NamedOverlay` and `DisabledOverlay` are gone. | compose-rust#429 (`Modifier::label`, `role`), #372 | The painted box is the control: `components::NamedClickable` (a clickable container with the name, the button role and the shared press values), or `NamedDisabled` for the busy 실행 중 square. Tests: `a_fixed_name_sits_on_the_painted_box_and_a_data_name_on_a_matched_button` (`vcs.rs`), `section_rows_are_the_named_controls_and_data_named_chips_keep_a_matched_button` (`agents.rs`), `a_fixed_name_sits_on_the_painted_box_and_a_routine_name_on_a_matched_button` (`routines.rs`), `fr_l12_new_channel_button_says_why_in_demo_mode` (`new_channel.rs`). | `EMBER_CR_ROUTE=vcs`, `agents`, `routines` and the channel list at 1440 and 390, light and dark: every row, pill and round button looks as before. By hand, with a pointer and a keyboard: a press scales and tints the painted box in its own shape (a 44 dp circle round the 32 dp remote buttons), Tab puts the focus ring on the box, and VoiceOver reads the same names as before. |
+| `src/ui/cr/vcs.rs` (`ConflictFileRow`, `BarSelector`, `RemoteMainButton`, the tree's folder and file rows, `HistoryRow`, `PullRequestRow`, the team card's PR pill, `StashPill`), `agents.rs` (`ModelRadio`, `SelectChip`, `MenuPickerPill`), `routines.rs` (`FilterSegButton`, `RoutineRow`) | The same invisible `Button`, `fill_max_size`, for a name built from data. It widened a box that had no width. | compose-rust#431 (`Modifier::match_parent_size`); #425 does not fit (see the unfiled gaps) | One shared clear button, `components::DataNamedOverlay`, with `match_parent_size`: it takes its box's bounds and no more. The names are unchanged. Test `a_data_named_overlay_takes_its_box_and_a_disabled_named_box_has_no_click` (`components.rs`). | The same captures: no row or pill is wider or taller than before, and the team card's PR pill is as wide as its text. By hand: each of these still takes a click over its whole box and reads its name. |
+
 ### Closed after the pin
 
 | Place | Workaround | Toolkit issue | State | Action at the next pin |
@@ -91,7 +103,6 @@ behaves, so a capture or a run decides it.
 | Place | Workaround | Toolkit issue | State | Action |
 |---|---|---|---|---|
 | `src/ui/cr/agents.rs:591`, `agents.rs:619` | `SelectChip` has a fixed 200 width and `MenuPickerPill` an estimated one, because the `fill_max_size` overlay widens them. | compose-rust#431 | In the pin (`Modifier::match_parent_size`, `ui/mod.rs:474`) | Give `FocusOverlay` `match_parent_size`, drop both widths, capture the 에이전트 screen. |
-| `src/ui/cr/vcs.rs:290`, `vcs.rs:4998`, `agents.rs:560`, `routines.rs:1372`, `new_channel.rs:130`, `components.rs:1533` | An invisible `Button` over a painted row or pill carries focus, role and name (30 `FocusOverlay` calls). | compose-rust#425, #429 | In the pin (`Button::content`, `Button::accessible_name`, `Modifier::label`) | Move each caller onto `Button::content` or `components::NamedClickable`, then delete the three `FocusOverlay` functions. |
 | `src/ui/cr/vcs.rs:425`, `vcs.rs:5001`, `routines.rs:1877` | Pill widths are estimated with `text_px` and fixed. | compose-rust#427, #328 | In the pin since v0.0.7 | Drop `vcs_pill_width` and let the pill take its content's width. |
 | `src/ui/cr/vcs.rs:1933`, `home.rs:328` | Panes scroll on their own; tiles take a fixed height. | compose-rust#389 | In the pin (`Row::equal_height`) | Try `equal_height` and capture both. |
 | `src/ui/cr/project.rs:424` | The search field is not focused when it opens. | compose-rust#410 | In the pin (`FocusHandle`, `Batch::request_focus`) | Wire the focus and check it by hand. |
@@ -139,6 +150,7 @@ the number.
 |---|---|---|
 | `src/ui/cr/components.rs:1673` (`EmberCardSized`), `:1702` (`InsetPanelSized`) | `ui::Modifier` has no per-side padding. `Modifier::padding(dp)` is uniform and `padding_role` takes one role. The wire has `Modifier::PaddingEach`, with no builder. Ember adds 4 dp spacers to turn 16 into 16/20 and 12 into 12/16. | `compose-rust/src/ui/mod.rs:500`, `compose-rust/src/schema.rs:2421` |
 | `src/ui/cr/agents.rs:854` (`HeadedCard`) | `ui::Modifier` has no minimum height. Ember puts a zero-width spacer of the height in the row as a strut. compose-rust#778 is about a maximum by its title; whether its fix also gives a minimum is not known from the pin. | `compose-rust/src/ui/mod.rs` (`width`, `height`, `size` only) |
+| `src/ui/cr/components.rs` (`DataNamedOverlay`) | A clickable container has no owned accessible name. `Modifier::label` keeps every distinct name for the life of the program and drops names past 4096, so it suits a fixed set only. A `Button` with content (compose-rust#425) insets its children by the design system's 16 dp and gives no way to change it, so a painted row cannot move into one. A box named from data therefore keeps a clear `Button` over it. | `compose-rust/src/ui/mod.rs` (`keep_label`, `MAX_LABELS`), `renderer/desktop/src/renderer/HostButton.kt` (`labelPadding`) |
 | `src/ui/cr/channel_owner.rs:467` | `TextField` has no read-only flag. The invite link is shown in an enabled field so it can be selected and copied, and typing changes what is drawn. | `compose-rust/src/ui/widgets.rs` (`TextFieldScope`, line 1163) |
 
 ### Notes not changed in this pass
@@ -197,6 +209,17 @@ API는 핀에 있다.
 | `src/ui/cr/session.rs` `PaneTerminal` | 터미널 칸이 맨 위에서 열리고 새 출력을 따라가지 않았다. | compose-rust#385 | 닫힘, v0.0.5부터 핀에 있음(`ScrollState::scroll_to`) | 칸의 `ScrollColumn`이 `remember_scroll_state()`를 받고, 대화와 같이 `FollowNewest`가 옮긴다. 테스트 `pane_terminal_follows_its_newest_line_with_the_toolkit_scroll_state`. |
 | `src/ui/cr/compat.rs` `SplitPane` | 고정 두 칸 행이 분할 창을 대신했다. 부르는 곳이 없었다. | compose-rust#27 | 닫힘, 핀에 있음(`compose_rust::ui::SplitPane`) | 함수를 지웠다. 테스트 `no_stand_in_split_pane_is_left`. |
 
+### `feat/673-drop-in-pin`에서 지움, 캡처로 확인할 것
+
+`feat/673-drop-in-pin` 브랜치가 아래 우회 코드를 지운다. 아직 컴파일하지 않았고 화면에서 보지도
+않았다. 빌더가 한 번에 컴파일하고 테스트를 돌린 뒤 마지막 칸의 캡처를 찍는다. 캡처를 판단한 행은
+이 표에서 뺀다.
+
+| 위치 | 우회 코드 | 툴킷 이슈 | 대신 쓰는 것 | 확인할 캡처 |
+|---|---|---|---|---|
+| `src/ui/cr/vcs.rs`(`SectionList`, 시트 레일, `PaneTabSegment`, `CircleIconButton`, 이 덩어리 전체), `agents.rs`(`SectionNav`), `routines.rs`(`GlyphButton`, 폰의 새 루틴과 편집, 지금 실행 네모, `RunTile`), `new_channel.rs`(`NewChannelButton`) | 그린 상자 위의 보이지 않는 `Button`이 포커스, 역할, 정해진 이름을 맡았다. `FocusOverlay` 함수 셋과 `NamedOverlay`, `DisabledOverlay`를 지웠다. | compose-rust#429(`Modifier::label`, `role`), #372 | 그린 상자가 곧 컨트롤이다. `components::NamedClickable`(이름, 버튼 역할, 공통 누름 값을 가진 클릭 컨테이너)을 쓰고, 바쁜 실행 중 네모는 `NamedDisabled`를 쓴다. 테스트: `a_fixed_name_sits_on_the_painted_box_and_a_data_name_on_a_matched_button`(`vcs.rs`), `section_rows_are_the_named_controls_and_data_named_chips_keep_a_matched_button`(`agents.rs`), `a_fixed_name_sits_on_the_painted_box_and_a_routine_name_on_a_matched_button`(`routines.rs`), `fr_l12_new_channel_button_says_why_in_demo_mode`(`new_channel.rs`). | `EMBER_CR_ROUTE=vcs`, `agents`, `routines`와 채널 목록을 1440과 390, 라이트와 다크로 찍는다. 행, 알약, 둥근 버튼이 모두 전과 같아야 한다. 포인터와 키보드로 직접: 누르면 그린 상자가 제 모양대로 줄고 물든다(32 dp 원격 버튼은 44 dp 원). Tab을 누르면 포커스 링이 상자에 생긴다. VoiceOver가 전과 같은 이름을 읽는다. |
+| `src/ui/cr/vcs.rs`(`ConflictFileRow`, `BarSelector`, `RemoteMainButton`, 트리의 폴더와 파일 행, `HistoryRow`, `PullRequestRow`, 팀 카드의 PR 알약, `StashPill`), `agents.rs`(`ModelRadio`, `SelectChip`, `MenuPickerPill`), `routines.rs`(`FilterSegButton`, `RoutineRow`) | 데이터로 만든 이름을 위한 같은 `Button`이 `fill_max_size`였다. 폭이 없는 상자를 넓혔다. | compose-rust#431(`Modifier::match_parent_size`). #425는 맞지 않는다(이슈 없는 빈 곳 참고) | 공용 투명 버튼 하나, `components::DataNamedOverlay`가 `match_parent_size`를 쓴다. 상자 크기만큼만 차지한다. 이름은 그대로다. 테스트 `a_data_named_overlay_takes_its_box_and_a_disabled_named_box_has_no_click`(`components.rs`). | 같은 캡처에서 어떤 행이나 알약도 전보다 넓거나 높지 않고, 팀 카드의 PR 알약은 글자 폭만큼이다. 직접: 상자 전체가 클릭을 받고 이름을 읽는다. |
+
 ### 핀 뒤에 닫힘
 
 | 위치 | 우회 코드 | 툴킷 이슈 | 상태 | 다음 핀에서 할 일 |
@@ -232,7 +255,6 @@ API는 핀에 있다.
 | 위치 | 우회 코드 | 툴킷 이슈 | 상태 | 할 일 |
 |---|---|---|---|---|
 | `src/ui/cr/agents.rs:591`, `agents.rs:619` | `fill_max_size` 덮개가 폭을 넓혀서 `SelectChip`은 폭 200 고정, `MenuPickerPill`은 어림한 폭을 쓴다. | compose-rust#431 | 핀에 있음(`Modifier::match_parent_size`, `ui/mod.rs:474`) | `FocusOverlay`에 `match_parent_size`를 주고 두 폭을 지운 뒤 에이전트 화면을 캡처한다. |
-| `src/ui/cr/vcs.rs:290`, `vcs.rs:4998`, `agents.rs:560`, `routines.rs:1372`, `new_channel.rs:130`, `components.rs:1533` | 그린 행이나 알약 위의 보이지 않는 `Button`이 포커스, 역할, 이름을 맡는다(`FocusOverlay` 호출 30곳). | compose-rust#425, #429 | 핀에 있음(`Button::content`, `Button::accessible_name`, `Modifier::label`) | 부르는 곳을 `Button::content`나 `components::NamedClickable`로 옮기고 `FocusOverlay` 함수 셋을 지운다. |
 | `src/ui/cr/vcs.rs:425`, `vcs.rs:5001`, `routines.rs:1877` | 알약 폭을 `text_px`로 어림해 고정한다. | compose-rust#427, #328 | v0.0.7부터 핀에 있음 | `vcs_pill_width`를 지우고 알약이 내용 폭을 갖게 한다. |
 | `src/ui/cr/vcs.rs:1933`, `home.rs:328` | 두 칸이 따로 스크롤된다. 타일 높이가 고정이다. | compose-rust#389 | 핀에 있음(`Row::equal_height`) | `equal_height`를 써 보고 둘 다 캡처한다. |
 | `src/ui/cr/project.rs:424` | 검색 필드가 열릴 때 포커스를 받지 않는다. | compose-rust#410 | 핀에 있음(`FocusHandle`, `Batch::request_focus`) | 포커스를 연결하고 직접 확인한다. |
@@ -279,6 +301,7 @@ API는 핀에 있다.
 |---|---|---|
 | `src/ui/cr/components.rs:1673`(`EmberCardSized`), `:1702`(`InsetPanelSized`) | `ui::Modifier`에 변마다 다른 안쪽 여백이 없다. `Modifier::padding(dp)`는 네 변이 같고 `padding_role`은 역할 하나를 받는다. 와이어에는 `Modifier::PaddingEach`가 있지만 빌더가 없다. Ember는 4 dp 스페이서를 넣어 16을 16/20으로, 12를 12/16으로 만든다. | `compose-rust/src/ui/mod.rs:500`, `compose-rust/src/schema.rs:2421` |
 | `src/ui/cr/agents.rs:854`(`HeadedCard`) | `ui::Modifier`에 최소 높이가 없다. Ember는 그 높이의 폭 0 스페이서를 행에 버팀목으로 넣는다. compose-rust#778은 제목으로는 최대 높이 이슈이고, 그 수정이 최소 높이도 주는지는 핀에서 알 수 없다. | `compose-rust/src/ui/mod.rs`(`width`, `height`, `size`뿐) |
+| `src/ui/cr/components.rs`(`DataNamedOverlay`) | 클릭 컨테이너에 소유한 접근성 이름이 없다. `Modifier::label`은 서로 다른 이름을 프로그램이 끝날 때까지 모두 쥐고 4096개를 넘으면 버리므로 정해진 이름에만 맞는다. 내용을 가진 `Button`(compose-rust#425)은 자식을 디자인 시스템의 16 dp만큼 안으로 밀고 바꿀 방법이 없어서, 그린 행을 그 안으로 옮길 수 없다. 그래서 데이터로 이름을 짓는 상자는 위에 투명 `Button`을 둔다. | `compose-rust/src/ui/mod.rs`(`keep_label`, `MAX_LABELS`), `renderer/desktop/src/renderer/HostButton.kt`(`labelPadding`) |
 | `src/ui/cr/channel_owner.rs:467` | `TextField`에 읽기 전용 설정이 없다. 초대 링크를 선택하고 복사할 수 있게 켜진 필드에 보여 주므로, 입력하면 그려진 글자가 바뀐다. | `compose-rust/src/ui/widgets.rs`(`TextFieldScope`, 1163행) |
 
 ### 이번에 바꾸지 않은 메모

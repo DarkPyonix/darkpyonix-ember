@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
 use compose_rust::{
-    Alignment, ButtonVariant, Color, IconRole, Paint, ShapeRole, TextOverflow, TypeRole,
+    Alignment, Color, IconRole, Paint, ShapeRole, TextOverflow, TypeRole,
     WindowSizeClass,
 };
 
@@ -39,7 +39,7 @@ use crate::ui::Route;
 
 use super::components::{
     AppButton, ButtonKind, Choice, ChoiceButton, ChoiceRow, EmberCard, EmberField, EmberSheetSized, FieldOptions, InsetPanel, Label, PopExtra, PopKind, PopMenu, PopRow, PopoverMenuWith,
-    Clickable, Pill, PillTone, Txt,
+    Clickable, DataNamedOverlay, NamedClickable, Pill, PillTone, Txt,
 };
 use super::notice;
 use super::shell::NavIcon;
@@ -287,20 +287,6 @@ fn SmallNote(text: &str) {
     Label(text, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));
 }
 
-// TODO(compose-rust#425, #429, in v0.0.10): an invisible `Button(label)` over a painted row, only
-// to get focus, role and the accessible name. `Button::content` and `Modifier::label` are in the
-// pin: move each caller onto them (or onto `components::NamedClickable`), check its row on a
-// display, then remove this.
-/// An accessible invisible button overlay for a painted row or pill.
-/// Gives assistive tech the item's label and provides keyboard focus and click handling.
-fn FocusOverlay(label: &str, on_click: impl FnMut() + 'static) {
-    cu::Button(label)
-        .variant(ButtonVariant::Text)
-        .color(Paint::Literal(Color::argb(0)))
-        .modifier(Modifier::new().fill_max_size())
-        .on_click(on_click);
-}
-
 /// Side of a stage check on the header, a file row and the form boxes (`vcs.css:68`).
 pub const STAGE_CHECK_SIDE: f32 = 18.0;
 /// Side of the check on a diff line (the mockup's 14 px line variant).
@@ -395,7 +381,7 @@ fn ConflictFileRow(path: &str, on_click: impl FnMut() + 'static) {
                 });
                 Txt(&shown, TypeRole::Mono, Some(paint(p.text)), Some(1), Some(TextOverflow::Ellipsis), Some(1.0), None);
             });
-            FocusOverlay(&shown, on_click);
+            DataNamedOverlay(&shown, true, None, on_click);
         });
 }
 
@@ -501,21 +487,24 @@ pub fn remote_button_labels() -> [&'static str; 4] {
     ["가져오기", "내려받기", "올리기", "스태시"]
 }
 
-/// A 32 px circle icon button in a 44 dp box that takes the press, named for assistive tech via
-/// `FocusOverlay`. The box asks for 44 by 44 and takes what its row gives: a row with a height
-/// (the 원격 cell's 36, the files header's 52) keeps that height, and the box is then as tall as
-/// the row at most (FR-L19.1, #415; a press area larger than the row is
+/// A 32 px circle icon button in a 44 dp box that takes the press. The box is the control: a
+/// named, clickable container (`NamedClickable`, compose-rust#429), round so the press tint and
+/// the focus ring are circles. It asks for 44 by 44 and takes what its row gives: a row with a
+/// height (the 원격 cell's 36, the files header's 52) keeps that height, and the box is then as
+/// tall as the row at most (FR-L19.1, #415; a press area larger than the row is
 /// TODO(compose-rust#472, after v0.0.10): a 44 by 44 hit area that does not grow the node).
 fn CircleIconButton(
     icon: &'static str,
-    label: &str,
+    label: &'static str,
     on_click: impl FnMut() + 'static,
 ) {
     let p = ember_theme().palette;
-    cu::Box()
-        .modifier(Modifier::new().size(ICON_TOUCH_TARGET, ICON_TOUCH_TARGET))
-        .alignment(Alignment::Center)
-        .content(move || {
+    NamedClickable(
+        label,
+        Modifier::new().size(ICON_TOUCH_TARGET, ICON_TOUCH_TARGET).shape_role(ShapeRole::Full),
+        Alignment::Center,
+        on_click,
+        move || {
             cu::Box()
                 .modifier(
                     Modifier::new()
@@ -528,8 +517,8 @@ fn CircleIconButton(
                 .content(move || {
                     NavIcon(icon, p.text_2.to_argb(), 16.0);
                 });
-            FocusOverlay(label, on_click);
-        });
+        },
+    );
 }
 
 /// The height of the bar's two pickers (`.vcs-sel{height:36px}`). Both take it, so the value
@@ -553,13 +542,9 @@ fn BarSelector(icon: &'static str, name: &str, expanded: bool, on_click: impl Fn
                     cu::Spacer().modifier(Modifier::new().width(6.0));
                     NavIcon(ICON_CHEVRON_DOWN_SVG, p.muted.to_argb(), 16.0);
                 });
-            // The clear button over the row is the control: named by the value it shows, and
-            // it says whether its menu is open (FR-L10.4).
-            cu::Button(name)
-                .variant(ButtonVariant::Text)
-                .color(Paint::Literal(Color::argb(0)))
-                .modifier(Modifier::new().fill_max_size().expanded(expanded))
-                .on_click(on_click);
+            // The clear button over the row is the control: named by the value it shows (a
+            // repository or a branch, so data), and it says whether its menu is open (FR-L10.4).
+            DataNamedOverlay(name, true, Some(expanded), on_click);
         });
 }
 
@@ -684,7 +669,7 @@ fn RemoteMainButton(
                     }
                     cu::Spacer().modifier(Modifier::new().width(SP[0]));
                 });
-            FocusOverlay(&label, on_click);
+            DataNamedOverlay(&label, true, None, on_click);
         });
 }
 
@@ -1146,9 +1131,7 @@ fn SectionListWithSample(
                 m = with_shadows(m.border(1.0, paint(p.line)), ember_theme().shadow_sm());
             }
 
-            cu::Box()
-                .modifier(m)
-                .content(move || {
+            NamedClickable(sec.label(), m, Alignment::TopStart, move || pick(sec), move || {
                     cu::Row()
                         .alignment(Alignment::CenterStart)
                         .modifier(Modifier::new().fill_max_size())
@@ -1190,8 +1173,7 @@ fn SectionListWithSample(
                             }
                             cu::Spacer().modifier(Modifier::new().width(SP[2]));
                         });
-                    FocusOverlay(sec.label(), move || pick(sec));
-                });
+            });
         }
     });
 }
@@ -1286,16 +1268,17 @@ pub fn pane_tab_look(on: bool, p: &Palette) -> (Color, Color, Color) {
 }
 
 /// One equal segment of the pane tabs: a `H_CTL` pill that takes its share of the row.
-fn PaneTabSegment(text: &str, on: bool, on_click: impl FnMut() + 'static) {
+/// The pill is the control: a named, clickable container (`NamedClickable`, compose-rust#429).
+fn PaneTabSegment(text: &'static str, on: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let (fill, border, ink) = pane_tab_look(on, &p);
-    cu::Box()
-        .modifier(Modifier::new().weight(1.0).height(H_CTL).background(paint(fill)).border(1.0, paint(border)).shape_role(ShapeRole::Full))
-        .alignment(Alignment::Center)
-        .content(move || {
-            Label(text, VCS_CONTROL_FS, Weight::Medium, Some(paint(ink)), Some(1));
-            FocusOverlay(text, on_click);
-        });
+    NamedClickable(
+        text,
+        Modifier::new().weight(1.0).height(H_CTL).background(paint(fill)).border(1.0, paint(border)).shape_role(ShapeRole::Full),
+        Alignment::Center,
+        on_click,
+        move || Label(text, VCS_CONTROL_FS, Weight::Medium, Some(paint(ink)), Some(1)),
+    );
 }
 
 /// Tabs within a section on compact windows.
@@ -1381,23 +1364,22 @@ fn DiffViewAtWidth(file: &FileDiff, staging: &MutableState<Staging>, pane_width:
                 Txt(&h.header, TypeRole::Mono, Some(paint(p.muted)), Some(1), Some(TextOverflow::Ellipsis), Some(1.0), None);
                 let st_hunk = staging.clone();
                 let f_hunk = file.clone();
-                cu::Box()
-                    .modifier(
-                        Modifier::new()
-                            .width(vcs_pill_width("이 덩어리 전체"))
-                            .height(VCS_HUNK_BUTTON_H)
-                            .border(1.0, paint(p.line))
-                            .background(paint(p.surface))
-                            .shape_role(ShapeRole::Full),
-                    )
-                    .alignment(Alignment::Center)
-                    .content(move || {
+                NamedClickable(
+                    "이 덩어리 전체",
+                    Modifier::new()
+                        .width(vcs_pill_width("이 덩어리 전체"))
+                        .height(VCS_HUNK_BUTTON_H)
+                        .border(1.0, paint(p.line))
+                        .background(paint(p.surface))
+                        .shape_role(ShapeRole::Full),
+                    Alignment::Center,
+                    move || {
+                        let mut s = st_hunk.get();
+                        s.file_mut(&f_hunk.path).toggle_hunk(&f_hunk, hi);
+                        st_hunk.set(s);
+                    },
+                    move || {
                         Label("이 덩어리 전체", VCS_CONTROL_FS, Weight::Medium, Some(paint(p.text)), Some(1));
-                        FocusOverlay("이 덩어리 전체", move || {
-                            let mut s = st_hunk.get();
-                            s.file_mut(&f_hunk.path).toggle_hunk(&f_hunk, hi);
-                            st_hunk.set(s);
-                        });
                     });
                 cu::Spacer().modifier(Modifier::new().width(SP[2]));
             });
@@ -1619,7 +1601,7 @@ fn FilesTree(
                                             Some(1),
                                         );
                                     });
-                                FocusOverlay(&label, move || {
+                                DataNamedOverlay(&label, true, None, move || {
                                     let mut f = f_state.get();
                                     if !f.remove(&pth) {
                                         f.insert(pth.clone());
@@ -1700,7 +1682,7 @@ fn FilesTree(
                                                     });
                                                 cu::Spacer().modifier(Modifier::new().width(SP[1]));
                                             });
-                                        FocusOverlay(&file_name, move || {
+                                        DataNamedOverlay(&file_name, true, None, move || {
                                             sel_state.set(index);
                                             on_tab_file(tab_after_select(PaneTab::Files));
                                         });
@@ -2612,7 +2594,7 @@ fn HistoryRow(e: &HistoryEntry, layout: PaneLayout, selected: bool, on_select: i
                 }
             });
         });
-        FocusOverlay(&format!("커밋 {} {}", e.short, e.subject), on_select);
+        DataNamedOverlay(&format!("커밋 {} {}", e.short, e.subject), true, None, on_select);
     });
 }
 
@@ -3289,7 +3271,7 @@ fn PullRequestRow(e: &PrEntry, selected: bool, on_select: impl FnMut() + 'static
             let gate = if e.can_merge { paint(p.green.strong) } else { paint(p.text_2) };
             Label(&e.gate_text, Fs::Sm, Weight::Regular, Some(gate), None);
         });
-        FocusOverlay(&format!("풀 리퀘스트 #{} {}", e.number, e.title), on_select);
+        DataNamedOverlay(&format!("풀 리퀘스트 #{} {}", e.number, e.title), true, None, on_select);
     });
 }
 
@@ -4547,7 +4529,7 @@ fn TeamRowView(
                                 let on_pr_click = on_pr.clone();
                                 cu::Box().modifier(Modifier::new().shape_role(ShapeRole::Full)).content(move || {
                                     Pill(label, tone, true);
-                                    FocusOverlay(label, move || on_pr_click(pr_num));
+                                    DataNamedOverlay(label, true, None, move || on_pr_click(pr_num));
                                 });
                             }
                         }
@@ -4995,9 +4977,8 @@ fn StashRow(e: &StashEntry, layout: PaneLayout, busy: bool, dirty: bool, armed: 
     }
 }
 
-// TODO(compose-rust#425, #429, in v0.0.10): the pill is painted and an invisible `Button` over it
-// carries the accessible name. `Button::accessible_name` is in the pin: use it and check the pill
-// on a display.
+// The pill is painted and its accessible name is built from data (the stash's index and message),
+// so the clear button of `components::DataNamedOverlay` carries it (the gap is filed there).
 // TODO(compose-rust#427, in v0.0.10): the width is estimated and fixed, from when a Box in a Row
 // took the remaining width. The estimate goes after the same display check.
 /// A small pill whose visible text is `text` and whose accessible name is `access`.
@@ -5017,12 +4998,7 @@ fn StashPill(text: &str, access: &str, kind: ButtonKind, enabled: bool, on_click
         .alignment(Alignment::Center)
         .content(move || {
             Label(text, s.fs, Weight::Medium, Some(paint(s.text)), Some(1));
-            cu::Button(access)
-                .enabled(enabled)
-                .variant(ButtonVariant::Text)
-                .color(Paint::Literal(Color::argb(0)))
-                .modifier(Modifier::new().fill_max_size())
-                .on_click(on_click);
+            DataNamedOverlay(access, enabled, None, on_click);
         });
 }
 
@@ -5405,7 +5381,7 @@ fn SectionRail(
                 m = with_shadows(m.border(1.0, paint(p.line)), ember_theme().shadow_sm());
             }
             let mut pick = on_pick.clone();
-            cu::Box().alignment(Alignment::TopEnd).modifier(m).content(move || {
+            NamedClickable(sec.label(), m, Alignment::TopEnd, move || pick(sec), move || {
                 cu::Box().alignment(Alignment::Center).modifier(Modifier::new().fill_max_size()).content(|| {
                     NavIcon(section_svg(sec), (if on { p.text } else { p.text_2 }).to_argb(), 18.0);
                 });
@@ -5421,7 +5397,6 @@ fn SectionRail(
                             cu::Spacer().modifier(Modifier::new().width(5.0));
                         });
                 }
-                FocusOverlay(sec.label(), move || pick(sec));
             });
         }
     });
@@ -5809,7 +5784,7 @@ mod tests {
         // The control is a button named by the shown project that says the menu is open.
         let control = nodes
             .iter()
-            .find(|n| n.0 == "Button" && n.2.iter().any(|p| p.contains("core")) && n.1.iter().any(|m| m == "FillMaxSize" || m.starts_with("FillMax")))
+            .find(|n| n.0 == "Button" && n.2.iter().any(|p| p.contains("core")) && n.1.iter().any(|m| m == "MatchParentSize"))
             .expect("the control");
         let state: u32 = control
             .1
@@ -7441,13 +7416,14 @@ mod tests {
             BAR_GRID.with(|g| g.set(grid));
             let nodes = nodes_of(repo_bar_sample);
             for label in ["Pull 1", "가져오기", "내려받기", "올리기"] {
-                let overlay = nodes.iter().find(|n| n.widget == "Button" && n.props.iter().any(|x| x.ends_with(&format!("=String({label:?})")))).unwrap_or_else(|| panic!("{label}"));
-                let mods = row_over(&nodes, overlay);
+                let control = nodes.iter().find(|n| n.props.iter().any(|x| *x == format!("AccessibleName=String({label:?})"))).unwrap_or_else(|| panic!("{label}"));
+                let mods = row_over(&nodes, control);
                 assert!(mods.iter().any(|m| m == "Height(36.0)") && mods.iter().any(|m| m == "FillMaxWidth"), "{grid:?} {label}: {mods:?}");
             }
             // The round buttons still ask for the 44 dp box and draw the 32 dp circle.
-            let fetch = nodes.iter().find(|n| n.widget == "Button" && n.props.iter().any(|x| x.ends_with("=String(\"가져오기\")"))).unwrap();
-            let hit = nodes.iter().find(|n| Some(n.id) == fetch.parent).unwrap();
+            // The 44 dp box is the control itself (compose-rust#429): it has the name and the click.
+            let hit = nodes.iter().find(|n| n.props.iter().any(|x| x == "AccessibleName=String(\"가져오기\")")).unwrap();
+            assert!(hit.widget == "Box" && hit.props.iter().any(|x| x.starts_with("OnClick=")), "{:?}", hit.props);
             assert!(has(hit, "Width(44.0)") && has(hit, "Height(44.0)"), "{:?}", hit.mods);
             let circle = kids(&nodes, hit.id)[0];
             assert!(has(circle, "Width(32.0)") && has(circle, "Height(32.0)"), "{:?}", circle.mods);
@@ -7458,7 +7434,7 @@ mod tests {
         // The files header: 52 high, no padding of its own, 16 at each side, and the stash
         // button after a note that takes only the room left.
         let nodes = nodes_of(changes_two_pane_probe);
-        let stash = nodes.iter().find(|n| n.widget == "Button" && n.props.iter().any(|x| x.ends_with("=String(\"스태시\")"))).expect("the stash button");
+        let stash = nodes.iter().find(|n| n.props.iter().any(|x| x == "AccessibleName=String(\"스태시\")")).expect("the stash button");
         let ups = up(&nodes, stash);
         let head = ups
             .iter()
@@ -8018,54 +7994,54 @@ mod tests {
     }
 
     #[test]
-    fn focus_overlay_emits_button_with_text_and_fill_max_size() {
+    fn a_fixed_name_sits_on_the_painted_box_and_a_data_name_on_a_matched_button() {
+        // compose-rust#429, #431 (#673): the three `FocusOverlay` functions are gone. A control
+        // whose name is one of a fixed set is the painted box itself; one named from data keeps a
+        // clear button that takes its box's bounds (`components::DataNamedOverlay`).
         let _guard = crate::services::test_guard();
         compose_rust::window::reset_window_size();
-        let mut host = Host::new(|| {
-            Box::new(Recomposer::new(|| {
-                cu::Box().content(|| {
-                    FocusOverlay("테스트 행", || {});
-                });
-            }))
-        });
-        let mutations = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
-        let has_button = mutations.iter().any(|m| match m {
-            Mutation::Create {
-                widget: WidgetKind::Button,
-                ..
-            } => true,
-            _ => false,
-        });
-        assert!(has_button, "expected Button widget");
+        let named = |nodes: &[N], name: &str| -> usize {
+            let want = format!("AccessibleName=String({name:?})");
+            nodes.iter().position(|n| n.props.contains(&want)).unwrap_or_else(|| panic!("no control named {name}"))
+        };
+        let press = |n: &N| n.mods.iter().filter(|m| m.starts_with("PressFeedback")).count();
+        let button_role = |n: &N| n.mods.iter().any(|m| m.starts_with("Semantics") && m.contains("Button"));
 
-        let has_text = mutations.iter().any(|m| match m {
-            Mutation::SetProp {
-                property,
-                value: PropertyValue::String(s),
-                ..
-            } => *property == PropertyKind::Text && *s == "테스트 행",
-            _ => false,
-        });
-        assert!(has_text, "expected text prop matching label");
+        // A pane tab: the pill has the fill, the name, the role, the click and the press.
+        let nodes = nodes_of(|| cu::Row().content(|| PaneTabSegment("파일", true, || {})));
+        assert!(!nodes.iter().any(|n| n.widget == "Button"), "no button over the pill");
+        let tab = &nodes[named(&nodes, "파일")];
+        assert_eq!(tab.widget, "Box");
+        assert!(tab.props.iter().any(|x| x.starts_with("OnClick=")), "{:?}", tab.props);
+        assert!(button_role(tab) && press(tab) == 1, "{:?}", tab.mods);
+        let fill = format!("{:?}", compose_rust::schema::Modifier::Background(paint(ember_theme().palette.ink)));
+        assert!(tab.mods.contains(&fill) && tab.mods.iter().any(|m| *m == format!("Height({H_CTL:?})")), "{:?}", tab.mods);
 
-        let has_fill_width = mutations.iter().any(|m| match m {
-            Mutation::SetModifier {
-                modifier: compose_rust::Modifier::FillMaxWidth,
-                ..
-            } => true,
-            _ => false,
-        });
-        let has_fill_height = mutations.iter().any(|m| match m {
-            Mutation::SetModifier {
-                modifier: compose_rust::Modifier::FillMaxHeight,
-                ..
-            } => true,
-            _ => false,
-        });
-        assert!(
-            has_fill_width && has_fill_height,
-            "expected fill_max_size modifier"
-        );
+        // A round icon button: the 44 dp box is the control and is round, the 32 dp circle is drawn in it.
+        let nodes = nodes_of(|| CircleIconButton(ICON_FETCH_SVG, "가져오기", || {}));
+        assert!(!nodes.iter().any(|n| n.widget == "Button"));
+        let hit = &nodes[named(&nodes, "가져오기")];
+        assert!(hit.props.iter().any(|x| x.starts_with("OnClick=")) && button_role(hit) && press(hit) == 1, "{:?}", hit.mods);
+        assert!(hit.mods.iter().any(|m| m == "Width(44.0)") && hit.mods.iter().any(|m| m.starts_with("ShapeRole(Full")), "{:?}", hit.mods);
+
+        // A row named by a path: one clear button with the path as text and name, exactly over
+        // its box, which keeps its own size.
+        let nodes = nodes_of(|| ConflictFileRow("docs/SPEC.md", || {}));
+        let buttons: Vec<&N> = nodes.iter().filter(|n| n.widget == "Button").collect();
+        assert_eq!(buttons.len(), 1);
+        let over = buttons[0];
+        assert!(over.props.iter().any(|x| x == "Text=String(\"docs/SPEC.md\")"), "{:?}", over.props);
+        assert!(over.props.iter().any(|x| x == "AccessibleName=String(\"docs/SPEC.md\")"), "{:?}", over.props);
+        assert!(over.props.iter().any(|x| x.starts_with("OnClick=")), "{:?}", over.props);
+        assert!(over.mods.iter().any(|m| m == "MatchParentSize"), "{:?}", over.mods);
+        assert!(!over.mods.iter().any(|m| m.starts_with("FillMax")), "it does not widen its box: {:?}", over.mods);
+        let row = nodes.iter().find(|n| Some(n.id) == over.parent).expect("its box");
+        assert!(row.widget == "Box" && row.mods.iter().any(|m| *m == format!("Height({CONFLICT_ROW_H:?})")), "{:?}", row.mods);
+        assert!(!row.props.iter().any(|x| x.starts_with("OnClick=")), "one tap target, not two");
+
+        let production = include_str!("vcs.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(!production.contains(&["Focus", "Overlay("].concat()), "the per-screen overlay is gone");
+        assert!(!production.contains(&["cu::", "Button("].concat()), "no direct toolkit button is left");
         compose_rust::window::reset_window_size();
     }
 
@@ -8082,7 +8058,7 @@ mod tests {
                     Mutation::Create { node_id, widget: WidgetKind::Button } => {
                         button_nodes.insert(*node_id);
                     }
-                    Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                    Mutation::SetProp { node_id, property: PropertyKind::Text | PropertyKind::AccessibleName, value: PropertyValue::String(s) } => {
                         button_texts.insert(*node_id, s.to_string());
                     }
                     _ => {}
@@ -8163,7 +8139,7 @@ mod tests {
                     Mutation::Create { node_id, widget: WidgetKind::Button } => {
                         button_nodes.insert(*node_id);
                     }
-                    Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                    Mutation::SetProp { node_id, property: PropertyKind::Text | PropertyKind::AccessibleName, value: PropertyValue::String(s) } => {
                         button_texts.insert(*node_id, s.to_string());
                     }
                     _ => {}
@@ -8250,7 +8226,7 @@ mod tests {
                         Mutation::Create { node_id, widget: WidgetKind::Button } => {
                             tab_nodes.insert(*node_id);
                         }
-                        Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                        Mutation::SetProp { node_id, property: PropertyKind::Text | PropertyKind::AccessibleName, value: PropertyValue::String(s) } => {
                             tab_texts.insert(*node_id, s.to_string());
                         }
                         _ => {}

@@ -156,6 +156,40 @@ pub fn NamedClickable(
     Clickable(modifier.label(label).role(Role::Button).click_action(true), alignment, on_click, content);
 }
 
+/// A [`NamedClickable`] that cannot act now: the same painted box, named and a disabled button
+/// to assistive technology, with no click handler and so no press feedback.
+pub fn NamedDisabled(label: &'static str, modifier: Modifier, alignment: Alignment, content: impl FnOnce()) {
+    cu::Box().modifier(modifier.label(label).role(Role::Button).disabled(true)).alignment(alignment).content(content);
+}
+
+// TODO(compose-rust, unfiled: an owned accessible name on a clickable container): a container
+// takes its name from `Modifier::label` only, which keeps every distinct name for the life of the
+// program and drops names past 4096 (`compose-rust/src/ui/mod.rs`, `MAX_LABELS`), and a `Button`
+// with content insets its children by the design system's 16 dp with no way to change it
+// (`HostButton.kt`, `labelPadding`). So a painted box whose name is built from data (a path, a
+// commit subject, a profile name) keeps a clear `Button` over it for the name, the focus and the
+// click. When a container takes an owned name, move every caller onto [`Clickable`] with that
+// name and delete this.
+/// The control of a painted box whose accessible name is built from data: a clear toolkit
+/// `Button` exactly over its `Box` parent. It takes the parent's bounds without changing them
+/// (`Modifier::match_parent_size`, compose-rust#431), so the box keeps the size of what it
+/// paints. `expanded` says whether the menu it opens is open (FR-L10.4). A name that is one of a
+/// fixed set never comes here: it goes on the painted box itself through [`NamedClickable`].
+pub fn DataNamedOverlay(name: &str, enabled: bool, expanded: Option<bool>, on_click: impl FnMut() + 'static) {
+    let m = Modifier::new().match_parent_size();
+    let m = match expanded {
+        Some(open) => m.expanded(open),
+        None => m,
+    };
+    cu::Button(name)
+        .accessible_name(name)
+        .enabled(enabled)
+        .variant(ButtonVariant::Text)
+        .color(Paint::Literal(Color::argb(0)))
+        .modifier(m)
+        .on_click(on_click);
+}
+
 /// The label of a copy button. The button puts text the screen already holds on the clipboard
 /// with `compose_rust::clipboard::set_text` (compose-rust v0.0.7, #471).
 pub const COPY_LABEL: &str = "복사";
@@ -2781,6 +2815,52 @@ mod tests {
     }
 
     #[test]
+    fn a_data_named_overlay_takes_its_box_and_a_disabled_named_box_has_no_click() {
+        // compose-rust#431, #429 (#673). The one clear button that names a painted box from
+        // data: the name as text and as accessible name, the box's bounds and no more, and the
+        // open state of a menu when it has one. `FillMaxSize` widened a box without a width.
+        let _guard = crate::services::test_guard();
+        let nodes = emitted_nodes(|| {
+            cu::Box().content(|| DataNamedOverlay("feat/673", true, Some(true), || {}));
+        });
+        let over = the(&nodes, "Button");
+        for want in ["Text=String(\"feat/673\")", "AccessibleName=String(\"feat/673\")"] {
+            assert!(over.props.iter().any(|p| p == want), "{want}: {:?}", over.props);
+        }
+        assert!(over.props.iter().any(|p| p.starts_with("OnClick=")), "{:?}", over.props);
+        assert!(over.mods.iter().any(|m| m == "MatchParentSize"), "{:?}", over.mods);
+        assert!(!over.mods.iter().any(|m| m.starts_with("FillMax")), "{:?}", over.mods);
+        let state = |mods: &[String]| -> u32 {
+            mods.iter()
+                .find_map(|m| m.strip_prefix("Semantics")?.split("state: ").nth(1)?.trim_end_matches([' ', '}']).parse().ok())
+                .unwrap_or(0)
+        };
+        assert_eq!((state(&over.mods) >> compose_rust::schema::SEMANTICS_EXPANDED_SHIFT) & 3, 2, "{:?}", over.mods);
+        let plain = emitted_nodes(|| {
+            cu::Box().content(|| DataNamedOverlay("feat/673", false, None, || {}));
+        });
+        let plain = the(&plain, "Button");
+        assert!(!plain.mods.iter().any(|m| m.starts_with("Semantics")), "no menu, no state: {:?}", plain.mods);
+        assert!(plain.props.iter().any(|p| p == "Enabled=Bool(false)"), "{:?}", plain.props);
+
+        // A named box that cannot act: the name, the button role and the disabled state, and
+        // nothing to click or press.
+        let nodes = emitted_nodes(|| NamedDisabled(crate::ui::cr::a11y::CLOSE, Modifier::new().size(32.0, 32.0), Alignment::Center, || {}));
+        let boxed = the(&nodes, "Box");
+        assert!(boxed.props.iter().any(|p| *p == format!("AccessibleName=String({:?})", crate::ui::cr::a11y::CLOSE)), "{:?}", boxed.props);
+        assert!(!boxed.props.iter().any(|p| p.starts_with("OnClick=")), "{:?}", boxed.props);
+        assert!(!boxed.mods.iter().any(|m| m.starts_with("PressFeedback")), "{:?}", boxed.mods);
+        assert!(boxed.mods.iter().any(|m| m.starts_with("Semantics") && m.contains("Button")), "{:?}", boxed.mods);
+        assert_eq!((state(&boxed.mods) >> compose_rust::schema::SEMANTICS_DISABLED_SHIFT) & 3, 2, "{:?}", boxed.mods);
+
+        // No screen keeps an overlay function of its own.
+        for (file, src) in [("vcs.rs", include_str!("vcs.rs")), ("agents.rs", include_str!("agents.rs")), ("routines.rs", include_str!("routines.rs"))] {
+            let production = src.split("#[cfg(test)]").next().unwrap();
+            assert!(!production.contains(&["fn Focus", "Overlay"].concat()), "{file}");
+        }
+    }
+
+    #[test]
     fn fr_l34_5_the_phone_primary_circle_is_one_shared_button_with_its_look_unchanged() {
         // #250: files.rs (보내기) and project.rs (새 팀원) each built this button by hand, so it
         // was outside `pressable`. What is sent is what they sent, plus the press values.
@@ -3334,10 +3414,12 @@ mod tests {
             let allowed_buttons = match name {
                 // AppButton, AppMenuButton, IconButton, InkIconButton and PickChip; ChoiceButton
                 // is Ember's clickable pill since review r5 (its 12 px label inset, FR-L10.2).
-                "components.rs" => 5,
-                // SegGroup moved onto ChoiceButton (#878). The one left is the invisible
-                // overlay that names a painted row from data (FR-L34.5).
-                "agents.rs" => 1,
+                // The sixth is DataNamedOverlay, the one clear button that names a painted box
+                // from data for every screen (#673).
+                "components.rs" => 6,
+                // SegGroup moved onto ChoiceButton (#878); the section rows are named
+                // containers and the chips named from data use DataNamedOverlay (#673).
+                "agents.rs" => 0,
                 // The phone's round 보내기 is InkIconButton (FR-L34.5, #250).
                 "files.rs" => 0,
                 "home.rs" => 0,
@@ -3346,14 +3428,13 @@ mod tests {
                 // The phone's round 새 팀원 is InkIconButton (FR-L34.5, #250).
                 "project.rs" => 0,
                 // The wide 새 루틴 pill (toolkit label style and a fixed width, which AppButton
-                // would change) and the invisible overlay named from data.
-                "routines.rs" => 2,
-                // FocusOverlay, the StashPill accessible-name overlay (FR-G6, #350) and the
-                // bar selector's clear control, which says whether its menu is open (FR-L10.4).
-                "vcs.rs" => 3,
-                // The accessible-name overlay of the channel + button (#499); it keeps its
-                // visible text and `accessible_name` until #425's content slot is checked.
-                "new_channel.rs" => 1,
+                // would change).
+                "routines.rs" => 1,
+                // Its fixed names are on the painted boxes; the stash pill, the bar selector
+                // and the rows named from data use DataNamedOverlay (#673).
+                "vcs.rs" => 0,
+                // The channel + ring is a named container (compose-rust#429, #673).
+                "new_channel.rs" => 0,
                 _ => 0,
             };
             assert_eq!(production.matches("cu::Button(").count(), allowed_buttons, "{name} has an unreviewed direct button");

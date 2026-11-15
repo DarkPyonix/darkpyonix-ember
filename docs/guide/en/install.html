@@ -91,6 +91,15 @@ tar -xzf ember-server-v0.1.0-macos-arm64.tar.gz</code></pre>
     </ul>
     <p>At each start the app looks for a newer release on GitHub Releases and downloads it in the background. <strong>설정 → 업데이트</strong> shows the running version and where the check stands, with 업데이트 확인 to check again. When a download is ready, 업데이트 후 다시 시작 saves your preferences, applies the update and starts the new version; nothing is applied without that click. A client built with cargo, the Windows <code>.msix</code> and the older <code>.app.zip</code>, <code>.zip</code> and <code>.AppImage</code> files are not Velopack installs: 설정 says so, and they update only by installing a newer file by hand. <code>EMBER_UPDATE_FEED</code> points the check at another URL or a local folder that holds a feed.</p>
 
+    <h3 id="client-android">Android</h3>
+    <p>The release carries one APK for 64-bit ARM phones, <code>ember-app-&lt;tag&gt;-android-arm64.apk</code>, with its <code>.sha256</code> <span class="pill planned">Planned</span> (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/880">#880</a>): the release job builds it, but no release carries it yet. It is installed by hand and does not update itself.</p>
+    <ol>
+      <li>Open the release page on the phone and download the APK.</li>
+      <li>Open the downloaded file. Android asks first: allow installs from that app (the browser or the file manager) in the screen it opens, go back, and choose Install.</li>
+      <li>Or, from a computer with <code>adb</code>: <code>adb install ember-app-&lt;tag&gt;-android-arm64.apk</code>.</li>
+    </ol>
+    <p>The release notes say how the APK is signed. Until the project has a release key, it is <strong>debug-signed</strong> with a key that changes with every release, so a newer APK does not install over an older one: uninstall Ember first. Uninstalling deletes the app's data, including its device key, so the phone gets a new peer id and has to be allowed on the server again (<a href="#server-outside">A device outside your network</a>).</p>
+
     <h2 id="checkout">Get the code</h2>
     <p>
       Work lands on the <code>develop</code> branch; <code>main</code> does not carry the code yet.

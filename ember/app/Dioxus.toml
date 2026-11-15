@@ -9,6 +9,12 @@ name = "Ember"
 # place of the one the packager would write. See README.md, "Android".
 android_main_activity = "android/MainActivity.kt"
 
+# R8 runs only in a release build signed with a keystore (NFR-R1, #880). The renderer's Kotlin
+# is reached from Rust over JNI and ships no keep rules, so the file turns shrinking, optimisation
+# and renaming off rather than guess which classes JNI needs.
+[android]
+proguard_rules = ["android/proguard-keep.pro"]
+
 [bundle]
 identifier = "dev.darkpyonix.ember"
 publisher = "DarkPyonix"

@@ -1,8 +1,9 @@
 # Builds ember server and ember node for each target on a v* tag and attaches the archives and
 # SHA256SUMS to a GitHub release (SPEC NFR-R1, #72). Owner decision 2026-10-25: macOS gets ad hoc
 # signing only (no Apple account, no notarization); the client app ships in every format
-# compose-rust packages. The client job runs only when the repository variable
-# EMBER_CLIENT_RELEASE is "true" (see the TODOs on that job).
+# compose-rust packages, and an Android APK (job "Client app (android-arm64)", #880). The client
+# jobs run only when the repository variable EMBER_CLIENT_RELEASE is "true" (see the TODOs on
+# the client job).
 # A manual dispatch is a dry run (#880, leader 2026-11-15): it builds and packs everything a tag
 # would, at ember/app/Cargo.toml's version, keeps the files as workflow artifacts for 3 days and
 # checks them in "Dry run summary". Only a v* tag push runs the publish job.
@@ -263,11 +264,149 @@ jobs:
           # 0 keeps the repository default for a tag run; a dry run's files go after 3 days.
           retention-days: ${{ github.event_name == 'workflow_dispatch' && '3' || '' }}
 
+  android:
+    # The Android client (NFR-R1, FR-L36, #880, leader 2026-11-15): one APK for arm64-v8a, built
+    # with ember/app/scripts/build-android.sh the way compose-rust's sample job builds its APKs
+    # (test-samples.yml there: dioxus-cli 0.7.10, NDK 27.1.12297006, JDK 21). Same gate as the
+    # desktop client job. Signed with the release keystore when the four EMBER_ANDROID_* secrets
+    # are set ([OWNER ACTION REQUIRED] to create them); otherwise debug-signed with the runner's
+    # debug key, which is not kept between runs, so such an APK does not install over the last.
+    # dx 0.7.10 writes versionCode 1 into every APK and the crate version as versionName.
+    name: Client app (android-arm64)
+    needs: version
+    if: vars.EMBER_CLIENT_RELEASE == 'true' || (github.event_name == 'workflow_dispatch' && inputs.client)
+    runs-on: ubuntu-24.04
+    # A cold build compiles ember-app for Android, dx itself and the Gradle project.
+    timeout-minutes: 150
+    outputs:
+      # "release" (the keystore from the secrets) or "debug" (the runner's debug key).
+      signing: ${{ steps.sign.outputs.signing }}
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+      # The version compose-rust builds its sample APKs with; the README asks for dx 0.7.
+      DX_VERSION: "0.7.10"
+      NDK_VERSION: "27.1.12297006"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ember/app
+          key: android
+      # The Android Gradle plugin's jlink step fails on a JDK newer than 21 (build-android.sh).
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Install the NDK
+        # The runner image has an Android SDK with its licences accepted; only this NDK may be
+        # missing, and that SDK's sdkmanager fetches it (as compose-rust's sample job does).
+        run: |
+          set -euo pipefail
+          sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:?the runner image has no Android SDK}}"
+          "$sdk/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$NDK_VERSION" >/dev/null
+          echo "ANDROID_HOME=$sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$sdk/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          ls "$sdk/ndk/$NDK_VERSION/toolchains/llvm/prebuilt"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-android-ember-${{ hashFiles('ember/app/Cargo.lock') }}
+          restore-keys: gradle-android-ember-
+      - name: Install the Dioxus CLI
+        # Pinned, so an upstream release cannot change what a tag was built with. rust-cache keeps
+        # ~/.cargo/bin, so a warm run finds it installed.
+        run: |
+          if ! dx --version 2>/dev/null | grep -q "^dioxus $DX_VERSION "; then
+            cargo install dioxus-cli --version "$DX_VERSION" --locked --force
+          fi
+          dx --version
+      - name: Release keystore
+        id: keystore
+        # dx 0.7.10 reads a keystore only from [bundle.android] in Dioxus.toml ([android.signing]
+        # is parsed and ignored) and runs assembleRelease only with --release and that section.
+        # The section is written into this runner's copy of Dioxus.toml, never committed. dx puts
+        # the passwords through Handlebars into build.gradle.kts, which escapes = & < > " ' and `,
+        # and Kotlin reads $ in a string, so only [A-Za-z0-9._-] is accepted.
+        env:
+          KEYSTORE_BASE64: ${{ secrets.EMBER_ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.EMBER_ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.EMBER_ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.EMBER_ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "$KEYSTORE_BASE64" ] || [ -z "$KEYSTORE_PASSWORD" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASSWORD" ]; then
+            echo "::notice title=Android APK is debug-signed::The EMBER_ANDROID_KEYSTORE_BASE64, EMBER_ANDROID_KEYSTORE_PASSWORD, EMBER_ANDROID_KEY_ALIAS and EMBER_ANDROID_KEY_PASSWORD secrets are not all set, so the APK is signed with this runner's debug key. A later release signed with another key does not install over it: uninstall first."
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          for v in "$KEYSTORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD"; do
+            if ! printf '%s' "$v" | grep -Eq '^[A-Za-z0-9._-]+$'; then
+              echo "::error::An EMBER_ANDROID_* password or alias has a character outside [A-Za-z0-9._-]; dx would write it into build.gradle.kts escaped or interpolated." >&2
+              exit 1
+            fi
+          done
+          jks="$RUNNER_TEMP/ember-release.jks"
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$jks"
+          chmod 600 "$jks"
+          # dx resolves jks_file against ember/app (seven levels above the generated app module).
+          rel="$(python3 -c 'import os,sys; print(os.path.relpath(sys.argv[1], "ember/app"))' "$jks")"
+          printf '\n[bundle.android]\njks_file = "%s"\njks_password = "%s"\nkey_alias = "%s"\nkey_password = "%s"\n' \
+            "$rel" "$KEYSTORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD" >> ember/app/Dioxus.toml
+          echo "present=true" >> "$GITHUB_OUTPUT"
+      - name: Build the APK
+        run: cd ember/app && ./scripts/build-android.sh --release --cargo-args=--locked
+      - name: Check, name and sign-check the APK
+        id: sign
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+          KEYSTORE: ${{ steps.keystore.outputs.present }}
+        run: |
+          set -euo pipefail
+          out=ember/app/target/dx/ember-app/release/android/app/app/build/outputs/apk
+          if [ "$KEYSTORE" = true ]; then apk="$out/release/app-release.apk"; else apk="$out/debug/app-debug.apk"; fi
+          [ -f "$apk" ] || { echo "::error::no APK at $apk; found:" >&2; find "$out" -name '*.apk' >&2 || true; exit 1; }
+          # The name claims arm64-v8a, so the library must be there (compose-rust's sample check).
+          unzip -Z1 "$apk" | grep -qx 'lib/arm64-v8a/libmain.so' \
+            || { echo "::error::$apk has no lib/arm64-v8a/libmain.so" >&2; exit 1; }
+          bt="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)"
+          certs="$("$bt/apksigner" verify --print-certs "$apk")"
+          echo "$certs"
+          if echo "$certs" | grep -q 'CN=Android Debug'; then signing=debug; else signing=release; fi
+          if [ "$KEYSTORE" = true ] && [ "$signing" != release ]; then
+            echo "::error::the release keystore was set but the APK is debug-signed" >&2; exit 1
+          fi
+          if [ "$signing" = debug ]; then
+            echo "::notice title=Android APK is debug-signed::$(echo "$certs" | grep -m1 'SHA-256 digest' || true)"
+          fi
+          echo "signing=$signing" >> "$GITHUB_OUTPUT"
+          mkdir -p dist
+          name="ember-app-$TAG-android-arm64.apk"
+          cp "$apk" "dist/$name"
+          (cd dist && sha256sum "$name" > "$name.sha256")
+          ls -l dist
+      - name: Remove the keystore and the generated Gradle project
+        # The generated build.gradle.kts holds the passwords; nothing of it may reach a cache.
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/ember-release.jks" ember/app/target/dx
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dpx-ember-app-android-arm64
+          path: dist/*
+          # 0 keeps the repository default for a tag run; a dry run's files go after 3 days.
+          retention-days: ${{ github.event_name == 'workflow_dispatch' && '3' || '' }}
+
   publish:
     name: Publish the release
-    needs: [version, build, client]
+    needs: [version, build, client, android]
     # Only a v* tag push publishes; a manual dispatch is a dry run and never reaches this job.
-    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && !cancelled() && needs.build.result == 'success' && (needs.client.result == 'success' || needs.client.result == 'skipped') }}
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && !cancelled() && needs.build.result == 'success' && (needs.client.result == 'success' || needs.client.result == 'skipped') && (needs.android.result == 'success' || needs.android.result == 'skipped') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -287,21 +426,27 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.version.outputs.tag }}
+          ANDROID_SIGNING: ${{ needs.android.outputs.signing }}
         run: |
           # The client files are absent when the client job was skipped.
           shopt -s nullglob
-          files=(dist/*.tar.gz dist/*.dmg dist/*.zip dist/*.msix dist/*.AppImage dist/*-Setup.exe dist/*.nupkg dist/releases.*.json dist/SHA256SUMS)
+          files=(dist/*.tar.gz dist/*.dmg dist/*.zip dist/*.msix dist/*.AppImage dist/*-Setup.exe dist/*.nupkg dist/releases.*.json dist/*.apk dist/SHA256SUMS)
+          case "$ANDROID_SIGNING" in
+            release) android="The Android APK (arm64-v8a) is signed with the project's release key; it installs over an earlier APK signed with the same key." ;;
+            debug) android="The Android APK (arm64-v8a) is debug-signed: it cannot be upgraded by a later release signed with another key; uninstall first (this deletes the app's data and device key)." ;;
+            *) android="" ;;
+          esac
           gh release create "$TAG" "${files[@]}" \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --title "Ember ${TAG#v}" \
-            --notes "ember-server and ember-node for macOS arm64, Linux x86_64 and Linux aarch64, and the client app when built, by run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}. macOS builds are ad hoc signed, not notarized: clear quarantine with xattr -dr com.apple.quarantine. Setup.exe is unsigned. Installed with Setup.exe, the Velopack .dmg or the Velopack .AppImage, the app updates itself from this feed. See the install guide."
+            --notes "ember-server and ember-node for macOS arm64, Linux x86_64 and Linux aarch64, and the client app when built, by run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}. macOS builds are ad hoc signed, not notarized: clear quarantine with xattr -dr com.apple.quarantine. Setup.exe is unsigned. ${android} Installed with Setup.exe, the Velopack .dmg or the Velopack .AppImage, the app updates itself from this feed. See the install guide."
 
   dry-run:
     # Lists every packed file with size and sha256 and fails when a target or channel lacks one a
     # tag release would upload (NFR-R1, #880). No write permission: the workflow default is read.
     name: Dry run summary
-    needs: [version, build, client]
+    needs: [version, build, client, android]
     if: ${{ github.event_name == 'workflow_dispatch' && !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10

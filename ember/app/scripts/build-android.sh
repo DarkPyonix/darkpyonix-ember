@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
-# Usage: ./scripts/build-android.sh [--release]
+# Usage: ./scripts/build-android.sh [--release] [dx build options...]
+#
+# Options after --release go to `dx build` as they are, e.g. `--cargo-args=--locked` in the
+# release workflow (NFR-R1, #880). With --release, dx 0.7.10 runs Gradle's assembleRelease only
+# when Dioxus.toml has a [bundle.android] keystore; without one it builds the Rust library in
+# release mode and runs assembleDebug, so the APK is debug-signed and lands under
+# outputs/apk/debug either way.
 #
 # Builds the Ember client as an Android APK (FR-L36), the way the compose-rust samples are
 # built: `dx build --platform android` generates the Gradle project and compose-rust's build
@@ -14,7 +20,9 @@ args=()
 if [[ "${1:-}" == "--release" ]]; then
     profile=release
     args+=(--release)
+    shift
 fi
+args+=("$@")
 
 : "${ANDROID_HOME:=$HOME/Library/Android/sdk}"
 : "${ANDROID_NDK_HOME:=$ANDROID_HOME/ndk/27.1.12297006}"

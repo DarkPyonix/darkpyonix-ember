@@ -1742,14 +1742,24 @@ pub(crate) const SHEET_FOOTER_H: f32 = 1.0 + SP[2] + H_CTL + SP[4];
 pub(crate) const SHEET_BOTTOM_MAX_FRACTION: f32 = 0.85;
 
 /// The tallest a sheet may be (`.sheet` in the mockup): 85 percent of the window for a bottom
-/// sheet, the whole window for the full-screen monitor, and the window less 32 dp for a dialog.
+/// sheet, the whole window for the full-screen monitor, and for a dialog the window less 32 dp,
+/// or less the traffic lights' strip above and below where there is one ([`dialog_max_height`]).
 pub(crate) fn sheet_max_height(window_width_dp: f32, window_height_dp: f32, monitor: bool) -> f32 {
     let h = window_height_dp.max(0.0);
     match sheet_presentation(window_width_dp, monitor) {
         SheetPresentation::Bottom => h * SHEET_BOTTOM_MAX_FRACTION,
         SheetPresentation::FullScreen => h,
-        SheetPresentation::Dialog => (h - 32.0).max(0.0),
+        SheetPresentation::Dialog => dialog_max_height(h, crate::ui::safe_area::safe_area()),
     }
+}
+
+/// The tallest a centred dialog may be (FR-L33): the window less 16 dp above and below, and,
+/// where the window's own buttons cover a top strip (the macOS traffic lights), less that strip
+/// above and below, so the dialog's top edge and its header stay below the strip (review sf: the
+/// monitor dialog at 561 and 1440 put "이 컴퓨터" under the lights). A zero report changes nothing.
+pub(crate) fn dialog_max_height(window_height_dp: f32, area: crate::ui::safe_area::SafeArea) -> f32 {
+    let margin = crate::ui::safe_area::title_strip_height(area, true).max(16.0);
+    (window_height_dp.max(0.0) - 2.0 * margin).max(0.0)
 }
 
 /// The body height used while the window height is unknown (not yet reported).

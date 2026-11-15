@@ -555,7 +555,7 @@ pub fn split_end_radii(height: f32) -> [f32; 4] {
 /// (FR-L7). `on_ink` draws it inside the dark split button; otherwise as a bordered square.
 /// Its accessible name is "다른 IDE 선택" (compose-rust v0.0.7, #460), and it says whether the
 /// chooser is open. Touch target 26x32, under 44 px: FR-L34.3, #323 (waits for a toolkit hit
-/// area that does not change layout, compose-rust#472).
+/// area that does not change layout, TODO(compose-rust#472, after v0.0.10)).
 pub fn IdeChevron(open: MutableState<bool>, on_ink: bool) {
     IdeChevronSized(open, on_ink, 32.0);
 }
@@ -1284,7 +1284,9 @@ pub fn PaneTranscript(session: &str, agent: &str) {
 ///
 /// v0.0.7: #5 fixed (`SelectionContainer`); workaround kept until checked on a display (the
 /// terminal rows are a styled grid, and a selection over them must be tried before wrapping it).
-/// TODO(compose-rust): scroll to the bottom on new output; the pane opens at the top.
+/// New output is followed with the toolkit's scroll state, as the transcript is
+/// (compose-rust#385, `FollowNewest`): the pane opens at its newest line and stays there unless
+/// the reader scrolled up.
 /// Outside the demo it attaches as a read-only viewer to the project's one running agent terminal on
 /// the session's computer, and detaches when the pane leaves the screen (the terminal keeps running).
 pub fn PaneTerminal(member: &Member, project: &str) {
@@ -1357,6 +1359,9 @@ pub fn PaneTerminal(member: &Member, project: &str) {
                 Label(&text, Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
             });
     };
+    // Follow the newest line with the toolkit's scroll state (compose-rust#385), as `PaneTranscript` does.
+    let scroll = cu::remember_scroll_state();
+    FollowNewest(scroll.clone(), format!("{sid}:terminal"));
     match view {
         TermView::Connecting => note(tp::CONNECTING),
         TermView::NoTerminal => note(tp::NO_TERMINAL),
@@ -1374,6 +1379,7 @@ pub fn PaneTerminal(member: &Member, project: &str) {
                 )
                 .content(move || {
                     cu::ScrollColumn()
+                        .scroll_state(&scroll)
                         .modifier(Modifier::new().fill_max_width().fill_max_height())
                         .content(move || {
                             cu::Column()
@@ -5493,6 +5499,21 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn pane_terminal_follows_its_newest_line_with_the_toolkit_scroll_state() {
+        // compose-rust#385 (#673): the terminal pane hands its ScrollColumn the scroll state that
+        // `FollowNewest` moves, so no stand-in marker for scrolling to the bottom is left.
+        let src = include_str!("session.rs");
+        let src = &src[..src.find("#[cfg(test)]").unwrap()];
+        let doc = src.split("pub fn PaneTerminal(").next().unwrap();
+        assert!(!doc.contains(concat!("TODO(compose-rust): scroll to the ", "bottom")));
+        let term = src.split("pub fn PaneTerminal(").nth(1).unwrap();
+        let term = term.split("\npub fn ").next().unwrap();
+        assert!(term.contains("let scroll = cu::remember_scroll_state();"));
+        assert!(term.contains("FollowNewest(scroll.clone(), format!(\"{sid}:terminal\"));"));
+        assert!(term.contains("cu::ScrollColumn()\n                        .scroll_state(&scroll)"));
+    }
 
     #[test]
     fn nfr_l3_pane_transcript_opens_at_the_newest_message() {

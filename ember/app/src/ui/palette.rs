@@ -22,6 +22,9 @@ pub enum Payload {
     GotoLine { line: usize, column: Option<usize> },
     /// An extension command, by its id.
     ExtensionCommand(String),
+    /// An item of the editor's ⋯ menu that is not one of its actions (FR-L31.38): the window does
+    /// it itself, so it never reaches the host as an extension command.
+    EditorMenu(super::editor_menu::MenuCommand),
     /// Change the active document's line ending (FR-L31.7).
     SetEol(ember_editor::Eol),
     /// Go on to the encoding list for reopening or saving (FR-L31.7).

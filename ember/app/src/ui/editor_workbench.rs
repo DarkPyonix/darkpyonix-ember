@@ -765,9 +765,10 @@ pub mod page {
                 pos_sig.set((line, column.unwrap_or(1)));
             }
             crate::ui::palette::Payload::ExtensionCommand(id) => {
-                // The ⋯ menu's own rows (FR-L31.38) are the window's, not an extension's.
-                if let Some(cmd) = crate::ui::editor_menu::MenuCommand::from_id(&id) { run_menu_command(s, cmd); } else { s.host.send(HostCommand::ExecuteCommand(id)); }
+                s.host.send(HostCommand::ExecuteCommand(id));
             }
+            // The ⋯ menu's own rows (FR-L31.38) are the window's, not an extension's.
+            crate::ui::palette::Payload::EditorMenu(cmd) => run_menu_command(s, cmd),
             payload @ (crate::ui::palette::Payload::SetEol(_)
             | crate::ui::palette::Payload::EncodingAction(_)
             | crate::ui::palette::Payload::SetEncoding { .. }

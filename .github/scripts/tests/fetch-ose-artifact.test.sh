@@ -84,4 +84,19 @@ if run "$work/cache5" v1.0.0 >/dev/null 2>"$work/err6"; then fail "a tag that is
 [ "$(calls)" = "$before" ] || fail "gh was called for a malformed tag"
 ok "a tag that is not ose-v* fails without a download"
 
+# 7. The Windows target (#83): the archive holds bin/dpx-ose-server.cmd (no execute bit) and
+#    that is the launcher printed.
+wname="dpx-ose-1.0.0-windows-x64"
+mkdir -p "$work/wsrc/$wname/bin" "$work/wrelease"
+printf '@echo off\r\n' > "$work/wsrc/$wname/bin/dpx-ose-server.cmd"
+chmod -x "$work/wsrc/$wname/bin/dpx-ose-server.cmd"
+printf '{"serverApplicationName":"dpx-ose-server","commit":"0123abcd"}\n' > "$work/wsrc/$wname/product.json"
+tar -C "$work/wsrc" -czf "$work/wrelease/$wname.tar.gz" "$wname"
+(cd "$work/wrelease" && sum "$wname.tar.gz" > SHA256SUMS)
+wout="$(PATH="$work/bin:$PATH" FAKE_GH_LOG="$work/gh.log" FAKE_RELEASE_DIR="$work/wrelease" \
+  OSE_REPO=example/repo OSE_TARGET=windows-x64 OSE_CACHE_DIR="$work/cache6" OSE_RELEASE=ose-v1.0.0 \
+  bash "$script" 2>"$work/err7")" || { cat "$work/err7" >&2; fail "a good Windows release was refused"; }
+[ "$wout" = "$work/cache6/ose-v1.0.0-windows-x64/$wname/bin/dpx-ose-server.cmd" ] || fail "Windows launcher path: $wout"
+ok "the windows-x64 release prints bin/dpx-ose-server.cmd"
+
 echo "fetch-ose-artifact.test.sh: PASS"

@@ -14,7 +14,9 @@ if [ $# -ne 1 ] || [ ! -f "$1" ]; then
   exit 2
 fi
 
-python3 - "$1" <<'PY'
+# setup-python on Windows (Git Bash) provides python, not python3 (#83).
+py=python3; command -v python3 >/dev/null || py=python
+"$py" - "$1" <<'PY'
 import json, re, sys
 
 path = sys.argv[1]

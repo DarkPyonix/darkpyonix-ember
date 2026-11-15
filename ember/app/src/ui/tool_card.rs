@@ -211,6 +211,12 @@ fn command_of(input: &Value) -> Option<String> {
     }
 }
 
+/// Whether the approval card offers "allow always": not when the server marks the input
+/// `allow_always: false` (FR-T12, the `channel_post` call, which must not be remembered).
+pub fn offers_allow_always(input: &Value) -> bool {
+    input.get("allow_always") != Some(&Value::Bool(false))
+}
+
 /// The approval card's title and body for `tool` with `input` on `computer`.
 pub fn approval_text(computer: Option<&str>, tool: &str, input: &Value) -> ApprovalText {
     let pc = computer.map(str::trim).filter(|c| !c.is_empty()).unwrap_or(THIS_COMPUTER);
@@ -237,10 +243,15 @@ pub fn approval_text(computer: Option<&str>, tool: &str, input: &Value) -> Appro
         };
     }
     let name = if tool.trim().is_empty() { "도구" } else { tool };
+    // A server note (FR-T12: the server name is unverified) is what the person needs to read.
+    let body = match input.get("note") {
+        Some(Value::String(note)) if !note.trim().is_empty() => note.clone(),
+        _ => crate::model::json_summary(input, 200),
+    };
     ApprovalText {
         kind: ApprovalKind::Other,
         title: format!("{pc}에서 {name}을(를) 실행할까요?"),
-        body: crate::model::json_summary(input, 200),
+        body,
     }
 }
 

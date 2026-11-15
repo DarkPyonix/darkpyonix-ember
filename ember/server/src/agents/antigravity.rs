@@ -685,6 +685,14 @@ impl HookCall {
     }
 }
 
+/// Whether `call` is the `channel_post` call of Ember's `ember-channels` server (FR-T12). agy keys
+/// approvals by the tool name `call_mcp_tool`, so an "allow always" for it would allow every MCP
+/// tool of the run: this call is allowed once at a time and never remembered.
+fn is_channel_post(call: &HookCall) -> bool {
+    call.tool == "call_mcp_tool"
+        && call.input["ServerName"].as_str().is_some_and(|s| s.eq_ignore_ascii_case(crate::a2a::CHANNEL_MCP_SERVER))
+}
+
 /// `<conversation id>:<step index>`: both the tool call id and the approval id.
 pub fn call_id(conversation: &str, step: u64) -> String {
     format!("{conversation}:{step}")
@@ -771,8 +779,9 @@ struct ApprovalState {
     open: bool,
     policy: Policy,
     timeout: Duration,
-    /// approval_id -> (tool, answer channel)
-    pending: HashMap<String, (String, oneshot::Sender<ApprovalDecision>)>,
+    /// approval_id -> (the tool an "allow always" may remember, `None` for an allow-once-only
+    /// call, answer channel)
+    pending: HashMap<String, (Option<String>, oneshot::Sender<ApprovalDecision>)>,
     always_allowed: HashSet<String>,
 }
 
@@ -820,9 +829,12 @@ impl RunApprovals {
 
     async fn decide(&self, payload: &Value) -> Value {
         let call = HookCall::from_payload(payload);
+        let once_only = is_channel_post(&call);
         let (open, policy, timeout, always) = {
             let st = self.state.lock().unwrap();
-            (st.open, st.policy, st.timeout, approval_policy(&call.tool, false).remember_always && st.always_allowed.contains(&call.tool))
+            let remembered = approval_policy(&call.tool, false).remember_always && st.always_allowed.contains(&call.tool);
+            // A rule for `call_mcp_tool` remembered for another server does not cover the channel call.
+            (st.open, st.policy, st.timeout, remembered && !once_only)
         };
         if !open {
             return deny_reply("No Ember turn is running for this Antigravity session.");
@@ -868,13 +880,21 @@ impl RunApprovals {
             return allow_reply();
         }
         let (tx, rx) = oneshot::channel();
-        self.state.lock().unwrap().pending.insert(call.approval_id.clone(), (call.tool.clone(), tx));
+        let remember = (!once_only).then(|| call.tool.clone());
+        self.state.lock().unwrap().pending.insert(call.approval_id.clone(), (remember, tx));
+        let mut input = call.input.clone();
+        if once_only {
+            if let Some(map) = input.as_object_mut() {
+                // The app hides the always button for this card (FR-T12).
+                map.insert("allow_always".into(), Value::Bool(false));
+            }
+        }
         let asked = self
             .events
             .send(AgentEvent::ApprovalRequested {
                 approval_id: call.approval_id.clone(),
                 tool: call.tool.clone(),
-                input: call.input.clone(),
+                input,
                 needs_person: false,
             })
             .await;
@@ -918,7 +938,8 @@ impl RunApprovals {
             .pending
             .remove(approval_id)
             .ok_or_else(|| anyhow::anyhow!("unknown approval {approval_id}"))?;
-        if decision == ApprovalDecision::AllowAlways && approval_policy(&tool, false).remember_always {
+        // An allow-once-only call (`tool` is `None`) stores no rule: always counts as once.
+        if let Some(tool) = tool.filter(|t| decision == ApprovalDecision::AllowAlways && approval_policy(t, false).remember_always) {
             st.always_allowed.insert(tool);
         }
         // The hook may have given up already; nothing to do then.

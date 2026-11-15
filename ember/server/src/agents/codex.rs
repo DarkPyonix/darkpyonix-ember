@@ -40,7 +40,9 @@
 //! Server → client requests mapped to `ApprovalRequested` and answered by [`AgentRun::answer`]:
 //! `item/commandExecution/requestApproval`, `item/fileChange/requestApproval`,
 //! `item/permissions/requestApproval`, and the legacy `execCommandApproval` / `applyPatchApproval`.
-//! Any other server request gets a JSON-RPC error so Codex never waits on us.
+//! A `mcpServer/elicitation/request` from `ember-channels` with no fields to fill (the approval of
+//! a `channel_post` call, FR-T12) becomes an allow-once card; its shape is from the 0.155.1 schema,
+//! not recorded on 0.167.0. Any other server request gets a JSON-RPC error so Codex never waits on us.
 //!
 //! # Extra MCP servers
 //!
@@ -235,7 +237,7 @@ impl AgentAdapter for CodexAdapter {
             stdin: tokio::sync::Mutex::new(Some(stdin)),
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicI64::new(0),
-            mapper: Mutex::new(Mapper::default()),
+            mapper: Mutex::new(Mapper { channel_unverified: channel_post_unverified(&req), ..Mapper::default() }),
             closing: AtomicBool::new(false),
         });
 
@@ -697,6 +699,23 @@ enum ApprovalKind {
     Permissions,
     /// Legacy `execCommandApproval` / `applyPatchApproval` (answered with `ReviewDecision`).
     Legacy,
+    /// `mcpServer/elicitation/request` of the `ember-channels` server asking to run
+    /// `channel_post` (FR-T12), answered `{action, content}`.
+    Elicitation,
+}
+
+/// The card note of a `channel_post` call Codex asks about because a configuration layer the name
+/// check does not read is present (FR-T12).
+pub const CHANNEL_UNVERIFIED_NOTE: &str =
+    "서버 이름을 확인하지 못했습니다. 이 요청이 Ember 채널 도구에서 온 것인지 확인한 뒤 허용해 주세요.";
+/// The same in English, in the event input for logs.
+pub const CHANNEL_UNVERIFIED_REASON: &str = "unverified server name: a Codex configuration layer the name check does not read is present, so channel_post was not auto-approved";
+
+/// Whether `req` registers `ember-channels` without the `channel_post` allow rule: the A2A hook
+/// left the rule out because the server name is unverified (FR-T12), so Codex asks.
+fn channel_post_unverified(req: &StartRequest) -> bool {
+    req.mcp_servers.iter().any(|m| m.name == crate::a2a::CHANNEL_MCP_SERVER)
+        && !req.allowed_tools.iter().any(|t| t == crate::a2a::CHANNEL_POST_TOOL)
 }
 
 #[derive(Debug, Clone)]
@@ -727,6 +746,9 @@ struct Mapper {
     /// `RateLimited` was already emitted for the current exhaustion.
     limit_resets: Vec<i64>,
     limit_reported: bool,
+    /// The session's `channel_post` call is not auto-approved because its server name is
+    /// unverified ([`channel_post_unverified`]): its card carries [`CHANNEL_UNVERIFIED_NOTE`].
+    channel_unverified: bool,
 }
 
 impl Mapper {
@@ -933,6 +955,41 @@ impl Mapper {
                 add_reason(&mut input, p);
                 (ApprovalKind::Legacy, id, "file_change".to_string(), input)
             }
+            // Only the channel tool's approval (an elicitation with no fields to fill) becomes a
+            // card; any other elicitation is refused as before.
+            "mcpServer/elicitation/request"
+                if str_at(p, "/serverName") == Some(crate::a2a::CHANNEL_MCP_SERVER)
+                    && p.pointer("/requestedSchema/properties")
+                        .and_then(Value::as_object)
+                        .is_some_and(|m| m.is_empty()) =>
+            {
+                let mut input = json!({
+                    "server": crate::a2a::CHANNEL_MCP_SERVER,
+                    "message": str_at(p, "/message").unwrap_or_default(),
+                    // No per-session answer exists, and the call must not be remembered.
+                    "allow_always": false,
+                });
+                if self.channel_unverified {
+                    input["note"] = json!(CHANNEL_UNVERIFIED_NOTE);
+                    input["log_reason"] = json!(CHANNEL_UNVERIFIED_REASON);
+                }
+                let mut approval_id = format!("elicitation#{rpc_id}");
+                if self.approvals.contains_key(&approval_id) {
+                    approval_id = format!("{approval_id}#{}", self.approvals.len());
+                }
+                self.approvals.insert(
+                    approval_id.clone(),
+                    PendingApproval { rpc_id, kind: ApprovalKind::Elicitation, params: p.clone() },
+                );
+                // `needs_person`: approve-everything does not answer it, since Codex asks only when
+                // the auto-approval was left out (the server name is unverified).
+                return Ok(vec![AgentEvent::ApprovalRequested {
+                    approval_id,
+                    tool: crate::a2a::CHANNEL_POST_TOOL.to_string(),
+                    input,
+                    needs_person: true,
+                }]);
+            }
             other => return Err(format!("ember does not handle {other}")),
         };
         let mut approval_id = approval_id.to_string();
@@ -979,6 +1036,11 @@ fn approval_response(a: &PendingApproval, decision: ApprovalDecision) -> Value {
                 let scope = if allow == ApprovalDecision::AllowAlways { "session" } else { "turn" };
                 json!({ "permissions": strip_nulls(&a.params["permissions"]), "scope": scope })
             }
+        },
+        // Elicitation has no per-session answer: always counts as once.
+        ApprovalKind::Elicitation => match decision {
+            ApprovalDecision::AllowOnce | ApprovalDecision::AllowAlways => json!({ "action": "accept", "content": {} }),
+            ApprovalDecision::Deny => json!({ "action": "decline" }),
         },
         ApprovalKind::Legacy => match decision {
             ApprovalDecision::AllowOnce => json!({ "decision": "approved" }),

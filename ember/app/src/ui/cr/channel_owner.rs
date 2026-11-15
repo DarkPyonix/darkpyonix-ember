@@ -464,8 +464,8 @@ fn InviteSection(channel: &str, st: &OwnerState) {
     }
     if let Some(c) = created.filter(|_| status.can_copy()) {
         // A read-only look: the field starts with the link, enabled so it can be selected and
-        // copied with Cmd+C / Ctrl+C. The toolkit has no read_only flag, so typing into it changes
-        // only what is drawn, never the link. 복사 puts the link on the clipboard through the
+        // copied with Cmd+C / Ctrl+C. TODO(compose-rust, unfiled: TextField has no read-only flag):
+        // typing into it changes only what is drawn, never the link. 복사 puts the link on the clipboard through the
         // toolkit (compose-rust v0.0.7, #471); the link is never logged.
         EmberField(FieldOptions { fill_max_width: true, text: Some(c.link.clone()), ..Default::default() });
         let link = c.link.clone();

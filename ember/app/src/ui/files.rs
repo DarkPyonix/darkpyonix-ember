@@ -11,9 +11,9 @@
 //! and [`UNAVAILABLE`] for sending, receiving and history. Nothing is invented.
 //!
 //! #166 workarounds (revert when upstream lands):
-//! - No drag and drop (dioxus-compose and compose-rust are frozen): a send sheet picks the
-//!   receiver, then the files. The toolkit has no file picker, so the files step says
-//!   [`FILE_PICK_UNAVAILABLE`] (see [`FILE_PICKER_AVAILABLE`]).
+//! - No drag and drop: a send sheet picks the receiver, then the files. The file dialog
+//!   (compose-rust#483) and file drop (compose-rust#485) are in the v0.0.10 pin and not wired
+//!   yet, so the files step says [`FILE_PICK_UNAVAILABLE`] (see [`FILE_PICKER_AVAILABLE`]).
 //! - No OS share sheet (FR-F7) and no live push of transfer progress: the screen re-reads the
 //!   service whenever the launcher state changes.
 //! - Tiles are not clickable containers (pG), so each tile carries a small button.

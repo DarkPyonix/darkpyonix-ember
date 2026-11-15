@@ -1199,8 +1199,9 @@ pub fn name_then_pill_width(room: f32, natural: f32, pill: f32, gap: f32) -> Opt
 /// pill and whatever follows the row stay on screen (CSS `flex:0 1 auto;min-width:0` on the
 /// name; `.detail .topbar` in the mockup).
 ///
-/// The toolkit has no weight that leaves a child its own size (Compose `weight(fill = false)`)
-/// and no maximum width: a weighted child fills its share (compose-rust
+/// TODO(compose-rust#778, after v0.0.10): the pinned toolkit has no weight that leaves a child its
+/// own size (Compose `weight(fill = false)`) and no maximum width, so this measuring goes when
+/// the pin has one. A weighted child fills its share (compose-rust
 /// `renderer/desktop/src/renderer/RenderNode.kt` `WeightedStackPolicy`), and an unweighted one
 /// is measured in order, so a long name would leave the pill no room. So the row measures: the
 /// room, the pill and the name's own width (a copy in clear ink, left out of the accessibility

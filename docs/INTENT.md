@@ -1082,3 +1082,13 @@ What trust does not protect. Under D37 agents and terminals run with the full au
 **Why.** The check-then-open gap is reachable remotely through the server relay (#463). Checking the handle closes it for every operation that reads or writes content; checking the parent handle closes it for the operations that create, remove, move or describe a name, with no change to the API.
 
 **Status.** Content operations built (#803) (`ember/node/tests/fs_toctou.rs`). Namespace operations and their server relay written (#456), not yet compiled or run (`fr_x1_*` in `ember/node/tests/fs_toctou.rs`, `fr_w4_fs_relay_namespace_*` in `ember/server/tests/fr_w4_fs_relay.rs`). Residual: the `glob` walk itself reads directories by path, so a name that exists outside and at the same place inside is not told apart; Windows is not covered by handle checks. SPEC `FR-X1` (open, then check, #468; namespace operations, #456), `FR-W4`.
+
+### D49: OSE has a Windows target, built natively on a Windows runner
+
+**Decision.** [leader, provisional, 2026-11-15] Ember runs on Windows (P1, #83), so OSE gains a fifth target, `windows-x64`. It is built natively on a GitHub `windows-2022` runner with Code-OSS's own `vscode-reh-web-win32-x64-min-ci` gulp task, driven by the same `ember/ose/build.sh` under Git Bash. The archive keeps the shared shape `dpx-ose-<tag>-windows-x64.tar.gz` plus `.sha256` (Windows 10 and later ship `tar.exe`, which reads it). `ember-node` starts the Windows server by running the bundled `node.exe` on `out/server-main.js`, the two things `bin/dpx-ose-server.cmd` runs, instead of the `.cmd` itself.
+
+**Rejected** *[provisional]*. Cross-compiling from Linux (native modules such as node-pty and spdlog are compiled for the build host; upstream builds Windows on Windows). A PowerShell twin of `build.sh` (two build scripts drift; Git Bash is on every Windows runner). A `.zip` archive like upstream's (the fetch script, the live job and the release would need two formats). Spawning the `.cmd` (Rust runs it through `cmd.exe`, so killing the child leaves `node.exe` running, and `cmd.exe` argument quoting is its own risk).
+
+**Why.** A Windows computer hosts its own OSE the same way a Mac or a Linux machine does; one script and one archive shape keep the five targets in step.
+
+**Status.** Written, not yet run in CI (#83). Not built: the live tests on Windows (they use Unix process groups and `pkill`), process tree kill of the extension host on Windows, and hardened token file ACLs. SPEC `FR-W4` (acceptance, Windows).

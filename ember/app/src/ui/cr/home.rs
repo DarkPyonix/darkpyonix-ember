@@ -390,7 +390,7 @@ fn DotOrHatch(hatched: bool, hatch: compose_rust::Color, solid: compose_rust::Co
 
 /// Which of the composer's lists is open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Pick {
+pub(super) enum Pick {
     Project,
     Model,
     Mode,
@@ -512,8 +512,8 @@ pub fn HomeScreen() {
 
 /// The composer's state.
 #[derive(Clone)]
-struct Composer {
-    selection: MutableState<Selection>,
+pub(super) struct Composer {
+    pub(super) selection: MutableState<Selection>,
     typed: MutableState<String>,
     attachments: MutableState<Vec<ComposerAttachment>>,
     attachment_open: MutableState<bool>,
@@ -521,7 +521,7 @@ struct Composer {
     attachment_error: MutableState<Option<String>>,
     suggestion: MutableState<Option<String>>,
     busy: MutableState<bool>,
-    open: MutableState<Option<Pick>>,
+    pub(super) open: MutableState<Option<Pick>>,
     /// The mode that waits for its confirming tap (bypass), if any.
     mode_pending: MutableState<crate::ui::home::ModePending>,
     harness_filter: MutableState<Option<Harness>>,
@@ -535,7 +535,7 @@ struct Composer {
 }
 
 impl Composer {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let base_sel = crate::services::try_services()
             .map(|s| Selection::initial_with_defaults(&s.ui.live.agent_defaults.get_untracked()))
             .unwrap_or_else(Selection::initial);
@@ -686,7 +686,7 @@ impl Composer {
     }
 
     /// The four lists the chips open. One node, so the closed dialogs add no gap anywhere.
-    fn lists(&self, ui: &SharedUi) {
+    pub(super) fn lists(&self, ui: &SharedUi) {
         let sel = self.selection.get();
         let open = self.open.get();
         let close = {
@@ -873,7 +873,7 @@ impl Composer {
     /// The model picker at 560 and below (review K7, mockup `.mp-pop` under `@media
     /// (max-width:560px)`): the same rail, search and rows as a bottom sheet with no title bar,
     /// four fifths of the window high at most, and no key caps.
-    fn model_sheet(&self, ui: &SharedUi, sel: &Selection, open: bool, close: impl FnMut() + Clone + 'static) {
+    pub(super) fn model_sheet(&self, ui: &SharedUi, sel: &Selection, open: bool, close: impl FnMut() + Clone + 'static) {
         let mut reset = self.close_model();
         let mut close = close;
         let dismiss = move || {
@@ -897,7 +897,7 @@ impl Composer {
     /// profile names (FR-L17 profiles are not built), and focus on the search when it opens
     /// (`FieldOptions` carries no focus handle), so the arrow keys and `Ctrl+number` work once
     /// the search has focus.
-    fn model_popover(&self, ui: &SharedUi, sel: &Selection, share: Option<f32>, anchor: impl FnOnce(), close: impl FnMut() + Clone + 'static) {
+    pub(super) fn model_popover(&self, ui: &SharedUi, sel: &Selection, share: Option<f32>, anchor: impl FnOnce(), close: impl FnMut() + Clone + 'static) {
         let open = self.open.get() == Some(Pick::Model);
         let mut reset = self.close_model();
         let mut close = close;

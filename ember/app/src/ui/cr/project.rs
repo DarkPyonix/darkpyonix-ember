@@ -161,16 +161,16 @@ pub fn chip_sub(c: &ComputerChip) -> String {
 /// project's full view (`EMBER_CR_PROJECT=<id>` another), `EMBER_CR_PROJECT_SHEET=settings|
 /// computer|new|add-computer` a sheet, `EMBER_CR_PROJECT_EXPAND=1` expands every box's deck.
 #[derive(Clone)]
-struct Ui {
-    full: MutableState<Option<String>>,
-    settings: MutableState<Option<String>>,
-    computer: MutableState<Option<String>>,
-    new_project: MutableState<bool>,
-    new_draft: MutableState<NewProjectDraft>,
-    new_saving: MutableState<bool>,
-    new_failure: MutableState<Option<String>>,
-    new_confirm: MutableState<bool>,
-    add: super::add_computer::AddUi,
+pub(super) struct Ui {
+    pub(super) full: MutableState<Option<String>>,
+    pub(super) settings: MutableState<Option<String>>,
+    pub(super) computer: MutableState<Option<String>>,
+    pub(super) new_project: MutableState<bool>,
+    pub(super) new_draft: MutableState<NewProjectDraft>,
+    pub(super) new_saving: MutableState<bool>,
+    pub(super) new_failure: MutableState<Option<String>>,
+    pub(super) new_confirm: MutableState<bool>,
+    pub(super) add: super::add_computer::AddUi,
     query: MutableState<String>,
     expanded: MutableState<Vec<String>>,
     filter: MutableState<MemberFilter>,
@@ -185,7 +185,7 @@ fn search_hook_open(debug: bool, value: Option<&str>) -> bool {
 }
 
 impl Ui {
-    fn new(boxes: &[ProjectBox], chips: &[ComputerChip]) -> Ui {
+    pub(super) fn new(boxes: &[ProjectBox], chips: &[ComputerChip]) -> Ui {
         let first = boxes.first().map(|b| b.id.clone());
         let full = match std::env::var("EMBER_CR_PROJECT").ok() {
             Some(id) if !id.is_empty() => Some(id),
@@ -1144,7 +1144,7 @@ fn MemberRow(m: &Member, project_id: &str, ui: &SharedUi, rule: bool) {
 // Sheets
 // ---------------------------------------------------------------------------------------------
 
-fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: &SharedUi) {
+pub(super) fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: &SharedUi) {
     // New project (FR-L26, FR-L1): name, repository, default branch and team character. Creating
     // takes only the name; the other fields go in a second PATCH.
     {
@@ -1632,7 +1632,7 @@ fn delete_project_now(
 }
 
 /// The settings sheet has 취소 and 저장 in the header beside the close button.
-fn SettingsSheet(
+pub(super) fn SettingsSheet(
     b: &ProjectBox,
     chips: &[ComputerChip],
     closed: MutableState<Option<String>>,

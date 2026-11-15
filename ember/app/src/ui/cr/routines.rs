@@ -2522,7 +2522,7 @@ fn form_save_handler(
     }
 }
 
-fn RoutineForm(
+pub(super) fn RoutineForm(
     initial: FormDraft,
     editing: Option<String>,
     _server: bool,

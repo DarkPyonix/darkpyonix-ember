@@ -332,6 +332,11 @@ impl Core {
         }
     }
 
+    /// Whether a call of `tag` is in flight.
+    pub fn is_held(&self, tag: &str) -> bool {
+        self.holds.get(tag).is_some_and(|n| *n > 0)
+    }
+
     /// Fire the views that are due: each gets its new counter. Also the next deadline.
     pub fn poll(&mut self, now: Instant) -> (Vec<(ViewId, u64)>, Option<Instant>) {
         let mut fired = Vec::new();
@@ -604,6 +609,26 @@ async fn socket_task(
             },
         }
     }
+}
+
+/// A core with view 1 tagged `tag` on `/r` of `c1`, its socket open and the watch live as id 1
+/// (for the guard tests in `ui/vcs_watch.rs`).
+#[cfg(test)]
+pub(crate) fn tests_live(now: Instant, tag: &str) -> Core {
+    let key = WatchKey { computer: "c1".into(), folder: "/r".into(), recursive: true };
+    let mut c = Core::default();
+    c.subscribe(1, key.clone(), tag);
+    c.on_connected("c1", now);
+    c.on_watch_sent(&key, 1);
+    c.on_message("c1", FsWatchMessage::Watching { id: 1, path: "/r".into() }, now);
+    c
+}
+
+/// One change under `/r` on the watch of [`tests_live`].
+#[cfg(test)]
+pub(crate) fn tests_change(c: &mut Core, now: Instant) {
+    let events = vec![ember_client::fs_watch::FsChange { kind: ember_client::fs_watch::FsChangeKind::Changed, path: "/r/a".into(), to: None }];
+    c.on_message("c1", FsWatchMessage::Change { id: 1, events }, now);
 }
 
 #[cfg(test)]

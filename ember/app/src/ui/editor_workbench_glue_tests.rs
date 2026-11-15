@@ -661,6 +661,51 @@ fn fr_l31_26_the_status_bar_is_32_high_and_flush_with_the_page_bottom() {
     assert!(close(ed_rect.y + ed_rect.height, 900.0), "the page fills the viewport: {ed_rect:?}");
 }
 
+/// A node's laid-out box in the page, as `(x, y, width, height)`: its layout's location added up
+/// through its parents, so a node that draws nothing (a pane, a widget's placeholder) has one too.
+fn page_box(page: &Page, node: NodeId) -> (f32, f32, f32, f32) {
+    let doc = page.dom.document();
+    let n = doc.get_node(node).expect("the node");
+    let size = n.final_layout.size;
+    let (mut x, mut y, mut at) = (0.0, 0.0, Some(node));
+    while let Some(id) = at {
+        let Some(node) = doc.get_node(id) else { break };
+        x += node.final_layout.location.x;
+        y += node.final_layout.location.y;
+        at = node.parent;
+    }
+    (x, y, size.width, size.height)
+}
+
+// FR-L31.40 (#301): the code editor's box is the editor pane under the breadcrumb row less the
+// 8 px above the first line (FR-L31.27), and ends where the pane does, above the bottom panel: the
+// box `use_widget_box` hands the editor is the area the reader sees, so a line the editor counts
+// as on screen is drawn there. The window measured the same (pane 1054x456 at 337,135 and box
+// 1054x448 at 1440x900); this keeps the stylesheet and the pane's inline sizes from drifting.
+#[test]
+fn fr_l31_40_the_code_editor_box_is_the_pane_under_the_breadcrumb_less_the_top_room() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_styled();
+    page.click_row();
+    page.deliver(opened(3));
+    let widget = page.find_where("the code editor", |id| page.attr(id, "data-compose-widget").is_some()).expect("the code editor's box");
+    let pane = page.find("data-ed", "code-pane").expect("the editor pane");
+    let crumbs = page.find("class", "ed-crumbs").expect("the breadcrumb row");
+    let bottom = page.find("aria-label", "아래 도구 창").expect("the bottom tool window");
+    for (width, height) in [(1440.0, 900.0), (1280.0, 820.0), (1000.0, 620.0)] {
+        let _ = page.dom.layout(width, height, 1.0);
+        let (w, p, c, b) = (page_box(&page, widget), page_box(&page, pane), page_box(&page, crumbs), page_box(&page, bottom));
+        let close = |a: f32, b: f32| (a - b).abs() < 0.5;
+        let at = format!("at {width}x{height}: box {w:?}, pane {p:?}, crumbs {c:?}, bottom panel {b:?}");
+        assert!(p.3 > 0.0 && w.3 > 0.0, "laid out {at}");
+        assert!(close(p.1, c.1 + c.3), "the pane starts under the breadcrumb row {at}");
+        assert!(close(w.0, p.0) && close(w.2, p.2), "the box is the pane's width {at}");
+        assert!(close(w.1, p.1 + 8.0), "8 px above the box {at}");
+        assert!(close(w.1 + w.3, p.1 + p.3), "the box ends where the pane does {at}");
+        assert!(w.1 + w.3 <= b.1 + 0.5, "the box ends above the bottom panel {at}");
+    }
+}
+
 /// The page grid's and the status bar's boxes, as `(x, y, width, height)`, with the page laid out
 /// in a `width` by `height` viewport.
 fn page_and_bar_boxes(page: &mut Page, ed: NodeId, bar: NodeId, width: f32, height: f32) -> ((f32, f32, f32, f32), (f32, f32, f32, f32)) {

@@ -21,7 +21,8 @@ pub use crate::ui::monitor::{
     SortState,
 };
 use crate::ui::monitor::{
-    bar_fraction, bar_max, card_view, meter_fraction, empty_text, health_score, process_footer, ram_badge, score_tone,
+    bar_fraction, bar_max, card_view, hero_parts, meter_fraction, empty_text, health_score, process_footer, ram_badge, score_tone,
+    CORE_BARS_GAP, CORE_BARS_H, CORE_BAR_ALPHA, CORE_BAR_RADIUS,
     score_word, status_line, storage_line, CardView, FanMode, FeedStatus, FAN_MODE_AVAILABLE, FAN_MODE_REASON, POLL_SECS,
     TOP_PROCESSES,
 };
@@ -366,25 +367,40 @@ fn MetricCard(metric: Metric, view: Option<CardView>, empty: &str, meter: Option
     let p = ember_theme().palette;
     MonCard(metric_icon(metric), metric.title(), None, fill, || match view.as_ref() {
         Some(v) => {
-            Label(&v.headline, Fs::Xl4, Weight::Semibold, None, Some(1));
-            for line in v.lines.iter().take(4) {
-                Label(line, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));
-            }
+            HeroValue(&v.headline);
             Bars(metric, &v.bars);
             if let Some(f) = meter {
                 Meter(f);
+            }
+            // `.mon-f`: the card's footer lines, 12 `muted`, under the chart (review M2).
+            for line in v.lines.iter().take(4) {
+                Label(line, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
             }
         }
         None => Label(empty, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(3)),
     });
 }
 
-/// One value against a track: the track in surface-2, the fill in the accent, both rounded.
+/// `.mon-big`: the number at 40/600 and its unit at 15/500 `muted` beside it, bottoms aligned,
+/// 4 apart; whole numbers for a percent or a temperature (`hero_parts`, review M1).
+fn HeroValue(headline: &str) {
+    let p = ember_theme().palette;
+    let (number, unit) = hero_parts(headline);
+    cu::Row().alignment(Alignment::BottomStart).spacing(SP[0]).content(|| {
+        Label(&number, Fs::Xl4, Weight::Semibold, None, Some(1));
+        if !unit.is_empty() {
+            Label(&unit, Fs::Lg, Weight::Medium, Some(paint(p.muted)), Some(1));
+        }
+    });
+}
+
+/// One value against a track (`.mon-bar`): the track in `track`, the fill in the accent, both
+/// rounded.
 fn Meter(fraction: f32) {
     let p = ember_theme().palette;
     let f = bar_fraction(fraction, 1.0);
     cu::Row()
-        .modifier(Modifier::new().fill_max_width().height(8.0).background(paint(p.surface_2)).corner_radius(4.0).clip(true))
+        .modifier(Modifier::new().fill_max_width().height(8.0).background(paint(p.track)).corner_radius(4.0).clip(true))
         .content(move || {
             if f > 0.0 {
                 cu::Spacer().modifier(Modifier::new().weight(f).height(8.0).background(paint(p.blue.strong)).corner_radius(4.0));
@@ -395,18 +411,27 @@ fn Meter(fraction: f32) {
         });
 }
 
-/// A row of thin bars, one per core (CPU) or per recent sample, drawn from the bottom.
+/// A row of thin bars drawn from the bottom: the CPU's cores as the mockup's `.mon-cores` (44
+/// high, 3 apart, green with 2 dp top corners at 85 percent; review M2), the recent samples of
+/// the other cards 32 high in blue.
 fn Bars(metric: Metric, bars: &[f32]) {
     if bars.is_empty() {
         return;
     }
     let p = ember_theme().palette;
     let max = bar_max(metric, bars);
-    const H: f32 = 32.0;
-    cu::Row().alignment(Alignment::BottomStart).spacing(2.0).modifier(Modifier::new().fill_max_width().height(H)).content(|| {
+    let cores = metric == Metric::Cpu;
+    let (h_all, gap, tone) = if cores { (CORE_BARS_H, CORE_BARS_GAP, p.green.strong) } else { (32.0, 2.0, p.blue.strong) };
+    cu::Row().alignment(Alignment::BottomStart).spacing(gap).modifier(Modifier::new().fill_max_width().height(h_all)).content(|| {
         for v in bars.iter().copied() {
-            let h = (bar_fraction(v, max) * H).max(1.0);
-            cu::Spacer().modifier(Modifier::new().weight(1.0).height(h).background(paint(p.blue.strong)));
+            let h = (bar_fraction(v, max) * h_all).max(1.0);
+            let bar = Modifier::new().weight(1.0).height(h).background(paint(tone));
+            let bar = if cores {
+                bar.corner_radii([CORE_BAR_RADIUS, CORE_BAR_RADIUS, 0.0, 0.0]).alpha(CORE_BAR_ALPHA)
+            } else {
+                bar
+            };
+            cu::Spacer().modifier(bar);
         }
     });
 }
@@ -620,7 +645,9 @@ mod tests {
             Grid(1, &chip(), &live_feed(), true);
         }
         let text = composed_text(ui);
-        for want in ["25.0%", "50.0%", "스왑 1.0 GB / 4.0 GB", "60.0%", "2.0 KB/s", "GPU를 읽을 수 없습니다", "프로세스 321개 실행 중입니다", "준비 중입니다"] {
+        // The big value is split into the number and its unit, a percent as a whole number
+        // (`hero_parts`, review M1), so each is its own quoted text.
+        for want in ["\"25\"", "\"50\"", "스왑 1.0 GB / 4.0 GB", "\"60\"", "\"2.0\"", "KB/s", "GPU를 읽을 수 없습니다", "프로세스 321개 실행 중입니다", "준비 중입니다"] {
             assert!(text.contains(want), "missing {want}");
         }
     }
@@ -762,6 +789,59 @@ mod tests {
         let card = production.split("fn MonCard(").nth(1).unwrap().split("\n}\n").next().unwrap();
         assert!(card.contains("EmberCardSized(false, true, fill,"), "{card}");
         assert!(!card.contains(".height(h)"), "{card}");
+    }
+
+    fn cpu_card() {
+        let view = CardView { headline: "23.1%".into(), lines: vec!["코어 8개".into()], bars: vec![50.0, 100.0] };
+        MetricCard(Metric::Cpu, Some(view), "", None, false);
+    }
+
+    /// Review M1, M2: the big value is the whole number with its unit beside it in a smaller
+    /// muted label, and the cores are green bars with rounded tops, 44 high.
+    #[test]
+    fn m1_m2_cpu_card_splits_the_number_and_draws_green_core_bars() {
+        use compose_rust::protocol::{decode_batch, Mutation, PropertyValue};
+        use compose_rust::PropertyKind;
+        let _guard = crate::services::test_guard();
+        let mut host = Host::new(|| Box::new(Recomposer::new(cpu_card)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let texts: Vec<String> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetProp { property: PropertyKind::Text, value: PropertyValue::String(s), .. } => Some(s.to_string()),
+                Mutation::SetText { text, .. } => Some(text.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.contains(&"23".to_string()), "{texts:?}");
+        assert!(texts.contains(&"%".to_string()), "{texts:?}");
+        assert!(!texts.contains(&"23.1%".to_string()), "no one-label value with a decimal");
+        let p = ember_theme().palette;
+        let green = format!("{:?}", compose_rust::schema::Modifier::Background(paint(p.green.strong)));
+        let mods_of = |id: u32| -> Vec<String> {
+            batch
+                .iter()
+                .filter_map(|m| match m {
+                    Mutation::SetModifier { node_id, modifier, .. } if *node_id == id => Some(format!("{modifier:?}")),
+                    _ => None,
+                })
+                .collect()
+        };
+        let bars: Vec<u32> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetModifier { node_id, modifier, .. } if format!("{modifier:?}") == green => Some(*node_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(bars.len(), 2, "one green bar per core");
+        for id in bars {
+            let mods = mods_of(id);
+            assert!(mods.iter().any(|m| m == "Alpha(0.85)"), "{mods:?}");
+            assert!(mods.iter().any(|m| m.starts_with("CornerEach") || m.starts_with("Shape")), "rounded top: {mods:?}");
+        }
+        let all: String = batch.iter().map(|m| format!("{m:?}")).collect();
+        assert!(all.contains("Height(44.0)"), "the core row is 44 high");
     }
 
     #[test]

@@ -252,17 +252,25 @@ pub enum SessionStatus {
 impl SessionStatus {
     /// Status after `event`, given the status before it. Approval outranks running (FR-L2).
     pub fn after(self, event: &AgentEvent) -> SessionStatus {
+        self.after_with_pending(event, false)
+    }
+
+    /// Status after `event`, given the status before it and whether at least one approval or
+    /// question is still pending in the current turn after `event` (FR-A5, #683).
+    pub fn after_with_pending(self, event: &AgentEvent, still_pending: bool) -> SessionStatus {
         match event {
             AgentEvent::UserMessage { .. } => SessionStatus::Running,
             AgentEvent::ApprovalRequested { .. } | AgentEvent::QuestionAsked { .. } => {
                 SessionStatus::WaitingForApproval
             }
-            AgentEvent::ApprovalResolved { .. } => SessionStatus::Running,
-            // A question is answered AFTER the adapter accepted the answer, so a turn end can be
-            // stored first: a late answer or withdrawal must not turn a finished or failed session
-            // back into Running. Only a session that is waiting goes back to Running.
-            AgentEvent::QuestionAnswered { .. } | AgentEvent::PromptWithdrawn { .. } => {
-                if self == SessionStatus::WaitingForApproval {
+            AgentEvent::ApprovalResolved { .. }
+            | AgentEvent::QuestionAnswered { .. }
+            | AgentEvent::PromptWithdrawn { .. } => {
+                // A question or approval can be resolved AFTER the turn already ended, so a late
+                // answer or withdrawal must not turn a finished or failed session back into Running.
+                // Only a session that is waiting goes back to Running, and only when no other
+                // prompt is still pending in the turn.
+                if self == SessionStatus::WaitingForApproval && !still_pending {
                     SessionStatus::Running
                 } else {
                     self
@@ -273,6 +281,35 @@ impl SessionStatus {
             _ => self,
         }
     }
+}
+
+/// Whether `events` (in order, ending with the latest event) still has at least one approval or
+/// question pending in the current turn (FR-A5, #683).
+pub fn has_pending_prompts<'a>(events: impl IntoIterator<Item = &'a AgentEvent>) -> bool {
+    let mut approvals: Vec<&'a str> = Vec::new();
+    let mut questions: Vec<&'a str> = Vec::new();
+    for event in events {
+        match event {
+            AgentEvent::ApprovalRequested { approval_id, .. } => approvals.push(approval_id.as_str()),
+            AgentEvent::QuestionAsked { question_id, .. } => questions.push(question_id.as_str()),
+            AgentEvent::ApprovalResolved { approval_id, .. } => {
+                approvals.retain(|id| *id != approval_id.as_str());
+            }
+            AgentEvent::QuestionAnswered { question_id, .. } => {
+                questions.retain(|id| *id != question_id.as_str());
+            }
+            AgentEvent::PromptWithdrawn { prompt_id } => {
+                approvals.retain(|id| *id != prompt_id.as_str());
+                questions.retain(|id| *id != prompt_id.as_str());
+            }
+            AgentEvent::TurnEnded { .. } => {
+                approvals.clear();
+                questions.clear();
+            }
+            _ => {}
+        }
+    }
+    !approvals.is_empty() || !questions.is_empty()
 }
 
 #[cfg(test)]

@@ -640,6 +640,40 @@ pub fn meter_fraction(metric: Metric, feed: &MonitorFeed) -> Option<f32> {
 }
 
 /// The scale of a card's bars: 100 for percents, the series maximum for the network card.
+/// A card's big value split as the mockup draws it (`.mon-big`, review M1): the number at
+/// 40/600 and the unit beside it at 15/500 `muted`. A percent or a temperature is a whole number
+/// ("23%", "62 °C"), a rate keeps its one decimal ("2.3", "MB/s 받기", the mockup's received
+/// rate); a dash stays a dash with no unit.
+pub fn hero_parts(headline: &str) -> (String, String) {
+    let (text, received) = match headline.strip_prefix("\u{2193} ") {
+        Some(rest) => (rest.trim(), true),
+        None => (headline.trim(), false),
+    };
+    let split = text
+        .char_indices()
+        .find(|(_, c)| !(c.is_ascii_digit() || *c == '.' || *c == ',' || *c == '-'))
+        .map(|(i, _)| i)
+        .unwrap_or(text.len());
+    let (number, unit) = (text[..split].trim(), text[split..].trim());
+    if number.is_empty() {
+        return (text.to_string(), String::new());
+    }
+    let whole = matches!(unit, "%" | "\u{00B0}C");
+    let number = match number.replace(',', "").parse::<f32>() {
+        Ok(v) if whole && v.is_finite() => format!("{}", v.round() as i64),
+        _ => number.to_string(),
+    };
+    let unit = if received && !unit.is_empty() { format!("{unit} 받기") } else { unit.to_string() };
+    (number, unit)
+}
+
+/// The CPU card's core bars (`.mon-cores`): 44 high, 3 apart, green with 2 dp top corners at
+/// 85 percent (review M2; they were blue square bars 32 high).
+pub const CORE_BARS_H: f32 = 44.0;
+pub const CORE_BARS_GAP: f32 = 3.0;
+pub const CORE_BAR_RADIUS: f32 = 2.0;
+pub const CORE_BAR_ALPHA: f32 = 0.85;
+
 pub fn bar_max(metric: Metric, bars: &[f32]) -> f32 {
     if metric == Metric::Network {
         bars.iter().copied().filter(|v| v.is_finite()).fold(1.0, f32::max)
@@ -748,6 +782,18 @@ pub const FAN_MODE_REASON: &str = "이 컴퓨터의 팬 속도와 모드는 아�
 mod tests {
     use super::*;
     use ember_client::LauncherStatus;
+
+    #[test]
+    fn fr_l21_hero_number_and_unit_are_split_like_the_mockup() {
+        assert_eq!(hero_parts("23.1%"), ("23".to_string(), "%".to_string()));
+        assert_eq!(hero_parts("66.5%"), ("67".to_string(), "%".to_string()));
+        assert_eq!(hero_parts("61.8 \u{00B0}C"), ("62".to_string(), "\u{00B0}C".to_string()));
+        assert_eq!(hero_parts("\u{2193} 2.3 MB/s"), ("2.3".to_string(), "MB/s 받기".to_string()));
+        assert_eq!(hero_parts("-"), ("-".to_string(), String::new()));
+        assert_eq!(hero_parts("1,092 RPM"), ("1,092".to_string(), "RPM".to_string()));
+        assert_eq!(hero_parts(&percent_text(Some(26.0))), ("26".to_string(), "%".to_string()));
+        assert_eq!((CORE_BARS_H, CORE_BARS_GAP, CORE_BAR_RADIUS, CORE_BAR_ALPHA), (44.0, 3.0, 2.0, 0.85));
+    }
 
     fn row(name: &str, pid: Option<u32>, cpu: Option<f32>, mem: Option<u64>) -> ProcessRow {
         ProcessRow {

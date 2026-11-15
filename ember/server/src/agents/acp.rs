@@ -443,6 +443,15 @@ impl AgentAdapter for AcpAdapter {
         translate_drained_lines(lines)
     }
 
+    fn drain_reads_stored(&self) -> bool {
+        true
+    }
+
+    /// The tool calls already stored for the turn in flight are not stored again (#310).
+    fn translate_drained_after(&self, lines: &[String], stored: &[AgentEvent]) -> Vec<AgentEvent> {
+        translate_drained_lines_after(lines, stored)
+    }
+
     fn binary(&self) -> Option<PathBuf> {
         Some(self.config.command.clone())
     }
@@ -641,9 +650,17 @@ pub(crate) fn drain_ends_turn(line: &str) -> bool {
 /// (usage, stop reason). Without an end line the message in progress is still flushed, and the
 /// session layer ends the unfinished turn as failed.
 pub(crate) fn translate_drained_lines(lines: &[String]) -> Vec<AgentEvent> {
+    translate_drained_lines_after(lines, &[])
+}
+
+/// [`translate_drained_lines`] for a session whose store already holds `stored` (oldest first).
+/// The mapper starts from the tool calls of the turn in flight ([`Mapper::after_stored`]), so a
+/// call announced before the server died is not announced again when its update is drained, and
+/// a call that already has its result gets no second one (#310).
+pub(crate) fn translate_drained_lines_after(lines: &[String], stored: &[AgentEvent]) -> Vec<AgentEvent> {
     // Terminals belonged to the dead connection: `terminal` content falls back to a placeholder.
     let host = Host::new(PathBuf::new(), None);
-    let mut mapper = Mapper::default();
+    let mut mapper = Mapper::after_stored(stored);
     let mut out = Vec::new();
     for line in lines {
         let Ok(msg) = serde_json::from_str::<Value>(line) else { continue };
@@ -1558,6 +1575,24 @@ struct ToolState {
 }
 
 impl ToolState {
+    /// The state of a call from its stored `ToolCall` (`name` and `input` as
+    /// [`ToolState::tool_name`] and [`ToolState::input`] wrote them). Content and output are not
+    /// stored before the result, so they start empty.
+    fn from_stored(name: &str, input: &Value) -> ToolState {
+        let s = |k: &str| input.get(k).and_then(Value::as_str).map(str::to_string);
+        let kind = s("kind");
+        // `tool_name` falls back to the kind, then to "other": only another name was the agent's.
+        let own_name = kind.as_deref() != Some(name) && !(kind.is_none() && name == "other");
+        ToolState {
+            title: s("title"),
+            name: own_name.then(|| name.to_string()),
+            kind,
+            raw_input: input.get("input").cloned(),
+            locations: input.get("locations").cloned(),
+            ..ToolState::default()
+        }
+    }
+
     /// Apply the fields present in a `ToolCall` / `ToolCallUpdate` (absent and null keep).
     fn apply(&mut self, u: &Value) {
         let s = |k: &str| u.get(k).and_then(Value::as_str).map(str::to_string);
@@ -1662,6 +1697,40 @@ struct Mapper {
 }
 
 impl Mapper {
+    /// A mapper that continues the turn in flight of a session whose store holds `stored`
+    /// (oldest first), for draining a surviving agent (FR-S8, #310). It knows the tool calls
+    /// stored after the last `TurnEnded`: a known id is not announced again, and a call with a
+    /// stored result is done. The plan counter continues after the stored `acp-plan-N` ids.
+    ///
+    /// Only the turn in flight is looked at. ACP makes `toolCallId` unique within the session,
+    /// so an equal id inside one turn is the same call for every agent; an agent that restarts
+    /// its ids each turn would otherwise lose a new call to an old one. [`Mapper::end_turn`]
+    /// forgets the calls at the turn end for the same reason.
+    fn after_stored(stored: &[AgentEvent]) -> Mapper {
+        let turn = match stored.iter().rposition(|e| matches!(e, AgentEvent::TurnEnded { .. })) {
+            Some(i) => &stored[i + 1..],
+            None => stored,
+        };
+        let mut mapper = Mapper::default();
+        for event in turn {
+            match event {
+                AgentEvent::ToolCall { call_id, name, input } => {
+                    if let Some(n) = call_id.strip_prefix("acp-plan-").and_then(|n| n.parse::<u64>().ok()) {
+                        mapper.plans = mapper.plans.max(n);
+                    }
+                    mapper.tools.insert(call_id.clone(), ToolState::from_stored(name, input));
+                }
+                AgentEvent::ToolResult { call_id, .. } => {
+                    if let Some(state) = mapper.tools.get_mut(call_id) {
+                        state.done = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        mapper
+    }
+
     fn flush_message(&mut self, out: &mut Vec<AgentEvent>) {
         if !self.message.is_empty() {
             out.push(AgentEvent::AssistantMessage { text: std::mem::take(&mut self.message) });

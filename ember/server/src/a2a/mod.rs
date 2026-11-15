@@ -570,7 +570,17 @@ impl A2a {
     /// Hook into the session manager: give every agent process its credentials and
     /// instructions, deliver queued messages at turn boundaries, and deliver whatever was still
     /// queued when the server last stopped. Call once, inside the runtime.
+    ///
+    /// It is [`A2a::install_hooks`] followed by [`A2a::start`]. The server binary calls the two
+    /// apart, with `Sessions::recover_after_restart` between them (FR-S8).
     pub fn install(self: &Arc<Self>) {
+        self.install_hooks();
+        self.start();
+    }
+
+    /// The hooks alone: nothing is delivered and no task starts. A session started or rejoined
+    /// after this gets its A2A credentials and instructions.
+    pub fn install_hooks(self: &Arc<Self>) {
         let weak = Arc::downgrade(self);
         self.sessions.add_start_hook(Arc::new(move |rec| {
             weak.upgrade()
@@ -601,7 +611,13 @@ impl A2a {
                 }
             }) as BoxFuture<'static, ()>
         }));
+    }
 
+    /// Deliver at turn boundaries from now on, and deliver what was still queued when the server
+    /// last stopped. Call once, inside the runtime, after [`A2a::install_hooks`] and after the
+    /// session statuses are settled (`Sessions::recover_after_restart`): the first flush reads
+    /// them, and a turn that ended before this call is covered by that flush.
+    pub fn start(self: &Arc<Self>) {
         // Subscribe before the initial flush so no turn end is missed in between.
         let rx = self.sessions.subscribe();
         tokio::spawn(watch_turns(Arc::downgrade(self), rx));

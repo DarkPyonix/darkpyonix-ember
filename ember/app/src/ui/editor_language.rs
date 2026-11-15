@@ -437,7 +437,7 @@ pub mod view {
 
     use super::{rows, signature_parts, symbol_names, LangAction, LanguageState, Sheet};
     use crate::editor_host::HostCommand;
-    use crate::ui::editor_workbench::page::{icon, icon_px};
+    use crate::ui::editor_workbench::page::{icon, icon_tone};
     use crate::ui::editor_workbench::Shared;
     use crate::ui::find::Match;
 
@@ -576,8 +576,9 @@ pub mod view {
         };
         rsx! {
             for (i, name) in names.iter().enumerate() {
-                {icon_px("chev", 11)}
-                span { key: "sym{i}", "{name}" }
+                {icon_tone("chev", 11, "muted")}
+                // The mockup's symbol crumb (`.ed-crumbs .fn`): `--text-2` in the code font.
+                span { key: "sym{i}", class: "fn", "{name}" }
             }
         }
     }
@@ -712,9 +713,10 @@ pub mod view {
             div { class: "ed-menu", role: "dialog", "aria-label": "{title}",
                 style: "position:fixed; z-index:40; top:60px; left:calc(50vw - min(280px, calc(50vw - 12px))); width:min(560px, calc(100vw - 24px)); right:auto; padding:var(--sp1);",
                 div { style: "padding:var(--sp1) var(--sp3) 0; color:var(--muted); font-size:var(--fs-xs);", "{title}" }
-                div { class: "ed-find", style: "width:auto; margin:var(--sp1);",
-                    {icon(if is_rename { "edit" } else { "search" })}
-                    input { style: "flex:1; min-width:0; border:0; background:none; outline:none; color:var(--text); font:inherit;",
+                // FR-L31.29: the query row is a row of the popover, not a framed field inside the frame.
+                div { class: "ed-palq", style: "margin:var(--sp1) calc(var(--sp1) * -1) var(--sp1);",
+                    {icon_tone(if is_rename { "edit" } else { "search" }, 16, "muted")}
+                    input {
                         "aria-label": "{title}", placeholder: "{placeholder}", value: "{text}", autofocus: true,
                         oninput: move |event| { query.set(event.value()); sel.set(0); },
                         onkeydown: move |event| {
@@ -997,5 +999,16 @@ mod tests {
         }
         assert!(matches!(LanguageState::sample("rename", &u), Some(Sheet::Rename { .. })));
         assert!(LanguageState::sample("nothing", &u).is_none());
+    }
+
+    // #477: a symbol crumb is the mockup's `<span class="fn">`, which editor.css sets in `--text-2`
+    // and the code font; without the class it was a muted path segment.
+    #[test]
+    fn fr_l31_symbol_crumbs_carry_the_mockup_fn_class() {
+        let src = include_str!("editor_language.rs");
+        let production = &src[..src.find("#[cfg(test)]").expect("tests")];
+        assert!(production.contains("span { key: \"sym{i}\", class: \"fn\", \"{name}\" }"), "a symbol crumb lost its fn class");
+        let css = include_str!("../../assets/editor/editor.css");
+        assert!(css.contains(".ed-crumbs .fn{color:var(--text-2);font-family:var(--mono)}"), "editor.css no longer styles .ed-crumbs .fn");
     }
 }

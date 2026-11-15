@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use super::{has_head, message, run_with, worktree_root, GitError};
+use super::{has_head, message, run_with, worktree_root, Deadline, GitError};
 use crate::policy::PathPolicy;
 
 /// Default deadline of one blame.
@@ -160,7 +160,7 @@ pub async fn blame(policy: &PathPolicy, r: &GitBlameRequest) -> Result<GitBlameR
         args.extend(["--contents", "-"]);
     }
     args.extend(["--", r.path.as_str()]);
-    let out = match run_with(&root, &args, contents.as_deref(), Some(blame_timeout())).await {
+    let out = match run_with(&root, &args, contents.as_deref(), Some(Deadline::Local(blame_timeout()))).await {
         Err(GitError::Timeout(_)) => {
             return Err(GitError::Timeout(format!(
                 "git blame이 {}초 안에 끝나지 않아 중단했습니다.",

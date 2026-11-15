@@ -329,7 +329,7 @@ pub mod view {
 
     use super::{confirm_text, dir_part, file_label, hit_label, next_id, preview_parts, relative_path, replaced_text, report_text, ReplaceScope};
     use crate::editor_host::HostCommand;
-    use crate::ui::editor_workbench::page::{icon, icon_px};
+    use crate::ui::editor_workbench::page::{icon, icon_px, icon_tone};
     use crate::ui::editor_workbench::{FindCmd, Shared};
     use crate::ui::find::Match;
 
@@ -680,8 +680,8 @@ pub mod view {
                                             if !c.remove(&key_toggle_key) { c.insert(key_toggle_key.clone()); }
                                         }
                                     },
-                                    if open { {icon_px("chev-dn", 12)} } else { {icon_px("chev", 12)} }
-                                    {icon_px("file", 15)}
+                                    if open { {icon_tone("chev-dn", 12, "muted")} } else { {icon_tone("chev", 12, "muted")} }
+                                    {icon_tone("file", 15, "muted")}
                                     span { style: "font-weight:var(--fw-medium);", "{name}" }
                                     span { style: "color:var(--muted); font-size:var(--fs-xs); overflow:hidden; text-overflow:ellipsis; min-width:0;", "{dir}" }
                                     div { class: "spacer" }

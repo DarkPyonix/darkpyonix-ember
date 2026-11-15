@@ -340,7 +340,7 @@ async fn fr_w4_ose_data_dir_missing_binary_is_503() {
 }
 
 #[tokio::test]
-async fn fr_w4_ose_data_dir_unknown_computer_404_bad_id_400_non_local_400() {
+async fn fr_w4_ose_data_dir_unknown_computer_404_bad_id_400_unreachable_node_502() {
     let f = fx("", 5000);
     let h = format!("Bearer {}", f.token);
     let (st, _) = post(&f.app, "nope", r#"{"id":"a.b"}"#, Some(&h)).await;
@@ -350,9 +350,11 @@ async fn fr_w4_ose_data_dir_unknown_computer_404_bad_id_400_non_local_400() {
     let (st, _) = post(&f.app, "%2E%2E", r#"{"id":"a.b"}"#, Some(&h)).await;
     assert!(st == StatusCode::BAD_REQUEST || st == StatusCode::NOT_FOUND, "{st}");
     let c = f.computers.registry().insert("peer", "http://127.0.0.1:1", "tok").unwrap();
+    // FR-W4c (#896): the install of a registered computer is forwarded to its node; this one does
+    // not answer, and the server's own binary never runs for it.
     let (st, body) = post(&f.app, &c.id, r#"{"id":"a.b"}"#, Some(&h)).await;
-    assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
-    assert_eq!(body["error"], "OSE server is only available on the local computer");
+    assert_eq!(st, StatusCode::BAD_GATEWAY, "{body}");
+    assert!(body["error"].as_str().unwrap().starts_with("node unreachable"), "{body}");
     assert!(!ran(&f));
 }
 

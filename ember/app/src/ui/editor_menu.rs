@@ -76,6 +76,55 @@ pub fn entries(has_tab: bool) -> Vec<Entry> {
     out
 }
 
+/// An item of the ⋯ menu that is not one of the editor's actions, as a command palette row
+/// (FR-L31.38): with no tab open the menu is gone, and Code-OSS lists these in its palette too
+/// ("Preferences: Keyboard Shortcuts", "File: Toggle Auto Save", "View: Close Editor").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuCommand {
+    Keymap(crate::ui::keymap::Keymap),
+    AutoSave(crate::ui::editor_states::AutoSave),
+    CloseEditor,
+}
+
+impl MenuCommand {
+    /// Every row, in the menu's order.
+    pub fn all() -> Vec<MenuCommand> {
+        let mut out: Vec<MenuCommand> = crate::ui::keymap::Keymap::ALL.into_iter().map(MenuCommand::Keymap).collect();
+        out.extend(crate::ui::editor_states::AutoSave::ALL.into_iter().map(MenuCommand::AutoSave));
+        out.push(MenuCommand::CloseEditor);
+        out
+    }
+
+    /// The palette title, in the menu's words: the group's label, then the choice.
+    pub fn title(self) -> String {
+        match self {
+            MenuCommand::Keymap(k) => format!("단축키 체계: {}", k.label()),
+            MenuCommand::AutoSave(m) => format!("자동 저장: {}", m.label()),
+            MenuCommand::CloseEditor => "에디터 닫기".to_string(),
+        }
+    }
+}
+
+/// The palette rows of [`MenuCommand`], the current keymap and auto-save mode hinted "사용 중".
+pub fn palette_items(keymap: crate::ui::keymap::Keymap, auto_save: crate::ui::editor_states::AutoSave) -> Vec<crate::ui::palette::Item> {
+    MenuCommand::all()
+        .into_iter()
+        .map(|c| {
+            let current = match c {
+                MenuCommand::Keymap(k) => k == keymap,
+                MenuCommand::AutoSave(m) => m == auto_save,
+                MenuCommand::CloseEditor => false,
+            };
+            crate::ui::palette::Item {
+                payload: crate::ui::palette::Payload::EditorMenu(c),
+                title: c.title(),
+                hint: if current { "사용 중".to_string() } else { String::new() },
+                enabled: true,
+            }
+        })
+        .collect()
+}
+
 /// The height of every row (`.ed-menu button`), the menu's padding and the gap under the top bar.
 pub const ROW_H: f32 = 34.0;
 pub const PAD: f32 = 4.0;
@@ -279,5 +328,52 @@ mod tests {
         let page = include_str!("editor_workbench.rs");
         assert!(page.contains("crate::ui::editor_menu::toggled(open, modal_up(&menu_s))"), "the ⋯ button ignores the modal");
         assert!(page.contains("if em_shown { {menu(&s, keymap)} }"), "the page does not gate the menu on the modal");
+    }
+    /// FR-L31.38: with no tab (no ⋯ menu), every item the menu would hold is a palette row.
+    #[test]
+    fn fr_l31_38_every_menu_item_without_a_tab_is_in_the_palette() {
+        use crate::ui::editor_states::AutoSave;
+        use crate::ui::keymap::{Action, Keymap, Os};
+        use crate::ui::palette::{action_items, Payload};
+        for keymap in Keymap::ALL {
+            for auto_save in AutoSave::ALL {
+                let mut rows = action_items(keymap, Os::Mac);
+                rows.extend(palette_items(keymap, auto_save));
+                let has_action = |a: Action| rows.iter().any(|r| r.payload == Payload::Action(a));
+                let has_cmd = |c: MenuCommand| rows.iter().any(|r| r.payload == Payload::EditorMenu(c) && r.title == c.title());
+                for entry in entries(false) {
+                    match entry {
+                        Entry::Item(TopItem::Save) => assert!(has_action(Action::Save)),
+                        Entry::Item(TopItem::Recent) => assert!(has_action(Action::Recent)),
+                        Entry::Item(TopItem::GotoLine) => assert!(has_action(Action::GotoLine)),
+                        Entry::Item(TopItem::FindInFile) => assert!(has_action(Action::FindInFile)),
+                        Entry::Item(TopItem::ReopenClosed) => assert!(has_action(Action::ReopenClosed)),
+                        Entry::Item(TopItem::Settings) => assert!(has_action(Action::Settings)),
+                        // The palette item is the palette itself.
+                        Entry::Item(TopItem::Palette) => {}
+                        Entry::Item(TopItem::CloseEditor) => assert!(has_cmd(MenuCommand::CloseEditor)),
+                        Entry::Group(Submenu::Keymap) => Keymap::ALL.into_iter().for_each(|k| assert!(has_cmd(MenuCommand::Keymap(k)), "{k:?}")),
+                        Entry::Group(Submenu::AutoSave) => AutoSave::ALL.into_iter().for_each(|m| assert!(has_cmd(MenuCommand::AutoSave(m)), "{m:?}")),
+                        // 코드 정리 is an action row; the language features need a current tab.
+                        Entry::Group(Submenu::Code) => assert!(has_action(Action::Format)),
+                        Entry::Sep => {}
+                        other => panic!("{other:?} is shown with no tab"),
+                    }
+                }
+                let current: Vec<_> = palette_items(keymap, auto_save).into_iter().filter(|r| r.hint == "사용 중").map(|r| r.title).collect();
+                assert_eq!(current, vec![MenuCommand::Keymap(keymap).title(), MenuCommand::AutoSave(auto_save).title()]);
+            }
+        }
+        // No menu row is an extension command, so none can reach the host as one.
+        assert!(palette_items(Keymap::VsCode, AutoSave::ALL[0]).iter().all(|r| !matches!(r.payload, Payload::ExtensionCommand(_))));
+    }
+
+    #[test]
+    fn fr_l31_38_palette_menu_rows_are_wired() {
+        let page = include_str!("editor_workbench.rs");
+        assert!(page.contains("items.to_mut().extend(crate::ui::editor_menu::palette_items(keymap, crate::ui::editor_states::view::auto_save()))"), "the palette does not list the menu's rows");
+        assert!(page.contains("crate::ui::palette::Payload::EditorMenu(cmd) => run_menu_command(s, cmd),"), "a menu row is not done by the window");
+        assert!(page.contains("crate::ui::palette::Payload::ExtensionCommand(id) => {\n                s.host.send(HostCommand::ExecuteCommand(id));\n            }"), "an extension command is not sent to the host as it is");
+        assert!(!page.contains("MenuCommand::from_id"), "the id-string interception is back");
     }
 }

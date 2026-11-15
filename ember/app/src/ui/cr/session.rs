@@ -4138,8 +4138,11 @@ fn ProjectSwitchMenu(
 }
 
 /// The phone header's first row (title, new member): `.sesshead{height:auto;padding:8px ...}`
-/// around a 32 dp control, so the row is 48 dp and the wrapped rows follow it (FR-L28.6).
-const PHONE_HEAD_ROW_H: f32 = 48.0;
+/// around the title block, which is taller than the 32 dp controls: the name line (Md), 1 dp,
+/// the subtitle line (Xs2) and the block's 2 dp padding. A fixed 48 cut the subtitle's last
+/// 3 to 4 px (FR-L28.6, review and2).
+const PHONE_HEAD_ROW_H: f32 =
+    2.0 * SP[1] + 2.0 * 2.0 + Fs::Md.line_height() + 1.0 + Fs::Xs2.line_height();
 
 /// Pill-shaped toolbar action button (`.btn.sm` in `.sesshead`).
 /// Session header actions carry no text label (owner placement rule 2026-11-13, rule 6, design
@@ -5847,6 +5850,15 @@ mod tests {
         }
     }
 
+    #[test]
+    fn fr_l28_6_the_phone_head_row_holds_the_title_and_the_whole_subtitle() {
+        // Review and2: at 48 dp the subtitle lost its bottom 3 to 4 px.
+        let inner = Fs::Md.line_height() + 1.0 + Fs::Xs2.line_height() + 2.0 * 2.0;
+        assert_eq!(PHONE_HEAD_ROW_H, 2.0 * SP[1] + inner);
+        assert!(PHONE_HEAD_ROW_H >= 48.0 && PHONE_HEAD_ROW_H - 2.0 * SP[1] >= 32.0);
+        assert_eq!(PHONE_HEAD_ROW_H, 59.0);
+    }
+
     /// Flip 4 review 3.2 and 3.3: at 360 dp the five header controls shared the title's row, so
     /// the title shrank to "demo-..." and the IDE button ran under the floating menu button. The
     /// mockup's phone header wraps: the first row is the drawer, the title and 새 팀원, kept
@@ -5868,7 +5880,7 @@ mod tests {
             }
             let row = t.children_mods(first_row);
             assert!(row.iter().any(|m| m == "Width(52.0)"), "{view}: the floating menu room ends the title row: {row:?}");
-            assert!(t.modifiers.iter().any(|(n, m)| *n == first_row && m == "Height(48.0)"), "{view}: a 48 dp first row");
+            assert!(t.modifiers.iter().any(|(n, m)| *n == first_row && m == "Height(59.0)"), "{view}: a 59 dp first row (title and subtitle)");
         }
         shared_ui().update_prefs(|p| p.session_view = None);
         compose_rust::window::reset_window_size();

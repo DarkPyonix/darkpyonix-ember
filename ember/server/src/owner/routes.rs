@@ -122,6 +122,7 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("POST", "/api/computers/{id}/fs/rename", Token),
     ("POST", "/api/computers/{id}/fs/setattr", Token),
     ("POST", "/api/computers/{id}/fs/symlink", Token),
+    ("GET", "/api/computers/{id}/fs/watch", Token),
     ("POST", "/api/computers/{id}/fs/write", Token),
     ("GET", "/api/computers/{id}/transfers", Token),
     ("DELETE", "/api/computers/{id}/transfers/history", Token),

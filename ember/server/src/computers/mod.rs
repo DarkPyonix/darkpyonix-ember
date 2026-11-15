@@ -57,6 +57,7 @@ pub mod bridge;
 pub mod egress;
 pub mod enrol;
 pub mod fs;
+pub mod fs_watch;
 pub mod local_node;
 pub mod metrics;
 pub mod mount;

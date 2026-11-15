@@ -36,13 +36,63 @@ fn path(name: &str) -> &'static str {
     }
 }
 
-/// The SVG document of an icon stroked in `color` (e.g. `#56534d`).
-fn svg(name: &str, color: &str) -> String {
-    // `<name>-w` is the icon in white, for a dark pill (the active tab).
-    // The ink pill is light in the dark palette, so its icon is the dark ink colour there.
-    if let Some(base) = name.strip_suffix("-w") {
-        return svg(base, if color == "#c3bfb7" { "#151514" } else { "#ffffff" });
+/// The mockup's shared stylesheet, where the palette's tokens are declared for both themes.
+const TOKENS: &str = include_str!("../../assets/editor/style.css");
+
+/// The value the shared stylesheet declares for the token `name` (e.g. `--text-2`) in the light
+/// palette (`:root`) or the dark one (`:root[data-theme=dark]`). An icon is drawn as an image,
+/// which cannot read a CSS variable, so its stroke is looked up here and no colour is written in
+/// this file.
+pub(crate) fn token(name: &str, dark: bool) -> Option<&'static str> {
+    let open = if dark { ":root[data-theme=dark]{" } else { ":root{" };
+    let mut rest = TOKENS;
+    while let Some(at) = rest.find(open) {
+        let block = &rest[at + open.len()..];
+        let end = block.find('}')?;
+        for declaration in block[..end].split(';') {
+            if let Some((key, value)) = declaration.split_once(':') {
+                if key.trim() == name {
+                    return Some(value.trim());
+                }
+            }
+        }
+        rest = &block[end..];
     }
+    None
+}
+
+/// The shape and the stroke token of the icon `icon`, written `<name>` or `<name>.<tone>`. The
+/// mockup strokes an icon in `currentColor`, so an icon takes the colour editor.css gives its place:
+/// * no tone: `--text-2`, an icon button, a tab or a status item (`.ed-ib`, `.ed-sb`, `.ed-tab`,
+///   `.ed-status`);
+/// * `muted`: `--muted`, a tree row's icons, a breadcrumb chevron, a pill's chevron and the find
+///   pill (`.ed-tn .chev`, `.ed-tn svg.i:not(.chev)`, `.ed-crumbs`, `.ed-pj .chev`, `.ed-find`);
+/// * `green`: `--c-green`, the run button (`.ed-ib.run`);
+/// * `text`: `--text`, a selected stripe button, the selected terminal tab, a menu item and a
+///   project pill (`.ed-sb.on`, `.ed-tsub>button.on`, `.ed-menu button`, `.ed-pj`);
+/// * `<name>-w`: `--ink-text`, the icon on the ink pill of the active tab (`.ed-tab.on`).
+pub(crate) fn icon_stroke(icon: &str) -> (&str, &'static str) {
+    let (name, tone) = icon.split_once('.').unwrap_or((icon, ""));
+    if let Some(shape) = name.strip_suffix("-w") {
+        return (shape, "--ink-text");
+    }
+    let token = match tone {
+        "muted" => "--muted",
+        "green" => "--c-green",
+        "text" => "--text",
+        _ => "--text-2",
+    };
+    (name, token)
+}
+
+/// The colour of the token `name` in the palette asked for. A token the dark palette does not
+/// redefine keeps its light value, as the cascade gives it.
+fn stroke(name: &str, dark: bool) -> &'static str {
+    token(name, dark).or_else(|| token(name, false)).unwrap_or("currentColor")
+}
+
+/// The SVG document of the icon `name` stroked in `color`.
+fn svg(name: &str, color: &str) -> String {
     if name == "chev-dn" {
         // The mockup turns the right chevron a quarter turn for an open node.
         return format!(
@@ -56,9 +106,9 @@ fn svg(name: &str, color: &str) -> String {
     )
 }
 
-/// Answers the `src` of an icon `img` (`icon:<name>`) with an SVG asset registered with the
-/// renderer. The HTML path draws images only through a resolver.
-// TODO(editor-redesign step 4): one asset per theme colour once the dark palette is switched on.
+/// Answers the `src` of an icon `img` (`icon:<name>` or `icon:<name>.<tone>`, with `@dark` after it
+/// in the dark palette) with an SVG asset registered with the renderer, one per icon, tone and palette. The HTML path draws images
+/// only through a resolver.
 #[derive(Default)]
 pub struct IconResolver {
     ids: std::collections::HashMap<String, dioxus_compose::html::prelude::AssetId>,
@@ -76,10 +126,9 @@ impl dioxus_compose::html::prelude::ImageResolver for IconResolver {
         };
         let doc: String = if base == "mark" {
             include_str!("../../assets/brand/mark-sm.svg").to_string()
-        } else if dark {
-            svg(base, "#c3bfb7")
         } else {
-            svg(base, "#56534d")
+            let (shape, stroke_token) = icon_stroke(base);
+            svg(shape, stroke(stroke_token, dark))
         };
         let bytes: &'static [u8] = Box::leak(doc.into_boxed_str().into_boxed_bytes());
         let id = dioxus_compose::html::prelude::AssetId(compose_rust::asset(compose_rust::schema::AssetKind::Svg, bytes));
@@ -89,5 +138,123 @@ impl dioxus_compose::html::prelude::ImageResolver for IconResolver {
 
     fn size(&mut self, url: &str) -> Option<dioxus_compose::html::prelude::ImageSize> {
         url.starts_with("icon:").then(|| dioxus_compose::html::prelude::ImageSize::new(16, 16))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // #477: the icon strokes are the shared tokens of the stylesheet the page loads, in both palettes.
+    #[test]
+    fn fr_l31_icon_strokes_are_read_from_the_shared_tokens() {
+        assert_eq!(token("--text-2", false), Some("#56534d"));
+        assert_eq!(token("--text-2", true), Some("#c3bfb7"));
+        assert_eq!(token("--ink-text", false), Some("#ffffff"));
+        assert_eq!(token("--ink-text", true), Some("#151514"));
+        // A name is matched whole: `--text` is not `--text-2`, and `--c-green` is not `--c-green-soft`.
+        assert_eq!(token("--text", false), Some("#1c1b19"));
+        assert_eq!(token("--c-green", true), Some("#6fb287"));
+        assert_eq!(token("--no-such-token", false), None);
+        // A token only the light palette declares keeps its value in the dark one.
+        assert_eq!(token("--pill", true), None);
+        assert_eq!(stroke("--pill", true), "999px");
+    }
+
+    #[test]
+    fn fr_l31_an_icon_is_text_2_and_ink_text_on_the_active_pill() {
+        assert_eq!(icon_stroke("file"), ("file", "--text-2"));
+        assert_eq!(icon_stroke("chev-dn"), ("chev-dn", "--text-2"));
+        assert_eq!(icon_stroke("file-w"), ("file", "--ink-text"));
+        assert!(svg("file", stroke("--text-2", false)).contains("stroke='#56534d'"));
+        assert!(svg("file", stroke("--ink-text", true)).contains("stroke='#151514'"));
+        assert!(svg("chev-dn", stroke("--text-2", true)).contains("rotate(90 12 12)"));
+    }
+
+    // #477: an icon takes the colour editor.css gives its place, since an image has no currentColor.
+    #[test]
+    fn fr_l31_an_icon_tone_is_the_token_editor_css_gives_its_place() {
+        assert_eq!(icon_stroke("folder.muted"), ("folder", "--muted"));
+        assert_eq!(icon_stroke("chev-dn.muted"), ("chev-dn", "--muted"));
+        assert_eq!(icon_stroke("play.green"), ("play", "--c-green"));
+        assert_eq!(icon_stroke("folder.text"), ("folder", "--text"));
+        assert_eq!(icon_stroke("file-w.muted"), ("file", "--ink-text"));
+        assert_eq!(icon_stroke("file.unknown"), ("file", "--text-2"));
+        // The rules the tones stand for are the mockup's.
+        let css = include_str!("../../assets/editor/editor.css");
+        for rule in [
+            ".ed-ib.run{color:var(--c-green)}",
+            ".ed-pj .chev{transform:rotate(90deg);width:12px!important;height:12px!important;color:var(--muted)}",
+            ".ed-tn svg.i:not(.chev){color:var(--muted);width:15px;height:15px}",
+            ".ed-sb.on{background:var(--sel);color:var(--text)}",
+            ".ed-tsub>button.on{background:var(--surface-2);color:var(--text)}",
+        ] {
+            assert!(css.contains(rule), "editor.css no longer has {rule}");
+        }
+        assert!(svg("play", stroke("--c-green", false)).contains("stroke='#4f9a6c'"));
+        assert!(svg("play", stroke("--c-green", true)).contains("stroke='#6fb287'"));
+        assert!(svg("folder", stroke("--muted", false)).contains("stroke='#8f8b83'"));
+        assert!(svg("folder", stroke("--muted", true)).contains("stroke='#8b877f'"));
+    }
+
+    // #477: the page asks for the tone at each place the mockup colours.
+    #[test]
+    fn fr_l31_the_page_asks_for_the_mockup_tone_of_each_icon() {
+        let page = include_str!("editor_workbench.rs");
+        for call in [
+            // The top bar: pill chevrons, the find pill and the run button.
+            "\"{name}\" {icon_tone(\"chev-dn\", 12, \"muted\")}",
+            "{icon_tone(\"git\", 16, \"text\")} \"{branch}\" {icon_tone(\"chev-dn\", 12, \"muted\")}",
+            "{icon_tone(\"play\", 16, \"text\")} \"실행 구성\" {icon_tone(\"chev-dn\", 12, \"muted\")}",
+            "{icon_tone(\"search\", 16, \"muted\")}\n                    span { class: \"hide-md\"",
+            "{icon_tone(\"play\", 16, \"green\")} }",
+            // The stripes and the terminal tabs: the selected one is in the text colour.
+            "{icon_tone(icon_name(w), 16, if selected { \"text\" } else { \"\" })}",
+            "{icon_tone(\"code\", 14, if on { \"text\" } else { \"\" })}",
+            // The tree rows and the breadcrumbs.
+            "{icon_tone(\"chev-dn\", 12, \"muted\")} {icon_tone(\"folder\", 15, \"muted\")} span { class: \"ellipsis\", b { \"{root_name}\" } }",
+            "if is_dir { if row.open { {icon_tone(\"chev-dn\", 12, \"muted\")} } else { {icon_tone(\"chev\", 12, \"muted\")} } }",
+            "if is_dir { {icon_tone(\"folder\", 15, \"muted\")} } else { {icon_tone(\"file\", 15, \"muted\")} }",
+            "{icon_tone(icon_name, 15, \"muted\")}",
+            "if i > 0 { {icon_tone(\"chev\", 11, \"muted\")} }",
+            // The checked item of a menu.
+            "span { class: \"ed-mchk\", if selected { {icon_tone(\"check\", 14, \"text\")} } }",
+        ] {
+            assert!(page.contains(call), "the page lost {call}");
+        }
+        assert!(include_str!("editor_language.rs").contains("{icon_tone(\"chev\", 11, \"muted\")}"), "the symbol crumbs' chevrons are not muted");
+        assert!(include_str!("editor_states.rs").contains("{icon_tone(\"check\", 14, \"text\")}"), "the 자동 저장 submenu's check is not in the text colour");
+        assert!(include_str!("editor_tasks.rs").contains("{icon_tone(\"play\", 14, \"text\")}"), "the running task's tab icon is not in the text colour");
+        // The rows of the other tool windows are `.ed-tn` rows too, so the same rule colours them.
+        assert!(include_str!("editor_search.rs").contains("{icon_tone(\"file\", 15, \"muted\")}"), "a search result's file icon is not muted");
+        assert!(include_str!("editor_scm.rs").contains("{icon_tone(\"file\", 15, \"muted\")}"), "a change row's file icon is not muted");
+        assert!(include_str!("editor_extensions.rs").contains("{icon_tone(\"chev-dn\", 12, \"muted\")}"), "the built-in group's chevron is not muted");
+        // Every `.ed-find` pill has its icon on the line after it, and `.ed-find` is muted.
+        let pills = [page, include_str!("editor_extensions.rs"), include_str!("editor_settings.rs"), include_str!("editor_language.rs")];
+        for src in pills {
+            let lines: Vec<&str> = src.lines().collect();
+            for (at, line) in lines.iter().enumerate() {
+                let pill = line.contains("class: \"ed-find\"") && line.trim_start().starts_with("div {");
+                let next = lines.get(at + 1).map_or("", |l| l.trim_start());
+                if pill && next.starts_with("{icon") {
+                    assert!(next.starts_with("{icon_tone(") && next.ends_with("\"muted\")}"), "a find pill's icon is not muted: {next}");
+                }
+            }
+        }
+    }
+
+    // #477: no colour is written in the icon code; the palette lives in the stylesheet alone.
+    #[test]
+    fn fr_l31_the_icon_code_holds_no_colour_of_its_own() {
+        let src = include_str!("editor_icons.rs");
+        let code = src.split("#[cfg(test)]").next().unwrap();
+        for line in code.lines() {
+            let hex = line.match_indices('#').any(|(at, _)| {
+                let after = &line[at + 1..];
+                let digits = after.chars().take_while(|c| c.is_ascii_hexdigit()).count();
+                matches!(digits, 3 | 6 | 8) && after[digits..].starts_with(['"', '\''])
+            });
+            assert!(!hex, "a hard-coded colour in the icon code: {line}");
+        }
     }
 }

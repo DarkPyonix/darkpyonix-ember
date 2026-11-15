@@ -28,6 +28,16 @@ pub const OPEN_SCREEN: &str = "화면 열기";
 /// The back button of a phone detail view (`.icon-btn.sm.backbtn`, #885).
 pub const BACK: &str = "뒤로";
 
+/// The names of the option popovers, the mockup's `aria-label`s where it has one (FR-L10.4,
+/// #888). `components::PopoverMenu` gives the box this name.
+pub const MODE_PICKER: &str = "권한 모드 선택";
+pub const IDE_PICKER: &str = "IDE 고르기";
+pub const WEB_MENU: &str = "웹 페이지 열기";
+pub const PROJECT_PICKER: &str = "프로젝트 선택";
+pub const COMPUTER_PICKER: &str = "컴퓨터 선택";
+pub const MODEL_PICKER: &str = "하네스와 모델 선택";
+pub const ACCOUNT_PICKER: &str = "계정 선택";
+
 /// The reviewed Korean names of the icon-only controls outside the nav menus (those take
 /// `NavMenu::label`).
 pub fn rail_labels() -> [&'static str; 19] {

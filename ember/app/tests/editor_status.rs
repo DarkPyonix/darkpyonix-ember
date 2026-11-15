@@ -2,8 +2,7 @@
 //! their pickers. Pure parts only, no renderer.
 
 use ember_app::ui::editor_status::{
-    encoding_text, initial_selection, list_window, more_above_text, overflow_rows, resolve_selection, FOLLOW_CURRENT,
-    PICKER_VISIBLE_ROWS, is_picker, picker_items, reopen_failure_text, reopen_needs_confirmation, status_texts,
+    encoding_text, initial_selection, resolve_selection, FOLLOW_CURRENT, is_picker, picker_items, reopen_failure_text, reopen_needs_confirmation, status_texts,
     StatusTexts, AUTO_DETECT, CANCEL, DISCARD_AND_REOPEN, REOPEN_WITH_ENCODING, SAVE_WITH_ENCODING, UNKNOWN,
 };
 use ember_app::ui::palette::{lists_files, placeholder, rank, search_label, Mode, Payload};
@@ -126,8 +125,8 @@ fn fr_l31_7_reopen_failure_says_why_in_korean() {
     assert!(t.starts_with("a.txt을(를) 다시 열지 못했습니다: 파일이 없습니다"), "{t}");
 }
 
-// The picker opens on the current language even far down a long list: it is selected, tagged 현재 and
-// readable inside the rows that fit (the "위에 N개" row counts, one row of context stays below).
+// The picker opens on the current language even far down a long list: it is selected and tagged 현재,
+// and the row scrolls itself into view (dioxus-compose#200, pinned below).
 #[test]
 fn fr_l31_7_language_picker_opens_on_the_current_language_in_view() {
     // Names that sort before JSON put it below the first page.
@@ -141,41 +140,23 @@ fn fr_l31_7_language_picker_opens_on_the_current_language_in_view() {
     assert_eq!(items[sel].title, "JSON");
     assert_eq!(items[sel].hint, "(json) - 현재");
     assert_eq!(items.iter().filter(|i| i.hint.ends_with("현재")).count(), 1);
-    assert!(sel >= PICKER_VISIBLE_ROWS, "the case needs a row below the first page");
-    assert_in_view(sel, items.len());
-    assert_eq!(more_above_text(5), "위에 5개 더 있습니다");
+    assert!(sel >= 9, "the case needs a row below the first page of 320 px of 34 px rows");
 }
 
-/// `selected` is drawn among the rows that fit the budget, after the "위에" row if there is one, and is
-/// not the last row that fits unless it is the list's last row.
-fn assert_in_view(selected: usize, len: usize) {
-    let (start, end) = list_window(selected, len, PICKER_VISIBLE_ROWS);
-    let budget = PICKER_VISIBLE_ROWS - overflow_rows(start);
-    assert!(end - start <= budget, "{start}..{end} over the budget {budget}");
-    assert!(start <= selected, "{selected} hidden above {start}");
-    assert!(selected < start + budget, "{selected} past the rows that fit ({start} + {budget})");
-    if selected + 1 < len {
-        assert!(selected + 1 < start + budget, "{selected} on the last visible row of {start}..{}", start + budget);
-    }
-}
-
+// dioxus-compose#200 (in the f0e5b9f5 pin): the palette draws every picker row and scrolls the
+// highlighted one into view with `MountedData::scroll_to`; the windowed list and its "위에 N개" row
+// are gone.
 #[test]
-fn fr_l31_7_picker_window_counts_the_overflow_row_and_keeps_context_below() {
-    let v = PICKER_VISIBLE_ROWS;
-    for len in [1, 4, v - 1, v, v + 1, 30, 120] {
-        for selected in 0..len {
-            assert_in_view(selected, len);
-        }
+fn fr_l31_7_the_highlighted_picker_row_scrolls_itself_into_view() {
+    let status = include_str!("../src/ui/editor_status.rs");
+    for gone in ["pub fn list_window", "pub fn overflow_rows", "pub fn more_above_text", "PICKER_VISIBLE_ROWS"] {
+        assert!(!status.contains(gone), "{gone} is still there");
     }
-    // The first page while the row and the one below it fit; then the "위에" row appears.
-    assert_eq!(list_window(0, 120, v), (0, v));
-    assert_eq!(list_window(v - 2, 120, v), (0, v));
-    let (start, end) = list_window(v - 1, 120, v);
-    assert_eq!((overflow_rows(start), end - start), (1, v - 1));
-    // The last row ends the list: no blank rows below it.
-    assert_eq!(list_window(119, 120, v), (120 - (v - 1), 120));
-    assert_eq!(list_window(3, 4, v), (0, 4));
-    assert_eq!(overflow_rows(0), 0);
+    let page = include_str!("../src/ui/editor_workbench.rs");
+    assert!(page.contains("scroll_to_with_options(ScrollToOptions { behavior: ScrollBehavior::Instant, vertical: ScrollLogicalPosition::Nearest"));
+    assert!(page.contains("if is_chosen { super::reveal_palette_row(row); }"), "the list opens on the highlighted row");
+    assert!(page.contains("sel.set(next); super::reveal_palette_row(next);"), "Up and Down keep it in view");
+    assert!(!page.contains("위 항목 더 보기"));
 }
 
 // The language list can arrive after the sheet opened: until the person moves, the highlight follows

@@ -84,13 +84,15 @@ OSE_REGRESS_OUT=.scratch/regress ember/ose/regress.sh "$(dirname "$(dirname "$EM
 the extension host logs. In CI the Live checks job runs this per target and uploads the folder as
 `ose-regress-<target>`.
 
-Status today: the harness, the client and the data are written. No run against a real OSE has
-happened, so every `expected.json` entry is an unverified `pass`, and the step does not fail the
-job yet. `rust-lang.rust-analyzer` and `eamodio.gitlens` have no pinned version: Open VSX lists
-mostly pre-release builds for them, and the first run shows which version the OSE takes.
-`vscodevim.vim` declares `extensionKind` `ui`, which Code-OSS runs beside the window, not on the
-server; whether it activates in the server's extension host is unknown until the first run. The
-list itself awaits the owner's confirmation.
+Status today: the list is the five extensions the leader approved on 2026-11-15: two language
+servers (`redhat.vscode-yaml`, `dbaeumer.vscode-eslint`), the most used language extension
+(`ms-python.python`), a debugger (`ms-python.debugpy`) and a webview panel (`mhutchie.git-graph`).
+The live checks ran once on all four targets (run 43670763653) with the earlier list; this list
+has not run yet, so every `expected.json` entry is an unverified `pass` and the step does not
+fail the job. `ms-python.debugpy` and `mhutchie.git-graph` have no pinned version: their first
+resolving run prints the version to pin. The check is "installed and activated without a failure
+line"; opening a webview and starting a debug session are issue #929. Results are compared with
+our own previous OSE release, not with another vendor's build.
 
 What the run does not show: behaviour after activation (a language server answering, a formatter
 formatting), an activation that starts and never finishes, and a comparison with the same

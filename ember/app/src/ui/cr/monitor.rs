@@ -660,21 +660,19 @@ mod tests {
         // Review sf: from 561 up (and at 1440) the monitor dialog filled the window less 16 above
         // and below, so its header sat under the traffic lights. A dialog now leaves the lights'
         // strip above and below; centred, its top edge is below the strip.
-        use crate::ui::safe_area::{current_platform, safe_area_for, Platform, SafeArea};
+        use crate::ui::safe_area::{safe_area_for, Platform, SafeArea};
         use super::super::components::dialog_max_height;
         let lights = safe_area_for(Platform::MacOs, SafeArea { top: 66.0, leading: 98.0, trailing: 0.0 });
         assert_eq!(dialog_max_height(900.0, lights), 768.0, "66 above and below");
         assert_eq!(dialog_max_height(900.0, SafeArea::default()), 868.0, "16 above and below with no report");
         assert_eq!(dialog_max_height(844.0, SafeArea { top: 8.0, leading: 40.0, trailing: 0.0 }), 812.0, "never under 16");
-        assert_eq!(dialog_max_height(844.0, SafeArea { top: 32.0, leading: 0.0, trailing: 138.0 }), 812.0, "a trailing caption covers no leading strip");
+        assert_eq!(dialog_max_height(844.0, SafeArea { top: 32.0, leading: 0.0, trailing: 138.0 }), 780.0, "a Windows caption report: its 32 strip above and below");
         let _guard = crate::services::test_guard();
         // The body is the dialog less its 60 header and the 1 dp line under it:
         // 900 - 2 x 66 - 61 = 707 with the lights, 900 - 32 - 61 = 807 with a zero report.
         for width in [561.0, 1440.0] {
             let sent = monitor_after_report(width, 900.0, 66.0, 98.0);
-            if current_platform() == Platform::MacOs {
-                assert!(sent.contains("Height(707.0)") && !sent.contains("Height(807.0)"), "the dialog below the lights at {width}: {sent}");
-            }
+            assert!(sent.contains("Height(707.0)") && !sent.contains("Height(807.0)"), "the dialog below the reported strip at {width}: {sent}");
             let sent = monitor_after_report(width, 900.0, 0.0, 0.0);
             assert!(sent.contains("Height(807.0)") && !sent.contains("Height(707.0)"), "no change with a zero safe area at {width}: {sent}");
         }
@@ -684,7 +682,7 @@ mod tests {
     fn fr_l33_the_full_screen_monitor_header_starts_below_the_window_buttons() {
         // Review ba D: at 390 the computer monitor (and the project screen's computer sheet,
         // the same `MonitorSheet`) put "이 컴퓨터" under the macOS traffic lights.
-        use crate::ui::safe_area::{current_platform, safe_area_for, Platform, SafeArea};
+        use crate::ui::safe_area::{safe_area_for, Platform, SafeArea};
         use super::super::components::full_screen_sheet_top_inset;
         // The pure rule names macOS, so it holds on every OS CI runs (as `cr/shell.rs` does).
         let lights = safe_area_for(Platform::MacOs, SafeArea { top: 28.0, leading: 72.0, trailing: 0.0 });
@@ -695,14 +693,9 @@ mod tests {
         assert_eq!(full_screen_sheet_top_inset(390.0, true, SafeArea::default()), 0.0, "nothing to clear");
         let _guard = crate::services::test_guard();
         // An odd footprint (31) so no other height in the sheet can stand in for the strip.
-        // The composed sheet reads this platform's safe area: macOS passes the report through,
-        // Linux and Windows have no lights at the leading edge and reserve nothing.
+        // The composed sheet reads the report as it is on every system (FR-L33).
         let head = monitor_head_after_report(390.0, 31.0, 72.0);
-        if current_platform() == Platform::MacOs {
-            assert!(head.contains("Height(31.0)"), "the 31 strip before the title: {head}");
-        } else {
-            assert!(!head.contains("Height(31.0)"), "no strip off macOS: {head}");
-        }
+        assert!(head.contains("Height(31.0)"), "the 31 strip before the title: {head}");
         let head = monitor_head_after_report(390.0, 0.0, 0.0);
         assert!(!head.contains("Height(31.0)") && !head.contains("Height(28.0)"), "no strip with a zero safe area: {head}");
     }

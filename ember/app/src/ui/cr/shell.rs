@@ -33,7 +33,7 @@ pub use crate::ui::shell::{
     NavCounts, NavMenu, Screen, ShellMode, BOTTOM_TABS, DEMO_USER, ICON_GEAR_SVG, ICON_MOON_SVG,
     ICON_MORE_SVG, ICON_SUN_SVG, MORE_MENUS, ORG_NAME, PLACEHOLDER_TEXT, WINDOWS_CAPTION_HEIGHT_DP,
 };
-use super::components::{Clickable, EmberSheet, Label};
+use super::components::{Clickable, EmberSheet, Label, NamedClickable};
 use super::theme::*;
 pub const ICON_SEARCH_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" fill=\"none\" viewBox=\"0 0 24 24\" stroke-width=\"1.5\" stroke=\"currentColor\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" d=\"m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z\"/></svg>";
 pub const ICON_MENU_SVG: &str = include_str!("../../../assets/nav/menu.svg");
@@ -194,31 +194,49 @@ pub fn NavRow(menu: NavMenu, active: bool, badge: NavBadge, on_click: impl FnMut
 }
 
 /// One rail item: a 44 px rounded square with the icon centred and the red badge at its top
-/// right corner.
+/// right corner. Its accessible name is `menu.label()`, matching the visible tooltip (`core.js`,
+/// FR-L10, #501).
 pub fn RailItem(menu: NavMenu, active: bool, badge: NavBadge, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let fg = if active { p.ink_text } else { p.text_2 };
     let bg = if active { paint(p.ink) } else { transparent() };
-    Clickable(
+    let tip = menu.label().to_string();
+    NamedClickable(
+        menu.label(),
         Modifier::new().size(44.0, 44.0).background(bg).corner_radius(12.0),
         Alignment::Center,
         on_click,
-        || {
-            NavIcon(menu.svg(), fg.to_argb(), 20.0);
-            if let NavBadge::Alert(n) = badge {
-                cu::Box()
-                    .modifier(Modifier::new().fill_max_width().fill_max_height())
-                    .alignment(Alignment::TopEnd)
-                    .content(|| {
-                        // `.nav .redbadge`: top 2, right 0.
-                        cu::Column().content(|| {
-                            cu::Spacer().modifier(Modifier::new().height(2.0));
-                            RedBadge(n);
+        move || {
+            cu::Tooltip(tip).content(move || {
+                NavIcon(menu.svg(), fg.to_argb(), 20.0);
+                if let NavBadge::Alert(n) = badge {
+                    cu::Box()
+                        .modifier(Modifier::new().fill_max_width().fill_max_height())
+                        .alignment(Alignment::TopEnd)
+                        .content(|| {
+                            // `.nav .redbadge`: top 2, right 0.
+                            cu::Column().content(|| {
+                                cu::Spacer().modifier(Modifier::new().height(2.0));
+                                RedBadge(n);
+                            });
                         });
-                    });
-            }
+                }
+            });
         },
     );
+}
+
+/// The Korean accessible name and tooltip of a rail footer tool button (`core.js` `.sidetools`,
+/// FR-L10, #501).
+pub fn rail_tool_label(label: &str) -> &'static str {
+    match label {
+        "검색" => super::a11y::SEARCH,
+        "설정" => super::a11y::SETTINGS,
+        "데모 초기화" => super::a11y::DEMO_RESET,
+        s if s.starts_with("테마") => super::a11y::THEME,
+        s if s.starts_with("플랫폼") => super::a11y::PLATFORM,
+        _ => super::a11y::SETTINGS,
+    }
 }
 
 /// A footer tool row (theme, settings): icon and label in the sidebar, icon alone in the rail.
@@ -226,11 +244,18 @@ pub fn RailItem(menu: NavMenu, active: bool, badge: NavBadge, on_click: impl FnM
 pub fn ToolRow(svg: &'static str, label: &str, rail: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     if rail {
-        Clickable(
+        let a11y = rail_tool_label(label);
+        let tip = a11y.to_string();
+        NamedClickable(
+            a11y,
             Modifier::new().size(44.0, 40.0).corner_radius(CORNER_SM),
             Alignment::Center,
             on_click,
-            || NavIcon(svg, p.muted.to_argb(), 20.0),
+            move || {
+                cu::Tooltip(tip).content(|| {
+                    NavIcon(svg, p.muted.to_argb(), 20.0);
+                });
+            },
         );
         return;
     }
@@ -250,29 +275,39 @@ pub fn ToolRow(svg: &'static str, label: &str, rail: bool, on_click: impl FnMut(
 }
 
 /// The brand block: mark, "Ember" 15 px semibold and the org line 12 px muted. A click folds
-/// or unfolds the sidebar (the mockup's logo button).
+/// or unfolds the sidebar (the mockup's logo button, `aria-label="사이드바 접기/펼치기"`, #501).
 pub fn Brand(compact: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let size = 32.0;
     let mark = crate::ui::shell::mark_svg_for(size).as_bytes();
     let m = Modifier::new().fill_max_width_if(!compact);
-    Clickable(m, if compact { Alignment::Center } else { Alignment::CenterStart }, on_click, || {
-        // A Box centers both children on the cross axis: the logo against the two-line text.
-        cu::Box().alignment(Alignment::CenterStart).content(|| {
-            if !compact {
-                cu::Row().alignment(Alignment::CenterStart).content(|| {
-                    // 6 side padding, the 32 px mark, then the 10 px gap.
-                    cu::Spacer().modifier(Modifier::new().width(6.0 + size + 10.0));
-                    cu::Column().spacing(6.0).content(|| {
-                        Label("Ember", Fs::Lg, Weight::Semibold, None, None);
-                        Label(ORG_NAME, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+    if compact {
+        let tip = super::a11y::SIDEBAR_TOGGLE.to_string();
+        NamedClickable(super::a11y::SIDEBAR_TOGGLE, m, Alignment::Center, on_click, move || {
+            cu::Tooltip(tip).content(|| {
+                cu::Box().alignment(Alignment::CenterStart).content(|| {
+                    cu::Row().content(|| {
+                        cu::Image(compose_rust::asset(AssetKind::Svg, mark))
+                            .modifier(Modifier::new().size(size, size));
                     });
                 });
-            }
+            });
+        });
+        return;
+    }
+    Clickable(m, Alignment::CenterStart, on_click, || {
+        // A Box centers both children on the cross axis: the logo against the two-line text.
+        cu::Box().alignment(Alignment::CenterStart).content(|| {
+            cu::Row().alignment(Alignment::CenterStart).content(|| {
+                // 6 side padding, the 32 px mark, then the 10 px gap.
+                cu::Spacer().modifier(Modifier::new().width(6.0 + size + 10.0));
+                cu::Column().spacing(6.0).content(|| {
+                    Label("Ember", Fs::Lg, Weight::Semibold, None, None);
+                    Label(ORG_NAME, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                });
+            });
             cu::Row().content(|| {
-                if !compact {
-                    cu::Spacer().modifier(Modifier::new().width(6.0));
-                }
+                cu::Spacer().modifier(Modifier::new().width(6.0));
                 cu::Image(compose_rust::asset(AssetKind::Svg, mark))
                     .modifier(Modifier::new().size(size, size));
             });
@@ -500,7 +535,8 @@ pub fn PhoneMenu(open: compose_rust::runtime::MutableState<bool>, on_settings: i
         cu::Column().alignment(Alignment::TopEnd).content(|| {
             cu::Spacer().modifier(Modifier::new().height(10.0));
             let o = open.clone();
-            Clickable(
+            NamedClickable(
+                super::a11y::MENU,
                 with_shadows(Modifier::new(), theme.shadow_sm())
                     .size(H_CTL, H_CTL)
                     .background(paint(p.surface))
@@ -1352,5 +1388,126 @@ mod tests {
         assert!(has_text(&batch, "에디터 단축키"));
         assert!(has_text(&batch, "기본 IDE"));
         assert!(has_text(&batch, "보관된 세션 표시"));
+    }
+
+    #[Composable]
+    fn rail_with_demo_probe() {
+        let theme = ember_theme();
+        let theme_svg = if theme.scheme == Scheme::Dark { ICON_MOON_SVG } else { ICON_SUN_SVG };
+        cu::Column().content(|| {
+            Sidebar(true, NavMenu::Sessions, NavCounts::default(), || {}, || {});
+            ToolRow(ICON_CPU_SVG, "플랫폼: 기타", true, || {});
+            ToolRow(NavMenu::Routines.svg(), "데모 초기화", true, || {});
+            ToolRow(theme_svg, "테마: 시스템", false, || {});
+        });
+    }
+
+    #[test]
+    fn fr_l10_every_rail_icon_button_carries_its_korean_accessible_label_and_tooltip() {
+        // #501: every icon-only button in the rail (the compact logo button, the eight nav items,
+        // and the footer tool buttons) and the phone menu icon button must carry a Korean
+        // accessible label (`Modifier::label`, `Role::Button`, `click_action`) that matches its
+        // visible tooltip (`core.js`).
+        use compose_rust::protocol::{decode_batch, Mutation, PropertyValue};
+        use compose_rust::{Host, PropertyKind, Recomposer};
+        use std::collections::HashMap;
+
+        let _guard = crate::services::test_guard();
+
+        let extract_buttons = |content: fn()| {
+            let mut host = Host::new(move || Box::new(Recomposer::new(content)));
+            let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+            let mut click_nodes = Vec::new();
+            let mut mods: HashMap<u32, Vec<String>> = HashMap::new();
+            let mut widgets: HashMap<u32, String> = HashMap::new();
+            let mut parents: HashMap<u32, u32> = HashMap::new();
+            let mut texts: HashMap<u32, String> = HashMap::new();
+            for m in &batch {
+                match m {
+                    Mutation::Create { node_id, widget } => {
+                        widgets.insert(*node_id, format!("{widget:?}"));
+                    }
+                    Mutation::Insert { parent_id, node_id, .. } => {
+                        parents.insert(*node_id, *parent_id);
+                    }
+                    Mutation::SetProp { node_id, property: PropertyKind::OnClick, .. } => {
+                        click_nodes.push(*node_id);
+                    }
+                    Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                        texts.insert(*node_id, s.to_string());
+                    }
+                    Mutation::SetModifier { node_id, modifier, .. } => {
+                        mods.entry(*node_id).or_default().push(format!("{modifier:?}"));
+                    }
+                    _ => {}
+                }
+            }
+            (click_nodes, mods, widgets, parents, texts)
+        };
+
+        // 1. Standard rail (`Sidebar(true, ...)`): 1 logo + 8 nav items + 3 footer tools = 12 buttons.
+        let (rail_clicks, rail_mods, rail_widgets, rail_parents, rail_texts) = extract_buttons(rail_probe);
+        let expected_standard: Vec<&str> = std::iter::once(super::a11y::SIDEBAR_TOGGLE)
+            .chain(NavMenu::ALL.iter().map(|m| m.label()))
+            .chain([super::a11y::THEME, super::a11y::SEARCH, super::a11y::SETTINGS])
+            .collect();
+        assert_eq!(rail_clicks.len(), expected_standard.len(), "standard rail button count");
+
+        for (&node_id, &want_label) in rail_clicks.iter().zip(expected_standard.iter()) {
+            let m = rail_mods.get(&node_id).unwrap_or_else(|| panic!("no modifiers on rail button {want_label}"));
+            let sem = m
+                .iter()
+                .find(|s| s.starts_with("Semantics"))
+                .unwrap_or_else(|| panic!("rail button {want_label} (node {node_id}) has no Semantics modifier: {m:?}"));
+            assert!(
+                sem.contains(&format!("{want_label:?}")),
+                "rail button {want_label} semantics missing label: {sem}"
+            );
+            assert!(
+                sem.contains("Button"),
+                "rail button {want_label} semantics missing Role::Button: {sem}"
+            );
+            // Check that a Tooltip child under this button carries the matching Korean tooltip text.
+            let has_matching_tooltip = rail_widgets.iter().any(|(&wid, wname)| {
+                if wname != "Tooltip" {
+                    return false;
+                }
+                let mut cur = Some(wid);
+                let mut under = false;
+                while let Some(c) = cur {
+                    if c == node_id {
+                        under = true;
+                        break;
+                    }
+                    cur = rail_parents.get(&c).copied();
+                }
+                under && rail_texts.get(&wid).map(String::as_str) == Some(want_label)
+            });
+            assert!(
+                has_matching_tooltip,
+                "rail button {want_label} (node {node_id}) has no matching Tooltip({want_label:?})"
+            );
+        }
+
+        // 2. Demo rail tool buttons ("플랫폼 미리보기 전환", "데모 초기화") also carry their Korean labels and tooltips.
+        let (demo_clicks, demo_mods, _, _, _) = extract_buttons(rail_with_demo_probe);
+        for want_label in [super::a11y::PLATFORM, super::a11y::DEMO_RESET] {
+            let found = demo_clicks.iter().any(|nid| {
+                demo_mods
+                    .get(nid)
+                    .map(|ms| ms.iter().any(|s| s.starts_with("Semantics") && s.contains(&format!("{want_label:?}")) && s.contains("Button")))
+                    .unwrap_or(false)
+            });
+            assert!(found, "demo rail tool button {want_label} carries Semantics with its Korean label");
+        }
+
+        // 3. PhoneMenu trigger button carries `a11y::MENU` ("메뉴").
+        let (pm_clicks, pm_mods, _, _, _) = extract_buttons(phone_menu_probe);
+        let trigger = pm_clicks.first().expect("phone menu trigger button");
+        let trigger_mods = pm_mods.get(trigger).expect("phone menu trigger modifiers");
+        assert!(
+            trigger_mods.iter().any(|s| s.starts_with("Semantics") && s.contains(&format!("{:?}", super::a11y::MENU)) && s.contains("Button")),
+            "phone menu trigger carries Semantics with 메뉴: {trigger_mods:?}"
+        );
     }
 }

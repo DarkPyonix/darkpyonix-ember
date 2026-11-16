@@ -8,8 +8,11 @@
 //! `accessible_name`, which is owned.
 
 pub const THEME: &str = "테마 전환";
+pub const SEARCH: &str = "검색";
 pub const SETTINGS: &str = "설정";
-pub const PLATFORM: &str = "플랫폼";
+pub const PLATFORM: &str = "플랫폼 미리보기 전환";
+pub const DEMO_RESET: &str = "데모 초기화";
+pub const SIDEBAR_TOGGLE: &str = "사이드바 접기/펼치기";
 pub const MENU: &str = "메뉴";
 pub const NEW_CHANNEL: &str = "새 채널";
 pub const MEMBERS: &str = "멤버";
@@ -43,11 +46,11 @@ pub const ACCOUNT_PICKER: &str = "계정 선택";
 
 /// The reviewed Korean names of the icon-only controls outside the nav menus (those take
 /// `NavMenu::label`).
-pub fn rail_labels() -> [&'static str; 21] {
+pub fn rail_labels() -> [&'static str; 24] {
     [
-        THEME, SETTINGS, PLATFORM, MENU, NEW_CHANNEL, MEMBERS, MORE, ATTACH, EMOJI,
-        VERSION_CONTROL, PROJECT_SETTINGS, OPEN_SESSION, CLOSE, SEND, SHARE, OTHER_IDE,
-        SESSION_MENU, OPEN_SCREEN, BACK, SCROLL_LEFT, SCROLL_RIGHT,
+        THEME, SEARCH, SETTINGS, PLATFORM, DEMO_RESET, SIDEBAR_TOGGLE, MENU, NEW_CHANNEL, MEMBERS,
+        MORE, ATTACH, EMOJI, VERSION_CONTROL, PROJECT_SETTINGS, OPEN_SESSION, CLOSE, SEND, SHARE,
+        OTHER_IDE, SESSION_MENU, OPEN_SCREEN, BACK, SCROLL_LEFT, SCROLL_RIGHT,
     ]
 }
 

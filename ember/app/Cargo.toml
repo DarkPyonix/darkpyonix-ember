@@ -28,7 +28,7 @@ path = "src/main.rs"
 # ("Local dioxus-compose"). The crate's build script fetches the renderer for its version; set
 # DIOXUS_COMPOSE_RENDERER_DIR to use a renderer you built yourself.
 # TODO: 배포되면 버전 의존성으로 바꾼다 (compose-rust and dioxus-compose are not yet published).
-compose-rust = { git = "https://github.com/DarkPyonix/compose-rust", tag = "v0.0.10", default-features = false }
+compose-rust = { git = "https://github.com/DarkPyonix/compose-rust", tag = "v0.0.11", default-features = false }
 dioxus-compose = { git = "https://github.com/DarkPyonix/dioxus-compose", rev = "f0e5b9f579ef897eac67e9de2be12d78f0089737" }
 
 # Everything below the UI: sync engine, state reducer, transcript, cache.

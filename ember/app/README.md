@@ -145,7 +145,9 @@ NFR-R1, #880) with `./scripts/build-android.sh --release --cargo-args=--locked`.
 `--release` go to `dx build` unchanged. dx 0.7.10 signs with a keystore only from
 `[bundle.android]` in `Dioxus.toml` (the job writes it from the `EMBER_ANDROID_*` secrets on the
 runner) and then runs `assembleRelease`, with R8 kept from removing anything by
-`android/proguard-keep.pro`; without it, `--release` builds the Rust library optimised and the
+`android/proguard-keep.pro` (which also tells R8 to ignore errorprone's reference to
+`javax.lang.model`) and lint switched off by `android/lint.xml`, which the script copies into the
+generated module first (lint crashed on the first signed build, run 43874185801); without it, `--release` builds the Rust library optimised and the
 APK debug-signed under `outputs/apk/debug`. Every APK has `versionCode` 1 (dx writes it) and the
 crate version as `versionName`.
 

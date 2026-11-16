@@ -6,3 +6,11 @@
 -dontshrink
 -dontoptimize
 -dontobfuscate
+
+# The first release-signed build (publish-release run 43874185801) stopped in R8 on
+# "Missing class javax.lang.model.element.Modifier", referenced from errorprone's compile-time
+# annotations (com.google.errorprone.annotations.IncompatibleModifiers and one more) that a
+# dependency carries. javax.lang.model exists only in the JDK's annotation processing API, never
+# on Android, and nothing calls those annotations at run time, so R8 may ignore the reference.
+-dontwarn javax.lang.model.**
+-dontwarn com.google.errorprone.annotations.**

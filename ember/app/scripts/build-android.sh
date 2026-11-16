@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
-# Usage: ./scripts/build-android.sh [--release]
+# Usage: ./scripts/build-android.sh [--release] [dx build options...]
+#
+# Options after --release go to `dx build` as they are, e.g. `--cargo-args=--locked` in the
+# release workflow (NFR-R1, #880). With --release, dx 0.7.10 runs Gradle's assembleRelease only
+# when Dioxus.toml has a [bundle.android] keystore; without one it builds the Rust library in
+# release mode and runs assembleDebug, so the APK is debug-signed and lands under
+# outputs/apk/debug either way.
 #
 # Builds the Ember client as an Android APK (FR-L36), the way the compose-rust samples are
 # built: `dx build --platform android` generates the Gradle project and compose-rust's build
@@ -14,7 +20,9 @@ args=()
 if [[ "${1:-}" == "--release" ]]; then
     profile=release
     args+=(--release)
+    shift
 fi
+args+=("$@")
 
 : "${ANDROID_HOME:=$HOME/Library/Android/sdk}"
 : "${ANDROID_NDK_HOME:=$ANDROID_HOME/ndk/27.1.12297006}"
@@ -39,6 +47,14 @@ export COMPOSE_RUST_ANDROID_KOTLIN_DIR="$project/app/src/main/kotlin"
 # dx runs the Gradle build itself and has no flag for it, so the daemon is switched off through
 # the environment: a daemon left behind holds its heap on a shared machine.
 export GRADLE_OPTS="${GRADLE_OPTS:-} -Dorg.gradle.daemon=false"
+
+# Lint in the generated project crashes in a release build (android/lint.xml says why). dx writes
+# the Gradle project and runs Gradle in one step, with no hook between them, but it leaves files it
+# does not write in place, so the lint configuration goes into the module directory first.
+if [[ "$profile" == release ]]; then
+    mkdir -p "$project/app"
+    cp android/lint.xml "$project/app/lint.xml"
+fi
 
 dx build --platform android --target aarch64-linux-android ${args[@]+"${args[@]}"}
 

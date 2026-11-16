@@ -4137,6 +4137,13 @@ fn ProjectSwitchMenu(
     );
 }
 
+/// The phone header's first row (title, new member): `.sesshead{height:auto;padding:8px ...}`
+/// around the title block, which is taller than the 32 dp controls: the name line (Md), 1 dp,
+/// the subtitle line (Xs2) and the block's 2 dp padding. A fixed 48 cut the subtitle's last
+/// 3 to 4 px (FR-L28.6, review and2).
+const PHONE_HEAD_ROW_H: f32 =
+    2.0 * SP[1] + 2.0 * 2.0 + Fs::Md.line_height() + 1.0 + Fs::Xs2.line_height();
+
 /// Pill-shaped toolbar action button (`.btn.sm` in `.sesshead`).
 /// Session header actions carry no text label (owner placement rule 2026-11-13, rule 6, design
 /// review B6); the label is the tooltip and the accessible name.
@@ -5004,15 +5011,43 @@ pub fn SessionScreen(focus: Option<String>) {
                         .modifier(Modifier::new().weight(1.0).fill_max_height())
                         .content(|| {
                             // Top toolbar (.sesshead)
+                            // The version control, web page and IDE controls. At 560 and below the
+                            // mockup's header wraps (`.sesshead{flex-wrap:wrap;padding-right:60px}`):
+                            // they go to a second row, so the title keeps its room and nothing
+                            // runs under the floating menu button (FR-L28.2, FR-L28.6).
+                            let trailing = || {
+                                let vo = vcs_open.clone();
+                                ToolbarBtn(ICON_GIT_SVG, "버전 관리", SESSION_HEADER_LABELS, false, None, move || vo.set(true));
+                                let wm = open_web_menu.clone();
+                                let wm_d = web_menu.clone();
+                                #[allow(clippy::redundant_closure)]
+                                WebMenu(web_menu.get(), &web_pages.get(), web_sub.get().as_deref(), move || wm_d.set(false), move || wm());
+                                if let Some(t) = target.clone() {
+                                    IdeMenu(&t);
+                                } else {
+                                    AppButton(
+                                        "IDE 열기",
+                                        Some(IconRole::Forward),
+                                        ButtonKind::Default,
+                                        true,
+                                        false,
+                                        false,
+                                        || {},
+                                    );
+                                }
+                            };
                             cu::Row()
                                 .alignment(Alignment::CenterStart)
                                 .spacing(6.0)
                                 .modifier(
                                     Modifier::new()
                                         .fill_max_width()
-                                        .height(60.0)
+                                        .height(if is_phone { PHONE_HEAD_ROW_H } else { 60.0 })
                                         .background(paint(p.surface))
-                                        .padding(SP[2]),
+                                        // Phone: 8 around the 32 dp controls (one padding for all
+                                        // sides; the mockup's start is 12) and 60 at the end with
+                                        // the menu room.
+                                        .padding(if is_phone { SP[1] } else { SP[2] }),
                                 )
                                 .content(|| {
                                     if is_phone {
@@ -5099,33 +5134,31 @@ pub fn SessionScreen(focus: Option<String>) {
                                         // mockup's `.sesshead` (owner placement rule 2026-11-13, rule 6).
                                         let nm = new_member_open.clone();
                                         ToolbarBtn(ICON_PLUS_SVG, "새 팀원", SESSION_HEADER_LABELS, false, None, move || nm.set(true));
-                                        let vo = vcs_open.clone();
-                                        ToolbarBtn(ICON_GIT_SVG, "버전 관리", SESSION_HEADER_LABELS, false, None, move || vo.set(true));
-                                        let wm = open_web_menu.clone();
-                                        let wm_d = web_menu.clone();
-                                        #[allow(clippy::redundant_closure)]
-                                        WebMenu(web_menu.get(), &web_pages.get(), web_sub.get().as_deref(), move || wm_d.set(false), move || wm());
-                                    }
-                                    if let Some(t) = target.clone() {
-                                        IdeMenu(&t);
-                                    } else {
-                                        AppButton(
-                                            "IDE 열기",
-                                            Some(IconRole::Forward),
-                                            ButtonKind::Default,
-                                            true,
-                                            false,
-                                            false,
-                                            || {},
-                                        );
                                     }
                                     if is_phone {
-                                        // Keep the trailing group clear of the shell's floating menu button.
+                                        // Keep the first row clear of the shell's floating menu button.
                                         cu::Spacer().modifier(
                                             Modifier::new().width(super::project::PHONE_MENU_ROOM),
                                         );
+                                    } else {
+                                        trailing();
                                     }
                                 });
+                            if is_phone {
+                                // The wrapped second row: version control, web pages, IDE.
+                                cu::Row()
+                                    .alignment(Alignment::CenterStart)
+                                    .spacing(6.0)
+                                    .modifier(
+                                        Modifier::new()
+                                            .fill_max_width()
+                                            .background(paint(p.surface))
+                                            .padding(SP[1]),
+                                    )
+                                    .content(|| {
+                                        trailing();
+                                    });
+                            }
 
                             if chips_below {
                                 cu::Row()
@@ -5761,6 +5794,96 @@ mod tests {
         })
         .expect("dispatch");
         assert!(open.get_untracked(), "the chevron opened the chooser");
+    }
+
+    /// What a composed screen sends: each node's parent, string props and modifiers.
+    struct Tree {
+        parents: std::collections::HashMap<u32, u32>,
+        strings: Vec<(u32, String)>,
+        modifiers: Vec<(u32, String)>,
+    }
+
+    impl Tree {
+        fn of(content: fn()) -> Self {
+            let mut host = Host::new(move || Box::new(Recomposer::new(content)));
+            let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+            let mut t = Tree { parents: Default::default(), strings: Vec::new(), modifiers: Vec::new() };
+            for m in batch.iter() {
+                match m {
+                    Mutation::Insert { parent_id, node_id, .. } => {
+                        t.parents.insert(*node_id, *parent_id);
+                    }
+                    Mutation::SetProp { node_id, value: PropertyValue::String(v), .. } => t.strings.push((*node_id, v.to_string())),
+                    Mutation::SetModifier { node_id, modifier, .. } => t.modifiers.push((*node_id, format!("{modifier:?}"))),
+                    _ => {}
+                }
+            }
+            t
+        }
+
+        fn ancestors(&self, mut id: u32) -> Vec<u32> {
+            let mut out = vec![id];
+            while let Some(p) = self.parents.get(&id) {
+                out.push(*p);
+                id = *p;
+            }
+            out
+        }
+
+        fn nodes_with(&self, text: &str) -> Vec<u32> {
+            self.strings.iter().filter(|(_, s)| s == text).map(|(n, _)| *n).collect()
+        }
+
+        /// The nearest node that holds both texts.
+        fn common(&self, a: &str, b: &str) -> u32 {
+            let a = self.ancestors(*self.nodes_with(a).first().unwrap_or_else(|| panic!("no {a}")));
+            let b = self.ancestors(*self.nodes_with(b).first().unwrap_or_else(|| panic!("no {b}")));
+            *a.iter().find(|n| b.contains(n)).expect("one tree")
+        }
+
+        fn children_mods(&self, parent: u32) -> Vec<String> {
+            self.modifiers
+                .iter()
+                .filter(|(n, _)| self.parents.get(n) == Some(&parent))
+                .map(|(_, m)| m.clone())
+                .collect()
+        }
+    }
+
+    #[test]
+    fn fr_l28_6_the_phone_head_row_holds_the_title_and_the_whole_subtitle() {
+        // Review and2: at 48 dp the subtitle lost its bottom 3 to 4 px.
+        let inner = Fs::Md.line_height() + 1.0 + Fs::Xs2.line_height() + 2.0 * 2.0;
+        assert_eq!(PHONE_HEAD_ROW_H, 2.0 * SP[1] + inner);
+        assert!(PHONE_HEAD_ROW_H >= 48.0 && PHONE_HEAD_ROW_H - 2.0 * SP[1] >= 32.0);
+        assert_eq!(PHONE_HEAD_ROW_H, 59.0);
+    }
+
+    /// Flip 4 review 3.2 and 3.3: at 360 dp the five header controls shared the title's row, so
+    /// the title shrank to "demo-..." and the IDE button ran under the floating menu button. The
+    /// mockup's phone header wraps: the first row is the drawer, the title and 새 팀원, kept
+    /// 60 dp from the right edge; version control, web pages and the IDE go to the next row.
+    #[test]
+    fn fr_l28_2_the_phone_session_header_wraps_and_keeps_the_menu_button_room_at_360() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        for (view, host) in [("multi", host_session_multi as fn()), ("single", host_session_single as fn())] {
+            shared_ui().update_prefs(|p| p.session_view = Some(view.to_string()));
+            crate::ui::window_size::set_opened_for_test(Some((360.0, 880.0)));
+            let t = Tree::of(host);
+            crate::ui::window_size::set_opened_for_test(None);
+            let first_row = t.common(super::super::a11y::MENU, "새 팀원");
+            for later in ["버전 관리", "웹 페이지"] {
+                for n in t.nodes_with(later) {
+                    assert!(!t.ancestors(n).contains(&first_row), "{view}: {later} must leave the title row at 360");
+                }
+            }
+            let row = t.children_mods(first_row);
+            assert!(row.iter().any(|m| m == "Width(52.0)"), "{view}: the floating menu room ends the title row: {row:?}");
+            assert!(t.modifiers.iter().any(|(n, m)| *n == first_row && m == "Height(59.0)"), "{view}: a 59 dp first row (title and subtitle)");
+        }
+        shared_ui().update_prefs(|p| p.session_view = None);
+        compose_rust::window::reset_window_size();
     }
 
     #[Composable]

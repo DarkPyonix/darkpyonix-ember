@@ -514,15 +514,18 @@ mod title_strip {
     // #301: the error message clears the title strip the window reports, not a fixed height.
     #[test]
     fn fr_l31_37_the_error_message_starts_below_the_reported_title_strip() {
-        assert_eq!(editor_error_padding(true, 28.0), "padding:20px; padding-top:48px;");
-        assert_eq!(editor_error_padding(true, 0.0), "padding:20px; padding-top:20px;");
-        assert_eq!(editor_error_padding(false, 28.0), "padding:20px; padding-top:20px;");
+        assert_eq!(editor_error_padding(28.0), "padding:20px; padding-top:48px;");
+        assert_eq!(editor_error_padding(32.0), "padding:20px; padding-top:52px;");
+        assert_eq!(editor_error_padding(0.0), "padding:20px; padding-top:20px;");
     }
 
+    // FR-L33: the top bar keeps exactly the reported controls clear, on both edges, per system.
     #[test]
-    fn fr_l31_top_bar_clears_the_traffic_lights_only_under_full_size() {
-        assert_eq!(editor_strip_padding(true, 98.0), "padding-left:98px;");
-        assert_eq!(editor_strip_padding(false, 98.0), "");
+    fn fr_l31_top_bar_clears_the_reported_controls_on_both_edges() {
+        assert_eq!(editor_strip_padding(70.0, 0.0), "padding-left:70px;", "macOS");
+        assert_eq!(editor_strip_padding(0.0, 138.0), "padding-right:138px;", "Windows");
+        assert_eq!(editor_strip_padding(0.0, 0.0), "", "Linux, window manager title bar");
+        assert_eq!(editor_strip_padding(0.0, 96.0), "padding-right:96px;", "Linux X11");
     }
 
     #[test]

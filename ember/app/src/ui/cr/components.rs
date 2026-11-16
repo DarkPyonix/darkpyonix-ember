@@ -1928,7 +1928,23 @@ pub(crate) fn sheet_body_max_height(window_width_dp: f32, window_height_dp: f32,
     if window_height_dp <= 0.0 {
         return SHEET_BODY_UNKNOWN_H;
     }
-    (sheet_max_height(window_width_dp, window_height_dp, monitor) - chrome_h).max(0.0)
+    let room = sheet_bottom_room(window_width_dp, monitor);
+    (sheet_max_height(window_width_dp, window_height_dp, monitor) - chrome_h - room).max(0.0)
+}
+
+/// The room a bottom sheet keeps under its last row for the phone's gesture bar or home
+/// indicator (`env(safe-area-inset-bottom)` in the mockup, FR-L28.4). compose-rust v0.0.10
+/// reports no bottom safe area (`WindowSafeArea` has top, leading and trailing only) and its
+/// `Sheet` does not pad for the navigation bar, so a fixed phone value is used on every system.
+pub const SHEET_PHONE_BOTTOM_ROOM: f32 = 24.0;
+
+/// [`SHEET_PHONE_BOTTOM_ROOM`] for a bottom sheet, 0 for a dialog or the full-screen monitor.
+pub(crate) fn sheet_bottom_room(window_width_dp: f32, monitor: bool) -> f32 {
+    if sheet_presentation(window_width_dp, monitor) == SheetPresentation::Bottom {
+        SHEET_PHONE_BOTTOM_ROOM
+    } else {
+        0.0
+    }
 }
 
 /// The 32 px round close button of a sheet header, with the mockup's line icon.
@@ -2010,12 +2026,13 @@ pub fn EmberSheetSized(
     let modifier = with_shadows(Modifier::new().padding(0.0), theme.shadow_sm()).background(paint(theme.palette.surface));
     // `.sheet.card` (FR-L32, #583): the 1 px `line` border is what separates a dark sheet from
     // the dimmed page. The full-screen monitor has none (`border:0` at 560 px and below).
-    let framed = modifier.border(1.0, paint(theme.palette.line));
+    let framed = modifier.clone().border(1.0, paint(theme.palette.line));
     let dismiss = on_dismiss.clone();
     let window = crate::ui::window_size::current_window_size();
     let presentation = sheet_presentation(window.width_dp, monitor);
     let top_inset = full_screen_sheet_top_inset(window.width_dp, monitor, crate::ui::safe_area::safe_area());
     let strip_bg = theme.palette.surface;
+    let bottom_room = sheet_bottom_room(window.width_dp, monitor);
     // An empty title draws no header: the share sheet is the mockup's `.fl-share`, which has
     // none and puts its close button in its first card (FR-L27.7).
     let body = move || {
@@ -2030,6 +2047,10 @@ pub fn EmberSheetSized(
                 cu::Separator(Some(paint(theme.palette.line)));
             }
             content();
+            if bottom_room > 0.0 {
+                // FR-L28.4: the last row stays above the gesture bar.
+                cu::Spacer().modifier(Modifier::new().fill_max_width().height(bottom_room));
+            }
         });
     };
     if presentation == SheetPresentation::Bottom {
@@ -3368,13 +3389,40 @@ mod tests {
     }
 
     #[test]
+    fn fr_l28_4_a_bottom_sheet_keeps_room_for_the_gesture_bar_at_360() {
+        // Flip 4 review 3.4: the settings sheet's last row sat on the gesture handle. The last
+        // thing a bottom sheet sends is a 24 dp spacer under its content; a dialog sends none.
+        let _guard = crate::services::test_guard();
+        crate::ui::window_size::set_opened_for_test(Some((360.0, 880.0)));
+        let phone = emitted_nodes(|| EmberSheet("시트", true, || {}, None, || {}));
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+        let desk = emitted_nodes(|| EmberSheet("시트", true, || {}, None, || {}));
+        crate::ui::window_size::set_opened_for_test(None);
+        let room = format!("Height({SHEET_PHONE_BOTTOM_ROOM:?})");
+        let body = |nodes: &[EmittedNode], host: &str| {
+            let host = the(nodes, host).id;
+            let column = nodes.iter().find(|n| n.parent == Some(host)).expect("the body column").id;
+            let mut kids: Vec<&EmittedNode> = nodes.iter().filter(|n| n.parent == Some(column)).collect();
+            kids.sort_by_key(|n| n.index);
+            kids.last().map(|n| n.mods.clone()).unwrap_or_default()
+        };
+        assert!(body(&phone, "Sheet").contains(&room), "{:?}", body(&phone, "Sheet"));
+        assert!(!body(&desk, "Dialog").contains(&room), "{:?}", body(&desk, "Dialog"));
+        assert_eq!(sheet_bottom_room(360.0, false), 24.0);
+        assert_eq!(sheet_bottom_room(360.0, true), 0.0);
+        assert_eq!(sheet_bottom_room(1440.0, false), 0.0);
+    }
+
+    #[test]
     fn fr_l32_sheet_body_height_is_one_formula() {
-        // 85 percent of the window for the sheet, minus the 60 dp header.
-        assert_eq!(sheet_body_max_height(390.0, 844.0, false, 60.0), 844.0 * 0.85 - 60.0);
-        assert_eq!(sheet_body_max_height(390.0, 700.0, false, 60.0), 700.0 * 0.85 - 60.0);
-        assert_eq!(sheet_body_max_height(390.0, 390.0, false, 60.0), 390.0 * 0.85 - 60.0);
+        // 85 percent of the window for the sheet, minus the 60 dp header and the bottom room
+        // kept for the gesture bar (FR-L28.4).
+        let r = SHEET_PHONE_BOTTOM_ROOM;
+        assert_eq!(sheet_body_max_height(390.0, 844.0, false, 60.0), 844.0 * 0.85 - 60.0 - r);
+        assert_eq!(sheet_body_max_height(390.0, 700.0, false, 60.0), 700.0 * 0.85 - 60.0 - r);
+        assert_eq!(sheet_body_max_height(390.0, 390.0, false, 60.0), 390.0 * 0.85 - 60.0 - r);
         // With a 65 dp footer as well.
-        assert_eq!(sheet_body_max_height(390.0, 844.0, false, 125.0), 844.0 * 0.85 - 125.0);
+        assert_eq!(sheet_body_max_height(390.0, 844.0, false, 125.0), 844.0 * 0.85 - 125.0 - r);
         // The real call sites at 390x844 and 390x640 keep a body well above 300 (header 60, footer 65).
         for h in [844.0, 640.0] {
             assert!(sheet_body_max_height(390.0, h, false, 60.0).min(900.0) > 300.0, "project {h}");

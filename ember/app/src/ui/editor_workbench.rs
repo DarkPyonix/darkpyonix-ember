@@ -336,6 +336,12 @@ fn editor_pane() -> Element {
             }
         }
     }
+    // #895: a completion or code actions list asked for with the caret scrolled away has the
+    // editor reveal the caret first (Code-OSS's `revealPosition`), then opens at its new rectangle.
+    if crate::ui::editor_language::view::take_caret_reveal() {
+        let (line, col) = *s.position.peek();
+        handle.reveal(version, crate::ui::editor_language::caret_reveal_range(line, col), compose_rust::schema::RevealAlign::Nearest);
+    }
     // Edits the session asks for (an accepted completion, formatting, a rename, a code action) go to
     // the widget, which applies them as the reader's own and reports them back as changes.
     for command in s.bridge.borrow_mut().take_pending_edits(&doc.uri) {
@@ -358,7 +364,7 @@ fn editor_pane() -> Element {
     let click_s = s.clone(); let click_uri = uri.clone();
     let fold_s = s.clone(); let fold_uri = uri.clone();
     let selection_s = s.clone(); let selection_uri = uri;
-    let key_s = s.clone(); let pointer_s = s.clone();
+    let key_s = s.clone(); let pointer_s = s.clone(); let caret_s = s.clone();
     rsx! { CodeEditor {
         key: "{generation}", width: Some(box_w), height: Some(box_h), handle,
         text: doc.text, decorations: compose_rust::code::Decorations::from_bytes(doc.decoration_bytes), syntax_spans: crate::ui::editor::syntax_spans(&doc.syntax), folds: crate::ui::editor::folds(&doc.folds), tab_width: Some(doc.tab_width),
@@ -372,13 +378,13 @@ fn editor_pane() -> Element {
         on_key_preview: move |e: compose_rust::KeyEvent| crate::ui::editor_language::view::code_key(&key_s, &e),
         pointer_kinds: Some(compose_rust::PointerKinds::DOWN),
         on_code_pointer: move |e: compose_rust::code::CodePointer| crate::ui::editor_language::view::code_pointer(&pointer_s, &e),
-        on_caret_rect: move |e: compose_rust::code::CaretRect| crate::ui::editor_language::view::set_caret_rect(e.rect),
+        on_caret_rect: move |e: compose_rust::code::CaretRect| crate::ui::editor_language::view::set_caret_rect(&caret_s, e.rect),
         on_change: move |e: compose_rust::code::CodeChange| { keep_edited_tab(&change_s, &change_uri.path); change_s.editor_versions.borrow_mut().insert(generation, e.version); let event = change_s.bridge.borrow_mut().on_code_changed(&change_uri, e.version, WidgetRange::new(pos(e.range.start), pos(e.range.end)), e.text); send(&change_s, event); crate::ui::editor_states::view::edited(&change_s, &change_uri.path); },
         on_save: move |e: compose_rust::code::SaveRequest| { if !crate::ui::editor_states::view::manual_save_allowed(&save_s, &save_uri.path) { return; } let event = save_s.bridge.borrow().on_save_requested(&save_uri, e.version); send(&save_s, event); save_s.scm.refresh(); },
         on_hover: move |e: compose_rust::code::CodeHover| { let phase = match e.phase { compose_rust::schema::HoverPhase::Rest => EditorHoverPhase::Rest, _ => EditorHoverPhase::Leave }; let event = hover_s.bridge.borrow().on_code_hovered(&hover_uri, e.decoration.unwrap_or(0), pos(e.position), phase); send(&hover_s, event); },
         on_decoration_click: move |id| { let event = click_s.bridge.borrow().on_decoration_activated(&click_uri, id); send(&click_s, event); },
         on_fold_change: move |e: compose_rust::code::FoldChange| { let event = fold_s.bridge.borrow_mut().on_fold_changed(&fold_uri, e.start_line, e.collapsed); send(&fold_s, event); let mut rev = fold_s.revision; *rev.write() += 1; },
-        on_selection_change: move |e: compose_rust::code::SelectionChange| { let mut position = selection_s.position; position.set((e.active.line as usize + 1, e.active.column as usize + 1)); let mut find_sel = selection_s.find.selection; find_sel.set(((e.anchor.line, e.anchor.column), (e.active.line, e.active.column))); let event = selection_s.bridge.borrow().on_selection_changed(&selection_uri, e.version, pos(e.anchor), pos(e.active)); send(&selection_s, event); },
+        on_selection_change: move |e: compose_rust::code::SelectionChange| { crate::ui::editor_language::view::caret_moved(); let mut position = selection_s.position; position.set((e.active.line as usize + 1, e.active.column as usize + 1)); let mut find_sel = selection_s.find.selection; find_sel.set(((e.anchor.line, e.anchor.column), (e.active.line, e.active.column))); let event = selection_s.bridge.borrow().on_selection_changed(&selection_uri, e.version, pos(e.anchor), pos(e.active)); send(&selection_s, event); },
     } }
 }
 
@@ -1264,7 +1270,7 @@ pub mod page {
         // also while nothing else does (the workspace trust prompt is up); read from the toolkit
         // state at render, the top bar kept the 0 inset and the logo sat under the traffic lights.
         let window_safe = dioxus_compose::use_window_safe_area();
-        let leading = crate::ui::safe_area::safe_area_from_toolkit(window_safe.top, window_safe.leading, window_safe.trailing).leading;
+        let safe = crate::ui::safe_area::safe_area_from_toolkit(window_safe.top, window_safe.leading, window_safe.trailing);
         let _ = *s.revision.read();
         let (error, updates, edit_errors, gone, renamed) = {
             let mut state = s.host.state.lock().unwrap();
@@ -1429,7 +1435,7 @@ pub mod page {
         // The page is the viewport on every system, and the viewport follows the window's content
         // box on every dp change, so growing and shrinking both lay the page out again.
         let ed_style = format!("{} {grid}", crate::ui::editor::editor_page_size_style());
-        let error_style = format!("{} grid-column:1 / -1;", crate::ui::editor::editor_error_padding(cfg!(target_os = "macos"), window_safe.top));
+        let error_style = format!("{} grid-column:1 / -1;", crate::ui::editor::editor_error_padding(safe.top));
         rsx! {
             div { class: "{ed_class}", "data-theme": if dark { "dark" } else { "light" }, tabindex: "-1", style: "{ed_style}",
                 onkeydown: move |event| {
@@ -1495,7 +1501,7 @@ pub mod page {
                 if let Some(error) = error {
                     div { style: "{error_style}", "{error}" button { onclick: move |_| crate::services::services().ui.close_editor(), "닫기" } }
                 } else {
-                    {top_bar(&s, &branch, keymap, leading)}
+                    {top_bar(&s, &branch, keymap, safe)}
                     div { class: "ed-rail",
                         {stripe_column(&s, sel, keymap, Strip::Left)}
                         {stripe_column(&s, sel, keymap, Strip::Bottom)}
@@ -1533,7 +1539,7 @@ pub mod page {
                         {crate::ui::editor_states::view::banners(&s, current.as_deref())}
                         if *s.find.open.read() && active.is_some() && !diff_shown && !conflict_shown && !compare_shown { {find_bar(&s)} }
                         // FR-L31.13: the editor pane's box, which a list at the caret is kept inside.
-                        div { style: "flex:1; min-height:0; min-width:0; display:flex; overflow:hidden;",
+                        div { "data-ed": "code-pane", style: "flex:1; min-height:0; min-width:0; display:flex; overflow:hidden;",
                             onmounted: move |event| crate::ui::editor_language::view::set_pane_mount(event.data()),
                             if conflict_shown { {crate::ui::editor_scm::view::conflict_pane(&s)} }
                             else if diff_shown { {crate::ui::editor_scm::view::diff_pane(&s)} }
@@ -1625,7 +1631,7 @@ pub mod page {
         rsx! { img { class: "i", src: "icon:{name}.{tone}{dark}", width: "{px}", height: "{px}" } }
     }
 
-    fn top_bar(s: &Shared, branch: &str, keymap: Keymap, leading: f32) -> Element {
+    fn top_bar(s: &Shared, branch: &str, keymap: Keymap, safe: crate::ui::safe_area::SafeArea) -> Element {
         let mut theme = s.theme;
         let theme_pref = *s.theme.read();
         let theme_title = format!("테마: {}", theme_pref.label());
@@ -1640,7 +1646,7 @@ pub mod page {
         let project_tip = tooltip_text("프로젝트 창", &keymap.hint(Action::Project, Os::current()));
         // The traffic lights float over the top bar's left end under FullSize. `leading` is the
         // page's hook reading (FR-L33.1), so a later report renders this again.
-        let strip_pad = crate::ui::editor::editor_strip_padding(cfg!(target_os = "macos"), leading);
+        let strip_pad = crate::ui::editor::editor_strip_padding(safe.leading, safe.trailing);
         rsx! {
             header { class: "ed-top", style: "{strip_pad}",
                 img { class: "logo logo-img", src: "icon:mark", width: "28", height: "28", alt: "Ember" }

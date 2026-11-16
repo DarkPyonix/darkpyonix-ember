@@ -9,10 +9,9 @@
 //! Content: the screens are still on dioxus-compose, so the content area shows a placeholder
 //! per menu until each screen lands in its phase.
 //!
-//! TODO(#213, #204): the macOS full-size title bar and safe area, and the Windows caption
-//! buttons' 138 dp, wait for the toolkit's caption inset (compose-rust and dioxus-compose issues
-//! of the same name). The Windows strip below reserves the width meanwhile, as the Dioxus shell
-//! does.
+//! The window controls' strip (macOS traffic lights, Windows caption buttons, a Linux desktop's
+//! own) is reserved from the toolkit's reported safe area on every system (FR-L33,
+//! `safe_area::top_reservation`).
 
 #![allow(non_snake_case)]
 
@@ -442,9 +441,10 @@ pub fn BottomBar(active: NavMenu, counts: NavCounts, on_choose: impl FnMut(Botto
                                 Alignment::Center,
                                 move || choose_tab(tab),
                                 || {
-                                  // The pill is the tab's content width, not the whole cell.
+                                  // The pill fills its cell (`.nav.tab{flex:1 1 0;min-width:0}` at 560
+                                  // and below): a fixed 70 dp pill overflowed a 360 window (FR-L28.1).
                                   cu::Box()
-                                    .modifier(Modifier::new().width(70.0).height(52.0).background(bg).corner_radius(20.0))
+                                    .modifier(Modifier::new().fill_max_width().height(52.0).background(bg).corner_radius(20.0))
                                     .alignment(Alignment::Center)
                                     .content(|| {
                                     cu::Box().modifier(Modifier::new().fill_max_width().fill_max_height()).alignment(Alignment::Center).content(|| {
@@ -618,7 +618,7 @@ pub fn shell() {
     let active = active_menu(&route, ui.menu.get());
     let screen = screen_for(&route, active);
     let mode = current_mode(collapsed.get());
-    let strip = crate::ui::safe_area::top_reservation(crate::ui::safe_area::safe_area(), mode).content_strip;
+    let strip = crate::ui::safe_area::top_reservation(crate::ui::safe_area::safe_area(), mode);
     let counts = ui.with_rows_no_previews(|st, _| {
         let cards = model::project_cards(st);
         NavCounts {
@@ -630,21 +630,19 @@ pub fn shell() {
 
     let content = || {
         cu::Column().modifier(Modifier::new().weight(1.0).fill_max_width().fill_max_height()).content(|| {
-            if cfg!(target_os = "windows") {
-                // Caption strip: an empty drag region, then the width the caption buttons cover.
+            // The strip the reported window controls cover above the content (FR-L33): a
+            // leading set where the content touches the left edge (bottom tabs), a trailing set
+            // (Windows caption, a Linux desktop's own) always, its width kept clear at the right.
+            // Computed in `shell`, beside `mode`, so one read of the window size drives both.
+            if strip.content_strip > 0.0 {
                 cu::Row()
-                    .modifier(Modifier::new().fill_max_width().height(WINDOWS_CAPTION_HEIGHT_DP))
+                    .modifier(Modifier::new().fill_max_width().height(strip.content_strip))
                     .content(|| {
                         cu::Spacer().modifier(Modifier::new().weight(1.0));
-                        cu::Spacer().modifier(Modifier::new().width(caption_reserved_width(true)));
+                        if strip.trailing > 0.0 {
+                            cu::Spacer().modifier(Modifier::new().width(strip.trailing));
+                        }
                     });
-            }
-            // macOS without a sidebar or rail (bottom tabs): the content touches the left edge,
-            // where the traffic lights float, so every screen starts below them (FR-L33). The
-            // reservation is computed in `shell`, beside `mode`, so one read of the window size
-            // drives both.
-            if strip > 0.0 {
-                cu::Spacer().modifier(Modifier::new().fill_max_width().height(strip));
             }
             cu::Column().modifier(Modifier::new().weight(1.0).fill_max_width()).content(|| {
                 // TODO(#220 phases 4-7): each screen replaces its placeholder as it moves.
@@ -778,16 +776,16 @@ fn requested_size() -> (u16, u16) {
         .unwrap_or((1440, 900))
 }
 
-/// On macOS the window opens with content under the traffic lights (FR-L33, compose-rust
-/// v0.0.6 `Chrome::FullSize`); other systems keep their chrome. Every window asks for a size
+/// Every Ember window takes the same per-system chrome (FR-L33, `safe_area::chrome_for`): macOS
+/// `FullSize` with content under the traffic lights, Windows and Linux the system's own caption
+/// with its real buttons. Every window asks for a size
 /// report on each whole-dp change (compose-rust v0.0.7, #479), because the screens lay out from
 /// `width_dp` and `height_dp`, not only from the size class.
 pub fn window_chrome(window: Window) -> Window {
     let window = window.with_report_size(true);
-    if cfg!(target_os = "macos") {
-        window.with_chrome(compose_rust::schema::Chrome::FullSize)
-    } else {
-        window
+    match crate::ui::safe_area::chrome_for(crate::ui::safe_area::current_platform()) {
+        Some(chrome) => window.with_chrome(chrome),
+        None => window,
     }
 }
 
@@ -1300,6 +1298,38 @@ mod tests {
         assert!(len_after_send > initial);
         assert!(s.reset_demo());
         assert_eq!(d.events_for("demo-s1").len(), initial);
+    }
+
+    /// Every `SetModifier` one composition sends, as debug text.
+    fn sent_modifiers(content: fn()) -> Vec<String> {
+        use compose_rust::protocol::{decode_batch, Mutation};
+        use compose_rust::{Host, Recomposer};
+        let mut host = Host::new(move || Box::new(Recomposer::new(content)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetModifier { modifier, .. } => Some(format!("{modifier:?}")),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fr_l28_1_the_tab_bar_fits_a_360_window_with_12_on_both_sides() {
+        // Flip 4 review 3.1: five fixed 70 dp pills (350) plus the 4 dp insides and the 12 dp
+        // sides (32) asked for 382 dp in a 360 window, so the card ran to the right edge. The
+        // mockup's tab is `flex:1 1 0; min-width:0` (`style.css`), so the pill takes its cell.
+        crate::ui::window_size::set_opened_for_test(Some((360.0, 880.0)));
+        let mods = sent_modifiers(|| BottomBar(NavMenu::Home, NavCounts::default(), |_| {}));
+        crate::ui::window_size::set_opened_for_test(None);
+        let fixed: f32 = mods
+            .iter()
+            .filter_map(|m| m.strip_prefix("Width(").and_then(|r| r.strip_suffix(')')).and_then(|v| v.parse::<f32>().ok()))
+            .sum();
+        assert!(fixed <= 360.0 - 2.0 * TABBAR_SIDE_GAP, "fixed widths {fixed} dp leave no room at 360: {mods:?}");
+        assert_eq!(mods.iter().filter(|m| *m == "Width(12.0)").count(), 2, "12 dp on both sides: {mods:?}");
+        assert!(!mods.iter().any(|m| m == "Width(70.0)"), "no fixed 70 dp pill: {mods:?}");
     }
 
     fn count_text(batch: &[compose_rust::protocol::Mutation<'_>], want: &str) -> usize {

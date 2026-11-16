@@ -10,6 +10,7 @@
 #   release-workflow     .github/scripts/checks/check-release-workflow.sh (SPEC NFR-R1) and
 #                        .github/scripts/tests/check-tag-version.test.sh and
 #                        .github/scripts/tests/dry-run-summary.test.sh (#880)
+#                        .github/scripts/tests/pe-stack-reserve.test.sh (#880)
 #   node-units           .github/scripts/checks/check-node-units.sh + its test (SPEC FR-P6)
 #   ose-fetch            .github/scripts/tests/fetch-ose-artifact.test.sh (SPEC FR-W4 acceptance
 #                        step 5: the release archive is checked against SHA256SUMS, #83)
@@ -99,6 +100,8 @@ jobs:
         run: bash .github/scripts/tests/check-tag-version.test.sh
       - name: Run .github/scripts/tests/dry-run-summary.test.sh
         run: bash .github/scripts/tests/dry-run-summary.test.sh
+      - name: Run .github/scripts/tests/pe-stack-reserve.test.sh
+        run: bash .github/scripts/tests/pe-stack-reserve.test.sh
 
   vendored-css:
     name: Vendored Code-OSS CSS is reproducible

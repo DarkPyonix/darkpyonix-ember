@@ -2026,7 +2026,7 @@ pub fn EmberSheetSized(
     let modifier = with_shadows(Modifier::new().padding(0.0), theme.shadow_sm()).background(paint(theme.palette.surface));
     // `.sheet.card` (FR-L32, #583): the 1 px `line` border is what separates a dark sheet from
     // the dimmed page. The full-screen monitor has none (`border:0` at 560 px and below).
-    let framed = modifier.border(1.0, paint(theme.palette.line));
+    let framed = modifier.clone().border(1.0, paint(theme.palette.line));
     let dismiss = on_dismiss.clone();
     let window = crate::ui::window_size::current_window_size();
     let presentation = sheet_presentation(window.width_dp, monitor);

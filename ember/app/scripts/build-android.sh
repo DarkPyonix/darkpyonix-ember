@@ -48,6 +48,14 @@ export COMPOSE_RUST_ANDROID_KOTLIN_DIR="$project/app/src/main/kotlin"
 # the environment: a daemon left behind holds its heap on a shared machine.
 export GRADLE_OPTS="${GRADLE_OPTS:-} -Dorg.gradle.daemon=false"
 
+# Lint in the generated project crashes in a release build (android/lint.xml says why). dx writes
+# the Gradle project and runs Gradle in one step, with no hook between them, but it leaves files it
+# does not write in place, so the lint configuration goes into the module directory first.
+if [[ "$profile" == release ]]; then
+    mkdir -p "$project/app"
+    cp android/lint.xml "$project/app/lint.xml"
+fi
+
 dx build --platform android --target aarch64-linux-android ${args[@]+"${args[@]}"}
 
 find "$project/app/build/outputs/apk" -name '*.apk' -print

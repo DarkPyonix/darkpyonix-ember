@@ -924,6 +924,331 @@ async fn fr_g3_a_configured_ssh_command_is_used_with_batch_mode() {
 }
 
 #[cfg(unix)]
+struct SshdServer {
+    child: std::process::Child,
+    port: u16,
+    known_hosts: PathBuf,
+    authorized_keys: PathBuf,
+    user: String,
+    log_file: PathBuf,
+}
+
+#[cfg(unix)]
+impl Drop for SshdServer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[cfg(unix)]
+fn find_sshd() -> Option<PathBuf> {
+    for p in ["/usr/sbin/sshd", "/sbin/sshd", "/usr/local/sbin/sshd", "/opt/homebrew/sbin/sshd"] {
+        let path = Path::new(p);
+        if path.is_file() {
+            return Some(path.to_path_buf());
+        }
+    }
+    None
+}
+
+#[cfg(unix)]
+fn start_sshd(dir: &Path) -> Option<SshdServer> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Some(sshd_bin) = find_sshd() else {
+        eprintln!("skipping fr_g3_real_ssh_config_push_fetch_and_pull_against_sshd: sshd binary not found in /usr/sbin, /sbin, /usr/local/sbin, or /opt/homebrew/sbin");
+        return None;
+    };
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+
+    let host_key = dir.join("host_ed25519");
+    let keygen = Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-f", &s(&host_key)])
+        .output()
+        .expect("ssh-keygen must be installed alongside sshd");
+    assert!(
+        keygen.status.success(),
+        "ssh-keygen failed ({}): {}",
+        keygen.status,
+        String::from_utf8_lossy(&keygen.stderr)
+    );
+
+    let host_pub = std::fs::read_to_string(dir.join("host_ed25519.pub")).unwrap();
+    let known_hosts = dir.join("known_hosts");
+    std::fs::write(&known_hosts, format!("[127.0.0.1]:{port} {}\n", host_pub.trim())).unwrap();
+    std::fs::set_permissions(&known_hosts, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    let authorized_keys = dir.join("authorized_keys");
+    std::fs::write(&authorized_keys, "").unwrap();
+    std::fs::set_permissions(&authorized_keys, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    let user = std::env::var("USER")
+        .ok()
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| {
+            let o = Command::new("id").arg("-un").output().unwrap();
+            String::from_utf8_lossy(&o.stdout).trim().to_string()
+        });
+
+    // Build a compact, whitespace-free PATH for sshd's `SetEnv`. OpenSSH's `SetEnv` splits on
+    // whitespace, so inheriting a caller PATH that contains spaces (for example
+    // `/Users/.../Application Support/...` on macOS) makes sshd reject `sshd_config` with
+    // `Invalid environment.` and exit 255.
+    let git_out = Command::new("git").arg("--exec-path").output().unwrap();
+    let git_exec = String::from_utf8_lossy(&git_out.stdout).trim().to_string();
+    let which_git = Command::new("which").arg("git").output().ok();
+    let git_bin_dir = which_git
+        .as_ref()
+        .and_then(|o| std::str::from_utf8(&o.stdout).ok())
+        .and_then(|p| Path::new(p.trim()).parent())
+        .and_then(|p| p.to_str())
+        .unwrap_or("/usr/bin");
+    let mut path_entries = Vec::new();
+    for entry in [
+        git_exec.as_str(),
+        git_bin_dir,
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    ] {
+        if !entry.is_empty()
+            && !entry.chars().any(char::is_whitespace)
+            && !path_entries.contains(&entry)
+        {
+            path_entries.push(entry);
+        }
+    }
+    let sshd_path_dir = path_entries.join(":");
+
+    let cfg = dir.join("sshd_config");
+    let pid_file = dir.join("sshd.pid");
+    let log_file = dir.join("sshd.log");
+    std::fs::write(
+        &cfg,
+        format!(
+            "ListenAddress 127.0.0.1:{port}\n\
+             HostKey {}\n\
+             AuthorizedKeysFile {}\n\
+             PidFile {}\n\
+             UsePAM no\n\
+             PasswordAuthentication yes\n\
+             KbdInteractiveAuthentication no\n\
+             PubkeyAuthentication yes\n\
+             StrictModes no\n\
+             SetEnv PATH={sshd_path_dir}\n",
+            s(&host_key),
+            s(&authorized_keys),
+            s(&pid_file),
+        ),
+    )
+    .unwrap();
+
+    let log_out = std::fs::File::create(&log_file).unwrap();
+    let log_err = log_out.try_clone().unwrap();
+    let mut child = match Command::new(&sshd_bin)
+        .args(["-D", "-e", "-f", &s(&cfg)])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(log_out))
+        .stderr(std::process::Stdio::from(log_err))
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) if cfg!(target_os = "macos") => {
+            panic!("failed to spawn {}: {e}", sshd_bin.display());
+        }
+        Err(e) => {
+            eprintln!(
+                "skipping fr_g3_real_ssh_config_push_fetch_and_pull_against_sshd: failed to spawn {}: {e}",
+                sshd_bin.display()
+            );
+            return None;
+        }
+    };
+
+    let mut ready = false;
+    for _ in 0..100 {
+        if let Ok(Some(st)) = child.try_wait() {
+            let log = std::fs::read_to_string(&log_file).unwrap_or_default();
+            if cfg!(target_os = "macos") {
+                panic!(
+                    "sshd ({}) exited early with {st}.\nsshd_config:\n{}\nsshd log:\n{log}",
+                    sshd_bin.display(),
+                    std::fs::read_to_string(&cfg).unwrap_or_default()
+                );
+            }
+            eprintln!(
+                "skipping fr_g3_real_ssh_config_push_fetch_and_pull_against_sshd: sshd ({}) exited early ({st}); sshd log: {}",
+                sshd_bin.display(),
+                log.trim()
+            );
+            return None;
+        }
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            ready = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if !ready {
+        let _ = child.kill();
+        let _ = child.wait();
+        let log = std::fs::read_to_string(&log_file).unwrap_or_default();
+        if cfg!(target_os = "macos") {
+            panic!(
+                "sshd ({}) did not listen on 127.0.0.1:{port} within 5s.\nsshd log:\n{log}",
+                sshd_bin.display()
+            );
+        }
+        eprintln!(
+            "skipping fr_g3_real_ssh_config_push_fetch_and_pull_against_sshd: sshd ({}) did not listen on 127.0.0.1:{port} within 5s; sshd log: {}",
+            sshd_bin.display(),
+            log.trim()
+        );
+        return None;
+    }
+
+    Some(SshdServer { child, port, known_hosts, authorized_keys, user, log_file })
+}
+
+#[cfg(unix)]
+fn gen_ssh_key(dir: &Path, name: &str) -> (PathBuf, String) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let key = dir.join(name);
+    let o = Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-f", &s(&key)])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "ssh-keygen: {}", String::from_utf8_lossy(&o.stderr));
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let pub_line = std::fs::read_to_string(dir.join(format!("{name}.pub"))).unwrap().trim().to_string();
+    (key, pub_line)
+}
+
+#[cfg(unix)]
+fn write_ssh_config(path: &Path, srv: &SshdServer, alias: &str, identity: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _ = &srv.log_file;
+    std::fs::write(
+        path,
+        format!(
+            "Host {alias}\n\
+             \x20 HostName 127.0.0.1\n\
+             \x20 Port {}\n\
+             \x20 User {}\n\
+             \x20 IdentityFile '{}'\n\
+             \x20 IdentitiesOnly yes\n\
+             \x20 UserKnownHostsFile '{}'\n\
+             \x20 StrictHostKeyChecking yes\n\
+             \x20 PreferredAuthentications publickey,password\n",
+            srv.port,
+            srv.user,
+            s(identity),
+            s(&srv.known_hosts),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fr_g3_real_ssh_config_push_fetch_and_pull_against_sshd() {
+    let f = start().await;
+    let ssh_dir = f.root.join("sshd");
+    let Some(srv) = start_sshd(&ssh_dir) else {
+        return;
+    };
+
+    let (good_key, good_pub) = gen_ssh_key(&ssh_dir, "id_good");
+    let (bad_key, _) = gen_ssh_key(&ssh_dir, "id_bad");
+    std::fs::write(&srv.authorized_keys, format!("{good_pub}\n")).unwrap();
+
+    let good_cfg = ssh_dir.join("ssh_config_good");
+    write_ssh_config(&good_cfg, &srv, "ember-ssh-remote", &good_key);
+    let bad_cfg = ssh_dir.join("ssh_config_bad");
+    write_ssh_config(&bad_cfg, &srv, "ember-ssh-remote", &bad_key);
+
+    let bare = f.root.join("remote.git");
+    std::fs::create_dir_all(&bare).unwrap();
+    git(&bare, &["init", "-q", "--bare", "-b", "main"]);
+    let remote_url = format!("ember-ssh-remote:{}", s(&bare));
+
+    // Repo A pushes initial commit and a second commit over real OpenSSH using `core.sshCommand`.
+    let repo_a = f.root.join("repo-a");
+    one_commit(&repo_a);
+    git(&repo_a, &["config", "core.sshCommand", &format!("ssh -F '{}'", s(&good_cfg))]);
+    git(&repo_a, &["remote", "add", "origin", &remote_url]);
+    let _: GitOutput = f.ok("push", &remote_req(&repo_a)).await;
+    let st_a = f.status(&repo_a).await;
+    assert_eq!(st_a.upstream.as_deref(), Some("origin/main"));
+    assert_eq!((st_a.ahead, st_a.behind), (0, 0));
+
+    // Repo B starts from the same initial commit, points `origin` at the SSH host alias, and uses
+    // the same `core.sshCommand`.
+    let repo_b = f.root.join("repo-b");
+    git(&f.root, &["clone", "-q", &s(&bare), "repo-b"]);
+    git(&repo_b, &["config", "user.name", "Tester"]);
+    git(&repo_b, &["config", "user.email", "tester@example.com"]);
+    git(&repo_b, &["config", "commit.gpgsign", "false"]);
+    git(&repo_b, &["remote", "set-url", "origin", &remote_url]);
+    git(&repo_b, &["config", "core.sshCommand", &format!("ssh -F '{}'", s(&good_cfg))]);
+
+    // Push a new commit from A over SSH.
+    write(&repo_a, "a.txt", "one\nover-ssh\n");
+    f.stage(&repo_a, &["a.txt"]).await;
+    f.commit(&repo_a, "second over ssh").await;
+    let _: GitOutput = f.ok("push", &remote_req(&repo_a)).await;
+    assert_eq!(f.status(&repo_a).await.ahead, 0);
+
+    // Fetch and pull in B over SSH using the Host alias and IdentityFile from `ssh_config`.
+    let _: GitOutput = f.ok("fetch", &GitRemoteRequest { repo: s(&repo_b), remote: Some("origin".into()) }).await;
+    let st_b = f.status(&repo_b).await;
+    assert_eq!((st_b.ahead, st_b.behind), (0, 1));
+    let _: GitOutput = f.ok("pull", &remote_req(&repo_b)).await;
+    assert_eq!(f.status(&repo_b).await.behind, 0);
+    assert_eq!(std::fs::read_to_string(repo_b.join("a.txt")).unwrap(), "one\nover-ssh\n");
+
+    // With an unauthorized key and PasswordAuthentication enabled on sshd, the appended
+    // `-o BatchMode=yes` makes ssh fail with 409 conflict (carrying ssh's Permission denied text
+    // in Korean, not a 504 timeout) instead of waiting on a password prompt.
+    git(&repo_b, &["config", "core.sshCommand", &format!("ssh -F '{}'", s(&bad_cfg))]);
+    let t = std::time::Instant::now();
+    for op in ["fetch", "push"] {
+        let msg = f
+            .err(op, &GitRemoteRequest { repo: s(&repo_b), remote: Some("origin".into()) }, 409, "conflict")
+            .await;
+        assert!(has_korean(&msg) && msg.contains("원격"), "{op}: {msg}");
+        assert!(
+            msg.to_ascii_lowercase().contains("permission denied"),
+            "{op}: expected ssh permission denied in message, got: {msg}"
+        );
+    }
+    assert!(t.elapsed() < std::time::Duration::from_secs(30), "unexpectedly slow: {:?}", t.elapsed());
+    let sshd_log = std::fs::read_to_string(&srv.log_file).unwrap_or_default();
+    assert!(
+        sshd_log.contains("Accepted publickey"),
+        "expected sshd log to record Accepted publickey, got:\n{sshd_log}"
+    );
+    eprintln!(
+        "fr_g3_real_ssh_config_push_fetch_and_pull_against_sshd ran against sshd on 127.0.0.1:{} ({} log bytes)",
+        srv.port,
+        sshd_log.len()
+    );
+}
+
+#[cfg(unix)]
 fn pid_alive(pid: &str) -> bool {
     Command::new("kill").args(["-0", pid]).output().map(|o| o.status.success()).unwrap_or(false)
 }

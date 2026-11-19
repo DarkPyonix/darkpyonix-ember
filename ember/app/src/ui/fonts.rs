@@ -146,7 +146,10 @@ pub const CODE_EDITOR_COLORS: compose_rust::code::CodeEditorColors = compose_rus
     .current_line_number(ColorRole::OnSurface)
     // FR-L31.28: the caret line's band is `surface-2` (`editor.css:70` `.ed-ln.cur`), which the
     // palette gives `SurfaceVariant`. A part named here is drawn opaque, not as a wash.
-    .current_line(ColorRole::SurfaceVariant);
+    .current_line(ColorRole::SurfaceVariant)
+    // compose-rust#816 (v0.0.11): extend the caret line's `surface-2` band across the line
+    // number and fold columns (`editor.css:70,72`).
+    .current_line_gutter(ColorRole::SurfaceVariant);
 
 /// The Ember palette's value for a role in one scheme (tests and the capture checks read it).
 pub fn palette_color(role: ColorRole, scheme: ColorScheme) -> Option<compose_rust::Color> {
@@ -333,11 +336,16 @@ mod tests {
     }
 
     /// FR-L31.28 (design review E2, #895): the caret line's band is the mockup's `surface-2`
-    /// (`editor.css:70`; `style.css:3` `#f7f6f2`, `:28` `#252523`), not the toolkit's accent wash.
+    /// (`editor.css:70`; `style.css:3` `#f7f6f2`, `:28` `#252523`), not the toolkit's accent wash,
+    /// and extends across the gutter (`current_line_gutter`, compose-rust#816).
     #[test]
     fn fr_l31_28_the_current_line_is_surface_2() {
         assert!(include_str!("../../assets/editor/editor.css").contains(".ed-ln.cur{background:var(--surface-2)}"));
         let role = CODE_EDITOR_COLORS.current_line.expect("the editor names its current line colour");
+        let gutter_role = CODE_EDITOR_COLORS
+            .current_line_gutter
+            .expect("the editor extends the current line band across the gutter");
+        assert_eq!(gutter_role, role);
         for (scheme, rgb) in [(ColorScheme::Light, 0xf7f6f2), (ColorScheme::Dark, 0x252523)] {
             let colour = editor_theme(scheme).palette.expect("editor palette").get(role, scheme).expect("the role has a value");
             assert_eq!(colour.to_argb() & 0x00ff_ffff, rgb, "{scheme:?}");

@@ -9,7 +9,7 @@
 
 #![allow(non_snake_case)]
 
-use compose_rust::runtime::{disposable_effect, launched_effect, on_dispose, mutable_state_of, remember_with_key, MutableState};
+use compose_rust::runtime::{launched_effect, mutable_state_of, remember_with_key, MutableState};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
 use compose_rust::{Alignment, SpaceRole};
@@ -334,7 +334,9 @@ pub fn MembersSheet(channel: &str, channel_name: &str, st: &OwnerState, live: bo
     // Review sample data stands in for a server; it is never fetched over.
     let live = live || st.sample;
     let fetch = live && !st.sample;
-    // Entering a room starts with the sheet shut and nothing left from an earlier visit.
+    // Entering a room starts with the sheet shut and nothing left from an earlier visit. When the
+    // room or the channels screen leaves the composition, `OwnerState`'s `remember_with_key` slot
+    // releases its `MutableState`s automatically.
     {
         let st2 = st.clone();
         launched_effect(format!("enter:{channel}"), move || async move {
@@ -342,19 +344,6 @@ pub fn MembersSheet(channel: &str, channel_name: &str, st: &OwnerState, live: bo
                 st2.open.set(false);
                 st2.reset();
             }
-        });
-    }
-    // Leaving the room (back, or another room) drops the link and the confirm too: the cleanup
-    // runs when this call site leaves the composition or the room changes.
-    {
-        let st2 = st.clone();
-        disposable_effect(channel.to_string(), move || {
-            on_dispose(move || {
-                if !st2.sample {
-                    st2.open.set(false);
-                    st2.reset();
-                }
-            })
         });
     }
     // Fetch when the sheet opens (the key changes with the open flag).

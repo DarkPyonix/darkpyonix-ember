@@ -49,9 +49,9 @@ pub const AGENT_SEND_UNSUPPORTED: &str = "agent로 보내기는 아직 지원되
 pub const OFFLINE_TAG: &str = "오프라인";
 
 /// Whether 파일 고르기 can open the platform's file dialog (`compose_rust::FileDialog`,
-/// compose-rust#483). In the v0.0.11 pin only macOS shows one; Windows, Linux, iOS, Android and
-/// the web answer "unavailable" (TODO(compose-rust#483): the other platforms' dialogs; the issue
-/// is closed with macOS alone). Dropped files stay with compose-rust#485.
+/// compose-rust#483, in v0.0.11). On desktop in v0.0.11 only macOS shows a native dialog;
+/// Windows, Linux, iOS and Android answer "unavailable". Dropped files stay with
+/// compose-rust#485.
 pub const FILE_PICKER_AVAILABLE: bool = cfg!(target_os = "macos");
 
 /// The title of the file dialog 파일 고르기 opens.

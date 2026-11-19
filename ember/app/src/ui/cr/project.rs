@@ -497,8 +497,8 @@ fn ComputerStrip(chips: &[ComputerChip], st: &Ui) {
                 cu::Spacer().modifier(Modifier::new().width(SP[1]));
             }
             // The hub's devices, registered with the node's token (FR-X7, #490).
-            // TODO(compose-rust#817): `Modifier::border` has no stroke dash, so the add chip keeps a
-            // solid 1 px border (`.cchip.add{border-style:dashed}`).
+            // TODO(compose-rust#817, after v0.0.12): `Modifier::border` has no stroke dash in
+            // v0.0.11, so the add chip keeps a solid 1 px border (`.cchip.add{border-style:dashed}`).
             let add = Modifier::new().height(56.0).border(1.0, paint(p.line)).corner_radius(CORNER_MD);
             let ui = st.add.clone();
             Clickable(add, Alignment::CenterStart, move || ui.show(), || {
@@ -2284,7 +2284,7 @@ mod tests {
         let strip = &src[src.find("fn ComputerStrip(").unwrap()..src.find("fn StripArrow(").unwrap()];
         assert!(!strip.contains("scroll.offset()"), "the strip keeps no offset from composition");
         // The open toolkit gaps cite their compose-rust issues.
-        assert!(strip.contains("TODO(compose-rust#817)") && strip.contains("TODO(compose-rust#818)"));
+        assert!(strip.contains("TODO(compose-rust#817, after v0.0.12)") && strip.contains("TODO(compose-rust#818)"));
         assert!(!strip.contains("TODO(compose-rust, #671)") && !arrow.contains("TODO("));
     }
 

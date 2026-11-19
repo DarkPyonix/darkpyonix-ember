@@ -1041,6 +1041,14 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
             .then(|| (form_init.get(), Some(id.clone()))),
     };
     let form_dirty = form_initial.is_some() && routine_form_dirty(&form_init.get(), &form_draft.get());
+    if let Some(svc) = try_services() {
+        if svc.ui.routine_form_dirty.get_untracked() != form_dirty {
+            svc.ui.routine_form_dirty.set(form_dirty);
+        }
+        if !form_dirty && svc.ui.routine_pending_leave.get().is_some() {
+            svc.ui.routine_pending_leave.set(None);
+        }
+    }
 
     // Opening a form starts it from the stored routine (or an empty draft) and remembers that
     // starting point, which is what "changed" is measured against.
@@ -1074,6 +1082,22 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                 }
                 Leave::NewForm => open_form(Panel::New),
                 Leave::EditForm(id) => open_form(Panel::Edit(id)),
+                Leave::NavMenu(menu) => {
+                    panel.set(Panel::View);
+                    if let Some(svc) = try_services() {
+                        svc.ui.routine_form_dirty.set(false);
+                        svc.ui.routine_pending_leave.set(None);
+                        super::shell::choose(&svc.ui, menu);
+                    }
+                }
+                Leave::Search => {
+                    panel.set(Panel::View);
+                    if let Some(svc) = try_services() {
+                        svc.ui.routine_form_dirty.set(false);
+                        svc.ui.routine_pending_leave.set(None);
+                        svc.ui.go(crate::ui::Route::Search);
+                    }
+                }
             }
         }
     };
@@ -1288,9 +1312,16 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
     {
         let keep = {
             let c = pending_leave.clone();
-            move || c.set(None)
+            move || {
+                c.set(None);
+                if let Some(svc) = try_services() {
+                    svc.ui.routine_pending_leave.set(None);
+                }
+            }
         };
-        let asked = pending_leave.get();
+        let asked = pending_leave
+            .get()
+            .or_else(|| try_services().and_then(|s| s.ui.routine_pending_leave.get()));
         EmberSheet("변경 사항", asked.is_some(), keep.clone(), None, || {
             cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
                 Label(ROUTINE_DISCARD_QUESTION, Fs::Md, Weight::Regular, None, Some(3));
@@ -1299,8 +1330,14 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                 AppButton("계속 편집", None, ButtonKind::Default, true, true, false, keep.clone());
                 let (c, perform) = (pending_leave.clone(), perform.clone());
                 AppButton("버리기", None, ButtonKind::Primary, true, true, false, move || {
-                    if let Some(l) = c.get() {
-                        c.set(None);
+                    let next = c.get().or_else(|| {
+                        try_services().and_then(|s| s.ui.routine_pending_leave.get())
+                    });
+                    c.set(None);
+                    if let Some(svc) = try_services() {
+                        svc.ui.routine_pending_leave.set(None);
+                    }
+                    if let Some(l) = next {
                         perform(l);
                     }
                 });
@@ -2545,38 +2582,73 @@ pub(super) fn RoutineForm(
         return;
     }
 
-    let body_height = {
-        let w = current_window_size();
-        super::components::sheet_body_max_height(w.width_dp, w.height_dp, false, 60.0 + 65.0).min(600.0)
+    let w = current_window_size();
+    // FR-L32.1 (#596): in the bottom sheet (below 560 dp) the body is a plain column so the
+    // toolkit bottom sheet sizes to its content up to 85 percent of the window and scrolls taller
+    // content itself; the dialog keeps the capped scrolling body.
+    let wraps = super::components::sheet_wraps_content(w.width_dp);
+    let body_height = super::components::sheet_body_max_height(
+        w.width_dp,
+        w.height_dp,
+        false,
+        super::components::SHEET_HEADER_CHROME_H + super::components::SHEET_FOOTER_H,
+    )
+    .min(600.0);
+    // The phone bottom sheet (below 560 dp) scrolls as one container up to 85 percent of the
+    // window, so its 취소 and 저장 sit in the header before the close button (`.sheet-acts`), as
+    // the 새 프로젝트 and 프로젝트 설정 sheets do, keeping them on screen without scrolling; the
+    // dialog (560 dp and wider) keeps `SheetFooter` below its capped scrolling body.
+    let mut header_actions = {
+        let close = on_close.clone();
+        let draft = ctx.draft.clone();
+        let tried = ctx.tried.clone();
+        let editing_initial = ctx.editing.then(|| ctx.initial.clone());
+        let save_cb = on_save.clone();
+        move || {
+            let mut c = close.clone();
+            AppButton("취소", None, ButtonKind::Default, true, true, false, move || c());
+            cu::Spacer().modifier(Modifier::new().width(SP[0]));
+            let save = form_save_handler(draft.clone(), tried.clone(), editing_initial.clone(), save_cb.clone());
+            AppButton("저장", None, ButtonKind::Primary, true, true, false, save);
+            cu::Spacer().modifier(Modifier::new().width(SP[1]));
+        }
     };
-    EmberSheet(title, true, on_close.clone(), None, move || {
-        cu::ScrollColumn()
-            .modifier(Modifier::new().fill_max_width().height(body_height))
-            .content(|| {
+    EmberSheet(title, true, on_close.clone(), wraps.then_some(&mut header_actions as &mut dyn FnMut()), move || {
+            let fields = || {
                 cu::Column()
                     .spacing(SP[3])
                     .modifier(Modifier::new().fill_max_width().padding(SP[4]))
                     .content(|| FormFields(&ctx));
-            });
-        SheetFooter(move || {
-            let mut close = on_close.clone();
-            AppButton("취소", None, ButtonKind::Default, true, true, false, move || close());
-            AppButton(
-                "저장",
-                None,
-                ButtonKind::Primary,
-                true,
-                true,
-                false,
-                form_save_handler(
-                    ctx.draft.clone(),
-                    ctx.tried.clone(),
-                    ctx.editing.then(|| ctx.initial.clone()),
-                    on_save.clone(),
-                ),
-            );
-        });
-    });
+            };
+            if wraps {
+                cu::Column()
+                    .modifier(Modifier::new().fill_max_width())
+                    .content(fields);
+            } else {
+                cu::ScrollColumn()
+                    .modifier(Modifier::new().fill_max_width().height(body_height))
+                    .content(fields);
+                SheetFooter(move || {
+                    let mut close = on_close.clone();
+                    AppButton("취소", None, ButtonKind::Default, true, true, false, move || close());
+                    AppButton(
+                        "저장",
+                        None,
+                        ButtonKind::Primary,
+                        true,
+                        true,
+                        false,
+                        form_save_handler(
+                            ctx.draft.clone(),
+                            ctx.tried.clone(),
+                            ctx.editing.then(|| ctx.initial.clone()),
+                            on_save.clone(),
+                        ),
+                    );
+                });
+            }
+        },
+    );
 }
 
 /// The fields, in `FORM_FIELDS` order, for both shells.
@@ -3339,12 +3411,225 @@ mod tests {
     fn fr_l25_form_routes_all_go_through_request_leave() {
         let src = include_str!("routines.rs");
         let screen = src.split("pub fn RoutinesScreenWith").nth(1).unwrap().split("pub fn preview_routines").next().unwrap();
-        for route in ["Leave::NewForm", "Leave::OpenRoutine", "Leave::Cancel", "Leave::EditForm"] {
+        for route in [
+            "Leave::NewForm",
+            "Leave::OpenRoutine",
+            "Leave::Cancel",
+            "Leave::EditForm",
+            "Leave::NavMenu",
+            "Leave::Search",
+        ] {
             assert!(screen.contains(route), "{route}");
         }
         assert!(!screen.contains("pan.set(Panel::Edit"));
         assert!(!screen.contains("panel_new.set"));
         assert_eq!(ROUTINE_DISCARD_QUESTION, "변경 사항을 버릴까요?");
+    }
+
+    /// FR-L25 (#596 (1), (5)): leaving a dirty routine form via 취소, clicking another routine
+    /// row, or shell navigation (`shell::choose` / `shell::open_search`) opens the `"변경 사항"`
+    /// discard confirmation sheet (`"변경 사항을 버릴까요?"`); `"계속 편집"` keeps the dirty form
+    /// open, and `"버리기"` discards changes and completes the leave.
+    #[test]
+    fn fr_l25_host_dirty_form_discard_confirm_on_cancel_row_and_sidebar_nav() {
+        let _guard = crate::services::test_guard();
+        let svc = crate::services::test_services();
+        svc.reset_demo();
+        svc.ui.menu.set(crate::ui::cr::shell::NavMenu::Routines);
+        svc.ui.go(crate::ui::Route::Projects);
+        compose_rust::window::reset_window_size();
+
+        let mut host = Host::new(|| Box::new(Recomposer::new(|| RoutinesScreenWith(sample_entries(), true))));
+        let mut seen = Seen::default();
+        let mut value_change: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+        let mut placeholders: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+        let mut scan_all = |batch: &[Mutation<'_>],
+                            seen: &mut Seen,
+                            vc: &mut std::collections::HashMap<u32, u64>,
+                            ph: &mut std::collections::HashMap<u32, String>| {
+            seen.scan(batch);
+            for m in batch {
+                match m {
+                    Mutation::SetProp {
+                        node_id,
+                        property: PropertyKind::OnValueChange,
+                        value: PropertyValue::Integer(h),
+                    } => {
+                        vc.insert(*node_id, *h as u64);
+                    }
+                    Mutation::SetProp {
+                        node_id,
+                        property: PropertyKind::Placeholder,
+                        value: PropertyValue::String(s),
+                    } => {
+                        ph.insert(*node_id, s.to_string());
+                    }
+                    Mutation::Remove { node_id } => {
+                        vc.remove(node_id);
+                        ph.remove(node_id);
+                    }
+                    _ => {}
+                }
+            }
+        };
+
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        scan_all(&batch, &mut seen, &mut value_change, &mut placeholders);
+        let (bytes, _) = host
+            .dispatch(HostEvent {
+                node_id: 0,
+                handler_id: 0,
+                payload: EventPayload::WindowSizeChanged {
+                    width_dp: 1440.0,
+                    height_dp: 900.0,
+                    class: WindowSizeClass::Expanded,
+                    height_class: WindowHeightClass::Medium,
+                    safe_area_top: 0.0,
+                    safe_area_leading: 0.0,
+                    safe_area_trailing: 0.0,
+                },
+            })
+            .expect("dispatch resize");
+        scan_all(&decode_batch(bytes).expect("decode"), &mut seen, &mut value_change, &mut placeholders);
+
+        let find_clickable = |seen: &Seen, label: &str| -> u32 {
+            seen.texts
+                .iter()
+                .find(|(id, t)| *t == label && seen.clickables.contains_key(id))
+                .map(|(id, _)| *id)
+                .unwrap_or_else(|| panic!("no clickable {label}"))
+        };
+
+        // 1. Click "편집" to open the inline routine form; it starts clean.
+        let edit_btn = find_clickable(&seen, "편집");
+        let (bytes, _) = host
+            .dispatch(HostEvent {
+                node_id: edit_btn,
+                handler_id: seen.clickables[&edit_btn],
+                payload: EventPayload::Clicked,
+            })
+            .expect("click 편집");
+        scan_all(&decode_batch(bytes).expect("decode"), &mut seen, &mut value_change, &mut placeholders);
+        assert!(seen.texts.values().any(|t| t == "루틴 편집"), "inline edit form opened");
+        assert!(!svc.ui.routine_form_dirty.get(), "freshly opened form is not dirty");
+
+        // 2. Edit the Name field via OnValueChange -> form becomes dirty.
+        let name_field = placeholders
+            .iter()
+            .find(|(id, p)| *p == "바꾸려면 새 이름을 입력하세요" && value_change.contains_key(id))
+            .map(|(id, _)| *id)
+            .expect("name field with OnValueChange");
+        let (bytes, _) = host
+            .dispatch(HostEvent {
+                node_id: name_field,
+                handler_id: value_change[&name_field],
+                payload: EventPayload::TextChanged("수정된 루틴 이름".into()),
+            })
+            .expect("change routine name");
+        scan_all(&decode_batch(bytes).expect("decode"), &mut seen, &mut value_change, &mut placeholders);
+        assert!(svc.ui.routine_form_dirty.get(), "editing a field marks routine_form_dirty");
+
+        // 3. Click "취소" -> asks "변경 사항을 버릴까요?", click "계속 편집" -> stays in dirty form.
+        let cancel_btn = find_clickable(&seen, "취소");
+        let (bytes, _) = host
+            .dispatch(HostEvent {
+                node_id: cancel_btn,
+                handler_id: seen.clickables[&cancel_btn],
+                payload: EventPayload::Clicked,
+            })
+            .expect("click 취소");
+        scan_all(&decode_batch(bytes).expect("decode"), &mut seen, &mut value_change, &mut placeholders);
+        assert!(
+            seen.texts.values().any(|t| t == ROUTINE_DISCARD_QUESTION),
+            "clicking 취소 on a dirty form opens the discard confirmation sheet"
+        );
+        let keep_btn = find_clickable(&seen, "계속 편집");
+        let (bytes, _) = host
+            .dispatch(HostEvent {
+                node_id: keep_btn,
+                handler_id: seen.clickables[&keep_btn],
+                payload: EventPayload::Clicked,
+            })
+            .expect("click 계속 편집");
+        scan_all(&decode_batch(bytes).expect("decode"), &mut seen, &mut value_change, &mut placeholders);
+        assert!(seen.texts.values().any(|t| t == "루틴 편집"), "form remains open after 계속 편집");
+        assert!(svc.ui.routine_form_dirty.get(), "form remains dirty after 계속 편집");
+
+        // 4. Click another routine row ("PR 열리면 리뷰") -> asks "변경 사항을 버릴까요?", click "계속 편집".
+        let other_row = find_clickable(&seen, "PR 열리면 리뷰");
+        let (bytes, _) = host
+            .dispatch(HostEvent {
+                node_id: other_row,
+                handler_id: seen.clickables[&other_row],
+                payload: EventPayload::Clicked,
+            })
+            .expect("click another routine row");
+        scan_all(&decode_batch(bytes).expect("decode"), &mut seen, &mut value_change, &mut placeholders);
+        assert!(
+            seen.texts.values().any(|t| t == ROUTINE_DISCARD_QUESTION),
+            "clicking another routine row on a dirty form opens the discard confirmation sheet"
+        );
+        let keep_btn = find_clickable(&seen, "계속 편집");
+        let (bytes, _) = host
+            .dispatch(HostEvent {
+                node_id: keep_btn,
+                handler_id: seen.clickables[&keep_btn],
+                payload: EventPayload::Clicked,
+            })
+            .expect("click 계속 편집 after row click");
+        scan_all(&decode_batch(bytes).expect("decode"), &mut seen, &mut value_change, &mut placeholders);
+        assert!(seen.texts.values().any(|t| t == "루틴 편집"), "form remains open after row 계속 편집");
+
+        // 5. Shell navigation away (`shell::choose` to Projects) is intercepted while dirty:
+        // menu stays Routines, `routine_pending_leave` is set, and the confirm sheet opens.
+        crate::ui::cr::shell::choose(&svc.ui, crate::ui::cr::shell::NavMenu::Projects);
+        assert_eq!(svc.ui.menu.get(), crate::ui::cr::shell::NavMenu::Routines, "navigation is held while dirty");
+        assert_eq!(
+            svc.ui.routine_pending_leave.get(),
+            Some(crate::ui::routines::Leave::NavMenu(crate::ui::cr::shell::NavMenu::Projects))
+        );
+        let batch = decode_batch(host.rebuild().expect("rebuild after shell::choose")).expect("decode");
+        scan_all(&batch, &mut seen, &mut value_change, &mut placeholders);
+        assert!(
+            seen.texts.values().any(|t| t == ROUTINE_DISCARD_QUESTION),
+            "sidebar navigation while dirty opens the discard confirmation sheet"
+        );
+
+        // Clicking "계속 편집" cancels the pending navigation and stays on Routines.
+        let keep_btn = find_clickable(&seen, "계속 편집");
+        let (bytes, _) = host
+            .dispatch(HostEvent {
+                node_id: keep_btn,
+                handler_id: seen.clickables[&keep_btn],
+                payload: EventPayload::Clicked,
+            })
+            .expect("click 계속 편집 after sidebar nav");
+        scan_all(&decode_batch(bytes).expect("decode"), &mut seen, &mut value_change, &mut placeholders);
+        assert_eq!(svc.ui.menu.get(), crate::ui::cr::shell::NavMenu::Routines);
+        assert_eq!(svc.ui.routine_pending_leave.get(), None);
+
+        // Trigger sidebar navigation again and click "버리기" -> form closes, dirty resets, and
+        // menu navigates to Projects.
+        crate::ui::cr::shell::choose(&svc.ui, crate::ui::cr::shell::NavMenu::Projects);
+        let batch = decode_batch(host.rebuild().expect("rebuild for discard")).expect("decode");
+        scan_all(&batch, &mut seen, &mut value_change, &mut placeholders);
+        let discard_btn = find_clickable(&seen, "버리기");
+        let (bytes, _) = host
+            .dispatch(HostEvent {
+                node_id: discard_btn,
+                handler_id: seen.clickables[&discard_btn],
+                payload: EventPayload::Clicked,
+            })
+            .expect("click 버리기");
+        scan_all(&decode_batch(bytes).expect("decode"), &mut seen, &mut value_change, &mut placeholders);
+        assert_eq!(
+            svc.ui.menu.get(),
+            crate::ui::cr::shell::NavMenu::Projects,
+            "clicking 버리기 completes the held sidebar navigation"
+        );
+        assert!(!svc.ui.routine_form_dirty.get(), "dirty flag cleared after discarding");
+        assert_eq!(svc.ui.routine_pending_leave.get(), None);
+        compose_rust::window::reset_window_size();
     }
 
     /// The form's one-of choices are the mockup's `.seg` buttons: 13/500 text, and the chosen
@@ -5026,6 +5311,88 @@ mod design_review_tests {
             assert!(ra.is_some(), "{a} has a row");
             assert_eq!(ra, rb, "{a} and {b} share a row");
         }
+    }
+
+    fn sample_routine_form_sheet() {
+        let draft = remember(|| mutable_state_of(FormDraft::new("ember")));
+        let projects = vec!["ember".to_string(), "second-project".to_string()];
+        RoutineForm(
+            FormDraft::new("ember"),
+            Some("rt1".to_string()),
+            false,
+            &[],
+            &projects,
+            FormLayout::Sheet,
+            NARROW_SHEET_FIELD_W,
+            &draft,
+            |_| {},
+            || {},
+        );
+    }
+
+    /// #596 (2): at 390 dp, `RoutineForm` (`FormLayout::Sheet`) uses a plain `Column` inside the
+    /// bottom `Sheet` (`sheet_wraps_content`) so the sheet wraps its content up to 85% of the
+    /// window and scrolls taller content itself instead of clipping the form body to a 240 dp
+    /// inner `ScrollColumn`.
+    #[test]
+    fn issue_596_phone_routine_sheet_body_wraps_content_and_does_not_clip_at_240() {
+        let _guard = crate::services::test_guard();
+        crate::ui::window_size::set_opened_for_test(Some((390.0, 844.0)));
+        compose_rust::window::reset_window_size();
+        let mut host = Host::new(|| Box::new(Recomposer::new(sample_routine_form_sheet)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let has_sheet = batch.iter().any(|m| {
+            matches!(
+                m,
+                Mutation::Create {
+                    widget: compose_rust::WidgetKind::Sheet,
+                    ..
+                }
+            )
+        });
+        let has_scroll_col = batch.iter().any(|m| {
+            matches!(
+                m,
+                Mutation::Create {
+                    widget: compose_rust::WidgetKind::ScrollColumn,
+                    ..
+                }
+            )
+        });
+        let has_height_240 = batch.iter().any(|m| {
+            matches!(
+                m,
+                Mutation::SetModifier { modifier, .. } if format!("{modifier:?}") == "Height(240.0)"
+            )
+        });
+        crate::ui::window_size::set_opened_for_test(None);
+        compose_rust::window::reset_window_size();
+        assert!(has_sheet, "at 390 dp RoutineForm renders in a bottom Sheet");
+        assert!(
+            !has_scroll_col,
+            "at 390 dp RoutineForm body is a plain Column, not an inner ScrollColumn"
+        );
+        assert!(
+            !has_height_240,
+            "at 390 dp RoutineForm body is never clipped to Height(240.0)"
+        );
+        use compose_rust::protocol::PropertyValue;
+        use compose_rust::schema::PropertyKind;
+        let texts: Vec<String> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetProp {
+                    property: PropertyKind::Text,
+                    value: PropertyValue::String(s),
+                    ..
+                } => Some(s.to_string()),
+                _ => None,
+            })
+            .collect();
+        let cancel_count = texts.iter().filter(|t| t.as_str() == "취소").count();
+        let save_count = texts.iter().filter(|t| t.as_str() == "저장").count();
+        assert_eq!(cancel_count, 1, "one 취소 button in the header: {texts:?}");
+        assert_eq!(save_count, 1, "one 저장 button in the header: {texts:?}");
     }
 
     /// #596 (6): every select of the routine form is named by its field label for assistive

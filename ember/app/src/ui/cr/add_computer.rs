@@ -420,7 +420,7 @@ pub fn AddComputerSheet(ui: &AddUi) {
     // the header and footer (`Modifier::max_height`), so a short step is only as tall as its
     // rows and a long one scrolls inside the cap with the footer on screen.
     EmberSheet("컴퓨터 추가", ui.open.get(), close.clone(), None, || {
-        cu::ScrollColumn().modifier(Modifier::new().fill_max_width().max_height(body_h)).content(|| AddBody(ui, sample));
+        { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().fill_max_width().max_height(body_h), content = || AddBody(ui, sample)) };
         SheetFooter(|| {
             AppButton("닫기", None, ButtonKind::Default, true, true, false, close.clone());
         });
@@ -430,7 +430,7 @@ pub fn AddComputerSheet(ui: &AddUi) {
 /// The add-computer sheet's body for the current step.
 fn AddBody(ui: &AddUi, sample: bool) {
     let p = ember_theme().palette;
-    cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
+    { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width().padding(SP[4]), {
         let muted = Some(paint(p.muted));
         if sample {
             Label(flow::DEMO_LINE, Fs::Xs, Weight::Regular, muted, None);
@@ -445,7 +445,7 @@ fn AddBody(ui: &AddUi, sample: bool) {
             Some(EnrolView::Expired) => Outcome(ui, flow::EXPIRED_LINE, true),
             Some(EnrolView::Failed(m)) => Outcome(ui, &m, true),
         }
-    });
+    }) };
 }
 
 fn ListBody(ui: &AddUi, sample: bool) {
@@ -493,7 +493,7 @@ fn NamingBody(ui: &AddUi) {
     }
     FailureLine(ui);
     let busy = ui.busy.get();
-    cu::Row().spacing(SP[1]).content(|| {
+    { use ::compose_rust::ui::Row; Row!(spacing = SP[1], {
         let u = ui.clone();
         AppButton("취소", None, ButtonKind::Default, true, !busy, false, move || u.reset_flow());
         let (u, name) = (ui.clone(), typed.clone());
@@ -502,7 +502,7 @@ fn NamingBody(ui: &AddUi) {
                 mint(u.clone(), n);
             }
         });
-    });
+    }) };
 }
 
 fn FailureLine(ui: &AddUi) {
@@ -647,7 +647,7 @@ fn ConfirmBody(ui: &AddUi, rows: &ConfirmRows) {
     FailureLine(ui);
     let busy = ui.busy.get();
     let Some(run) = ui.run.get() else { return };
-    cu::Row().spacing(SP[1]).content(|| {
+    { use ::compose_rust::ui::Row; Row!(spacing = SP[1], {
         let (u, r) = (ui.clone(), run.clone());
         AppButton(flow::DENY_LABEL, None, ButtonKind::Default, true, !busy && !confirmed, false, move || deny(u.clone(), r.clone()));
         let (u, r, rows) = (ui.clone(), run.clone(), rows.clone());
@@ -658,7 +658,7 @@ fn ConfirmBody(ui: &AddUi, rows: &ConfirmRows) {
             }
             confirm(u.clone(), r.clone(), rows.clone());
         });
-    });
+    }) };
 }
 
 fn Outcome(ui: &AddUi, line: &str, again: bool) {
@@ -685,28 +685,28 @@ fn Outcome(ui: &AddUi, line: &str, again: bool) {
 
 fn KV(k: &str, v: &str) {
     let p = ember_theme().palette;
-    cu::Row().spacing(SP[2]).content(|| {
+    { use ::compose_rust::ui::Row; Row!(spacing = SP[2], {
         Label(k, Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(2));
         Label(v, Fs::Sm, Weight::Regular, None, Some(2));
-    });
+    }) };
 }
 
 fn DeviceRowView(r: &DeviceRow) {
     let p = ember_theme().palette;
     let m = Modifier::new().fill_max_width().background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_MD);
-    cu::Column().spacing(SP[2]).modifier(m.padding(SP[3])).content(|| {
-        cu::Row().spacing(SP[2]).content(|| {
-            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+    { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = m.padding(SP[3]), {
+        { use ::compose_rust::ui::Row; Row!(spacing = SP[2], {
+            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), {
                 Label(&r.name, Fs::Sm, Weight::Semibold, None, Some(1));
                 Label(&r.kind, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-            });
+            }) };
             if r.sample {
                 Pill("예시", super::components::PillTone::Grey, true);
             }
             Pill(r.pill.0, r.pill.1.into(), true);
             Pill(r.online.0, r.online.1.into(), true);
-        });
-    });
+        }) };
+    }) };
 }
 
 #[cfg(test)]

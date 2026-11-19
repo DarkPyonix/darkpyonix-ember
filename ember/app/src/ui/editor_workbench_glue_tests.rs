@@ -1033,7 +1033,7 @@ fn fr_l31_36_the_editor_has_no_tab_strip_while_no_tab_is_open() {
 
 #[compose_rust::runtime::Composable]
 fn toolkit_probe() {
-    compose_rust::ui::Text("probe".to_string());
+    { use ::compose_rust::ui::Text; Text!("probe".to_string()) };
 }
 
 // FR-L33.1 (#875): the window's safe area reaches the toolkit after the page's first render. The

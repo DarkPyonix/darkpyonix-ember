@@ -163,7 +163,7 @@ mod tests {
             WindowSizeClass::Medium => "Medium",
             WindowSizeClass::Expanded => "Expanded",
         };
-        cu::Text(format!("{}x{} {class}", w.width_dp, w.height_dp));
+        { use ::compose_rust::ui::Text; Text!(format!("{}x{} {class}", w.width_dp, w.height_dp)) };
     }
 
     fn texts(batch: &[compose_rust::protocol::Mutation<'_>]) -> String {

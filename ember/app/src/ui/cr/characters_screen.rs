@@ -100,40 +100,40 @@ fn save_character_override(
 /// `cols` equal columns; a short last row keeps the cell width.
 fn Grid<T>(items: &[T], cols: usize, gap: f32, mut cell: impl FnMut(&T)) {
     let cols = cols.max(1);
-    cu::Column().spacing(gap).modifier(Modifier::new().fill_max_width()).content(|| {
+    { use ::compose_rust::ui::Column; Column!(spacing = gap, modifier = Modifier::new().fill_max_width(), {
         for row in items.chunks(cols) {
-            cu::Row().spacing(gap).modifier(Modifier::new().fill_max_width()).content(|| {
+            { use ::compose_rust::ui::Row; Row!(spacing = gap, modifier = Modifier::new().fill_max_width(), {
                 for item in row {
-                    cu::Column().alignment(Alignment::TopCenter).modifier(Modifier::new().weight(1.0)).content(|| cell(item));
+                    { use ::compose_rust::ui::Column; Column!(alignment = Alignment::TopCenter, modifier = Modifier::new().weight(1.0), content = || cell(item)) };
                 }
                 for _ in row.len()..cols {
-                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                 }
-            });
+            }) };
         }
-    });
+    }) };
 }
 
 fn Section(title: &str, note: &str, preview: bool, content: impl FnOnce()) {
     let p = ember_theme().palette;
-    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-        cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
+    { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
+        { use ::compose_rust::ui::Row; Row!(spacing = SP[1], alignment = Alignment::CenterStart, {
             Label(title, Fs::Xl, Weight::Semibold, None, Some(1));
             if preview {
                 Pill("미리보기", PillTone::Grey, true);
             }
-        });
+        }) };
         Label(note, Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
         content();
-    });
+    }) };
 }
 
 fn FieldRow(label: &str, content: impl FnOnce()) {
     let p = ember_theme().palette;
-    cu::Column().spacing(4.0).modifier(Modifier::new().fill_max_width()).content(|| {
+    { use ::compose_rust::ui::Column; Column!(spacing = 4.0, modifier = Modifier::new().fill_max_width(), {
         Label(label, Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(1));
         content();
-    });
+    }) };
 }
 
 fn spec(style: CharStyle, name: &str, agent: &str, role: &str, state: CharState, lead: bool, pin: Option<usize>) -> CharSpec {
@@ -152,25 +152,21 @@ fn spec(style: CharStyle, name: &str, agent: &str, role: &str, state: CharState,
 /// One catalog cell (`.cell`): the character on a card with its caption.
 fn Cell(spec: &CharSpec, caption: &str) {
     let p = ember_theme().palette;
-    cu::Column()
-        .alignment(Alignment::TopCenter)
-        .spacing(6.0)
-        .modifier(Modifier::new().fill_max_width().background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_LG).padding(SP[2]))
-        .content(|| {
+    { use ::compose_rust::ui::Column; Column!(alignment = Alignment::TopCenter, spacing = 6.0, modifier = Modifier::new().fill_max_width().background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_LG).padding(SP[2]), {
             draw(spec, 64.0);
             Label(caption, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
-        });
+        }) };
 }
 
 /// One numbered style section of the catalog (mockup `#cands`): the five states, the three
 /// harnesses and the leader crown, nine cells.
 fn StyleSection(index: usize, style: CharStyle, cols: usize) {
     let p = ember_theme().palette;
-    cu::Column().spacing(6.0).modifier(Modifier::new().fill_max_width()).content(|| {
-        cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).content(|| {
+    { use ::compose_rust::ui::Column; Column!(spacing = 6.0, modifier = Modifier::new().fill_max_width(), {
+        { use ::compose_rust::ui::Row; Row!(spacing = SP[2], alignment = Alignment::CenterStart, {
             Label(&format!("{}. {}", index + 1, style.label()), Fs::Xl, Weight::Semibold, None, Some(1));
             Pill(style.id(), PillTone::Grey, true);
-        });
+        }) };
         Label(style.blurb(), Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
         let mut cells: Vec<(CharSpec, &str)> = CharState::ALL
             .iter()
@@ -181,7 +177,7 @@ fn StyleSection(index: usize, style: CharStyle, cols: usize) {
         }
         cells.push((spec(style, "ember-리더", "claude", "리더", CharState::Done, true, None), "리더 왕관"));
         Grid(&cells, cols, SP[2], |(s, label)| Cell(s, label));
-    });
+    }) };
 }
 
 /// Where a review capture starts the screen (`EMBER_CR_SCROLL` here, read in debug builds only).
@@ -322,31 +318,31 @@ pub fn CharactersScreen() {
     let room = super::home::content_width(width, SP[4]);
     let page_w = page_width(room);
     let page = if room > PAGE_MAX_W { Modifier::new().width(page_w) } else { Modifier::new().fill_max_width() };
-    cu::ScrollColumn().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
-        cu::Column().alignment(Alignment::TopCenter).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
-        cu::Column().spacing(SP[5]).modifier(page).content(|| {
+    { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().fill_max_width().fill_max_height(), {
+        { use ::compose_rust::ui::Column; Column!(alignment = Alignment::TopCenter, modifier = Modifier::new().fill_max_width().padding(SP[4]), {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[5], modifier = page, {
             if start == CaptureStart::Top {
                 // Back to where it was opened from; no sidebar entry (D26).
-                cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                { use ::compose_rust::ui::Row; Row!(spacing = SP[1], alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
                     let u = ui.clone();
                     AppButton("뒤로", Some(IconRole::Back), ButtonKind::Default, true, true, false, move || u.close_characters());
-                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                     if compact {
-                        cu::Spacer().modifier(Modifier::new().width(super::project::PHONE_MENU_ROOM));
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(super::project::PHONE_MENU_ROOM)) };
                     }
-                });
-                cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                }) };
+                { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
                     Label("팀 캐릭터", if compact { Fs::Xl } else { Fs::Xl2 }, Weight::Regular, None, Some(1));
                     // `.lead{max-width:820px}`.
-                    cu::Column().modifier(Modifier::new().width(LEAD_MAX_W.min(page_w))).content(|| {
+                    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().width(LEAD_MAX_W.min(page_w)), {
                         Label(LEAD, Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
-                    });
+                    }) };
                     let sub = match &project {
                         Some(n) => format!("{n} 프로젝트의 스타일은 {}입니다.", current.label()),
                         None => "프로젝트가 아직 없어 기본 스타일로 보여 드립니다.".to_string(),
                     };
                     Label(&sub, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
-                });
+                }) };
 
                 // 1. The catalog: one numbered section per style.
                 for (i, s) in CharStyle::ALL.iter().copied().enumerate() {
@@ -365,7 +361,7 @@ pub fn CharactersScreen() {
                     // `.segx`: six style buttons; a phone puts three on a line.
                     let per_line = if compact { 3 } else { CharStyle::ALL.len() };
                     for line in CharStyle::ALL.chunks(per_line) {
-                        cu::Row().spacing(6.0).alignment(Alignment::CenterStart).content(|| {
+                        { use ::compose_rust::ui::Row; Row!(spacing = 6.0, alignment = Alignment::CenterStart, {
                             for &s in line {
                                 let (c, m) = (chosen.clone(), message.clone());
                                 // The chosen style says it is pressed (aria-pressed, compose-rust#473).
@@ -374,10 +370,10 @@ pub fn CharactersScreen() {
                                     m.set(None);
                                 });
                             }
-                        });
+                        }) };
                     }
                     let needed = style_apply_needed(current, style);
-                    cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                    { use ::compose_rust::ui::Row; Row!(spacing = SP[2], alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
                         let (pr, sv, ms) = (project.clone(), saving.clone(), message.clone());
                         AppButton(
                             if saving.get() { "저장 중" } else { "이 프로젝트에 적용" },
@@ -398,14 +394,11 @@ pub fn CharactersScreen() {
                             Some(n) => format!("{n}의 현재 스타일은 {}입니다", current.label()),
                         };
                         Label(&note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
-                    });
+                    }) };
                     if let Some(m) = message.get() {
                         Label(&m, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), None);
                     }
-                    cu::Column()
-                        .spacing(SP[3])
-                        .modifier(Modifier::new().fill_max_width().background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_LG).padding(SP[4]))
-                        .content(|| {
+                    { use ::compose_rust::ui::Column; Column!(spacing = SP[3], modifier = Modifier::new().fill_max_width().background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_LG).padding(SP[4]), {
                             let ov_map = current_overrides.clone();
                             let proj_id = project_name.clone();
                             Grid(&team.cells, cols, SP[3], |m| {
@@ -418,7 +411,7 @@ pub fn CharactersScreen() {
                             if team.more > 0 {
                                 Label(&format!("외 {}명", team.more), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                             }
-                        });
+                        }) };
                 });
             }
 
@@ -442,18 +435,14 @@ pub fn CharactersScreen() {
                     && !trimmed_name.is_empty()
                     && current_overrides.contains_key(&trimmed_name);
                 let stage = || {
-                    cu::Column()
-                        .alignment(Alignment::Center)
-                        .spacing(SP[3])
-                        .modifier(Modifier::new().fill_max_width().height(if compact { 300.0 } else { 320.0 }).background(paint(p.surface_2)).corner_radius(CORNER_MD))
-                        .content(|| {
+                    { use ::compose_rust::ui::Column; Column!(alignment = Alignment::Center, spacing = SP[3], modifier = Modifier::new().fill_max_width().height(if compact { 300.0 } else { 320.0 }).background(paint(p.surface_2)).corner_radius(CORNER_MD), {
                             draw(&spec(ed_v, &shown_name, agent_id, role, ed_state.get(), role == "리더", pin), if compact { 160.0 } else { 200.0 });
-                            cu::Row().spacing(10.0).content(|| {
+                            { use ::compose_rust::ui::Row; Row!(spacing = 10.0, {
                                 for suffix in ["-2", "-리뷰", "-테스트", "-문서", "-조사"] {
                                     draw(&spec(ed_v, &format!("{shown_name}{suffix}"), agent_id, &suffix[1..], CharState::Idle, false, pin), 44.0);
                                 }
-                            });
-                        });
+                            }) };
+                        }) };
                 };
                 let name_field = || {
                     FieldRow("이름", || {
@@ -525,7 +514,7 @@ pub fn CharactersScreen() {
                     FieldRow("상태", || {
                         let per_line = if compact { 3 } else { CharState::ALL.len() };
                         for line in CharState::ALL.chunks(per_line) {
-                            cu::Row().spacing(6.0).content(|| {
+                            { use ::compose_rust::ui::Row; Row!(spacing = 6.0, {
                                 for &s in line {
                                     let (st, m) = (ed_state.clone(), ed_message.clone());
                                     ChoiceButton(state_label(s), Choice::Toggle, ed_state.get() == s, true, true, move || {
@@ -533,7 +522,7 @@ pub fn CharactersScreen() {
                                         m.set(None);
                                     });
                                 }
-                            });
+                            }) };
                         }
                     });
                 };
@@ -548,8 +537,8 @@ pub fn CharactersScreen() {
                     Some(n) => format!("{n} 프로젝트에 {trimmed_name} 팀원 설정을 저장합니다"),
                 };
                 let actions_row = || {
-                    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-                        cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                    { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
+                        { use ::compose_rust::ui::Row; Row!(spacing = SP[2], alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
                             let (pr, nm, cand, ovs, sv, ms) = (
                                 project.clone(),
                                 trimmed_name.clone(),
@@ -596,17 +585,17 @@ pub fn CharactersScreen() {
                             if !compact {
                                 Label(&status_note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
                             }
-                        });
+                        }) };
                         if compact {
                             Label(&status_note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
                         }
                         if let Some(m) = ed_message.get() {
                             Label(&m, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), None);
                         }
-                    });
+                    }) };
                 };
                 let form = || {
-                    cu::Column().spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(|| {
+                    { use ::compose_rust::ui::Column; Column!(spacing = SP[3], modifier = Modifier::new().fill_max_width(), {
                         name_field();
                         if compact {
                             harness_field();
@@ -619,32 +608,32 @@ pub fn CharactersScreen() {
                         }
                         state_field();
                         actions_row();
-                    });
+                    }) };
                 };
                 let card = Modifier::new().fill_max_width().background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_LG).padding(SP[5]);
                 if wide {
-                    cu::Row().spacing(SP[5]).alignment(Alignment::CenterStart).modifier(card).content(|| {
-                        cu::Column().modifier(Modifier::new().weight(1.0)).content(stage);
-                        cu::Column().modifier(Modifier::new().weight(1.2)).content(form);
-                    });
+                    { use ::compose_rust::ui::Row; Row!(spacing = SP[5], alignment = Alignment::CenterStart, modifier = card, {
+                        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), content = stage) };
+                        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.2), content = form) };
+                    }) };
                 } else {
-                    cu::Column().spacing(SP[5]).modifier(card).content(|| {
+                    { use ::compose_rust::ui::Column; Column!(spacing = SP[5], modifier = card, {
                         stage();
                         form();
-                    });
+                    }) };
                 }
             });
-        });
-        });
-    });
+        }) };
+        }) };
+    }) };
 }
 
 /// Two form fields side by side, equal width (`.ed-form` two columns).
 fn Pair(a: impl FnOnce(), b: impl FnOnce()) {
-    cu::Row().spacing(SP[3]).alignment(Alignment::TopStart).modifier(Modifier::new().fill_max_width()).content(|| {
-        cu::Column().modifier(Modifier::new().weight(1.0)).content(a);
-        cu::Column().modifier(Modifier::new().weight(1.0)).content(b);
-    });
+    { use ::compose_rust::ui::Row; Row!(spacing = SP[3], alignment = Alignment::TopStart, modifier = Modifier::new().fill_max_width(), {
+        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), content = a) };
+        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), content = b) };
+    }) };
 }
 
 /// The mockup's lead paragraph (`.lead`).

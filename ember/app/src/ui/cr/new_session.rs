@@ -275,24 +275,18 @@ fn NewSessionForm(preset: &str) {
     };
     EmberSheet("새 세션", true, close.clone(), None, || {
         // A long form on a short window scrolls inside the dialog.
-        cu::ScrollColumn().modifier(Modifier::new().fill_max_width().height(body_height)).content(|| {
-            cu::Column().space_role(SpaceRole::Md).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
+        { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().fill_max_width().height(body_height), {
+            { use ::compose_rust::ui::Column; Column!(space_role = SpaceRole::Md, modifier = Modifier::new().fill_max_width().padding(SP[4]), {
                 Field("프로젝트", || {
                     let (options, projects) = (project_options.clone(), projects.clone());
                     let (ui, project, agent, account, computer) =
                         (ui.clone(), project.clone(), agent.clone(), account.clone(), computer.clone());
-                    Select(
-                        &project_options[project_index.min(project_options.len() - 1)],
-                        &project_options,
-                        project_index,
-                        POPUP_WIDTH,
-                        move |i| {
+                    Select!(&project_options[project_index.min(project_options.len() - 1)], &project_options, project_index, POPUP_WIDTH, move |i| {
                             let p = options.get(i).cloned().unwrap_or_default();
                             let p = if projects.contains(&p) { p } else { String::new() };
                             let remembered = ui.prefs.get_untracked().last_used.get(&p).cloned();
                             seed(&p, remembered, &project, &agent, &account, &computer);
-                        },
-                    );
+                        }, |_| {});
                 });
                 if creating_project {
                     Field("프로젝트 이름", || {
@@ -334,33 +328,33 @@ fn NewSessionForm(preset: &str) {
                 });
                 Field("에이전트", || {
                     let (agents_for, agent, account) = (agents.clone(), agent.clone(), account.clone());
-                    Select(&agent_value, &agents, agent_index, POPUP_WIDTH, move |i| {
+                    Select!(&agent_value, &agents, agent_index, POPUP_WIDTH, move |i| {
                         if let Some(a) = agents_for.get(i) {
                             agent.set(a.clone());
                             // Accounts belong to an agent.
                             account.set(None);
                         }
-                    });
+                    }, |_| {});
                 });
                 Field("계정", || {
                     let (choices, account) = (accounts.clone(), account.clone());
                     let labels: Vec<String> = accounts.iter().map(|c| c.label.clone()).collect();
-                    Select(&labels[account_index.min(labels.len() - 1)], &labels, account_index, POPUP_WIDTH, move |i| {
+                    Select!(&labels[account_index.min(labels.len() - 1)], &labels, account_index, POPUP_WIDTH, move |i| {
                         account.set(choices.get(i).and_then(|c| c.value.clone()))
-                    });
+                    }, |_| {});
                 });
                 Field("컴퓨터", || {
                     let (choices, computer) = (computers.clone(), computer.clone());
                     let labels: Vec<String> = computers.iter().map(|c| c.label.clone()).collect();
-                    Select(&labels[computer_index.min(labels.len() - 1)], &labels, computer_index, POPUP_WIDTH, move |i| {
+                    Select!(&labels[computer_index.min(labels.len() - 1)], &labels, computer_index, POPUP_WIDTH, move |i| {
                         computer.set(choices.get(i).and_then(|c| c.value.clone()))
-                    });
+                    }, |_| {});
                 });
-            });
-        });
+            }) };
+        }) };
         SheetFooter(|| {
             if busy.get() {
-                cu::IndeterminateProgressIndicator().circular(true).modifier(Modifier::new().size(18.0, 18.0));
+                { use ::compose_rust::ui::IndeterminateProgressIndicator; IndeterminateProgressIndicator!(circular = true, modifier = Modifier::new().size(18.0, 18.0)) };
             }
             AppButton("취소", None, ButtonKind::Default, true, !busy.get(), false, close.clone());
             AppButton("만들기", None, ButtonKind::Primary, true, can_start, false, start);
@@ -393,10 +387,10 @@ fn seed(
 
 /// A labelled form row.
 fn Field(label: &str, content: impl FnOnce()) {
-    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+    { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
         Txt(label, TypeRole::Label, muted(), None, None, None, None);
         content();
-    });
+    }) };
 }
 
 #[cfg(test)]

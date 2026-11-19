@@ -4599,13 +4599,7 @@ pub(super) fn NewMemberSheet(
                                     Some(1),
                                 );
                                 let ci = comp_idx.clone();
-                                Select(
-                                    &comp_opts[c_idx.min(comp_opts.len() - 1)],
-                                    &comp_opts,
-                                    c_idx,
-                                    440.0,
-                                    move |i| ci.set(i),
-                                );
+                                Select!(&comp_opts[c_idx.min(comp_opts.len() - 1)], &comp_opts, c_idx, 440.0, move |i| ci.set(i), |_| {});
                             });
                     });
                 SheetFooter(move || {

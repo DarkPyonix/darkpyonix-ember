@@ -853,7 +853,7 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                 );
                                 cu::Spacer().modifier(Modifier::new().weight(1.0));
                                 if let Some(label) = qv::needs_you_label(pending) {
-                                    Badge(&label, Tone::Warning);
+                                    Badge!(&label, Tone::Warning);
                                 }
                                 let im = ide_menu.clone();
                                 let ui_ide_btn = ui.clone();
@@ -966,7 +966,7 @@ pub fn ConversationView(id: &str, embedded: bool) {
                             .space_role(SpaceRole::Sm)
                             .modifier(Modifier::new().fill_max_width())
                             .content(|| {
-                                Badge(&format!("{}개 대기 중", queued.len()), Tone::Accent);
+                                Badge!(&format!("{}개 대기 중", queued.len()), Tone::Accent);
                                 cu::Box().modifier(Modifier::new().weight(1.0)).content(|| {
                                     Label(
                                         &format!(
@@ -1824,7 +1824,7 @@ pub fn TranscriptRow(
                                         );
                                     },
                                 );
-                                Badge(state_text, tone);
+                                Badge!(state_text, tone);
                                 Clickable(
                                     Modifier::new()
                                         .height(H_PILL)
@@ -2227,7 +2227,7 @@ pub fn TeamPanel(session: &str) {
                                     },
                                 );
                                 if r.open_tasks > 0 {
-                                    Badge(&format!("작업 {}", r.open_tasks), Tone::Accent);
+                                    Badge!(&format!("작업 {}", r.open_tasks), Tone::Accent);
                                 }
                                 if !r.this {
                                     let sid = r.session_id.clone();

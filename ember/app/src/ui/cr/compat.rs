@@ -59,43 +59,34 @@ pub fn tone_strong(tone: Tone, p: &Palette) -> Color {
 pub fn Badge(text: &str, tone: Tone) {
     let theme = ember_theme();
     let (fill, ink) = tone_colors(tone, theme.palette);
-    cu::Row()
-        .alignment(Alignment::CenterStart)
-        .modifier(Modifier::new().height(H_PILL).background(paint(fill)).shape_role(ShapeRole::Full))
-        .content(|| {
-            cu::Spacer().modifier(Modifier::new().width(10.0));
+    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().height(H_PILL).background(paint(fill)).shape_role(ShapeRole::Full), {
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(10.0)) };
             Txt(text, TypeRole::Label, Some(paint(ink)), Some(1), None, None, None);
-            cu::Spacer().modifier(Modifier::new().width(10.0));
-        });
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(10.0)) };
+        }) };
 }
 
 /// A dot, e.g. "finished, unread" or a computer's reachability.
 pub fn Dot(tone: Tone) {
     let theme = ember_theme();
-    cu::Box()
-        .modifier(
-            Modifier::new()
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                 .size(8.0, 8.0)
                 .background(paint(tone_strong(tone, theme.palette)))
-                .shape_role(ShapeRole::Full),
-        )
-        .content(|| {});
+                .shape_role(ShapeRole::Full), {}) };
 }
 
 /// An indeterminate circular spinner, 12 px as in the mockup. The ring's stroke scales with its
 /// size (compose-rust#377); the mockup's `--c-blue-soft` track has no builder, so the ring has
 /// the design system's track.
 pub fn Spinner(size: f32) {
-    cu::IndeterminateProgressIndicator()
-        .circular(true)
-        .modifier(Modifier::new().size(size, size));
+    { use ::compose_rust::ui::IndeterminateProgressIndicator; IndeterminateProgressIndicator!(circular = true, modifier = Modifier::new().size(size, size)) };
 }
 
 /// A session's status as the launcher shows it (FR-L2): running spinner, waiting-for-approval
 /// pill (outranks running), finished-unread dot, finished, failed.
 pub fn StatusIndicator(status: LauncherStatus) {
     let label = super::ko::status_label(status);
-    cu::Row().space_role(SpaceRole::Xs).alignment(Alignment::CenterStart).content(|| match status {
+    { use ::compose_rust::ui::Row; Row!(space_role = SpaceRole::Xs, alignment = Alignment::CenterStart, content = || match status {
         LauncherStatus::Running => {
             Spinner(12.0);
             Txt(&label, TypeRole::Caption, Some(Paint::Role(ColorRole::Primary)), None, None, None, None);
@@ -107,7 +98,7 @@ pub fn StatusIndicator(status: LauncherStatus) {
         }
         LauncherStatus::Failed => Badge(&label, Tone::Error),
         _ => Txt(&label, TypeRole::Caption, Some(Paint::Role(ColorRole::OnSurfaceVariant)), None, None, None, None),
-    });
+    }) };
 }
 
 fn status_tone(status: LauncherStatus) -> Tone {
@@ -127,7 +118,7 @@ pub fn StatusDot(status: LauncherStatus) {
 
 /// The Korean status pill of a session row (`pill`).
 pub fn StatusPill(status: LauncherStatus) {
-    Badge(super::ko::status_label(status), status_tone(status));
+    Badge!(super::ko::status_label(status), status_tone(status));
 }
 
 /// Conversation text.
@@ -136,9 +127,9 @@ pub fn StatusPill(status: LauncherStatus) {
 /// replies) once compose-rust has one. Plain text until then. The text sits in a
 /// `SelectionContainer` so it can be selected and copied (compose-rust#5).
 pub fn MessageText(text: &str, ink: Option<ColorRole>) {
-    cu::SelectionContainer().content(|| {
+    { use ::compose_rust::ui::SelectionContainer; SelectionContainer!({
         Txt(text, TypeRole::Body, ink.map(Paint::Role), None, None, None, None);
-    });
+    }) };
 }
 
 /// Code or tool output in a monospace face.
@@ -148,18 +139,14 @@ pub fn MessageText(text: &str, ink: Option<ColorRole>) {
 /// read-only editor view for large outputs.
 pub fn CodeText(text: &str, max_lines: Option<u32>, error: bool) {
     let theme = ember_theme();
-    cu::Box()
-        .modifier(
-            Modifier::new()
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                 .fill_max_width()
                 .background(paint(theme.palette.surface_2))
                 .corner_radius(CORNER_SM)
-                .padding(PAD_ROW_V),
-        )
-        .content(|| {
+                .padding(PAD_ROW_V), {
             // `.inset` pads 12 16; the uniform 12 above plus this 4 makes the left edge 16.
-            cu::Row().content(|| {
-                cu::Spacer().modifier(Modifier::new().width(4.0));
+            { use ::compose_rust::ui::Row; Row!({
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(4.0)) };
                 Txt(
                     text,
                     TypeRole::Mono,
@@ -169,25 +156,21 @@ pub fn CodeText(text: &str, max_lines: Option<u32>, error: bool) {
                     None,
                     None,
                 );
-            });
-        });
+            }) };
+        }) };
 }
 
 /// A banner across the top of a screen.
 pub fn Banner(text: &str, tone: Tone) {
     let theme = ember_theme();
     let (fill, ink) = tone_colors(tone, theme.palette);
-    cu::Box()
-        .modifier(
-            Modifier::new()
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                 .fill_max_width()
                 .background(paint(fill))
                 .corner_radius(CORNER_MD)
-                .padding(SP[2]),
-        )
-        .content(|| {
+                .padding(SP[2]), {
             Txt(text, TypeRole::Label, Some(paint(ink)), None, None, None, None);
-        });
+        }) };
 }
 
 #[cfg(test)]

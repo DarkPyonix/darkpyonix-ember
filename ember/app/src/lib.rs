@@ -175,7 +175,6 @@ pub(crate) fn prepare() {
         outbox: Arc::new(Mutex::new(Outbox::default())),
         initial_prefs,
         ui: shared_ui,
-        live: OnceLock::new(),
     });
     // A device the server refuses, or a server out of reach, reads as one Korean sentence at
     // start (FR-N9); 설정 shows it again.

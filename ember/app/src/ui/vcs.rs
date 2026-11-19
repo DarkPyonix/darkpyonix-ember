@@ -27,7 +27,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 
 use crate::demo::GitError;
-use crate::services::{run, services};
+use crate::services::services;
 use crate::ui::project::{is_default_project, ProjectBox};
 
 /// What a view shows while the server does not provide its data.

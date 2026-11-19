@@ -21,7 +21,7 @@ pub use crate::ui::monitor::{
     SortState,
 };
 use crate::ui::monitor::{
-    bar_fraction, bar_max, card_view, hero_parts, meter_fraction, empty_text, health_score, process_footer, ram_badge, score_tone,
+    bar_fraction, bar_max, card_view, hero_parts, meter_fraction, metric_badge, empty_text, health_score, process_footer, ram_badge, score_tone,
     CORE_BARS_GAP, CORE_BARS_H, CORE_BAR_ALPHA, CORE_BAR_RADIUS,
     score_word, status_line, storage_line, CardView, FanMode, FeedStatus, FAN_MODE_AVAILABLE, FAN_MODE_REASON, POLL_SECS,
     TOP_PROCESSES,
@@ -70,7 +70,7 @@ pub fn mon_columns(width_dp: f32) -> usize {
 /// Column widths of the process table (dp): the name takes the rest.
 const PID_W: f32 = 72.0;
 const PWR_W: f32 = 72.0;
-const CPU_W: f32 = 96.0;
+const CPU_W: f32 = 108.0;
 const MEM_W: f32 = 96.0;
 const ROW_H: f32 = 36.0;
 
@@ -249,7 +249,10 @@ fn Grid(columns: usize, c: &ComputerChip, feed: &MonitorFeed, online: bool) {
                     match card {
                         Card::Status => StatusCard(c, feed, online, fill),
                         Card::Metric(Metric::Fans) => FanCard(fill),
-                        Card::Metric(m) => MetricCard(m, card_view(m, feed), empty_text(m, online, feed.status()), meter_fraction(m, feed), fill),
+                        Card::Metric(m) => {
+                            let badge = feed.latest().and_then(|s| metric_badge(m, s));
+                            MetricCard(m, card_view(m, feed), badge, empty_text(m, online, feed.status()), meter_fraction(m, feed), fill)
+                        }
                     }
                 });
             }
@@ -378,9 +381,17 @@ fn FanCard(fill: bool) {
     });
 }
 
-fn MetricCard(metric: Metric, view: Option<CardView>, empty: &str, meter: Option<f32>, fill: bool) {
+fn MetricCard(
+    metric: Metric,
+    view: Option<CardView>,
+    badge: Option<(String, crate::ui::components::PillTone)>,
+    empty: &str,
+    meter: Option<f32>,
+    fill: bool,
+) {
     let p = ember_theme().palette;
-    MonCard(metric_icon(metric), metric.title(), None, fill, || match view.as_ref() {
+    let header_badge = badge.as_ref().map(|(text, tone)| (text.as_str(), PillTone::from(*tone)));
+    MonCard(metric_icon(metric), metric.title(), header_badge, fill, || match view.as_ref() {
         Some(v) => {
             HeroValue(&v.headline);
             Bars(metric, &v.bars);
@@ -546,7 +557,27 @@ fn ProcessRowView(row: &ProcessRow, mut on_open: impl FnMut(String) + 'static) {
             };
             cell(PID_W, row.pid.map_or_else(|| "-".to_string(), |v| v.to_string()));
             cell(PWR_W, "-".to_string());
-            cell(CPU_W, cpu_text(row.cpu));
+            // In-cell CPU bar beside the numeric percent (FR-L21, #389): blue for member rows,
+            // muted track fill for other processes.
+            cu::Box().alignment(Alignment::CenterEnd).modifier(Modifier::new().width(CPU_W)).content(|| {
+                cu::Row().alignment(Alignment::CenterEnd).spacing(SP[1]).content(|| {
+                    if let Some(pct) = row.cpu {
+                        let f = bar_fraction(pct, 100.0);
+                        let bar_color = if mine { p.blue.strong } else { p.muted };
+                        cu::Row()
+                            .modifier(Modifier::new().width(36.0).height(4.0).background(paint(p.track)).corner_radius(2.0).clip(true))
+                            .content(move || {
+                                if f > 0.0 {
+                                    cu::Spacer().modifier(Modifier::new().weight(f).height(4.0).background(paint(bar_color)).corner_radius(2.0));
+                                }
+                                if f < 1.0 {
+                                    cu::Spacer().modifier(Modifier::new().weight(1.0 - f).height(4.0));
+                                }
+                            });
+                    }
+                    Label(&cpu_text(row.cpu), Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
+                });
+            });
             cell(MEM_W, mem_text(row.mem));
             cu::Spacer().modifier(Modifier::new().width(SP[3]));
         });
@@ -910,7 +941,7 @@ mod tests {
 
     fn cpu_card() {
         let view = CardView { headline: "23.1%".into(), lines: vec!["코어 8개".into()], bars: vec![50.0, 100.0] };
-        MetricCard(Metric::Cpu, Some(view), "", None, false);
+        MetricCard(Metric::Cpu, Some(view), None, "", None, false);
     }
 
     /// Review M1, M2: the big value is the whole number with its unit beside it in a smaller

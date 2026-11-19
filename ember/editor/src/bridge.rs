@@ -218,7 +218,7 @@ impl WidgetBridge {
                             doc.syntax = SyntaxRuns::default();
                             doc.folds = folds;
                         }
-                         edit @ WidgetCommand::EditCode { .. } => {
+                        edit @ (WidgetCommand::EditCode { .. } | WidgetCommand::InsertSnippet { .. }) => {
                             doc.pending_edits.push(edit);
                         }
                     }

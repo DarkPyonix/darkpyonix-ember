@@ -329,6 +329,12 @@ pub const PHONE_MENU_ROOM: f32 = 52.0;
 
 /// The theme toggle of the page header: a 40 px round button with a sun or a moon (Ember's SVG,
 /// the toolkit has no such glyph), named "테마 전환" (compose-rust v0.0.7, #372, #460).
+/// The icon of a header's theme button: the theme in use, sun in light and moon in dark, as the
+/// sidebar's 테마 row and the mockup's `updateThemeButtons` draw it (FR-L10.6).
+pub fn theme_icon(dark: bool) -> &'static str {
+    if dark { shell::ICON_MOON_SVG } else { shell::ICON_SUN_SVG }
+}
+
 pub fn ThemeButton(ui: &SharedUi) {
     let p = ember_theme().palette;
     let dark = ember_theme().scheme == Scheme::Dark;
@@ -339,7 +345,7 @@ pub fn ThemeButton(ui: &SharedUi) {
         Alignment::Center,
         move || u.set_theme_pref(u.theme_pref.get_untracked().next()),
         || {
-            NavIcon(if dark { shell::ICON_SUN_SVG } else { shell::ICON_MOON_SVG }, p.text_2.to_argb(), 18.0);
+            NavIcon(theme_icon(dark), p.text_2.to_argb(), 18.0);
         },
     );
 }
@@ -2032,6 +2038,19 @@ fn DangerRowView(row: &crate::ui::project::DangerRow, enabled: bool, on_click: i
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fr_l10_6_the_header_theme_button_shows_the_theme_in_use() {
+        assert_eq!(super::theme_icon(false), super::shell::ICON_SUN_SVG);
+        assert_eq!(super::theme_icon(true), super::shell::ICON_MOON_SVG);
+        let src = include_str!("project.rs").split("#[cfg(test)]").next().unwrap();
+        let button = &src[src.find("pub fn ThemeButton").unwrap()..];
+        let button = &button[..button.find("\n}\n").unwrap()];
+        assert!(button.contains("NavIcon(theme_icon(dark),"));
+        // The sidebar's 테마 row makes the same choice.
+        let shell_src = include_str!("shell.rs");
+        assert!(shell_src.contains("if theme.scheme == Scheme::Dark { ICON_MOON_SVG } else { ICON_SUN_SVG }"));
+    }
+
     use super::*;
 
     #[test]

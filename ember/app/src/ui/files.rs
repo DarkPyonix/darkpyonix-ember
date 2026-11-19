@@ -377,6 +377,20 @@ pub fn next_state(state: TransferState, action: TransferAction) -> Option<Transf
 }
 
 /// The buttons a state offers the user, in order.
+/// The name a transfer row's action button carries for assistive technology (FR-L27.3): the
+/// mockup's `aria-label`s (`files.js`), and 다시 시도 for a failed transfer, which it does not draw.
+pub fn action_button_name(action: TransferAction) -> &'static str {
+    match action {
+        TransferAction::Pause => "일시 정지",
+        TransferAction::Resume => "이어서 전송",
+        TransferAction::Cancel => "전송 취소",
+        TransferAction::Retry => "다시 시도",
+        TransferAction::Start => "시작",
+        TransferAction::Complete => "완료",
+        TransferAction::Fail => "실패",
+    }
+}
+
 pub fn user_actions(state: TransferState) -> &'static [TransferAction] {
     use TransferAction as A;
     match state {
@@ -1527,6 +1541,26 @@ pub fn chip_text_max(glyph: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fr_l27_3_every_transfer_action_has_a_korean_name() {
+        use TransferState as S;
+        for state in [S::Queued, S::Sending, S::Paused, S::Failed, S::Done, S::Cancelled] {
+            for &a in user_actions(state) {
+                let name = action_button_name(a);
+                assert!(!name.is_empty() && name.chars().any(|c| ('\u{AC00}'..='\u{D7A3}').contains(&c)), "{a:?}: {name}");
+            }
+        }
+        assert_eq!(action_button_name(TransferAction::Pause), "일시 정지");
+        assert_eq!(action_button_name(TransferAction::Resume), "이어서 전송");
+        assert_eq!(action_button_name(TransferAction::Cancel), "전송 취소");
+        assert_eq!(action_button_name(TransferAction::Retry), "다시 시도");
+        // The row draws every action as a named round button, never the toolkit's unnamed close icon.
+        let row = include_str!("cr/files.rs");
+        let production = &row[..row.find("#[cfg(test)]").unwrap()];
+        assert!(production.contains("RoundGlyph(glyph, action_button_name(action), on_act)"));
+        assert!(!production.contains("IconButton(IconRole::Close, true, on_act)"));
+    }
+
     use super::*;
     use std::sync::Mutex;
 

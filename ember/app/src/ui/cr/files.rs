@@ -27,7 +27,7 @@ pub use crate::ui::files::{
     path_label, percent, progress_line, send_blocker, sendable_devices, transfer_service,
     offer_card_shown, user_actions, visible_offers, Answer, Device, DeviceKind, Direction, FilesKpi, FilesModel,
     HistoryEntry, HistoryResult, Offer, PathKind, Presence, ReceivedFile, SendDraft, SendTarget,
-    Transfer, TransferAction, TransferService, TransferState, FILE_DIALOG_TITLE, FILE_PICKER_AVAILABLE, FILE_PICK_REASON, PickOutcome, pick_outcome,
+    Transfer, TransferAction, TransferService, action_button_name, TransferState, FILE_DIALOG_TITLE, FILE_PICKER_AVAILABLE, FILE_PICK_REASON, PickOutcome, pick_outcome,
     FILE_PICK_UNAVAILABLE, LOCK_LINE, UNAVAILABLE, clean_member_name, demo_files, is_demo,
 };
 /// Whether the share sheet picks files itself. It does not yet: its file card only says what is
@@ -38,7 +38,7 @@ use crate::ui::files::{choose_target, chip_avail, chip_label, chip_rows, chip_te
 use super::compat::Banner;
 use crate::model::Tone;
 use super::characters::{CharState, Character};
-use super::components::{EmberSheetSized, AppButton, ButtonKind, Clickable, EmberCard, EmberSheet, FilterChip, IconButton, InkIconButton, Label, Pill, PillTone};
+use super::components::{EmberSheetSized, AppButton, ButtonKind, Clickable, EmberCard, EmberSheet, FilterChip, InkIconButton, Label, Pill, PillTone};
 use super::home::{fit_label, text_px, Cols, Part};
 use super::notice;
 use super::project::{HeaderGap, ThemeButton};
@@ -129,6 +129,8 @@ const ICON_VIDEO: &str = line_icon!("m15.75 10.5 4.72-4.72a.75.75 0 0 1 1.28.53v
 const ICON_AUDIO: &str = line_icon!("m9 9 10.5-3m0 6.553v3.75a2.25 2.25 0 0 1-1.632 2.163l-1.32.377a1.803 1.803 0 1 1-.99-3.467l2.31-.66a2.25 2.25 0 0 0 1.632-2.163Zm0 0V2.25L9 5.25v10.303m0 0v3.75a2.25 2.25 0 0 1-1.632 2.163l-1.32.377a1.803 1.803 0 0 1-.99-3.467l2.31-.66A2.25 2.25 0 0 0 9 15.553Z");
 const ICON_ZIP: &str = line_icon!("m20.25 7.5-.625 10.632a2.25 2.25 0 0 1-2.247 2.118H6.622a2.25 2.25 0 0 1-2.247-2.118L3.75 7.5m8.25 3v6.75m0 0-3-3m3 3 3-3M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125Z");
 const ICON_PAUSE: &str = line_icon!("M15.75 5.25v13.5m-7.5-13.5v13.5");
+/// `.fl-x`: the cancel button's cross (heroicons x-mark, as the mockup's `I("close")`).
+const ICON_CANCEL: &str = line_icon!("M6 18 18 6M6 6l12 12");
 const ICON_PLAY: &str = line_icon!("M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.347a1.125 1.125 0 0 1 0 1.972l-11.54 6.347a1.125 1.125 0 0 1-1.667-.986V5.653Z");
 
 /// What the device list shows beyond [`Device`]: the system line and when it was last seen. The
@@ -1133,25 +1135,16 @@ fn TransferRow(t: &Transfer, devices: &[Device], st: &State) {
             for action in user_actions(t.state).iter().copied() {
                 let id = t.id.clone();
                 let glyph = match action {
-                    TransferAction::Pause => Some(ICON_PAUSE),
-                    TransferAction::Resume | TransferAction::Retry | TransferAction::Start => Some(ICON_PLAY),
-                    _ => None,
+                    TransferAction::Pause => ICON_PAUSE,
+                    TransferAction::Resume | TransferAction::Retry | TransferAction::Start => ICON_PLAY,
+                    _ => ICON_CANCEL,
                 };
                 let st_ver = st.version.clone();
                 let on_act = move || {
                     svc.control(&id, action);
                     st_ver.set(st_ver.get_untracked() + 1);
                 };
-                let name = match action {
-                    TransferAction::Pause => "일시 정지",
-                    TransferAction::Resume => "재개",
-                    TransferAction::Retry => "다시 시도",
-                    _ => "시작",
-                };
-                match glyph {
-                    Some(g) => RoundGlyph(g, name, on_act),
-                    None => IconButton(IconRole::Close, true, on_act),
-                }
+                RoundGlyph(glyph, action_button_name(action), on_act);
             }
         });
         // The claim is shown only where it is true (#487): plain HTTP is not end to end.

@@ -54,7 +54,7 @@ use super::compat::Spinner;
 use super::home::{CardHead, Dot as HomeDot};
 use super::components::{
     AppButton, BackButton, ButtonKind, Clickable, CloseButton, NamedClickable, NameThenPill, EmberCard, EmberCardSized, TrackBar, EmberField, EmberSheet,
-    FieldOptions, IconButton, Label, OptionSheet, PickChip, Pill, PillTone, PopKind, PopMenu, PopRow, PopoverMenu, SearchField, Select, SheetFooter, Txt,
+    FieldOptions, IconButton, Label, OptionSheet, PickChip, Pill, PillTone, PopExtra, PopKind, PopMenu, PopRow, PopoverMenu, PopoverMenuWith, SearchField, Select, SheetFooter, Txt,
     SEARCH_FIELD_H_COMPACT,
 };
 use super::conversation::{ConversationView, ICON_SEND_SVG, ICON_TERMINAL_SVG, TranscriptRow, tail_start_index};
@@ -261,12 +261,28 @@ fn harness_dot_color(agent: &str, p: &Palette) -> Color {
     }
 }
 
-/// The model chip of a composer (`.pickchip.modelchip`).
+/// The one row of the session model chip's menu: a running session's model cannot change.
+pub fn model_chip_rows() -> Vec<PopRow> {
+    vec![PopRow {
+        icon: Some(ICON_SHIELD_SVG),
+        title: MODEL_LOCKED.to_string(),
+        badge: Some((SOON.to_string(), PillTone::Grey)),
+        ..Default::default()
+    }]
+}
+
+/// The model chip of a composer (`.pickchip.modelchip`). Its menu hangs from the chip (FR-L10.4,
+/// #888), in the permission picker's look with the harness and model as its head; at 560 and
+/// below it is the mockup's bottom sheet (`plain_sheet`). The mockup opens the model picker here
+/// (review SE20); a running session's model cannot change yet, so the menu holds one row saying
+/// so. `EMBER_CR_SESSION_MENU=model` opens it at start, for captures.
 pub fn ModelChip(session: &str, compact_label: bool) {
     let ui = shared_ui().clone();
     let p = ember_theme().palette;
     let sid = session.to_string();
-    let model_menu = remember_with_key(format!("{sid}:model"), || mutable_state_of(false));
+    let model_menu = remember_with_key(format!("{sid}:model"), || {
+        mutable_state_of(std::env::var("EMBER_CR_SESSION_MENU").as_deref() == Ok("model"))
+    });
 
     let info = {
         let _ = ui.live.launcher.get();
@@ -291,52 +307,58 @@ pub fn ModelChip(session: &str, compact_label: bool) {
     };
     let dot_col = harness_dot_color(&agent, p);
 
-    cu::Box().content(|| {
-        let mm = model_menu.clone();
-        Clickable(
-            Modifier::new()
-                .height(30.0)
-                .background(paint(p.surface_2))
-                .shape_role(ShapeRole::Full),
-            Alignment::Center,
-            move || mm.set(true),
-            move || {
-                cu::Row()
-                    .alignment(Alignment::CenterStart)
-                    .spacing(6.0)
-                    .content(|| {
-                        cu::Spacer().modifier(Modifier::new().width(4.0));
-                        cu::Box().modifier(
-                            Modifier::new()
-                                .size(8.0, 8.0)
-                                .background(paint(dot_col))
-                                .corner_radius(4.0),
-                        );
-                        Label(
-                            &shown_text,
-                            Fs::Xs,
-                            Weight::Medium,
-                            Some(paint(p.text_2)),
-                            Some(1),
-                        );
-                        NavIcon(ICON_CHEVRON_DOWN_SVG, p.muted.to_argb(), 12.0);
-                        cu::Spacer().modifier(Modifier::new().width(4.0));
-                    });
-            },
-        );
-
-        let model_opts = vec![format!("{MODEL_LOCKED} ({SOON})")];
-        let mm_d = model_menu.clone();
-        let mm_c = model_menu.clone();
-        OptionSheet(
-            model_menu.get(),
-            &model_opts,
-            None,
-            POPUP_W,
-            move || mm_d.set(false),
-            move |_| mm_c.set(false),
-        );
-    });
+    let rows = model_chip_rows();
+    let (mm, mm_d) = (model_menu.clone(), model_menu.clone());
+    let expanded = model_menu.get();
+    PopoverMenuWith(
+        model_menu.get(),
+        PopMenu {
+            name: super::a11y::MODEL_PICKER,
+            kind: PopKind::Mode,
+            head: &base_text,
+            sub: None,
+            rows: &rows,
+            align: compose_rust::PopoverAlign::Start,
+        },
+        PopExtra { plain_sheet: true, ..Default::default() },
+        move || mm_d.set(false),
+        |_| {},
+        move || {
+            Clickable(
+                Modifier::new()
+                    .height(30.0)
+                    .background(paint(p.surface_2))
+                    .shape_role(ShapeRole::Full)
+                    .expanded(expanded),
+                Alignment::Center,
+                move || mm.set(!mm.get_untracked()),
+                move || {
+                    cu::Row()
+                        .alignment(Alignment::CenterStart)
+                        .spacing(6.0)
+                        .content(|| {
+                            cu::Spacer().modifier(Modifier::new().width(4.0));
+                            cu::Box().modifier(
+                                Modifier::new()
+                                    .size(8.0, 8.0)
+                                    .background(paint(dot_col))
+                                    .corner_radius(4.0),
+                            );
+                            Label(
+                                &shown_text,
+                                Fs::Xs,
+                                Weight::Medium,
+                                Some(paint(p.text_2)),
+                                Some(1),
+                            );
+                            NavIcon(ICON_CHEVRON_DOWN_SVG, p.muted.to_argb(), 12.0);
+                            cu::Spacer().modifier(Modifier::new().width(4.0));
+                        });
+                },
+            );
+        },
+        None,
+    );
 }
 
 /// The permission mode chip of a composer (`.pickchip.modechip`). It opens the permission
@@ -517,10 +539,23 @@ pub fn ide_split_style(p: &Palette) -> IdeSplitStyle {
     IdeSplitStyle { fill: p.surface, ink: p.text, border: p.line, divider: p.line }
 }
 
+/// The corners of the leading half of a split pill `height` high: the pill's own arc at the
+/// start, square where it meets the divider (`[top_start, top_end, bottom_end, bottom_start]`).
+pub fn split_start_radii(height: f32) -> [f32; 4] {
+    [height / 2.0, 0.0, 0.0, height / 2.0]
+}
+
+/// The corners of the trailing half of a split pill: square at the divider, the pill's arc at
+/// the end.
+pub fn split_end_radii(height: f32) -> [f32; 4] {
+    [0.0, height / 2.0, height / 2.0, 0.0]
+}
+
 /// The chevron beside a header's "IDE 열기" that opens the chooser even when a default is set
 /// (FR-L7). `on_ink` draws it inside the dark split button; otherwise as a bordered square.
 /// Its accessible name is "다른 IDE 선택" (compose-rust v0.0.7, #460), and it says whether the
-/// chooser is open. Touch target 26x32, under 44 px: #323.
+/// chooser is open. Drawn 26x32 (`height`), with a 44 dp hit area that does not grow the node
+/// (`Modifier::min_touch_target`, compose-rust#472, v0.0.11; FR-L34.3, #323).
 pub fn IdeChevron(open: MutableState<bool>, on_ink: bool) {
     IdeChevronSized(open, on_ink, 32.0);
 }
@@ -530,7 +565,9 @@ pub fn IdeChevron(open: MutableState<bool>, on_ink: bool) {
 pub fn IdeChevronSized(open: MutableState<bool>, on_ink: bool, height: f32) {
     let p = ember_theme().palette;
     let (tint, m) = if on_ink {
-        (ide_split_style(p).ink.to_argb(), Modifier::new().size(26.0, height))
+        // The trailing end of the split pill: its hover layer, press tint and focus ring take
+        // the pill's rounded end, not a square that crosses it (FR-L34.2, #251).
+        (ide_split_style(p).ink.to_argb(), Modifier::new().size(26.0, height).corner_radii(split_end_radii(height)))
     } else {
         (
             p.text_2.to_argb(),
@@ -543,7 +580,7 @@ pub fn IdeChevronSized(open: MutableState<bool>, on_ink: bool, height: f32) {
     };
     NamedClickable(
         super::a11y::OTHER_IDE,
-        m.expanded(open.get()),
+        m.min_touch_target(super::vcs::ICON_TOUCH_TARGET).expanded(open.get()),
         Alignment::Center,
         move || open.set(true),
         move || NavIcon(ICON_CHEVRON_DOWN_SVG, tint, 13.0),
@@ -567,11 +604,14 @@ pub fn ide_pop_rows(choices: &[crate::ui::session::IdeChoice], remembered: Optio
         .collect()
 }
 
+/// The demo's own computer, as the mockup names it.
+pub(crate) const DEMO_COMPUTER: &str = "mac-mini";
+
 /// Reads the name of the session's computer into `into` (the demo's own computer in the demo),
 /// for the IDE menu's `computer:~/project` line. A failed read leaves it unset.
 pub(crate) fn load_session_computer(session: String, into: MutableState<Option<String>>) {
     if services().demo.is_some() {
-        into.set(Some("mac-mini".to_string()));
+        into.set(Some(DEMO_COMPUTER.to_string()));
         return;
     }
     run_shared(
@@ -713,7 +753,8 @@ pub fn IdeMenu(session: &str) {
                     )
                     .content(move || {
                         Clickable(
-                            Modifier::new().fill_max_height(),
+                            // The leading half of the 32 dp pill (FR-L34.2, #251).
+                            Modifier::new().fill_max_height().corner_radii(split_start_radii(32.0)),
                             Alignment::Center,
                             move || {
                                 ide_main_click(remembered, &o_main, |kind| {
@@ -1165,6 +1206,16 @@ pub fn PaneTranscript(session: &str, agent: &str) {
     let agent_name = agent.to_string();
     let expanded = remember_with_key(sid.clone(), || mutable_state_of(HashSet::<String>::new()));
     let answering = remember_with_key(sid.clone(), || mutable_state_of(HashSet::<String>::new()));
+    // The name of the member's computer, for the approval card's title (#536: a pane's card
+    // read 이 컴퓨터에서 because no name was passed).
+    let computer = remember_with_key(format!("{sid}:pane-computer"), || mutable_state_of(None::<String>));
+    {
+        let (sid_load, computer_load) = (sid.clone(), computer.clone());
+        launched_effect(sid.clone(), move || async move {
+            load_session_computer(sid_load, computer_load);
+        });
+    }
+    let computer_name = computer.get();
 
     let items = {
         let _ = ui.live.transcripts.get();
@@ -1209,6 +1260,7 @@ pub fn PaneTranscript(session: &str, agent: &str) {
                 let agent_c = agent_name.clone();
                 let exp_c = expanded.clone();
                 let ans_c = answering.clone();
+                let computer_c = computer_name.clone();
                 cu::ScrollColumn()
                     .scroll_state(&scroll)
                     .modifier(Modifier::new().fill_max_width().fill_max_height())
@@ -1218,7 +1270,7 @@ pub fn PaneTranscript(session: &str, agent: &str) {
                             .modifier(Modifier::new().fill_max_width().padding(SP[1]))
                             .content(move || {
                                 for item in items_c.iter() {
-                                    TranscriptRow(&sid_c, &agent_c, item, &exp_c, &ans_c, None);
+                                    TranscriptRow(&sid_c, &agent_c, item, &exp_c, &ans_c, computer_c.as_deref(), true);
                                 }
                                 cu::Spacer().modifier(Modifier::new().height(12.0));
                             });
@@ -1232,7 +1284,9 @@ pub fn PaneTranscript(session: &str, agent: &str) {
 ///
 /// v0.0.7: #5 fixed (`SelectionContainer`); workaround kept until checked on a display (the
 /// terminal rows are a styled grid, and a selection over them must be tried before wrapping it).
-/// TODO(compose-rust): scroll to the bottom on new output; the pane opens at the top.
+/// New output is followed with the toolkit's scroll state, as the transcript is
+/// (compose-rust#385, `FollowNewest`): the pane opens at its newest line and stays there unless
+/// the reader scrolled up.
 /// Outside the demo it attaches as a read-only viewer to the project's one running agent terminal on
 /// the session's computer, and detaches when the pane leaves the screen (the terminal keeps running).
 pub fn PaneTerminal(member: &Member, project: &str) {
@@ -1305,6 +1359,9 @@ pub fn PaneTerminal(member: &Member, project: &str) {
                 Label(&text, Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
             });
     };
+    // Follow the newest line with the toolkit's scroll state (compose-rust#385), as `PaneTranscript` does.
+    let scroll = cu::remember_scroll_state();
+    FollowNewest(scroll.clone(), format!("{sid}:terminal"));
     match view {
         TermView::Connecting => note(tp::CONNECTING),
         TermView::NoTerminal => note(tp::NO_TERMINAL),
@@ -1322,6 +1379,7 @@ pub fn PaneTerminal(member: &Member, project: &str) {
                 )
                 .content(move || {
                     cu::ScrollColumn()
+                        .scroll_state(&scroll)
                         .modifier(Modifier::new().fill_max_width().fill_max_height())
                         .content(move || {
                             cu::Column()
@@ -1731,6 +1789,69 @@ pub fn Pane(
             );
         });
 }
+/// The corners of a pane tab's click area (`[top_start, top_end, bottom_end, bottom_start]`),
+/// so the hover layer, the press tint and the keyboard focus ring follow the tab and not a
+/// square inside it (FR-L34.4, #251). Alone, the click area is the whole tab and takes its
+/// `CORNER_MD` at all four corners. With a close button after it, the click area ends where the
+/// close button starts, inside the tab's straight part, so it is rounded at the start only and
+/// square at that end.
+pub fn pane_tab_click_radii(closable: bool) -> [f32; 4] {
+    if closable {
+        [CORNER_MD, 0.0, 0.0, CORNER_MD]
+    } else {
+        [CORNER_MD; 4]
+    }
+}
+
+/// One tab of the multi view's tab strip (`.stab`): 34 dp high with the `CORNER_MD` corner, its
+/// name and pane count, and a 24 dp round close button when there is more than one tab. The
+/// current tab is `surface` inside a 1 dp `line` outline.
+fn PaneTabChip(
+    name: &str,
+    count: usize,
+    selected: bool,
+    closable: bool,
+    on_select: impl FnMut() + 'static,
+    on_close: impl FnMut() + 'static,
+) {
+    let p = ember_theme().palette;
+    let (bg, fg, wt) = if selected {
+        (paint(p.surface), p.text, Weight::Semibold)
+    } else {
+        (paint(Color::argb(0)), p.text_2, Weight::Medium)
+    };
+    let mut tab_mod = Modifier::new().height(34.0).background(bg).corner_radius(CORNER_MD);
+    if selected {
+        tab_mod = tab_mod.border(1.0, paint(p.line));
+    }
+    let tab_name = name.to_string();
+    cu::Row().alignment(Alignment::Center).modifier(tab_mod).content(move || {
+        Clickable(
+            Modifier::new().fill_max_height().corner_radii(pane_tab_click_radii(closable)),
+            Alignment::Center,
+            on_select,
+            move || {
+                cu::Row().alignment(Alignment::CenterStart).spacing(6.0).content(|| {
+                    cu::Spacer().modifier(Modifier::new().width(10.0));
+                    Label(&tab_name, Fs::Sm, wt, Some(paint(fg)), Some(1));
+                    cu::Box()
+                        .alignment(Alignment::Center)
+                        .modifier(Modifier::new().size(20.0, 18.0).background(paint(p.surface_2)).corner_radius(9.0))
+                        .content(|| {
+                            Label(&count.to_string(), Fs::Xs2, Weight::Medium, Some(paint(p.muted)), Some(1));
+                        });
+                    cu::Spacer().modifier(Modifier::new().width(if closable { 2.0 } else { 10.0 }));
+                });
+            },
+        );
+        if closable {
+            Clickable(Modifier::new().size(24.0, 24.0).shape_role(ShapeRole::Full), Alignment::Center, on_close, || {
+                NavIcon(ICON_CLOSE_SVG, p.muted.to_argb(), 11.0)
+            });
+            cu::Spacer().modifier(Modifier::new().width(4.0));
+        }
+    });
+}
 
 /// Panes of the project's active tab, with the tab strip (FR-L18).
 pub fn MultiView(
@@ -1792,120 +1913,25 @@ pub fn MultiView(
                                                 let pg = page.clone();
                                                 let u = ui.clone();
                                                 let pr = proj_owned.clone();
-                                                let tab_vis = visible_panes(t, &all);
-                                                let tab_name = t.name.clone();
-                                                let tab_cnt = tab_vis.len();
-                                                let selected = i == panes.active;
-                                                let (bg, border_w, fg, wt) = if selected {
-                                                    (
-                                                        paint(p.surface),
-                                                        1.0,
-                                                        p.text,
-                                                        Weight::Semibold,
-                                                    )
-                                                } else {
-                                                    (
-                                                        paint(Color::argb(0)),
-                                                        0.0,
-                                                        p.text_2,
-                                                        Weight::Medium,
-                                                    )
-                                                };
-                                                let mut tab_mod = Modifier::new()
-                                                    .height(34.0)
-                                                    .background(bg)
-                                                    .corner_radius(CORNER_MD);
-                                                if border_w > 0.0 {
-                                                    tab_mod = tab_mod.border(border_w, paint(p.line));
-                                                }
-                                                cu::Row()
-                                                    .alignment(Alignment::Center)
-                                                    .modifier(tab_mod)
-                                                    .content(move || {
-                                                        let pg_s = pg.clone();
-                                                        let u_s = u.clone();
-                                                        let pr_s = pr.clone();
-                                                        Clickable(
-                                                            Modifier::new().fill_max_height(),
-                                                            Alignment::Center,
-                                                            move || {
-                                                                pg_s.set(0);
-                                                                edit_panes(&u_s, &pr_s, move |pp| {
-                                                                    pp.select(i)
-                                                                });
-                                                            },
-                                                            move || {
-                                                                cu::Row()
-                                                                    .alignment(Alignment::CenterStart)
-                                                                    .spacing(6.0)
-                                                                    .content(|| {
-                                                                        cu::Spacer().modifier(
-                                                                            Modifier::new().width(10.0),
-                                                                        );
-                                                                        Label(
-                                                                            &tab_name,
-                                                                            Fs::Sm,
-                                                                            wt,
-                                                                            Some(paint(fg)),
-                                                                            Some(1),
-                                                                        );
-                                                                        cu::Box()
-                                                                            .alignment(Alignment::Center)
-                                                                            .modifier(
-                                                                                Modifier::new()
-                                                                                    .size(20.0, 18.0)
-                                                                                    .background(paint(
-                                                                                        p.surface_2,
-                                                                                    ))
-                                                                                    .corner_radius(9.0),
-                                                                            )
-                                                                            .content(|| {
-                                                                                Label(
-                                                                                    &tab_cnt.to_string(),
-                                                                                    Fs::Xs2,
-                                                                                    Weight::Medium,
-                                                                                    Some(paint(p.muted)),
-                                                                                    Some(1),
-                                                                                );
-                                                                            });
-                                                                        cu::Spacer().modifier(
-                                                                            Modifier::new().width(
-                                                                                if multi_tabs {
-                                                                                    2.0
-                                                                                } else {
-                                                                                    10.0
-                                                                                },
-                                                                            ),
-                                                                        );
-                                                                    });
-                                                            },
-                                                        );
-                                                        if multi_tabs {
-                                                            let pg_x = pg.clone();
-                                                            let u_x = u.clone();
-                                                            let pr_x = pr.clone();
-                                                            Clickable(
-                                                                Modifier::new()
-                                                                    .size(24.0, 24.0)
-                                                                    .shape_role(ShapeRole::Full),
-                                                                Alignment::Center,
-                                                                move || {
-                                                                    pg_x.set(0);
-                                                                    edit_panes(&u_x, &pr_x, move |pp| {
-                                                                        pp.remove_tab(i)
-                                                                    });
-                                                                },
-                                                                || {
-                                                                    NavIcon(
-                                                                        ICON_CLOSE_SVG,
-                                                                        p.muted.to_argb(),
-                                                                        11.0,
-                                                                    )
-                                                                },
-                                                            );
-                                                            cu::Spacer().modifier(Modifier::new().width(4.0));
-                                                        }
-                                                    });
+                                                let (pg_s, u_s, pr_s) = (pg.clone(), u.clone(), pr.clone());
+                                                PaneTabChip(
+                                                    &t.name,
+                                                    visible_panes(t, &all).len(),
+                                                    i == panes.active,
+                                                    multi_tabs,
+                                                    move || {
+                                                        pg_s.set(0);
+                                                        edit_panes(&u_s, &pr_s, move |pp| {
+                                                            pp.select(i)
+                                                        });
+                                                    },
+                                                    move || {
+                                                        pg.set(0);
+                                                        edit_panes(&u, &pr, move |pp| {
+                                                            pp.remove_tab(i)
+                                                        });
+                                                    },
+                                                );
                                             }
                                             // Circular .stab-add "+" button (30x30)
                                             {
@@ -4051,6 +4077,73 @@ fn ViewSeg(
         });
 }
 
+/// The head of the session project menu: what is chosen now.
+pub fn project_switch_head(current: &str) -> String {
+    format!("프로젝트 \u{b7} {}", display_name(current))
+}
+
+/// The session project menu's rows: one per project with the folder glyph, its name, its member
+/// count and a check on the current one.
+pub fn project_switch_rows(boxes: &[crate::ui::project::ProjectBox], current: &str) -> Vec<PopRow> {
+    boxes
+        .iter()
+        .map(|b| PopRow {
+            icon: Some(ICON_FOLDER_SVG),
+            title: display_name(&b.id),
+            description: Some(format!("팀원 {}명", b.members.len())),
+            chosen: b.id == current,
+            ..Default::default()
+        })
+        .collect()
+}
+
+/// The session screen's project switcher menu (FR-L10.4, #888): the shared menu in the
+/// permission-mode look under `anchor`, lined up with its start; at 560 and below a bottom sheet
+/// with the menu's own head, for which the caller passes an empty `anchor` and draws the control
+/// itself. The mockup draws a native `<select>` (`.projsw`). A row switches the project and
+/// remembers it.
+fn ProjectSwitchMenu(
+    open: &MutableState<bool>,
+    boxes: &[crate::ui::project::ProjectBox],
+    current: &str,
+    project: &MutableState<Option<String>>,
+    ui: &SharedUi,
+    anchor: impl FnOnce(),
+) {
+    let rows = project_switch_rows(boxes, current);
+    let head = project_switch_head(current);
+    let ids: Vec<String> = boxes.iter().map(|b| b.id.clone()).collect();
+    let (dismiss, proj_st, ui_p) = (open.clone(), project.clone(), ui.clone());
+    PopoverMenuWith(
+        open.get(),
+        PopMenu {
+            name: super::a11y::PROJECT_PICKER,
+            kind: PopKind::Mode,
+            head: &head,
+            sub: None,
+            rows: &rows,
+            align: compose_rust::PopoverAlign::Start,
+        },
+        PopExtra { plain_sheet: true, ..Default::default() },
+        move || dismiss.set(false),
+        move |idx| {
+            if let Some(id) = ids.get(idx).cloned() {
+                proj_st.set(Some(id.clone()));
+                ui_p.update_prefs(|p| p.last_project = Some(id));
+            }
+        },
+        anchor,
+        None,
+    );
+}
+
+/// The phone header's first row (title, new member): `.sesshead{height:auto;padding:8px ...}`
+/// around the title block, which is taller than the 32 dp controls: the name line (Md), 1 dp,
+/// the subtitle line (Xs2) and the block's 2 dp padding. A fixed 48 cut the subtitle's last
+/// 3 to 4 px (FR-L28.6, review and2).
+const PHONE_HEAD_ROW_H: f32 =
+    2.0 * SP[1] + 2.0 * 2.0 + Fs::Md.line_height() + 1.0 + Fs::Xs2.line_height();
+
 /// Pill-shaped toolbar action button (`.btn.sm` in `.sesshead`).
 /// Session header actions carry no text label (owner placement rule 2026-11-13, rule 6, design
 /// review B6); the label is the tooltip and the accessible name.
@@ -4060,10 +4153,11 @@ pub const SESSION_HEADER_LABELS: bool = false;
 /// chevron (`.btn.sm` with `I("globe")` and `.chev`, review SE3), and under it, lined up with its
 /// end, "웹 페이지 열기" and one row per listening port: the address in the mono face, the process
 /// (and why a port cannot be opened) below, and a green 감지됨 pill on a port that opens. A tap
-/// opens the address in the browser or says why it cannot. Not built: the member character on a
-/// row (ports carry no member), the computer subtitle (the list is read without its name), the
-/// port field and the tunnel hint (no direct-port open).
-fn WebMenu(open: bool, load: &WebPagesLoad, on_dismiss: impl FnMut() + Clone + 'static, on_open: impl FnMut() + 'static) {
+/// opens the address in the browser or says why it cannot. `sub` is the line under the head,
+/// `computer · ip` ([`crate::ui::session::web_menu_subtitle`]), read with the ports. Not built:
+/// the member character on a row (ports carry no member), the port field and the tunnel hint
+/// (no direct-port open).
+fn WebMenu(open: bool, load: &WebPagesLoad, sub: Option<&str>, on_dismiss: impl FnMut() + Clone + 'static, on_open: impl FnMut() + 'static) {
     let items = crate::ui::session::web_menu_items(load);
     let rows: Vec<PopRow> = items
         .iter()
@@ -4072,6 +4166,7 @@ fn WebMenu(open: bool, load: &WebPagesLoad, on_dismiss: impl FnMut() + Clone + '
             description: w.detail.clone(),
             badge: w.detected.then(|| ("감지됨".to_string(), PillTone::Green)),
             mono: w.mono,
+            spinner: w.loading,
             ..Default::default()
         })
         .collect();
@@ -4082,7 +4177,7 @@ fn WebMenu(open: bool, load: &WebPagesLoad, on_dismiss: impl FnMut() + Clone + '
             name: super::a11y::WEB_MENU,
             kind: PopKind::Drop,
             head: crate::ui::session::WEB_MENU_HEAD,
-            sub: None,
+            sub,
             rows: &rows,
             align: compose_rust::PopoverAlign::End,
         },
@@ -4091,6 +4186,14 @@ fn WebMenu(open: bool, load: &WebPagesLoad, on_dismiss: impl FnMut() + Clone + '
             WebTap::Open(url) => {
                 if crate::ide::open_external(&url).is_err() {
                     notice::post("브라우저를 열지 못했습니다");
+                }
+            }
+            // An address that is a guess: open it, and say it may not open (FR-L18, #519).
+            WebTap::OpenSaying(url, text) => {
+                if crate::ide::open_external(&url).is_err() {
+                    notice::post("브라우저를 열지 못했습니다");
+                } else {
+                    notice::post(text);
                 }
             }
             WebTap::Say(text) => notice::post(text),
@@ -4164,7 +4267,7 @@ fn ToolbarBtn(
 }
 
 /// New member sheet (`#snew` in mockup `session.js` lines 386-395).
-fn NewMemberSheet(
+pub(super) fn NewMemberSheet(
     project: &str,
     open: bool,
     on_close: impl FnMut() + Clone + Send + 'static,
@@ -4190,8 +4293,17 @@ fn NewMemberSheet(
     let comp_opts = vec!["mac-mini".to_string(), "mac-studio".to_string(), "이 컴퓨터".to_string()];
     let c_idx = comp_idx.get();
 
-    let close_hdr = on_close.clone();
-    let close_f = on_close.clone();
+    let close_guarded = {
+        let b = busy.clone();
+        let mut cl = on_close.clone();
+        move || {
+            if !b.get_untracked() {
+                cl();
+            }
+        }
+    };
+    let close_hdr = close_guarded.clone();
+    let close_f = close_guarded.clone();
     let create_cb = {
         let ui = ui.clone();
         let proj_c = proj_owned.clone();
@@ -4554,12 +4666,12 @@ fn NewMemberSheet(
     if is_compact {
         cu::Sheet(true)
             .modifier(modifier.fill_max_width())
-            .on_dismiss(on_close)
+            .on_dismiss(close_guarded)
             .content(body);
     } else {
         cu::Dialog(true)
             .modifier(modifier.width(758.0))
-            .on_dismiss(on_close)
+            .on_dismiss(close_guarded)
             .content(body);
     }
 }
@@ -4609,12 +4721,15 @@ pub fn SessionScreen(focus: Option<String>) {
     let new_member_open = remember(|| {
         mutable_state_of(std::env::var("EMBER_CR_SESSION_NEW_MEMBER").as_deref() == Ok("1"))
     });
-    let project_menu = remember(|| mutable_state_of(false));
+    // `EMBER_CR_SESSION_MENU=project` opens the project menu at start, for captures.
+    let project_menu = remember(|| mutable_state_of(std::env::var("EMBER_CR_SESSION_MENU").as_deref() == Ok("project")));
     let web_menu = remember(|| mutable_state_of(false));
     // 버전 관리 opens as a sheet over the conversation (FR-L18, #495); `EMBER_CR_SESSION_VCS=1`
     // opens it at start for captures.
     let vcs_open = remember(|| mutable_state_of(std::env::var("EMBER_CR_SESSION_VCS").as_deref() == Ok("1")));
     let web_pages = remember(|| mutable_state_of(WebPagesLoad::Loading));
+    // The 웹 페이지 menu's `computer · ip` line, read with the ports.
+    let web_sub = remember(|| mutable_state_of(None::<String>));
     // The detail flag value this screen last wrote or saw (FR-L28, #885).
     let detail_wrote = remember(|| mutable_state_of(false));
 
@@ -4672,13 +4787,19 @@ pub fn SessionScreen(focus: Option<String>) {
     let open_web_menu = {
         let web_menu = web_menu.clone();
         let web_pages = web_pages.clone();
+        let web_sub = web_sub.clone();
         let sid = target.clone().or_else(|| members.first().map(|m| m.session_id.clone()));
         move || {
             web_menu.set(true);
             web_pages.set(WebPagesLoad::Loading);
             let done = web_pages.clone();
+            let sub = web_sub.clone();
+            // The line of the last open is not shown while another session's ports load, or
+            // after a read that fails.
+            sub.set(None);
             if services().demo.is_some() {
-                let host = ComputerHost { local: false, host: Some(crate::demo::DEMO_HOST.to_string()) };
+                let host = ComputerHost { host: Some(crate::demo::DEMO_HOST.to_string()), ..Default::default() };
+                sub.set(crate::ui::session::web_menu_subtitle(Some(DEMO_COMPUTER), &host));
                 done.set(web_pages_from(Ok(crate::demo::ports()), &host));
                 return;
             }
@@ -4689,13 +4810,20 @@ pub fn SessionScreen(focus: Option<String>) {
             run_shared(
                 async move {
                     let c = services().server.session_computer(&sid).await.map_err(|e| e.to_string())?;
-                    let host = computer_host(c.computer.local, "", &services().config.server_url);
+                    let host = computer_host(&c.computer, &services().config.server_url);
                     let ports = services().client.api().computer_ports(&c.computer.id).await.map_err(|e| e.to_string())?;
-                    Ok::<_, String>((ports, host))
+                    Ok::<_, String>((ports, host, c.computer.name))
                 },
-                move |r: Result<(ember_client::api::Ports, ComputerHost), String>| match r {
-                    Ok((ports, host)) => done.set(web_pages_from(Ok(ports), &host)),
-                    Err(e) => done.set(web_pages_from(Err(e), &ComputerHost::default())),
+                move |r: Result<(ember_client::api::Ports, ComputerHost, String), String>| match r {
+                    Ok((ports, host, name)) => {
+                        sub.set(crate::ui::session::web_menu_subtitle(Some(&name), &host));
+                        done.set(web_pages_from(Ok(ports), &host));
+                    }
+                    Err(e) => {
+                        // The list shows one fixed sentence; the cause goes to the log only.
+                        tracing::debug!("web page list: {e}");
+                        done.set(web_pages_from(Err(e), &ComputerHost::default()));
+                    }
                 },
             );
         }
@@ -4883,15 +5011,43 @@ pub fn SessionScreen(focus: Option<String>) {
                         .modifier(Modifier::new().weight(1.0).fill_max_height())
                         .content(|| {
                             // Top toolbar (.sesshead)
+                            // The version control, web page and IDE controls. At 560 and below the
+                            // mockup's header wraps (`.sesshead{flex-wrap:wrap;padding-right:60px}`):
+                            // they go to a second row, so the title keeps its room and nothing
+                            // runs under the floating menu button (FR-L28.2, FR-L28.6).
+                            let trailing = || {
+                                let vo = vcs_open.clone();
+                                ToolbarBtn(ICON_GIT_SVG, "버전 관리", SESSION_HEADER_LABELS, false, None, move || vo.set(true));
+                                let wm = open_web_menu.clone();
+                                let wm_d = web_menu.clone();
+                                #[allow(clippy::redundant_closure)]
+                                WebMenu(web_menu.get(), &web_pages.get(), web_sub.get().as_deref(), move || wm_d.set(false), move || wm());
+                                if let Some(t) = target.clone() {
+                                    IdeMenu(&t);
+                                } else {
+                                    AppButton(
+                                        "IDE 열기",
+                                        Some(IconRole::Forward),
+                                        ButtonKind::Default,
+                                        true,
+                                        false,
+                                        false,
+                                        || {},
+                                    );
+                                }
+                            };
                             cu::Row()
                                 .alignment(Alignment::CenterStart)
                                 .spacing(6.0)
                                 .modifier(
                                     Modifier::new()
                                         .fill_max_width()
-                                        .height(60.0)
+                                        .height(if is_phone { PHONE_HEAD_ROW_H } else { 60.0 })
                                         .background(paint(p.surface))
-                                        .padding(SP[2]),
+                                        // Phone: 8 around the 32 dp controls (one padding for all
+                                        // sides; the mockup's start is 12) and 60 at the end with
+                                        // the menu room.
+                                        .padding(if is_phone { SP[1] } else { SP[2] }),
                                 )
                                 .content(|| {
                                     if is_phone {
@@ -4916,10 +5072,13 @@ pub fn SessionScreen(focus: Option<String>) {
                                     if is_phone {
                                         proj_mod = proj_mod.weight(1.0);
                                     }
+                                    // The control says whether its menu is open; its text is its name.
+                                    let proj_open = project_menu.get();
+                                    let control = move || {
                                     Clickable(
-                                        proj_mod,
+                                        proj_mod.expanded(proj_open),
                                         Alignment::CenterStart,
-                                        move || pm.set(true),
+                                        move || pm.set(!pm.get_untracked()),
                                         move || {
                                             cu::Column()
                                                 .spacing(1.0)
@@ -4955,6 +5114,14 @@ pub fn SessionScreen(focus: Option<String>) {
                                                 });
                                         },
                                     );
+                                    };
+                                    if is_phone {
+                                        // The phone's bottom sheet is drawn apart from the control
+                                        // (below), so the control keeps its weight in this row.
+                                        control();
+                                    } else {
+                                        ProjectSwitchMenu(&project_menu, &boxes, &current, &project, &ui, control);
+                                    }
                                     if !is_phone {
                                         cu::Spacer().modifier(Modifier::new().weight(1.0));
                                     }
@@ -4967,33 +5134,31 @@ pub fn SessionScreen(focus: Option<String>) {
                                         // mockup's `.sesshead` (owner placement rule 2026-11-13, rule 6).
                                         let nm = new_member_open.clone();
                                         ToolbarBtn(ICON_PLUS_SVG, "새 팀원", SESSION_HEADER_LABELS, false, None, move || nm.set(true));
-                                        let vo = vcs_open.clone();
-                                        ToolbarBtn(ICON_GIT_SVG, "버전 관리", SESSION_HEADER_LABELS, false, None, move || vo.set(true));
-                                        let wm = open_web_menu.clone();
-                                        let wm_d = web_menu.clone();
-                                        #[allow(clippy::redundant_closure)]
-                                        WebMenu(web_menu.get(), &web_pages.get(), move || wm_d.set(false), move || wm());
-                                    }
-                                    if let Some(t) = target.clone() {
-                                        IdeMenu(&t);
-                                    } else {
-                                        AppButton(
-                                            "IDE 열기",
-                                            Some(IconRole::Forward),
-                                            ButtonKind::Default,
-                                            true,
-                                            false,
-                                            false,
-                                            || {},
-                                        );
                                     }
                                     if is_phone {
-                                        // Keep the trailing group clear of the shell's floating menu button.
+                                        // Keep the first row clear of the shell's floating menu button.
                                         cu::Spacer().modifier(
                                             Modifier::new().width(super::project::PHONE_MENU_ROOM),
                                         );
+                                    } else {
+                                        trailing();
                                     }
                                 });
+                            if is_phone {
+                                // The wrapped second row: version control, web pages, IDE.
+                                cu::Row()
+                                    .alignment(Alignment::CenterStart)
+                                    .spacing(6.0)
+                                    .modifier(
+                                        Modifier::new()
+                                            .fill_max_width()
+                                            .background(paint(p.surface))
+                                            .padding(SP[1]),
+                                    )
+                                    .content(|| {
+                                        trailing();
+                                    });
+                            }
 
                             if chips_below {
                                 cu::Row()
@@ -5122,27 +5287,10 @@ pub fn SessionScreen(focus: Option<String>) {
                 super::vcs::VcsSheet(&current, vcs_open.get(), move || vo_d.set(false));
             }
 
-            // Project picker OptionSheet
-            let proj_labels: Vec<String> = boxes.iter().map(|b| display_name(&b.id)).collect();
-            let chosen_proj = boxes.iter().position(|b| b.id == current);
-            let pm_d = project_menu.clone();
-            let boxes_c = boxes.clone();
-            let proj_st = project.clone();
-            let ui_p = ui.clone();
-            OptionSheet(
-                project_menu.get(),
-                &proj_labels,
-                chosen_proj,
-                POPUP_W,
-                move || pm_d.set(false),
-                move |idx| {
-                    if let Some(b) = boxes_c.get(idx) {
-                        let id = b.id.clone();
-                        proj_st.set(Some(id.clone()));
-                        ui_p.update_prefs(|p| p.last_project = Some(id));
-                    }
-                },
-            );
+            // The project menu's phone sheet (FR-L10.4): apart from the control in the bar.
+            if is_phone {
+                ProjectSwitchMenu(&project_menu, &boxes, &current, &project, &ui, || {});
+            }
 
         });
 }
@@ -5219,6 +5367,66 @@ mod tests {
         assert!(project.contains("crate::ui::cr::session::ide_pop_rows(&choices, remembered)"));
     }
 
+    fn project_switch_sample() {
+        let _ = services();
+        let open = remember(|| mutable_state_of(true));
+        let project = remember(|| mutable_state_of(None::<String>));
+        let boxes = services().client.read(|s| project_boxes(s));
+        let current = boxes.first().map(|b| b.id.clone()).unwrap_or_default();
+        ProjectSwitchMenu(&open, &boxes, &current, &project, shared_ui(), || {
+            Label("프로젝트 컨트롤", Fs::Lg, Weight::Semibold, None, Some(1));
+        });
+    }
+
+    #[test]
+    fn fr_l10_4_session_project_menu_is_the_shared_menu() {
+        use compose_rust::protocol::{decode_batch, Mutation};
+        let _guard = crate::services::test_guard();
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+        let mut host = compose_rust::Host::new(|| Box::new(compose_rust::Recomposer::new(project_switch_sample)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        crate::ui::window_size::set_opened_for_test(None);
+        let mut nodes: Vec<(u32, String, Vec<String>, Vec<String>)> = Vec::new();
+        for m in batch.iter() {
+            match m {
+                Mutation::Create { node_id, widget } => nodes.push((*node_id, format!("{widget:?}"), Vec::new(), Vec::new())),
+                Mutation::SetModifier { node_id, modifier, .. } => {
+                    if let Some(n) = nodes.iter_mut().find(|n| n.0 == *node_id) {
+                        n.2.push(format!("{modifier:?}"));
+                    }
+                }
+                Mutation::SetProp { node_id, property, value } => {
+                    if let Some(n) = nodes.iter_mut().find(|n| n.0 == *node_id) {
+                        n.3.push(format!("{property:?}={value:?}"));
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(!nodes.iter().any(|n| n.1 == "Dialog" || n.1 == "Sheet"), "no centred dialog at 1440");
+        let pops: Vec<_> = nodes.iter().filter(|n| n.1 == "Popover").collect();
+        assert_eq!(pops.len(), 1);
+        for want in ["Open=Bool(true)", "Placement=Integer(2)", "OffsetDp=Float(8.0)"] {
+            assert!(pops[0].3.iter().any(|p| p == want), "{want} in {:?}", pops[0].3);
+        }
+        assert!(!pops[0].3.iter().any(|p| p == "Align=Integer(3)"));
+        assert!(pops[0].2.iter().any(|m| m == "Width(340.0)"), "{:?}", pops[0].2);
+        let boxes = services().client.read(|s| project_boxes(s));
+        let current = boxes.first().map(|b| b.id.clone()).unwrap_or_default();
+        let rows = project_switch_rows(&boxes, &current);
+        assert!(!boxes.is_empty(), "the demo has projects, so the rows below are checked");
+        assert_eq!(rows.len(), boxes.len());
+        assert_eq!(rows.iter().filter(|r| r.chosen).count(), usize::from(!boxes.is_empty()));
+        assert!(rows.iter().all(|r| r.icon.is_some() && r.description.as_deref().is_some_and(|d| d.starts_with("팀원 "))));
+        let says = |t: &str| nodes.iter().any(|n| n.3.iter().any(|p| p.contains(t)));
+        assert!(says(&project_switch_head(&current)) && says("프로젝트 컨트롤"));
+        for r in &rows {
+            assert!(says(&r.title), "missing {}", r.title);
+        }
+        let items = nodes.iter().filter(|n| n.2.iter().any(|m| m.starts_with("Semantics") && m.contains("MenuItem"))).count();
+        assert_eq!(items, rows.len());
+    }
+
     #[test]
     fn fr_l10_4_session_pickers_hang_from_their_controls() {
         let src = include_str!("session.rs").split("mod tests {").next().unwrap();
@@ -5235,9 +5443,30 @@ mod tests {
         assert!(ide.contains("IDE_MENU_HEAD") && ide.contains("ide_pop_rows(&choices, remembered)"));
         let web = body("WebMenu");
         assert!(web.contains("PopoverMenu(") && web.contains("WEB_MENU_HEAD") && web.contains("PillTone::Green"));
+        // The `computer · ip` line under the head is passed in and sent as the menu's subtitle.
+        assert!(web.contains("sub: Option<&str>") && web.contains("            sub,\n"), "{web}");
+        assert!(src.contains("sub.set(crate::ui::session::web_menu_subtitle(Some(&name), &host));"));
+        assert!(src.contains("web_sub.get().as_deref()"));
         // The globe is a named button that says whether its menu is open (review r8).
         assert!(web.contains("ToolbarBtn(ICON_GLOBE_SVG, \"웹 페이지\", SESSION_HEADER_LABELS, true, Some(open), on_open)"), "{web}");
-        for b in [&mode, &ide, &web] {
+        // The model chip's one line hangs from the chip too, with the mockup's own sheet on a phone.
+        let model = body("ModelChip");
+        assert!(model.contains("PopoverMenuWith(") && model.contains("PopKind::Mode") && model.contains("plain_sheet: true"));
+        assert!(model.contains(".expanded(expanded)") && model.contains("model_chip_rows()"));
+        let rows = super::model_chip_rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "실행 중인 세션의 모델은 바꿀 수 없습니다");
+        assert_eq!(rows[0].badge, Some((crate::ui::session::SOON.to_string(), PillTone::Grey)));
+        // The project switcher (a native select in the mockup) is the shared menu too.
+        let switch = body("ProjectSwitchMenu");
+        assert!(switch.contains("PopoverMenuWith(") && switch.contains("PopKind::Mode") && switch.contains("plain_sheet: true"));
+        assert!(switch.contains("PopoverAlign::Start") && switch.contains("a11y::PROJECT_PICKER"));
+        assert!(src.contains("proj_mod.expanded(proj_open)"), "the control says whether the menu is open");
+        assert!(src.contains("ProjectSwitchMenu(&project_menu, &boxes, &current, &project, &ui, control);"));
+        assert!(src.contains("ProjectSwitchMenu(&project_menu, &boxes, &current, &project, &ui, || {});"), "the phone sheet");
+        assert!(src.contains("EMBER_CR_SESSION_MENU\").as_deref() == Ok(\"project\")"));
+        assert!(!src.contains("// Project picker OptionSheet"));
+        for b in [&mode, &ide, &web, &model] {
             assert!(!b.contains("OptionSheet("), "no centred option sheet is left in {b:.40}");
         }
         assert!(!src.contains("// Web pages OptionSheet"));
@@ -5327,6 +5556,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pane_terminal_follows_its_newest_line_with_the_toolkit_scroll_state() {
+        // compose-rust#385 (#673): the terminal pane hands its ScrollColumn the scroll state that
+        // `FollowNewest` moves, so no stand-in marker for scrolling to the bottom is left.
+        let src = include_str!("session.rs");
+        let src = &src[..src.find("#[cfg(test)]").unwrap()];
+        let doc = src.split("pub fn PaneTerminal(").next().unwrap();
+        assert!(!doc.contains(concat!("TODO(compose-rust): scroll to the ", "bottom")));
+        let term = src.split("pub fn PaneTerminal(").nth(1).unwrap();
+        let term = term.split("\npub fn ").next().unwrap();
+        assert!(term.contains("let scroll = cu::remember_scroll_state();"));
+        assert!(term.contains("FollowNewest(scroll.clone(), format!(\"{sid}:terminal\"));"));
+        assert!(term.contains("cu::ScrollColumn()\n                        .scroll_state(&scroll)"));
+    }
+
+    #[test]
     fn nfr_l3_pane_transcript_opens_at_the_newest_message() {
         // First layout: the whole transcript was kept (height unknown), go to the end.
         assert_eq!(follow_newest(412.0, 0.0, 0.0), Some(412.0));
@@ -5396,6 +5640,131 @@ mod tests {
         assert!(open.get_untracked(), "an unset default opens the chooser");
     }
 
+    #[Composable]
+    fn host_ide_chevron_in_the_pill() {
+        let open = remember(|| mutable_state_of(false));
+        IdeChevron(open.clone(), true);
+    }
+
+    #[Composable]
+    fn host_pane_tab_alone() {
+        PaneTabChip("작업 1", 2, true, false, || {}, || {});
+    }
+
+    #[Composable]
+    fn host_pane_tab_with_close() {
+        PaneTabChip("작업 1", 2, true, true, || {}, || {});
+    }
+
+    /// What a composed pane tab sends: the nodes with a click handler in the order sent, every
+    /// node's parent and every node's modifiers as debug text.
+    struct PaneTabSent {
+        clicked: Vec<u32>,
+        parents: Vec<(u32, u32)>,
+        modifiers: Vec<(u32, String)>,
+    }
+
+    impl PaneTabSent {
+        fn of(content: fn()) -> Self {
+            let mut host = Host::new(move || Box::new(Recomposer::new(content)));
+            let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+            let mut sent = PaneTabSent { clicked: Vec::new(), parents: Vec::new(), modifiers: Vec::new() };
+            for m in batch.iter() {
+                match m {
+                    Mutation::SetProp { node_id, property: compose_rust::PropertyKind::OnClick, .. } => sent.clicked.push(*node_id),
+                    Mutation::Insert { parent_id, node_id, .. } => sent.parents.push((*node_id, *parent_id)),
+                    Mutation::SetModifier { node_id, modifier, .. } => sent.modifiers.push((*node_id, format!("{modifier:?}"))),
+                    _ => {}
+                }
+            }
+            sent
+        }
+
+        fn mods(&self, id: u32) -> Vec<String> {
+            self.modifiers.iter().filter(|(n, _)| *n == id).map(|(_, m)| m.clone()).collect()
+        }
+
+        fn parent(&self, id: u32) -> Option<u32> {
+            self.parents.iter().find(|(n, _)| *n == id).map(|(_, p)| *p)
+        }
+    }
+
+    /// FR-L34.4, #251: a pane tab's click area carries the tab's corners, so hover, press and the
+    /// focus ring are not a square inside the 12 dp rounded tab. Alone it is the whole tab; with
+    /// a close button after it, it is rounded at the start only.
+    #[test]
+    fn fr_l34_4_a_pane_tab_click_area_carries_the_tab_corners() {
+        assert_eq!(CORNER_MD, 12.0);
+        assert_eq!(pane_tab_click_radii(false), [12.0, 12.0, 12.0, 12.0]);
+        assert_eq!(pane_tab_click_radii(true), [12.0, 0.0, 0.0, 12.0]);
+        let _guard = crate::services::test_guard();
+        let shape = |r: [f32; 4]| {
+            format!("{:?}", compose_rust::schema::Modifier::Shape { top_start: r[0], top_end: r[1], bottom_end: r[2], bottom_start: r[3] })
+        };
+        let tab_shape = shape([12.0; 4]);
+        // Alone: one click area, the whole tab, with the tab's four corners.
+        let alone = PaneTabSent::of(host_pane_tab_alone);
+        assert_eq!(alone.clicked.len(), 1, "{:?}", alone.clicked);
+        let mods = alone.mods(alone.clicked[0]);
+        assert!(mods.contains(&tab_shape), "{mods:?}");
+        assert!(mods.iter().any(|m| m == "FillMaxHeight"), "{mods:?}");
+        // Its parent is the tab itself: 34 high with the same corner.
+        let tab = alone.mods(alone.parent(alone.clicked[0]).expect("the tab"));
+        assert!(tab.iter().any(|m| m == "Height(34.0)") && tab.contains(&tab_shape), "{tab:?}");
+        // With a close button: the name's click area is rounded at the start and square where
+        // the close button follows; the close button keeps its circle.
+        let both = PaneTabSent::of(host_pane_tab_with_close);
+        assert_eq!(both.clicked.len(), 2, "{:?}", both.clicked);
+        let (name, close) = (both.mods(both.clicked[0]), both.mods(both.clicked[1]));
+        assert!(name.contains(&shape([12.0, 0.0, 0.0, 12.0])), "{name:?}");
+        assert!(!name.contains(&tab_shape), "{name:?}");
+        assert!(close.iter().any(|m| m.starts_with("ShapeRole(Full")), "{close:?}");
+        assert!(close.iter().any(|m| m == "Width(24.0)") && close.iter().any(|m| m == "Height(24.0)"), "{close:?}");
+        assert!(both.parent(both.clicked[0]).is_some());
+        assert_eq!(both.parent(both.clicked[0]), both.parent(both.clicked[1]), "both are children of the tab");
+        let tab = both.mods(both.parent(both.clicked[0]).expect("the tab"));
+        assert!(tab.contains(&tab_shape), "the tab keeps its own four corners: {tab:?}");
+        // The tab strip draws its tabs with it, and no tab is left with a bare click area.
+        let src = include_str!("session.rs").split("#[cfg(test)]").next().unwrap();
+        assert_eq!(src.matches("PaneTabChip(").count(), 2, "the definition and the tab strip");
+        assert!(src.contains("Modifier::new().fill_max_height().corner_radii(pane_tab_click_radii(closable))"));
+    }
+
+    /// FR-L34.2, #251: the two halves of the "IDE 열기" split pill take the pill's rounded ends,
+    /// so the hover layer, the press tint and the keyboard focus ring stay inside the pill.
+    #[test]
+    fn fr_l34_2_the_split_pill_halves_carry_the_pill_ends_as_their_shape() {
+        assert_eq!(split_start_radii(32.0), [16.0, 0.0, 0.0, 16.0]);
+        assert_eq!(split_end_radii(32.0), [0.0, 16.0, 16.0, 0.0]);
+        assert_eq!(split_end_radii(40.0), [0.0, 20.0, 20.0, 0.0]);
+        let _guard = crate::services::test_guard();
+        let mut host = Host::new(|| Box::new(Recomposer::new(host_ide_chevron_in_the_pill)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let clicked: Vec<u32> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetProp { node_id, property: compose_rust::PropertyKind::OnClick, .. } => Some(*node_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(clicked.len(), 1, "{clicked:?}");
+        let mods: Vec<String> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetModifier { node_id, modifier, .. } if *node_id == clicked[0] => Some(format!("{modifier:?}")),
+                _ => None,
+            })
+            .collect();
+        let want = format!(
+            "{:?}",
+            compose_rust::schema::Modifier::Shape { top_start: 0.0, top_end: 16.0, bottom_end: 16.0, bottom_start: 0.0 }
+        );
+        assert!(mods.contains(&want), "{mods:?}");
+        // The main half is sent with the other end, in the desktop header.
+        let src = include_str!("session.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(src.contains("Modifier::new().fill_max_height().corner_radii(split_start_radii(32.0))"));
+    }
+
     /// FR-L7, #271: the chevron offered beside the default IDE carries a click handler that
     /// opens the chooser, as the renderer would click it.
     #[test]
@@ -5416,6 +5785,18 @@ mod tests {
             })
             .collect();
         assert_eq!(clicks.len(), 1, "the chevron is one clickable: {clicks:?}");
+        // compose-rust#472 (v0.0.11): the 26x32 chevron carries MinTouchTarget(44.0) without
+        // growing its drawn Width(26.0) / Height(32.0).
+        let mods: Vec<String> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetModifier { node_id, modifier, .. } if *node_id == clicks[0].0 => Some(format!("{modifier:?}")),
+                _ => None,
+            })
+            .collect();
+        for want in ["Width(26.0)", "Height(32.0)", "MinTouchTarget { size: 44.0 }"] {
+            assert!(mods.iter().any(|m| m == want), "{want}: {mods:?}");
+        }
         let open = CHEVRON_OPEN.with(|c| c.borrow().clone()).expect("state captured");
         assert!(!open.get_untracked());
         host.dispatch(HostEvent {
@@ -5425,6 +5806,98 @@ mod tests {
         })
         .expect("dispatch");
         assert!(open.get_untracked(), "the chevron opened the chooser");
+        let src = include_str!("session.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(!src.contains(concat!("TODO(compose-rust#", "472")));
+    }
+
+    /// What a composed screen sends: each node's parent, string props and modifiers.
+    struct Tree {
+        parents: std::collections::HashMap<u32, u32>,
+        strings: Vec<(u32, String)>,
+        modifiers: Vec<(u32, String)>,
+    }
+
+    impl Tree {
+        fn of(content: fn()) -> Self {
+            let mut host = Host::new(move || Box::new(Recomposer::new(content)));
+            let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+            let mut t = Tree { parents: Default::default(), strings: Vec::new(), modifiers: Vec::new() };
+            for m in batch.iter() {
+                match m {
+                    Mutation::Insert { parent_id, node_id, .. } => {
+                        t.parents.insert(*node_id, *parent_id);
+                    }
+                    Mutation::SetProp { node_id, value: PropertyValue::String(v), .. } => t.strings.push((*node_id, v.to_string())),
+                    Mutation::SetModifier { node_id, modifier, .. } => t.modifiers.push((*node_id, format!("{modifier:?}"))),
+                    _ => {}
+                }
+            }
+            t
+        }
+
+        fn ancestors(&self, mut id: u32) -> Vec<u32> {
+            let mut out = vec![id];
+            while let Some(p) = self.parents.get(&id) {
+                out.push(*p);
+                id = *p;
+            }
+            out
+        }
+
+        fn nodes_with(&self, text: &str) -> Vec<u32> {
+            self.strings.iter().filter(|(_, s)| s == text).map(|(n, _)| *n).collect()
+        }
+
+        /// The nearest node that holds both texts.
+        fn common(&self, a: &str, b: &str) -> u32 {
+            let a = self.ancestors(*self.nodes_with(a).first().unwrap_or_else(|| panic!("no {a}")));
+            let b = self.ancestors(*self.nodes_with(b).first().unwrap_or_else(|| panic!("no {b}")));
+            *a.iter().find(|n| b.contains(n)).expect("one tree")
+        }
+
+        fn children_mods(&self, parent: u32) -> Vec<String> {
+            self.modifiers
+                .iter()
+                .filter(|(n, _)| self.parents.get(n) == Some(&parent))
+                .map(|(_, m)| m.clone())
+                .collect()
+        }
+    }
+
+    #[test]
+    fn fr_l28_6_the_phone_head_row_holds_the_title_and_the_whole_subtitle() {
+        // Review and2: at 48 dp the subtitle lost its bottom 3 to 4 px.
+        let inner = Fs::Md.line_height() + 1.0 + Fs::Xs2.line_height() + 2.0 * 2.0;
+        assert_eq!(PHONE_HEAD_ROW_H, 2.0 * SP[1] + inner);
+        assert!(PHONE_HEAD_ROW_H >= 48.0 && PHONE_HEAD_ROW_H - 2.0 * SP[1] >= 32.0);
+        assert_eq!(PHONE_HEAD_ROW_H, 59.0);
+    }
+
+    /// Flip 4 review 3.2 and 3.3: at 360 dp the five header controls shared the title's row, so
+    /// the title shrank to "demo-..." and the IDE button ran under the floating menu button. The
+    /// mockup's phone header wraps: the first row is the drawer, the title and 새 팀원, kept
+    /// 60 dp from the right edge; version control, web pages and the IDE go to the next row.
+    #[test]
+    fn fr_l28_2_the_phone_session_header_wraps_and_keeps_the_menu_button_room_at_360() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        for (view, host) in [("multi", host_session_multi as fn()), ("single", host_session_single as fn())] {
+            shared_ui().update_prefs(|p| p.session_view = Some(view.to_string()));
+            crate::ui::window_size::set_opened_for_test(Some((360.0, 880.0)));
+            let t = Tree::of(host);
+            crate::ui::window_size::set_opened_for_test(None);
+            let first_row = t.common(super::super::a11y::MENU, "새 팀원");
+            for later in ["버전 관리", "웹 페이지"] {
+                for n in t.nodes_with(later) {
+                    assert!(!t.ancestors(n).contains(&first_row), "{view}: {later} must leave the title row at 360");
+                }
+            }
+            let row = t.children_mods(first_row);
+            assert!(row.iter().any(|m| m == "Width(52.0)"), "{view}: the floating menu room ends the title row: {row:?}");
+            assert!(t.modifiers.iter().any(|(n, m)| *n == first_row && m == "Height(59.0)"), "{view}: a 59 dp first row (title and subtitle)");
+        }
+        shared_ui().update_prefs(|p| p.session_view = None);
+        compose_rust::window::reset_window_size();
     }
 
     #[Composable]

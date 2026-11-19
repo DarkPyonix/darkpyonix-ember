@@ -18,7 +18,7 @@ use compose_rust::drawing::DrawList;
 use compose_rust::runtime::{mutable_state_of, remember, MutableState};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
-use compose_rust::{Alignment, ButtonVariant, Color, IconRole, ShapeRole};
+use compose_rust::{Alignment, Color, IconRole, ShapeRole};
 use ember_client::state::Reachability;
 use ember_client::wire::DetectedAgent;
 
@@ -33,7 +33,7 @@ pub use crate::ui::agents::{
 };
 use super::components::{
     AppButton, ButtonKind, Choice, ChoiceButton, ChoiceRowFit, EmberCard, EmberField, FieldOptions, InsetPanel,
-    InsetPanelSized, Label, Pill, PillTone, PopKind, PopMenu, PopRow, PopoverMenu,
+    DataNamedOverlay, InsetPanelSized, Label, NameThenPillLines, NamedClickable, Pill, PillTone, PopKind, PopMenu, PopRow, PopoverMenu,
 };
 use super::theme::*;
 use crate::server::{Account, ChatGptAccount};
@@ -448,16 +448,17 @@ fn SectionNav(current: Section, shape: NavShape, on_pick: impl FnMut(Section) + 
                         (Color::argb(0), p.text_2)
                     };
                     let mut on_pick = on_pick.clone();
-                    cu::Box()
-                        .modifier(
-                            Modifier::new()
-                                .width(200.0)
-                                .height(H_BTN)
-                                .background(paint(bg))
-                                .corner_radius(CORNER_SM),
-                        )
-                        .alignment(Alignment::CenterStart)
-                        .content(move || {
+                    // The painted row is the control (`NamedClickable`, compose-rust#429).
+                    NamedClickable(
+                        x.label(),
+                        Modifier::new()
+                            .width(200.0)
+                            .height(H_BTN)
+                            .background(paint(bg))
+                            .corner_radius(CORNER_SM),
+                        Alignment::CenterStart,
+                        move || on_pick(x),
+                        move || {
                             cu::Row().alignment(Alignment::CenterStart).content(|| {
                                 cu::Spacer().modifier(Modifier::new().width(12.0));
                                 super::shell::NavIcon(section_svg(x), fg.to_argb(), 18.0);
@@ -465,8 +466,8 @@ fn SectionNav(current: Section, shape: NavShape, on_pick: impl FnMut(Section) + 
                                 Label(x.label(), Fs::Md, Weight::Medium, Some(paint(fg)), Some(1));
                                 cu::Spacer().modifier(Modifier::new().weight(1.0));
                             });
-                            FocusOverlay(x.label(), move || on_pick(x));
-                        });
+                        },
+                    );
                 }
             });
         }
@@ -481,16 +482,17 @@ fn SectionNav(current: Section, shape: NavShape, on_pick: impl FnMut(Section) + 
                             (p.surface, p.text_2, p.line)
                         };
                         let mut on_pick = on_pick.clone();
-                        cu::Box()
-                            .modifier(
-                                Modifier::new()
-                                    .height(H_CTL)
-                                    .background(paint(bg))
-                                    .border(1.0, paint(border))
-                                    .shape_role(ShapeRole::Full),
-                            )
-                            .alignment(Alignment::Center)
-                            .content(move || {
+                        // The pill is the control and takes the width of its icon and label.
+                        NamedClickable(
+                            x.label(),
+                            Modifier::new()
+                                .height(H_CTL)
+                                .background(paint(bg))
+                                .border(1.0, paint(border))
+                                .shape_role(ShapeRole::Full),
+                            Alignment::Center,
+                            move || on_pick(x),
+                            move || {
                                 cu::Row().alignment(Alignment::CenterStart).content(|| {
                                     cu::Spacer().modifier(Modifier::new().width(12.0));
                                     super::shell::NavIcon(section_svg(x), fg.to_argb(), 16.0);
@@ -498,8 +500,8 @@ fn SectionNav(current: Section, shape: NavShape, on_pick: impl FnMut(Section) + 
                                     Label(x.label(), Fs::Sm, Weight::Medium, Some(paint(fg)), Some(1));
                                     cu::Spacer().modifier(Modifier::new().width(12.0));
                                 });
-                                FocusOverlay(x.label(), move || on_pick(x));
-                            });
+                            },
+                        );
                     }
                 });
             });
@@ -553,53 +555,20 @@ fn ModelRadio(label: &str, selected: bool, mut on_click: impl FnMut() + 'static)
         .modifier(Modifier::new().size(20.0, 20.0))
         .content(move || {
             cu::Canvas(draw).modifier(Modifier::new().size(20.0, 20.0));
-            FocusOverlay(&radio_label, move || on_click());
+            DataNamedOverlay(&radio_label, true, None, move || on_click());
         });
 }
 
-// v0.0.7: #425 and #429 fixed (`Button::content`, `Modifier::label`); workaround kept until
-// checked on a display (moving each painted row into a `Button` content slot changes its press
-// feedback and padding). The overlay names itself with `accessible_name` (owned), never
-// `Modifier::label`, so a name built from data (a profile, a model) never fills the toolkit's
-// label table (#455).
-/// An accessible invisible button overlay for a painted row, chip, or pill.
-/// Gives assistive tech the item's label and provides keyboard focus and click handling.
-fn FocusOverlay(label: &str, on_click: impl FnMut() + 'static) {
-    FocusOverlayEnabled(label, true, on_click);
-}
-
-fn FocusOverlayEnabled(label: &str, enabled: bool, on_click: impl FnMut() + 'static) {
-    FocusOverlayWith(label, enabled, None, on_click);
-}
-
-/// The overlay button; `expanded` says whether the menu it opens is open (FR-L10.4).
-fn FocusOverlayWith(label: &str, enabled: bool, expanded: Option<bool>, on_click: impl FnMut() + 'static) {
-    let m = Modifier::new().fill_max_size();
-    let m = match expanded {
-        Some(open) => m.expanded(open),
-        None => m,
-    };
-    cu::Button(label)
-        .accessible_name(label)
-        .enabled(enabled)
-        .variant(ButtonVariant::Text)
-        .color(compose_rust::Paint::Literal(Color::argb(0)))
-        .modifier(m)
-        .on_click(on_click);
-}
-
-// TODO(compose-rust#431): the FocusOverlay is a `fill_max_size` Button, and the toolkit has no
-// parent-sized modifier for an overlay, so a chip without a width takes the rest of the row and
-// squeezes the hint beside it to one word per line. compose-rust v0.0.7 (#427) stops the
-// squeeze at a word, not at the overlay: checked on a display 2026-11-13, so the width stays fixed.
-/// A selectable chip matching the mockup's .field.ag-sel: wide enough for the label,
-/// with a 1-line label and an accessible FocusOverlay.
+/// A selectable chip matching the mockup's .field.ag-sel: as wide as its one-line label and the
+/// 14 px at each side. It had a fixed 200 while the button over it was `fill_max_size`, which made
+/// a chip without a width take the rest of the row; the button takes the chip's bounds now
+/// (`match_parent_size`, compose-rust#431). Its name can be data (a profile), so that button
+/// carries it.
 fn SelectChip(text: &str, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     cu::Box()
         .modifier(
             Modifier::new()
-                .width(200.0)
                 .height(H_CTL)
                 .background(paint(p.surface_2))
                 .shape_role(ShapeRole::Full),
@@ -611,13 +580,13 @@ fn SelectChip(text: &str, on_click: impl FnMut() + 'static) {
                 Label(text, Fs::Sm, Weight::Medium, Some(paint(p.text)), Some(1));
                 cu::Spacer().modifier(Modifier::new().width(14.0));
             });
-            FocusOverlay(text, on_click);
+            DataNamedOverlay(text, true, None, on_click);
         });
 }
 
-// TODO(compose-rust#431): as for `SelectChip`, the `fill_max_size` overlay makes a pill without
-// a width take the rest of the row, so the width is estimated with `text_px` and fixed.
-/// A picker pill matching mockup's .pickchip: full pill shape, icon + label, sized to its content.
+/// A picker pill matching mockup's .pickchip: full pill shape, icon + label, sized by its content
+/// (12 px, the icon and 8, the label, 12). Its width was a `text_px` estimate for the reason
+/// [`SelectChip`] gives, and goes with it (compose-rust#431).
 fn ModelPickerPill(text: &str, svg: Option<&'static str>, on_click: impl FnMut() + 'static) {
     MenuPickerPill(text, svg, None, on_click);
 }
@@ -625,15 +594,9 @@ fn ModelPickerPill(text: &str, svg: Option<&'static str>, on_click: impl FnMut()
 /// [`ModelPickerPill`] as the control of a [`PopoverMenu`], saying whether the menu is open.
 fn MenuPickerPill(text: &str, svg: Option<&'static str>, expanded: Option<bool>, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
-    let width = 12.0
-        + if svg.is_some() { 16.0 + 8.0 } else { 0.0 }
-        + super::home::text_px(text, Fs::Sm.size())
-        + 12.0
-        + 8.0;
     cu::Box()
         .modifier(
             Modifier::new()
-                .width(width.max(72.0))
                 .height(H_CTL)
                 .background(paint(p.surface_2))
                 .shape_role(ShapeRole::Full),
@@ -649,7 +612,7 @@ fn MenuPickerPill(text: &str, svg: Option<&'static str>, expanded: Option<bool>,
                 Label(text, Fs::Sm, Weight::Medium, Some(paint(p.text)), Some(1));
                 cu::Spacer().modifier(Modifier::new().width(12.0));
             });
-            FocusOverlayWith(text, true, expanded, on_click);
+            DataNamedOverlay(text, true, expanded, on_click);
         });
 }
 
@@ -849,9 +812,13 @@ fn HeadedCard(head: impl FnOnce(), body: impl FnOnce()) {
             cu::Spacer().modifier(Modifier::new().height(PAD_CARD_V));
             cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
                 cu::Spacer().modifier(Modifier::new().width(PAD_CARD_H));
-                // A strut: the toolkit has no minimum height (TODO(compose-rust#778)).
-                cu::Spacer().modifier(Modifier::new().height(CARD_HEAD_CONTENT_MIN_H));
-                cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().weight(1.0)).content(head);
+                // compose-rust#778 / #826 (v0.0.11 `Modifier::min_height`): `.card-h{min-height:56px}`
+                // less the 16 px padding above and below.
+                cu::Row()
+                    .alignment(Alignment::CenterStart)
+                    .spacing(SP[2])
+                    .modifier(Modifier::new().weight(1.0).min_height(CARD_HEAD_CONTENT_MIN_H))
+                    .content(head);
                 cu::Spacer().modifier(Modifier::new().width(PAD_CARD_H));
             });
             cu::Spacer().modifier(Modifier::new().height(PAD_CARD_V));
@@ -1797,7 +1764,7 @@ fn ModelsSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: b
 /// Pick a harness and a label, create the account on the server, show the login command it
 /// returns and let the owner ask whether the login happened. There is no login window: the
 /// login runs on the server's machine (INTENT E3). Demo mode shows a sample and calls nothing.
-fn AddAccountSheet(add: &MutableState<crate::ui::agents::AddAccount>, example: bool) {
+pub(super) fn AddAccountSheet(add: &MutableState<crate::ui::agents::AddAccount>, example: bool) {
     use crate::ui::agents::{add_account_kinds, AddAccount, AddPhase};
     let theme = ember_theme();
     let p = theme.palette;
@@ -1807,6 +1774,14 @@ fn AddAccountSheet(add: &MutableState<crate::ui::agents::AddAccount>, example: b
         move || a.set(AddAccount::closed())
     };
     let busy = cur.phase == AddPhase::Busy;
+    let dismiss = {
+        let close = close.clone();
+        move || {
+            if !busy {
+                close();
+            }
+        }
+    };
     cu::Dialog(cur.open)
         .modifier(
             with_shadows(Modifier::new(), theme.shadow_lg())
@@ -1816,7 +1791,7 @@ fn AddAccountSheet(add: &MutableState<crate::ui::agents::AddAccount>, example: b
                 .corner_radius(CORNER_MD)
                 .padding(SP[3]),
         )
-        .on_dismiss(close.clone())
+        .on_dismiss(dismiss)
         .content(|| {
             cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
                 Label("계정 추가", Fs::Lg, Weight::Semibold, None, Some(1));
@@ -1885,7 +1860,7 @@ fn AddAccountSheet(add: &MutableState<crate::ui::agents::AddAccount>, example: b
                     cu::Row().spacing(SP[2]).content(|| {
                         let a = add.clone();
                         AppButton("만들기", None, ButtonKind::Primary, true, cur.can_create(), false, move || create_account(&a, example));
-                        AppButton("닫기", None, ButtonKind::Default, true, true, false, close.clone());
+                        AppButton("닫기", None, ButtonKind::Default, true, !busy, false, close.clone());
                     });
                 }
             });
@@ -2061,14 +2036,15 @@ fn ModelCard(h: AgentHarness, store: &MutableState<LocalStore>, _compact: bool, 
                 if !phone {
                     cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
                         cu::Box().modifier(Modifier::new().width(28.0)).content(|| {
-                            Label("기본", Fs::Xs, Weight::Medium, Some(paint(p.muted)), Some(1));
+                            Label("기본", Fs::Xs2, Weight::Medium, Some(paint(p.muted)), Some(1));
                         });
                         cu::Column().modifier(Modifier::new().weight(1.0).width(0.0)).content(|| {
-                            Label("모델", Fs::Xs, Weight::Medium, Some(paint(p.muted)), Some(1));
+                            Label("모델", Fs::Xs2, Weight::Medium, Some(paint(p.muted)), Some(1));
                         });
-                        Label(MODEL_PLANS_HEADER, Fs::Xs, Weight::Medium, Some(paint(p.muted)), Some(1));
-                        cu::Box().modifier(Modifier::new().width(MODEL_SWITCH_COL)).alignment(Alignment::CenterEnd).content(|| {
-                            Label("목록에 표시", Fs::Xs, Weight::Medium, Some(paint(p.muted)), Some(1));
+                        Label(MODEL_PLANS_HEADER, Fs::Xs2, Weight::Medium, Some(paint(p.muted)), Some(1));
+                        // The mockup's header span wraps in its 36 px cell: 목록에 over 표시, left aligned.
+                        cu::Box().modifier(Modifier::new().width(MODEL_SWITCH_COL)).alignment(Alignment::CenterStart).content(|| {
+                            Label(MODEL_SWITCH_HEADER, Fs::Xs2, Weight::Medium, Some(paint(p.muted)), Some(2));
                         });
                     });
                 }
@@ -2110,15 +2086,20 @@ fn ModelCard(h: AgentHarness, store: &MutableState<LocalStore>, _compact: bool, 
                             });
                         });
                         cu::Column().modifier(Modifier::new().weight(1.0).width(0.0)).content(|| {
-                            // `.ag-mn b`: the name, then the blue 기본 badge right after it.
-                            cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
-                                Label(m.name, Fs::Md, Weight::Medium, None, Some(1));
-                                if is_def {
-                                    Pill("기본", PillTone::Blue, true);
-                                }
-                            });
+                            // `.ag-mn b`: the name, then the blue 기본 badge right after it. The
+                            // mockup's name and note wrap in their `minmax(0,1fr)` column instead of
+                            // ending in "..." (#886: at 1280 `GPT-5 Cod...`, `가장 깊게 생각...`), and
+                            // the badge keeps its own width (it was squeezed to a blob beside a name
+                            // measured first).
+                            if is_def {
+                                cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                                    NameThenPillLines(m.name, Fs::Md, Weight::Medium, None, false, MODEL_TEXT_LINES, SP[1], || Pill("기본", PillTone::Blue, true));
+                                });
+                            } else {
+                                Label(m.name, Fs::Md, Weight::Medium, None, Some(MODEL_TEXT_LINES));
+                            }
                             cu::Spacer().modifier(Modifier::new().height(2.0));
-                            Label(m.note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                            Label(m.note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(MODEL_TEXT_LINES));
                             if phone {
                                 cu::Spacer().modifier(Modifier::new().height(SP[0]));
                                 plans();
@@ -2148,8 +2129,14 @@ fn ModelCard(h: AgentHarness, store: &MutableState<LocalStore>, _compact: bool, 
 /// The plans column header. The marks are Ember's own reference list, not server data, and the
 /// column says so (SPEC FR-L20); the mockup's shorter 플랜별 사용 does not.
 pub const MODEL_PLANS_HEADER: &str = "플랜별 사용 (Ember 참고 목록)";
-/// The switch column: wide enough for its 목록에 표시 header.
-const MODEL_SWITCH_COL: f32 = 60.0;
+/// The lines a model's name and note may take in the table: two, as the mockup's wrapping
+/// `.ag-mn` column shows them at 1280, where two model cards share a row (#886).
+pub const MODEL_TEXT_LINES: u32 = 2;
+/// The switch column: `.ag-mhead`/`.ag-mrow` `grid-template-columns: 28px minmax(0,1fr) auto 36px`,
+/// as wide as the 36 px switch (#886). Its header wraps to two lines, as the mockup's does.
+const MODEL_SWITCH_COL: f32 = 36.0;
+/// The switch column's header (`agents.js` `.ag-mhead`).
+const MODEL_SWITCH_HEADER: &str = "목록에 표시";
 
 /// Below 560 dp the model table hides its header and puts the plans under the note.
 pub fn model_table_phone(width_dp: f32) -> bool {
@@ -3461,14 +3448,15 @@ mod tests {
             .find(|n| rule_up.contains(&n.id) && n.widget == "Box" && n.mods.iter().any(|m| m.starts_with("Border")))
             .expect("the card");
         assert!(card.mods.iter().any(|m| m == "Padding(0.0)"), "{:?}", card.mods);
-        // The header row: 20 at each side, the 24 px strut, then the children 12 apart.
+        // The header row: 20 at each side, at least 24 px tall (`SizeIn` `min_h`), then the children 12 apart.
         let head_row = nodes.iter().find(|n| Some(n.id) == head.parent).unwrap();
         assert_eq!(head_row.widget, "Row");
         assert!(head_row.mods.iter().any(|m| m == "Weight(1.0)"), "{:?}", head_row.mods);
+        assert!(head_row.mods.iter().any(|m| m.contains("min_height: 24.0")), "the minimum height on the header row: {:?}", head_row.mods);
         let outer = nodes.iter().find(|n| Some(n.id) == head_row.parent).unwrap();
         let spacers: Vec<&Node> = children(&nodes, outer).into_iter().filter(|n| n.widget == "Spacer").collect();
         assert_eq!(spacers.iter().filter(|n| n.mods.iter().any(|m| m == "Width(20.0)")).count(), 2, "20 px sides");
-        assert!(spacers.iter().any(|n| n.mods.iter().any(|m| m == "Height(24.0)")), "the minimum height strut");
+        assert!(!spacers.iter().any(|n| n.mods.iter().any(|m| m == "Height(24.0)")), "no spacer strut");
         let tile = children(&nodes, head_row).into_iter().find(|n| n.widget == "Box").expect("the icon tile");
         for want in ["Width(30.0)", "Height(30.0)"] {
             assert!(tile.mods.iter().any(|m| m == want), "{want}: {:?}", tile.mods);
@@ -3586,6 +3574,60 @@ mod tests {
     }
 
     #[test]
+    fn section_rows_are_the_named_controls_and_data_named_chips_keep_a_matched_button() {
+        // compose-rust#429, #431 (#673): the screen's own overlay functions are gone. A section
+        // row or pill is the control itself; a chip or radio named from data (a profile, a model)
+        // keeps `components::DataNamedOverlay`, which takes its box's bounds and no more.
+        let _guard = crate::services::test_guard();
+        for shape in [NavShape::Side, NavShape::Pills] {
+            let nodes = match shape {
+                NavShape::Side => nodes_of(|| SectionNav(Section::Harness, NavShape::Side, |_| {})),
+                NavShape::Pills => nodes_of(|| SectionNav(Section::Harness, NavShape::Pills, |_| {})),
+            };
+            assert!(!nodes.iter().any(|n| n.widget == "Button"), "{shape:?}: no button over a row");
+            for x in Section::ALL {
+                let want = format!("AccessibleName=String({:?})", x.label());
+                let row = nodes.iter().find(|n| n.props.contains(&want)).unwrap_or_else(|| panic!("{shape:?}: {}", x.label()));
+                assert_eq!(row.widget, "Box");
+                assert!(row.props.iter().any(|p| p.starts_with("OnClick=")), "{:?}", row.props);
+                assert!(row.mods.iter().any(|m| m.starts_with("Semantics") && m.contains("Button")), "{:?}", row.mods);
+                assert_eq!(row.mods.iter().filter(|m| m.starts_with("PressFeedback")).count(), 1, "{:?}", row.mods);
+                assert!(row.mods.iter().any(|m| m.starts_with("Background")), "the painted box takes the press: {:?}", row.mods);
+            }
+        }
+        let radio = nodes_of(|| ModelRadio("Opus 기본 모델로 선택", true, || {}));
+        let over = radio.iter().find(|n| n.widget == "Button").expect("the radio's button");
+        assert!(over.props.iter().any(|p| p == "AccessibleName=String(\"Opus 기본 모델로 선택\")"), "{:?}", over.props);
+        assert!(over.mods.iter().any(|m| m == "MatchParentSize") && !over.mods.iter().any(|m| m.starts_with("FillMax")), "{:?}", over.mods);
+        let production = include_str!("agents.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(!production.contains(&["Focus", "Overlay"].concat()), "no overlay function of its own");
+        assert!(!production.contains(&["cu::", "Button("].concat()), "no direct toolkit button");
+    }
+
+    #[test]
+    fn chips_and_picker_pills_send_no_width_of_their_own() {
+        // compose-rust#431 (#673): the fixed 200 and the `text_px` estimate are gone; the box
+        // sends a height and takes the width of its row of spacers and label.
+        let _guard = crate::services::test_guard();
+        for nodes in [
+            nodes_of(|| SelectChip("자동", || {})),
+            nodes_of(|| ModelPickerPill("아직 정하지 않았습니다", Some(ICON_USER_SVG), || {})),
+            nodes_of(|| ModelPickerPill("+ 계정", None, || {})),
+        ] {
+            let over = nodes.iter().find(|n| n.widget == "Button").expect("the chip's button");
+            let chip = nodes.iter().find(|n| Some(n.id) == over.parent).expect("the chip");
+            assert!(chip.mods.iter().any(|m| *m == format!("Height({H_CTL:?})")), "{:?}", chip.mods);
+            assert!(!chip.mods.iter().any(|m| m.starts_with("Width(") || m.starts_with("Size(") || m.starts_with("FillMax")), "{:?}", chip.mods);
+            assert!(over.mods.iter().any(|m| m == "MatchParentSize"), "{:?}", over.mods);
+        }
+        let production = include_str!("agents.rs").split("#[cfg(test)]").next().unwrap();
+        for f in ["fn SelectChip(", "fn MenuPickerPill("] {
+            let body = production.split(f).nth(1).unwrap().split("\nfn ").next().unwrap();
+            assert!(!body.contains(".width(200.0)") && !body.contains("text_px("), "{f}");
+        }
+    }
+
+    #[test]
     fn fr_l10_4_new_member_default_chips_open_popovers_under_them() {
         let production = include_str!("agents.rs").split("#[cfg(test)]").next().unwrap();
         let body = production.split("fn ModelsSection(").nth(1).unwrap().split("\nfn ").next().unwrap();
@@ -3644,6 +3686,39 @@ mod tests {
         // The grid's 12 dp column gap (`.ag-mrow{gap:var(--sp3)}`) and the header shown above 560.
         assert!(holder.props.iter().any(|p| p.starts_with("Spacing=") && p.contains("12.0")), "{:?}", holder.props);
         assert!(model_table_phone(560.0) && !model_table_phone(561.0));
+    }
+
+    #[test]
+    fn fr_l20_model_switch_column_is_the_mockups_36() {
+        // #886: `.ag-mrow` ends in a 36 px column; ours was 60. The header wraps in it.
+        assert_eq!(MODEL_SWITCH_COL, 36.0);
+        let src = include_str!("agents.rs").split("#[cfg(test)]").next().unwrap();
+        assert_eq!(src.matches("Modifier::new().width(MODEL_SWITCH_COL)").count(), 2, "header and rows share the column");
+        assert!(src.contains("Label(MODEL_SWITCH_HEADER, Fs::Xs2, Weight::Medium, Some(paint(p.muted)), Some(2))"));
+        assert!(super::super::home::text_px("목록에", Fs::Xs2.size()) <= MODEL_SWITCH_COL, "the first line fits the column");
+    }
+
+    #[test]
+    fn fr_l20_model_names_and_notes_wrap_at_1280_instead_of_ending_in_an_ellipsis() {
+        // #886, review ba: at 1280 two model cards share a row and the names and notes ended in
+        // "..." (`GPT-5 Cod...`); the mockup's `.ag-mn` column wraps them.
+        crate::ui::window_size::set_opened_for_test(Some((1280.0, 800.0)));
+        let nodes = nodes_of(|| {
+            let st = remember(|| mutable_state_of(LocalStore::default()));
+            ModelCard(AgentHarness::Codex, &st, false, true);
+        });
+        crate::ui::window_size::set_opened_for_test(None);
+        assert_eq!(MODEL_TEXT_LINES, 2);
+        // GPT-5 Codex is not the default, so its name is a plain label.
+        for t in ["GPT-5 Codex", "긴 코딩 작업에 맞춥니다"] {
+            let n = text_node(&nodes, t);
+            assert!(n.props.iter().any(|p| p == "MaxLines=Integer(2)"), "{t}: {:?}", n.props);
+        }
+        // The default model's name and its 기본 badge go through NameThenPillLines (two lines), so the badge keeps
+        // its own width right after the name.
+        let production = include_str!("agents.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(production.contains("NameThenPillLines(m.name, Fs::Md, Weight::Medium, None, false, MODEL_TEXT_LINES, SP[1], || Pill(\"기본\", PillTone::Blue, true));"));
+        assert!(production.contains("Label(m.note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(MODEL_TEXT_LINES));"));
     }
 
     #[test]

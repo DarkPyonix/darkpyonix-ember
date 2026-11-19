@@ -514,15 +514,18 @@ mod title_strip {
     // #301: the error message clears the title strip the window reports, not a fixed height.
     #[test]
     fn fr_l31_37_the_error_message_starts_below_the_reported_title_strip() {
-        assert_eq!(editor_error_padding(true, 28.0), "padding:20px; padding-top:48px;");
-        assert_eq!(editor_error_padding(true, 0.0), "padding:20px; padding-top:20px;");
-        assert_eq!(editor_error_padding(false, 28.0), "padding:20px; padding-top:20px;");
+        assert_eq!(editor_error_padding(28.0), "padding:20px; padding-top:48px;");
+        assert_eq!(editor_error_padding(32.0), "padding:20px; padding-top:52px;");
+        assert_eq!(editor_error_padding(0.0), "padding:20px; padding-top:20px;");
     }
 
+    // FR-L33: the top bar keeps exactly the reported controls clear, on both edges, per system.
     #[test]
-    fn fr_l31_top_bar_clears_the_traffic_lights_only_under_full_size() {
-        assert_eq!(editor_strip_padding(true, 98.0), "padding-left:98px;");
-        assert_eq!(editor_strip_padding(false, 98.0), "");
+    fn fr_l31_top_bar_clears_the_reported_controls_on_both_edges() {
+        assert_eq!(editor_strip_padding(70.0, 0.0), "padding-left:70px;", "macOS");
+        assert_eq!(editor_strip_padding(0.0, 138.0), "padding-right:138px;", "Windows");
+        assert_eq!(editor_strip_padding(0.0, 0.0), "", "Linux, window manager title bar");
+        assert_eq!(editor_strip_padding(0.0, 96.0), "padding-right:96px;", "Linux X11");
     }
 
     #[test]
@@ -1880,20 +1883,6 @@ mod fr_l31_tabs {
     }
 
     #[test]
-    fn fr_l31_tabs_two_clicks_on_one_target_within_500_ms_are_a_double_click() {
-        use ember_app::ui::editor::{DoubleClick, DOUBLE_CLICK_MS};
-        assert_eq!(DOUBLE_CLICK_MS, 500);
-        let mut d = DoubleClick::default();
-        assert!(!d.click("tab:a", 1_000));
-        assert!(d.click("tab:a", 1_500), "the second click at 500 ms is a double-click");
-        assert!(!d.click("tab:a", 1_600), "the pair is used up: a third click starts over");
-        assert!(!d.click("tab:a", 2_101), "501 ms later is too slow");
-        assert!(!d.click("tab:b", 2_200), "another target is not a double-click");
-        assert!(!d.click("tab:a", 2_300));
-        assert!(d.click("tab:a", 2_400));
-    }
-
-    #[test]
     fn fr_l31_tabs_shift_f10_and_the_context_menu_key_open_the_tab_menu() {
         use ember_app::ui::editor::tab_menu_key;
         assert!(tab_menu_key("F10", false, true, false, false));
@@ -2042,10 +2031,10 @@ mod design_placement {
         }
         assert!(tree.contains("oncontextmenu: move |event| {"), "rows do not open the context menu");
         assert!(tree.contains("TreeMenuAt::Pointer { x: at.x, y: at.y }"));
-        // Stand-in openers until dioxus-compose forwards right-click (compose-rust#417 is fixed in
-        // v0.0.7; the editor window waits for dioxus-compose).
+        // Shift+F10 and the context-menu key are Code-OSS's keyboard route beside right-click
+        // (compose-rust#417, in the pin), not a stand-in.
         assert!(tree.contains("TreeMenuAt::Keyboard"), "no Shift+F10 opener");
-        assert!(tree.contains("v0.0.7: #417 fixed; workaround kept until checked on a display"));
+        assert!(!tree.contains("v0.0.7: #417 fixed; workaround kept until checked on a display"), "the stand-in note is gone");
     }
 
     #[test]

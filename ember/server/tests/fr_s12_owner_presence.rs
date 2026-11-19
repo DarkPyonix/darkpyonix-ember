@@ -339,6 +339,54 @@ async fn fr_s12_the_default_is_warn_and_the_call_is_logged() {
     assert_eq!(logged(&logs).matches("owner route served").count(), before);
 }
 
+/// Project edit (archive included) and delete are owner routes (leader, 2026-11-15, #384):
+/// under enforce the token alone gets 403 `owner_required` and nothing changes; with the key
+/// they work; create and read stay on the token.
+#[tokio::test]
+async fn fr_s12_project_patch_and_delete_need_the_owner() {
+    let f = fx();
+    let got = call_with(&f.app, "POST", "/api/projects", Some(&f.token), None, Some(json!({ "name": "acme" }))).await;
+    assert!(got.0.is_success(), "create stays on the token: {got:?}");
+    for (method, body) in [
+        ("PATCH", Some(json!({ "repository": "github.com/a/b" }))),
+        ("PATCH", Some(json!({ "archived": true }))),
+        ("DELETE", None),
+    ] {
+        let got = call_with(&f.app, method, "/api/projects/acme", Some(&f.token), None, body).await;
+        assert!(is_owner_required(&got), "{method} without a key: {got:?}");
+    }
+    let got = call_with(&f.app, "GET", "/api/projects/acme", Some(&f.token), None, None).await;
+    assert_eq!(got.0, StatusCode::OK, "{got:?}");
+    assert!(got.1["repository"].is_null() || got.1["repository"] == "", "unchanged: {got:?}");
+    assert_ne!(got.1["archived"], json!(true), "unchanged: {got:?}");
+
+    let key = f.owner.grant(f.owner.next_claim(), who());
+    let got = call_with(&f.app, "PATCH", "/api/projects/acme", Some(&f.token), Some(&key), Some(json!({ "repository": "github.com/a/b" }))).await;
+    assert_eq!(got.0, StatusCode::OK, "{got:?}");
+    assert_eq!(got.1["repository"], "github.com/a/b");
+    let got = call_with(&f.app, "DELETE", "/api/projects/acme", Some(&f.token), Some(&key), None).await;
+    assert!(got.0.is_success(), "{got:?}");
+    let got = call_with(&f.app, "GET", "/api/projects/acme", Some(&f.token), None, None).await;
+    assert_eq!(got.0, StatusCode::NOT_FOUND, "{got:?}");
+}
+
+/// In warn mode project PATCH and DELETE are served with the token alone and logged, as the
+/// other owner routes are.
+#[tokio::test]
+async fn fr_s12_project_patch_and_delete_warn_and_log() {
+    let (logs, _guard) = capture_logs();
+    let f = fx_with(Presence::Warn);
+    let got = call_with(&f.app, "POST", "/api/projects", Some(&f.token), None, Some(json!({ "name": "acme" }))).await;
+    assert!(got.0.is_success(), "{got:?}");
+    let got = call_with(&f.app, "PATCH", "/api/projects/acme", Some(&f.token), None, Some(json!({ "repository": "github.com/a/b" }))).await;
+    assert_eq!(got.0, StatusCode::OK, "{got:?}");
+    let got = call_with(&f.app, "DELETE", "/api/projects/acme", Some(&f.token), None, None).await;
+    assert!(got.0.is_success(), "{got:?}");
+    let text = logged(&logs);
+    assert!(text.matches("owner route served without owner presence").count() >= 2, "{text}");
+    assert!(text.contains("/api/projects/acme"), "{text}");
+}
+
 /// Warn mode serves an owner route without a key; the server token is still required.
 #[tokio::test]
 async fn fr_s12_warn_mode_serves_without_a_key() {
@@ -543,6 +591,9 @@ fn fr_s12_the_decided_owner_routes_are_owner_routes() {
         ("DELETE", "/api/channels/c/guests/g"),
         ("PUT", "/api/channels/c/guests/g/allow"),
         ("DELETE", "/api/channels/c/guests/g/allow"),
+        // Project edit, archive and delete (leader, 2026-11-15, #384).
+        ("PATCH", "/api/projects/p"),
+        ("DELETE", "/api/projects/p"),
     ] {
         assert!(auth::owner_route(&Method::from_bytes(m.as_bytes()).unwrap(), p), "{m} {p}");
     }

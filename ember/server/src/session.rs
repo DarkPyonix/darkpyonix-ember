@@ -64,6 +64,10 @@ pub enum SessionError {
     /// The requested account cannot be used, or the router found none available (FR-U2/U3).
     #[error("{0}")]
     Account(String),
+    /// The turn the session's agent was running when the server restarted is still being read
+    /// back (FR-S8): nothing may start a second agent for it until that drain ends.
+    #[error("session {0} is busy: the turn interrupted by the server restart is still finishing; send again when it ends")]
+    Busy(String),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -251,6 +255,9 @@ pub struct Sessions {
     /// Memory limit in MiB per agent kind, from the settings (FR-L20, FR-S8). Applies to agents
     /// started afterwards; a running shim keeps the limit it started with.
     mem_limits: std::sync::Mutex<HashMap<AgentKind, u64>>,
+    /// Sessions whose interrupted turn is being drained from the agent that outlived the
+    /// previous server (FR-S8). While a session is here no agent is started for it.
+    draining: std::sync::Mutex<HashSet<String>>,
 }
 
 impl Sessions {
@@ -275,6 +282,7 @@ impl Sessions {
             approve_all: std::sync::Mutex::new(HashSet::new()),
             questions_taken: std::sync::Mutex::new(HashSet::new()),
             mem_limits: std::sync::Mutex::new(HashMap::new()),
+            draining: std::sync::Mutex::new(HashSet::new()),
         })
     }
 
@@ -560,6 +568,11 @@ impl Sessions {
 
     /// The running agent for `id`, starting or natively resuming it if needed.
     async fn ensure_live(self: &Arc<Self>, id: &str) -> Result<LiveRun, SessionError> {
+        // The old agent is still writing the interrupted turn (FR-S8): a start now would stop
+        // it or run a second agent beside it.
+        if self.is_draining(id) {
+            return Err(SessionError::Busy(id.into()));
+        }
         let mut live = self.live.lock().await;
         // A dead shim cannot accept another message. Discard its adapter so the next start
         // removes stale shim files and resumes from the stored native session id.
@@ -1048,47 +1061,153 @@ impl Sessions {
         Ok(())
     }
 
-    /// Server startup (FR-S8): rejoin the sessions whose agent outlived the previous server.
+    /// Server startup (FR-S8), the one place that holds the order: first the sessions whose
+    /// agent outlived the previous server are rejoined, or their drain is started, and only
+    /// then are the sessions that were mid-turn and have no surviving agent marked idle. The
+    /// other order (reset first) hides every interrupted turn from the drain, which only looks
+    /// at mid-turn sessions, and shows a rejoined session as idle while its turn runs.
+    ///
+    /// The rejoins are awaited (they are fast). Each drain runs as a background task and this
+    /// function returns without waiting for it, so the listeners that start after it are not
+    /// held back for the length of an agent's turn. A rejoined session keeps its status. A
+    /// draining session keeps its stored status while the drain runs, which is true, ends as
+    /// [`Sessions::drain_turn`] leaves it, and is guarded until then
+    /// ([`Sessions::is_draining`]). Every other mid-turn session is marked idle, so its next
+    /// message resumes it natively: no live shim, a rejoin that failed, or an adapter that
+    /// neither rejoins nor drains. With `rt = None` (shims off) no agent survived, so all of
+    /// them are marked idle.
+    ///
+    /// Call it inside the runtime, after the start hooks are installed (a rejoin goes through
+    /// `ensure_live`) and before anything reads a session status: listeners, the A2A flush,
+    /// the scheduler.
+    pub async fn recover_after_restart(
+        self: &Arc<Self>,
+        rt: Option<&crate::agents::proc::ShimRuntime>,
+    ) -> anyhow::Result<Recovery> {
+        let (mut rejoined, mut draining) = (Vec::new(), Vec::new());
+        if let Some(rt) = rt {
+            let (rejoinable, drainable) = self.surviving_agents(rt).await;
+            for (id, adapter) in drainable {
+                let (this, rt, session) = (self.clone(), rt.clone(), id.clone());
+                tokio::spawn(async move { this.drain_one(&rt, &session, adapter).await });
+                draining.push(id);
+            }
+            rejoined = self.rejoin_all(rejoinable).await;
+        }
+        let mut keep = rejoined.clone();
+        keep.extend(draining.iter().cloned());
+        let reset = self.store.reset_live_statuses_except(&keep)?;
+        if !rejoined.is_empty() {
+            tracing::info!("rejoined {} running session(s) from the previous server", rejoined.len());
+        }
+        if !draining.is_empty() {
+            tracing::info!(
+                "draining the interrupted turn of {} session(s) from the previous server in the background",
+                draining.len()
+            );
+        }
+        if reset > 0 {
+            tracing::info!("{reset} session(s) were mid-turn at shutdown; marked idle for resume");
+        }
+        Ok(Recovery { rejoined, draining, reset })
+    }
+
+    /// Whether the interrupted turn of `id` is still being drained after a server restart
+    /// (FR-S8). While it is, a message to the session is refused with [`SessionError::Busy`].
+    pub fn is_draining(&self, id: &str) -> bool {
+        self.draining.lock().unwrap().contains(id)
+    }
+
+    /// Rejoin the sessions whose agent outlived the previous server (FR-S8).
     /// Agents that can be rejoined as they run are attached from their stored output offset, so
-    /// the rest of an interrupted turn arrives; for the others the old agent is stopped and the
-    /// session resumes natively on its next message. Returns the rejoined session ids.
+    /// the rest of an interrupted turn arrives; for the others a turn in flight is drained, the
+    /// old agent is stopped and the session resumes natively on its next message. Returns the
+    /// rejoined session ids, after every drain has ended.
+    ///
+    /// The server start calls [`Sessions::recover_after_restart`], which runs the drains in the
+    /// background and settles the statuses; this is the same work, awaited.
     pub async fn rejoin_shims(self: &Arc<Self>, rt: &crate::agents::proc::ShimRuntime) -> Vec<String> {
+        let (rejoinable, drainable) = self.surviving_agents(rt).await;
+        // All sessions at once: an update with many running sessions must not attach them one
+        // after the other.
+        let drains =
+            futures::future::join_all(drainable.into_iter().map(|(id, adapter)| async move {
+                self.drain_one(rt, &id, adapter).await
+            }));
+        let (rejoined, _) = futures::future::join(self.rejoin_all(rejoinable), drains).await;
+        rejoined
+    }
+
+    /// The sessions with a live shim (FR-S8): those whose agent can be rejoined as it runs, and
+    /// those that were mid-turn and whose agent's output can be drained. A session of the
+    /// second list is marked as draining here, before anything else can start an agent for it;
+    /// [`Sessions::drain_one`] removes the mark. A live shim that is neither is left: its agent
+    /// is stopped when the session starts again.
+    async fn surviving_agents(
+        &self,
+        rt: &crate::agents::proc::ShimRuntime,
+    ) -> (Vec<String>, Vec<(String, Arc<dyn AgentAdapter>)>) {
         let ids = match crate::agents::proc::live_shim_sessions(rt).await {
             Ok(ids) => ids,
             Err(e) => {
                 tracing::warn!("could not scan session shims: {e:#}");
-                return Vec::new();
+                return (Vec::new(), Vec::new());
             }
         };
-        // All sessions at once: an update with many running sessions must not attach them one
-        // after the other.
-        let results = futures::future::join_all(ids.into_iter().map(|id| self.rejoin_one(rt, id))).await;
-        results.into_iter().flatten().collect()
+        let (mut rejoinable, mut drainable) = (Vec::new(), Vec::new());
+        for id in ids {
+            let Some(rec) = self.store.session(&id).ok().flatten() else { continue };
+            let Some(adapter) = self.adapters.get(&rec.agent).cloned() else { continue };
+            if adapter.rejoins_shim() {
+                rejoinable.push(id);
+            } else if adapter.drains_shim()
+                && matches!(rec.status, SessionStatus::Running | SessionStatus::WaitingForApproval)
+                // A second drain of the same session is never started.
+                && self.draining.lock().unwrap().insert(id.clone())
+            {
+                drainable.push((id, adapter));
+            }
+        }
+        (rejoinable, drainable)
     }
 
-    /// [`Sessions::rejoin_shims`] for one session: `Some(id)` when its agent was rejoined.
-    async fn rejoin_one(self: &Arc<Self>, rt: &crate::agents::proc::ShimRuntime, id: String) -> Option<String> {
-        let rec = self.store.session(&id).ok().flatten()?;
-        let adapter = self.adapters.get(&rec.agent)?.clone();
-        if adapter.rejoins_shim() {
-            return match self.ensure_live(&id).await {
+    /// Attach the agents of `ids`, all at once. Returns the sessions that were rejoined.
+    async fn rejoin_all(self: &Arc<Self>, ids: Vec<String>) -> Vec<String> {
+        let results = futures::future::join_all(ids.into_iter().map(|id| async move {
+            match self.ensure_live(&id).await {
                 Ok(_) => Some(id),
                 Err(e) => {
                     tracing::warn!(session = %id, "could not rejoin its agent: {e}");
                     None
                 }
-            };
-        }
-        // Not rejoinable: a turn that was running is read back from the surviving agent, which
-        // is then stopped; the session resumes natively on its next message.
-        if adapter.drains_shim()
-            && matches!(rec.status, SessionStatus::Running | SessionStatus::WaitingForApproval)
-        {
-            if let Err(e) = self.drain_turn(rt, &id, adapter.as_ref()).await {
-                tracing::warn!(session = %id, "could not drain the surviving turn: {e:#}");
+            }
+        }))
+        .await;
+        results.into_iter().flatten().collect()
+    }
+
+    /// Drain the interrupted turn of one session marked by [`Sessions::surviving_agents`]: the
+    /// turn is read back from the surviving agent, which is then stopped; the session resumes
+    /// natively on its next message. A drain that fails ends the turn as failed (so whoever
+    /// waits for the turn end is told), or marks the session idle if even that cannot be
+    /// stored. The draining mark is removed last, when the status is settled.
+    async fn drain_one(
+        self: &Arc<Self>,
+        rt: &crate::agents::proc::ShimRuntime,
+        id: &str,
+        adapter: Arc<dyn AgentAdapter>,
+    ) {
+        if let Err(e) = self.drain_turn(rt, id, adapter.as_ref()).await {
+            tracing::warn!(session = %id, "could not drain the surviving turn: {e:#}");
+            let ended = self
+                .record(id, &AgentEvent::Error { message: "the turn interrupted by the server restart could not be read back".into() })
+                .and_then(|_| self.record(id, &AgentEvent::TurnEnded { outcome: crate::events::TurnOutcome::Failed }));
+            if let Err(e) = ended {
+                tracing::warn!(session = %id, "could not end the undrained turn, marking the session idle: {e:#}");
+                let _ = self.store.reset_live_status(id);
             }
         }
-        None
+        self.draining.lock().unwrap().remove(id);
     }
 
     /// FR-S8: store what a surviving agent wrote while no server was attached, then stop it.
@@ -1102,7 +1221,12 @@ impl Sessions {
             std::env::var("EMBER_SHIM_DRAIN_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(600),
         );
         let lines = crate::agents::proc::drain_surviving_lines(rt, id, max, |l| adapter.drain_turn_end(l)).await?;
-        for event in adapter.translate_drained(&lines) {
+        // The adapter sees the tool calls stored for the turn in flight, so a call announced
+        // before the server died is not stored a second time (#310). Only an adapter that
+        // compares them is given them, and only those rows are read.
+        let stored: Vec<AgentEvent> =
+            if adapter.drain_reads_stored() { self.store.open_turn_tool_events(id)? } else { Vec::new() };
+        for event in adapter.translate_drained_after(&lines, &stored) {
             self.record(id, &event)?;
         }
         // A turn that did not finish cannot continue: end it, so the session is not stuck running.
@@ -1120,6 +1244,18 @@ impl Sessions {
     pub async fn is_live(&self, id: &str) -> bool {
         self.live.lock().await.contains_key(id)
     }
+}
+
+/// What [`Sessions::recover_after_restart`] did at the server start (FR-S8).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Recovery {
+    /// Sessions whose running agent was rejoined; they keep their status.
+    pub rejoined: Vec<String>,
+    /// Sessions whose interrupted turn is being read back from the surviving agent in the
+    /// background; each ends its turn when its drain ends ([`Sessions::is_draining`]).
+    pub draining: Vec<String>,
+    /// How many mid-turn sessions had no surviving agent and were marked idle.
+    pub reset: usize,
 }
 
 /// The approvals still pending in `events` (oldest first): asked, not resolved, and not withdrawn

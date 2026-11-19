@@ -76,7 +76,10 @@ use ember_server::store::Store;
 ///   `0.0.0.0:<port>` is fine (D37 covers the HTTP listeners). A bad value is a startup error.
 ///   When set, the server also prints `ember server device address: <peer id>@<host>:<port>`
 ///   for the app (FR-N9, #863)
-/// - `EMBER_SERVER_RELAY_PORT`: letify relay TCP and QAD UDP port (default 7443)
+/// - `EMBER_SERVER_RELAY_PORT`: letify relay TCP and QAD UDP port (default 7443). With the relay
+///   role on, the server prints `ember server device address: <peer id> relay
+///   letify://<peer id>@<host>:<port>`: a device with only that line reaches the server through
+///   this TCP port, the one port to forward (FR-N9, #898)
 /// - `EMBER_SERVER_RELAY=off`: disable the automatic letify relay and QAD roles
 /// - `EMBER_LETIFY_RELAY_LISTEN`, `EMBER_LETIFY_QAD_LISTEN`: override role addresses
 /// - `EMBER_HUB_URL`: the darkpyonix.dev hub (default `https://api.darkpyonix.dev`; `off` disables).
@@ -169,10 +172,8 @@ async fn serve_main() -> anyhow::Result<()> {
     };
     // Demo only (#193): off unless EMBER_DEMO_DATA=1.
     ember_server::chatgpt::demo::seed(&store, std::env::var(ember_server::chatgpt::demo::ENV).ok().as_deref())?;
-    let reset = store.reset_live_statuses()?;
-    if reset > 0 {
-        tracing::info!("{reset} session(s) were mid-turn at shutdown; marked idle for resume");
-    }
+    // The statuses of sessions that were mid-turn are settled further down, by
+    // `Sessions::recover_after_restart`, once the session manager and its hooks exist (FR-S8).
     // Repair the per-channel JSONL files against the store before any router serves (FR-T16).
     // It only logs: a problem here never stops the start. It uses its own JsonlLog and shares no lock
     // with the routers' instances, so it must stay synchronous and ahead of every router.
@@ -246,8 +247,9 @@ async fn serve_main() -> anyhow::Result<()> {
         };
         // A bad EMBER_TRANSPORT_LISTEN stops the start here (#863).
         let listen = server_transport::listen_from_env()?;
-        let t = Transport::bind(server_transport::config_with_hub(key, hub_config.as_ref(), registered, token, device_token)?)
-            .await?;
+        let cfg = server_transport::config_with_hub(key, hub_config.as_ref(), registered, token, device_token)?;
+        let relay_role = server_transport::runs_relay_role(&cfg);
+        let t = Transport::bind(cfg).await?;
         if let Some(h) = &hub {
             h.attach_transport(t.clone());
             let _watch = h.spawn_watch(ember_server::hub::WATCH_PERIOD);
@@ -268,8 +270,9 @@ async fn serve_main() -> anyhow::Result<()> {
         // Printed (not only logged): the peer id goes into each node's allowed peers.
         println!("ember server peer id: {}", t.peer_id());
         println!("ember server peer addr: {}", serde_json::to_string(&t.local_addr())?);
-        // With a fixed transport port, the address a device keeps across restarts (#863).
-        if let Some(line) = server_transport::device_address_line(listen, &t.local_addr()) {
+        // The address a device keeps across restarts: this server's relay (#898), and with a fixed
+        // transport port the direct address too (#863).
+        if let Some(line) = server_transport::device_line(listen, relay_role, &t.local_addr()) {
             println!("{line}");
         }
         Some(ServerTransport::new(t))
@@ -503,8 +506,18 @@ async fn serve_main() -> anyhow::Result<()> {
         }
         None => None,
     };
+    // FR-S8 startup order: first rejoin the sessions whose agent outlived the previous server
+    // or start their drain, only then mark idle the mid-turn sessions with no surviving agent.
+    // It runs here because a rejoin needs every start hook above (accounts, members, computers,
+    // egress, browser, MCP, A2A), and nothing may read a session status before it: the A2A
+    // flush, the scheduler, the CI watcher, the transport and the local listener all start
+    // below. Until then a session still reads as running although its agent is gone. A drain
+    // runs in the background, so the start does not wait for an agent's turn; a draining
+    // session stays running and refuses messages as busy until its drain ends.
+    a2a.install_hooks();
+    sessions.recover_after_restart(shim_runtime.as_ref()).await?;
     // After binding, so agents woken by queued messages can reach the API.
-    a2a.install();
+    a2a.start();
     // Scheduled tasks (FR-A8): the first tick reports triggers missed while the server was down.
     let scheduler = Scheduler::new(sessions.clone(), Arc::new(SystemClock));
     {
@@ -691,12 +704,6 @@ async fn serve_main() -> anyhow::Result<()> {
     };
     #[cfg(not(any(unix, windows)))]
     tracing::warn!("no owner door on this platform: owner presence stays in warn mode (FR-S12)");
-    if let Some(rt) = &shim_runtime {
-        let rejoined = sessions.rejoin_shims(rt).await;
-        if !rejoined.is_empty() {
-            tracing::info!("rejoined {} running session(s) from the previous server", rejoined.len());
-        }
-    }
     // The guest door stops with the owner server. Its failure never stops the owner server.
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let guest_task = match (guest_listener, guest_app) {

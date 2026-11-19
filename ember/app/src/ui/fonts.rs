@@ -156,11 +156,17 @@ pub fn palette_color(role: ColorRole, scheme: ColorScheme) -> Option<compose_rus
 /// The toast's elevation in dp: the mockup's `.toast` casts `--shadow-lg` (`0 10px 32px`).
 pub const TOAST_ELEVATION: u16 = 12;
 
-/// The overlay tokens the app sets: only the toast's shadow and its pill corner (`.toast`
-/// `border-radius:var(--pill)`). A message is not a node and takes no Modifier, so its shadow
-/// is an overlay token (compose-rust#446, v0.0.9); every other token is 0, the design system's.
-pub const APP_OVERLAY: OverlayTokens =
-    OverlayTokens::new().toast_elevation(TOAST_ELEVATION).toast_corner_radius(999);
+/// The overlay tokens the app sets: the toast's shadow, pill corner (`.toast`
+/// `border-radius:var(--pill)`), inverted ink fill and text (`--ink` / `--ink-text`, #873),
+/// borderless pill, padding, and 13px text (compose-rust#446, compose-rust#781/v0.0.11).
+pub const APP_OVERLAY: OverlayTokens = OverlayTokens::new()
+    .toast_elevation(TOAST_ELEVATION)
+    .toast_corner_radius(999)
+    .toast_container(LIGHT.ink, DARK.ink)
+    .toast_content(LIGHT.ink_text, DARK.ink_text)
+    .toast_border_width(0)
+    .toast_padding(16, 10)
+    .toast_type(13, 18);
 
 /// The toolkit theme the app launches with: the prose roles in Inter and Pretendard, `Mono`
 /// in JetBrains Mono.
@@ -201,7 +207,20 @@ mod tests {
         let overlay = app_theme(ColorScheme::Dark).overlay.expect("overlay tokens");
         assert_eq!(overlay.toast_elevation, TOAST_ELEVATION);
         assert_eq!(overlay.toast_corner_radius, 999);
-        let rest = OverlayTokens { toast_elevation: 0, toast_corner_radius: 0, ..*overlay };
+        let rest = OverlayTokens {
+            toast_elevation: 0,
+            toast_corner_radius: 0,
+            toast_container_light: 0,
+            toast_container_dark: 0,
+            toast_content_light: 0,
+            toast_content_dark: 0,
+            toast_border_width: None,
+            toast_padding_horizontal: 0,
+            toast_padding_vertical: 0,
+            toast_font_size: 0,
+            toast_line_height: 0,
+            ..*overlay
+        };
         assert_eq!(rest, OverlayTokens::new());
         assert!(editor_theme(ColorScheme::Light).overlay.is_some());
     }
@@ -334,5 +353,20 @@ mod tests {
             assert_eq!(mono, mono_font());
             assert_ne!(Some(mono), theme.font(TypeRole::Body));
         }
+    }
+
+    /// #873: the toast is the mockup's inverted ink pill (dark on light theme, light on dark),
+    /// borderless, 13px text.
+    #[test]
+    fn issue_873_toast_uses_inverted_ink_pill() {
+        assert_eq!(APP_OVERLAY.toast_container_light, LIGHT.ink.to_argb());
+        assert_eq!(APP_OVERLAY.toast_container_dark, DARK.ink.to_argb());
+        assert_eq!(APP_OVERLAY.toast_content_light, LIGHT.ink_text.to_argb());
+        assert_eq!(APP_OVERLAY.toast_content_dark, DARK.ink_text.to_argb());
+        assert_eq!(APP_OVERLAY.toast_border_width, Some(0));
+        assert_eq!(APP_OVERLAY.toast_padding_horizontal, 16);
+        assert_eq!(APP_OVERLAY.toast_padding_vertical, 10);
+        assert_eq!(APP_OVERLAY.toast_font_size, 13);
+        assert_eq!(APP_OVERLAY.toast_line_height, 18);
     }
 }

@@ -10,8 +10,8 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
-  # Same tag as compose-rust in ember/app/Cargo.toml and Cargo.lock (dioxus-compose f0e5b9f5 moves to v0.0.10 in the same change); bump all together.
-  COMPOSE_RUST_RENDERER_VERSION: v0.0.10
+  # Same tag as compose-rust in ember/app/Cargo.toml and Cargo.lock (the dioxus-compose rev there is the one built on this tag); bump all together.
+  COMPOSE_RUST_RENDERER_VERSION: v0.0.11
 
 jobs:
   preview:
@@ -32,6 +32,10 @@ jobs:
         env:
           COMPOSE_RUST_RENDERER_DIR: ${{ runner.temp }}\renderer
         run: cd ember/app && cargo build --release --locked
+      # Windows' default main-thread stack is 1 MiB and the renderer overflowed it (#880).
+      - name: The main thread stack is 64 MiB
+        shell: bash
+        run: python .github/scripts/checks/pe-stack-reserve.py ember/app/target/release/ember-app.exe --min-bytes 67108864
       - name: Package
         shell: pwsh
         run: ./.github/scripts/preview/package-windows.ps1 -Renderer "$env:RUNNER_TEMP\renderer" -Out dist/ember-preview-windows-x64.zip

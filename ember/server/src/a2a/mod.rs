@@ -34,6 +34,7 @@ use crate::agents::{AgentKind, McpServer, StartRequest};
 use crate::events::{AgentEvent, SessionStatus};
 use crate::session::{Push, Sessions};
 use crate::store::SessionRecord;
+pub use channel::ChannelReply;
 pub use store::{A2aMessage, A2aStore};
 
 /// Name of the agent-side command (a bin target of this crate).
@@ -178,8 +179,8 @@ pub struct A2a {
     /// Recent channel posts per (session, channel), for the rate limit of `channel post`.
     channel_posts: StdMutex<HashMap<(String, String), std::collections::VecDeque<Instant>>>,
     /// Sessions whose last start skipped the `ember-channels` registration because the user's own
-    /// Claude Code configuration already names that server (FR-T12). The prompt builders read it
-    /// through [`A2a::channel_reply_by_tool`]. It lives in memory: after a server restart it is
+    /// configuration of the harness already names that server (FR-T12). The prompt builders read it
+    /// through [`A2a::channel_reply`]. It lives in memory: after a server restart it is
     /// empty, so a surviving agent is again told "by tool" (its prompt already carries the CLI
     /// fallback sentence) until its next start runs the check again. An entry is removed when the
     /// session's start finds the name free, when the session's team membership ends (end hook)
@@ -198,6 +199,14 @@ pub struct ClaudeConfigSources {
     pub config_dir: Option<PathBuf>,
     /// Managed MCP files.
     pub managed: Vec<PathBuf>,
+    /// `CODEX_HOME` of this server's own environment (a value in the start request wins; without
+    /// either it is `<home>/.codex`).
+    pub codex_home: Option<PathBuf>,
+    /// Codex configuration files outside the user's home.
+    pub codex_system: Vec<PathBuf>,
+    /// Codex managed preference locations ([`codex_managed_locations`]); presence alone makes
+    /// the channel tool unverified (FR-T12).
+    pub codex_managed: Vec<PathBuf>,
 }
 
 impl ClaudeConfigSources {
@@ -209,6 +218,12 @@ impl ClaudeConfigSources {
                 PathBuf::from("/Library/Application Support/ClaudeCode/managed-mcp.json"),
                 PathBuf::from("/etc/claude-code/managed-mcp.json"),
             ],
+            codex_home: std::env::var_os("CODEX_HOME").filter(|v| !v.is_empty()).map(PathBuf::from),
+            codex_system: vec![
+                PathBuf::from("/etc/codex/config.toml"),
+                PathBuf::from("/etc/codex/managed_config.toml"),
+            ],
+            codex_managed: codex_managed_locations(),
         }
     }
 }
@@ -221,7 +236,128 @@ const KIND_USER: &str = "user config";
 const KIND_LOCAL: &str = "local config";
 const KIND_MANAGED: &str = "managed";
 const KIND_REQUEST: &str = "start request";
+const KIND_CODEX_USER: &str = "user config.toml";
+const KIND_CODEX_PROJECT: &str = "project .codex/config.toml";
+const KIND_CODEX_SYSTEM: &str = "system config.toml";
+const KIND_AGY_USER: &str = "user mcp_config.json";
+const KIND_AGY_PROJECT: &str = "project .agents/mcp_config.json";
 const REASON_TAKEN: &str = "a server with this name is already configured";
+const KIND_CODEX_PROFILE: &str = "profile <name>.config.toml";
+const KIND_CODEX_PLUGIN: &str = "plugin .mcp.json or plugin.json";
+const KIND_CODEX_MANAGED: &str = "managed preferences";
+/// Logged when a Codex session gets the server without its auto-approval (FR-T12).
+const REASON_UNVERIFIED: &str =
+    "a Codex configuration layer the name check does not read is present, so the server name is unverified and the call is asked";
+
+/// A Codex configuration layer that [`codex_channel_name_taken`] does not read (FR-T12). While
+/// one may exist, which `ember-channels` entry wins is unknown, so `channel_post` is not
+/// auto-approved. `unreadable` is true when the location could not be checked (fail closed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnreadLayer {
+    pub kind: &'static str,
+    pub unreadable: bool,
+}
+
+/// Where [`codex_unread_layer`] looks. Plain paths, so tests use a temp dir.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CodexLayerPaths {
+    /// Directories whose `*.config.toml` files other than `config.toml` are profile layers.
+    pub profile_dirs: Vec<PathBuf>,
+    /// Plugin roots searched for `.mcp.json` and `plugin.json`, up to three levels deep.
+    pub plugin_roots: Vec<PathBuf>,
+    /// Managed preference files or directories.
+    pub managed: Vec<PathBuf>,
+}
+
+/// How deep below a plugin root the search for `.mcp.json` and `plugin.json` goes.
+const PLUGIN_DEPTH: usize = 3;
+
+/// The first Codex layer of `paths` that is present or cannot be checked. Presence only: no file
+/// is opened or parsed. A missing location is fine; any other error counts as present.
+pub fn codex_unread_layer(paths: &CodexLayerPaths) -> Option<UnreadLayer> {
+    use std::io::ErrorKind::NotFound;
+    let found = |kind| Some(UnreadLayer { kind, unreadable: false });
+    let unreadable = |kind| Some(UnreadLayer { kind, unreadable: true });
+    for dir in &paths.profile_dirs {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == NotFound => continue,
+            Err(_) => return unreadable(KIND_CODEX_PROFILE),
+        };
+        for entry in entries {
+            let Ok(entry) = entry else { return unreadable(KIND_CODEX_PROFILE) };
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".config.toml") && name != "config.toml" {
+                return found(KIND_CODEX_PROFILE);
+            }
+        }
+    }
+    /// `Ok(true)` when `dir` holds a plugin file within `depth` levels. Symlinks are not followed.
+    fn plugin_file(dir: &Path, depth: usize) -> Result<bool, ()> {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(_) => return Err(()),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|_| ())?;
+            let name = entry.file_name();
+            if name == ".mcp.json" || name == "plugin.json" {
+                return Ok(true);
+            }
+            let ty = entry.file_type().map_err(|_| ())?;
+            if ty.is_dir() && depth > 1 && plugin_file(&entry.path(), depth - 1)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    for root in &paths.plugin_roots {
+        match plugin_file(root, PLUGIN_DEPTH) {
+            Ok(true) => return found(KIND_CODEX_PLUGIN),
+            Ok(false) => {}
+            Err(()) => return unreadable(KIND_CODEX_PLUGIN),
+        }
+    }
+    for path in &paths.managed {
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => return found(KIND_CODEX_MANAGED),
+            Err(e) if e.kind() == NotFound => {}
+            Err(_) => return unreadable(KIND_CODEX_MANAGED),
+        }
+    }
+    None
+}
+
+/// The locations [`codex_unread_layer`] checks for a session whose Codex home is `codex_home`:
+/// the profile files and the plugins under it, and the `managed` locations.
+pub fn codex_layer_paths(codex_home: Option<&Path>, managed: &[PathBuf]) -> CodexLayerPaths {
+    CodexLayerPaths {
+        profile_dirs: codex_home.map(Path::to_path_buf).into_iter().collect(),
+        plugin_roots: codex_home.map(|h| h.join("plugins")).into_iter().collect(),
+        managed: managed.to_vec(),
+    }
+}
+
+/// Codex's managed preference locations on this OS: on macOS the `com.openai.codex` preference
+/// files (machine-wide managed, per-user managed and machine-wide), on Windows
+/// `%ProgramData%\OpenAI\Codex`, elsewhere none (the `/etc/codex` files are read by the name
+/// check). The exact locations Codex reads are NOT MEASURED.
+pub fn codex_managed_locations() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if cfg!(target_os = "macos") {
+        let managed = PathBuf::from("/Library/Managed Preferences");
+        out.push(managed.join("com.openai.codex.plist"));
+        if let Some(user) = std::env::var_os("USER").filter(|u| !u.is_empty()) {
+            out.push(managed.join(user).join("com.openai.codex.plist"));
+        }
+        out.push(PathBuf::from("/Library/Preferences/com.openai.codex.plist"));
+    } else if cfg!(windows) {
+        let base = std::env::var_os("ProgramData").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
+        out.push(base.join("OpenAI").join("Codex"));
+    }
+    out
+}
 
 /// The closed set of reasons a configuration file could not be checked. Static on purpose:
 /// nothing read from a file reaches a log line or a notice.
@@ -243,10 +379,66 @@ pub enum NameCheck {
 }
 
 /// The notice for a start that skipped the registration because a file could not be checked.
+#[cfg(test)]
 fn unsure_notice(kind: &str, why: &str) -> String {
+    unsure_notice_for(ToolHarness::Claude, kind, why)
+}
+
+/// [`unsure_notice`] naming the harness whose configuration could not be checked.
+fn unsure_notice_for(harness: ToolHarness, kind: &str, why: &str) -> String {
     format!(
-        "The channel tool was not registered because the Claude Code configuration ({kind}) could not be checked ({why}); replies use the ember-a2a command."
+        "The channel tool was not registered because the {} configuration ({kind}) could not be checked ({why}); replies use the ember-a2a command.",
+        harness.label()
     )
+}
+
+/// The harnesses that get the `channel_post` MCP tool (FR-T12), each through its own
+/// session-scoped mechanism: Claude Code's private `--mcp-config` file, Codex's `-c` overrides,
+/// the Antigravity session root's `mcp_config.json`, and `mcpServers` of an ACP `session/new`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolHarness {
+    Claude,
+    Codex,
+    Antigravity,
+    Acp,
+}
+
+impl ToolHarness {
+    /// `None` for the scripted test agent, which has no MCP client.
+    fn of(agent: AgentKind) -> Option<ToolHarness> {
+        match agent {
+            AgentKind::ClaudeCode => Some(ToolHarness::Claude),
+            AgentKind::Codex => Some(ToolHarness::Codex),
+            AgentKind::Antigravity => Some(ToolHarness::Antigravity),
+            AgentKind::Acp(_) => Some(ToolHarness::Acp),
+            AgentKind::Scripted => None,
+        }
+    }
+
+    /// How the prompt names the tool. Only Claude Code's combined name is measured.
+    fn reply(self) -> ChannelReply {
+        match self {
+            ToolHarness::Claude => ChannelReply::ClaudeTool,
+            ToolHarness::Codex | ToolHarness::Antigravity | ToolHarness::Acp => ChannelReply::McpTool,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            ToolHarness::Claude => "Claude Code",
+            ToolHarness::Codex => "Codex",
+            ToolHarness::Antigravity => "Antigravity",
+            ToolHarness::Acp => "ACP agent",
+        }
+    }
+
+    /// Whether the start request carries the one allow rule. Claude Code denies the call without
+    /// it (measured), and Codex could only ask through `mcpServer/elicitation/request`, which
+    /// Ember does not answer. Antigravity's call goes through Ember's hook and an ACP agent's
+    /// through `session/request_permission`, so the person is asked there and no rule is added.
+    fn allow_rule(self) -> bool {
+        matches!(self, ToolHarness::Claude | ToolHarness::Codex)
+    }
 }
 
 /// `Ok(None)` for a missing file, `Ok(Some(json))` for a regular JSON file of at most
@@ -255,6 +447,14 @@ fn unsure_notice(kind: &str, why: &str) -> String {
 /// between a check and the open cannot stall the session start. A symlink is followed on purpose
 /// (dotfile managers link these files).
 fn read_config_json(path: &Path) -> Result<Option<serde_json::Value>, &'static str> {
+    read_config_bytes(path)?
+        .map(|buf| serde_json::from_slice(&buf).map_err(|_| WHY_NOT_JSON))
+        .transpose()
+}
+
+/// [`read_config_json`] without the parsing: the bytes of a regular file of at most
+/// [`MAX_CONFIG_BYTES`], `Ok(None)` for a missing file.
+fn read_config_bytes(path: &Path) -> Result<Option<Vec<u8>>, &'static str> {
     use std::io::Read;
     let mut opts = std::fs::OpenOptions::new();
     opts.read(true);
@@ -280,7 +480,114 @@ fn read_config_json(path: &Path) -> Result<Option<serde_json::Value>, &'static s
     if buf.len() as u64 > MAX_CONFIG_BYTES {
         return Err(WHY_TOO_BIG);
     }
-    serde_json::from_slice(&buf).map(Some).map_err(|_| WHY_NOT_JSON)
+    Ok(Some(buf))
+}
+
+/// Whether `bytes` contain [`CHANNEL_MCP_SERVER`] anywhere, ignoring ASCII case. Used for the
+/// configuration files of Codex (TOML) and Antigravity (JSON that may hold comments and trailing
+/// commas): a plain text search needs no parser and fails closed, since a comment that mentions
+/// the name counts as taken. The text is searched as written and again with its ASCII escapes
+/// decoded ([`unescape_ascii`]), because a quoted key may spell a character as an escape.
+fn mentions_channel_server(bytes: &[u8]) -> bool {
+    let needle = CHANNEL_MCP_SERVER.as_bytes();
+    let found = |text: &[u8]| text.windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle));
+    found(bytes) || found(&unescape_ascii(bytes))
+}
+
+/// `bytes` with every `\uXXXX`, `\UXXXXXXXX` and `\xHH` escape of an ASCII character replaced by
+/// that character. TOML and JSON accept such an escape in a quoted key, so
+/// `"ember-channels"` is the key `ember-channels`. Everything else is kept as it is, also a
+/// sequence that is no escape where it stands (a literal string, a path): decoding too much can
+/// only report a name that is not there, which fails closed.
+fn unescape_ascii(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            let digits = match bytes[i + 1] {
+                b'u' => 4,
+                b'U' => 8,
+                b'x' => 2,
+                _ => 0,
+            };
+            let end = i + 2 + digits;
+            if digits > 0 && end <= bytes.len() {
+                let code = std::str::from_utf8(&bytes[i + 2..end]).ok().and_then(|hex| u32::from_str_radix(hex, 16).ok());
+                if let Some(c) = code.filter(|c| *c < 0x80) {
+                    out.push(c as u8);
+                    i = end;
+                    continue;
+                }
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
+}
+
+/// The first file of `files` that mentions the server name or cannot be checked decides.
+fn text_name_check(files: Vec<(PathBuf, &'static str)>) -> NameCheck {
+    for (file, kind) in files {
+        match read_config_bytes(&file) {
+            Err(why) => return NameCheck::Unsure { kind, why },
+            Ok(Some(bytes)) if mentions_channel_server(&bytes) => return NameCheck::Taken { kind },
+            Ok(_) => {}
+        }
+    }
+    NameCheck::Free
+}
+
+/// `cwd` (made absolute) and every ancestor, then the same for its canonical form.
+fn session_dirs(cwd: &Path) -> Vec<PathBuf> {
+    let cwd = if cwd.is_absolute() {
+        cwd.to_path_buf()
+    } else {
+        std::env::current_dir().map(|d| d.join(cwd)).unwrap_or_else(|_| cwd.to_path_buf())
+    };
+    let mut dirs: Vec<PathBuf> = cwd.ancestors().map(Path::to_path_buf).collect();
+    if let Ok(real) = cwd.canonicalize() {
+        for a in real.ancestors() {
+            if !dirs.iter().any(|d| d == a) {
+                dirs.push(a.to_path_buf());
+            }
+        }
+    }
+    dirs
+}
+
+/// Whether the user's own Codex configuration mentions an MCP server named `ember-channels`
+/// (FR-T12): `.codex/config.toml` in `cwd` and every ancestor, `<codex_home>/config.toml`, and
+/// the `system` files. A `-c mcp_servers.ember-channels.…` override would merge into such an
+/// entry, so the registration steps aside. Fails closed like [`channel_server_name_taken`].
+pub fn codex_channel_name_taken(cwd: &Path, codex_home: Option<&Path>, system: &[PathBuf]) -> NameCheck {
+    let mut files: Vec<(PathBuf, &'static str)> = session_dirs(cwd)
+        .into_iter()
+        .map(|d| (d.join(".codex").join("config.toml"), KIND_CODEX_PROJECT))
+        .collect();
+    if let Some(home) = codex_home {
+        files.push((home.join("config.toml"), KIND_CODEX_USER));
+    }
+    files.extend(system.iter().map(|f| (f.clone(), KIND_CODEX_SYSTEM)));
+    text_name_check(files)
+}
+
+/// Whether the user's own Antigravity configuration mentions an MCP server named
+/// `ember-channels` (FR-T12): `.agents/mcp_config.json` in `cwd` and every ancestor, and under
+/// `home` the user file `.gemini/config/mcp_config.json` and the legacy
+/// `.gemini/antigravity/mcp_config.json` (agy has no variable that moves `~/.gemini`). Fails
+/// closed like [`channel_server_name_taken`].
+pub fn agy_channel_name_taken(cwd: &Path, home: Option<&Path>) -> NameCheck {
+    let mut files: Vec<(PathBuf, &'static str)> = session_dirs(cwd)
+        .into_iter()
+        .map(|d| (d.join(".agents").join("mcp_config.json"), KIND_AGY_PROJECT))
+        .collect();
+    if let Some(home) = home {
+        let gemini = home.join(".gemini");
+        files.push((gemini.join("config").join("mcp_config.json"), KIND_AGY_USER));
+        files.push((gemini.join("antigravity").join("mcp_config.json"), KIND_AGY_USER));
+    }
+    text_name_check(files)
 }
 
 /// Whether the `mcpServers` object `servers` has a key equal to [`CHANNEL_MCP_SERVER`], ignoring
@@ -307,19 +614,7 @@ pub fn channel_server_name_taken(
     config_dir: Option<&Path>,
     managed: &[PathBuf],
 ) -> NameCheck {
-    let cwd = if cwd.is_absolute() {
-        cwd.to_path_buf()
-    } else {
-        std::env::current_dir().map(|d| d.join(cwd)).unwrap_or_else(|_| cwd.to_path_buf())
-    };
-    let mut dirs: Vec<PathBuf> = cwd.ancestors().map(Path::to_path_buf).collect();
-    if let Ok(real) = cwd.canonicalize() {
-        for a in real.ancestors() {
-            if !dirs.iter().any(|d| d == a) {
-                dirs.push(a.to_path_buf());
-            }
-        }
-    }
+    let dirs = session_dirs(cwd);
     for d in &dirs {
         match read_config_json(&d.join(".mcp.json")) {
             Err(why) => return NameCheck::Unsure { kind: KIND_PROJECT, why },
@@ -395,7 +690,17 @@ impl A2a {
     /// Hook into the session manager: give every agent process its credentials and
     /// instructions, deliver queued messages at turn boundaries, and deliver whatever was still
     /// queued when the server last stopped. Call once, inside the runtime.
+    ///
+    /// It is [`A2a::install_hooks`] followed by [`A2a::start`]. The server binary calls the two
+    /// apart, with `Sessions::recover_after_restart` between them (FR-S8).
     pub fn install(self: &Arc<Self>) {
+        self.install_hooks();
+        self.start();
+    }
+
+    /// The hooks alone: nothing is delivered and no task starts. A session started or rejoined
+    /// after this gets its A2A credentials and instructions.
+    pub fn install_hooks(self: &Arc<Self>) {
         let weak = Arc::downgrade(self);
         self.sessions.add_start_hook(Arc::new(move |rec| {
             weak.upgrade()
@@ -406,7 +711,8 @@ impl A2a {
         self.sessions.add_instructions_hook(Arc::new(move |rec: &SessionRecord| {
             weak.upgrade().map(|a| a.instructions_for(rec))
         }));
-        // FR-T12 (#380): Claude Code answers a mention through the `channel_post` MCP tool.
+        // FR-T12 (#380): Claude Code, Codex, Antigravity and ACP agents answer a mention through
+        // the `channel_post` MCP tool.
         let weak = Arc::downgrade(self);
         self.sessions.add_start_config_hook(Arc::new(move |rec: &SessionRecord, req: &mut StartRequest| {
             if let Some(a) = weak.upgrade() {
@@ -425,7 +731,13 @@ impl A2a {
                 }
             }) as BoxFuture<'static, ()>
         }));
+    }
 
+    /// Deliver at turn boundaries from now on, and deliver what was still queued when the server
+    /// last stopped. Call once, inside the runtime, after [`A2a::install_hooks`] and after the
+    /// session statuses are settled (`Sessions::recover_after_restart`): the first flush reads
+    /// them, and a turn that ended before this call is covered by that flush.
+    pub fn start(self: &Arc<Self>) {
         // Subscribe before the initial flush so no turn end is missed in between.
         let rx = self.sessions.subscribe();
         tokio::spawn(watch_turns(Arc::downgrade(self), rx));
@@ -449,22 +761,36 @@ impl A2a {
         &self.store
     }
 
-    /// Whether `rec` answers a channel mention through the `channel_post` MCP tool instead of the
-    /// `ember-a2a channel post` command (FR-T12, FR-T13). Only Claude Code does (the only harness
-    /// where the tool name and the approval rule are measured), only with the `ember-a2a` binary
-    /// installed, and only on this computer: on another computer the MCP child would need the
-    /// binary there, so those sessions keep the command. The start hook and both prompt builders
-    /// ask this one function, so they cannot disagree. A lookup error counts as another computer.
-    /// A session whose last start found the server name taken in the user's own Claude Code
-    /// configuration answers `false` (see `channel_fallback`).
-    fn channel_reply_by_tool(&self, rec: &SessionRecord) -> bool {
-        self.channel_reply_eligible(rec) && !self.channel_fallback.lock().unwrap().contains(&rec.id)
+    /// How `rec` is told to answer a channel mention: through the `channel_post` MCP tool, under
+    /// the name its harness is known to give it, or with the `ember-a2a channel post` command
+    /// (FR-T12, FR-T13). Every harness with an MCP client gets the tool ([`ToolHarness`]), only
+    /// with the `ember-a2a` binary installed, and only on this computer: on another computer the
+    /// MCP child would need the binary there, so those sessions keep the command. The start hook
+    /// and both prompt builders ask this one function, so they cannot disagree. A lookup error
+    /// counts as another computer. A session whose last start found the server name taken in the
+    /// user's own configuration of the harness gets the command (see `channel_fallback`).
+    fn channel_reply(&self, rec: &SessionRecord) -> ChannelReply {
+        match ToolHarness::of(rec.agent) {
+            Some(harness)
+                if self.channel_reply_eligible(rec)
+                    && !self.channel_fallback.lock().unwrap().contains(&rec.id) =>
+            {
+                harness.reply()
+            }
+            _ => ChannelReply::Command,
+        }
     }
 
-    /// [`A2a::channel_reply_by_tool`] before the name-collision fallback: what the harness, the
+    /// Whether [`A2a::channel_reply`] is a tool (test helper).
+    #[cfg(test)]
+    fn channel_reply_by_tool(&self, rec: &SessionRecord) -> bool {
+        self.channel_reply(rec) != ChannelReply::Command
+    }
+
+    /// [`A2a::channel_reply`] before the name-collision fallback: what the harness, the
     /// binary and the computer allow. The start hook asks this one, then runs the collision check.
     fn channel_reply_eligible(&self, rec: &SessionRecord) -> bool {
-        if rec.agent != AgentKind::ClaudeCode || self.config.cli_path.is_none() {
+        if ToolHarness::of(rec.agent).is_none() || self.config.cli_path.is_none() {
             return false;
         }
         match self.session_computer_id(&rec.id) {
@@ -489,30 +815,48 @@ impl A2a {
         .optional()
     }
 
-    /// Start-config hook (FR-T12): register the `ember-channels` MCP server and its one allow
-    /// rule for a Claude Code session that [`A2a::channel_reply_by_tool`]. It reuses the
-    /// `EMBER_URL` and `EMBER_RUNTIME_TOKEN` already in `req.env` (made by [`A2a::runtime_env`]),
-    /// so no second token is issued and the child gets no wider scope than the CLI has. Claude
-    /// Code writes an MCP entry with environment into a private file, never onto the command line.
-    /// Never logs the token.
+    /// Start-config hook (FR-T12): register the `ember-channels` MCP server for a session that
+    /// [`A2a::channel_reply`], and its one allow rule where the harness needs one
+    /// ([`ToolHarness::allow_rule`]). It reuses the `EMBER_URL` and `EMBER_RUNTIME_TOKEN` already
+    /// in `req.env` (made by [`A2a::runtime_env`]), so no second token is issued and the child
+    /// gets no wider scope than the CLI has. No adapter puts the entry's environment on a command
+    /// line: Claude Code writes a private file, Codex forwards the two variables by name from its
+    /// own process environment, Antigravity writes a private file in the session root, and an ACP
+    /// agent reads `session/new` from its stdin. Never logs the token.
     fn channel_tool_config(&self, rec: &SessionRecord, req: &mut StartRequest) {
         if !self.channel_reply_eligible(rec) || req.remote.is_some() || req.computer.is_some() {
             self.channel_fallback.lock().unwrap().remove(&rec.id);
             return;
         }
         let Some(cli) = self.config.cli_path.as_ref() else { return };
+        let Some(harness) = ToolHarness::of(rec.agent) else { return };
         let env_value = |name: &str| {
             req.env.iter().rev().find(|(k, v)| k == name && !v.is_empty()).map(|(_, v)| v.clone())
         };
         let (Some(url), Some(token)) = (env_value("EMBER_URL"), env_value("EMBER_RUNTIME_TOKEN")) else {
             return;
         };
+        let sources = self.claude_sources.lock().unwrap().clone();
+        let codex_home = env_value("CODEX_HOME")
+            .map(PathBuf::from)
+            .or(sources.codex_home.clone())
+            .or(sources.home.as_ref().map(|h| h.join(".codex")));
         let check = if req.mcp_servers.iter().any(|s| s.name == CHANNEL_MCP_SERVER) {
             NameCheck::Taken { kind: KIND_REQUEST }
         } else {
-            let sources = self.claude_sources.lock().unwrap().clone();
-            let config_dir = env_value("CLAUDE_CONFIG_DIR").map(PathBuf::from).or(sources.config_dir.clone());
-            channel_server_name_taken(&req.cwd, sources.home.as_deref(), config_dir.as_deref(), &sources.managed)
+            match harness {
+                ToolHarness::Claude => {
+                    let config_dir =
+                        env_value("CLAUDE_CONFIG_DIR").map(PathBuf::from).or(sources.config_dir.clone());
+                    channel_server_name_taken(&req.cwd, sources.home.as_deref(), config_dir.as_deref(), &sources.managed)
+                }
+                ToolHarness::Codex => {
+                    codex_channel_name_taken(&req.cwd, codex_home.as_deref(), &sources.codex_system)
+                }
+                ToolHarness::Antigravity => agy_channel_name_taken(&req.cwd, sources.home.as_deref()),
+                // Where an ACP agent keeps its own MCP servers is not known to Ember.
+                ToolHarness::Acp => NameCheck::Free,
+            }
         };
         // Never the file contents: `kind`, `why` and the reason are static strings.
         let skip_notice = match check {
@@ -523,14 +867,15 @@ impl A2a {
             }
             NameCheck::Unsure { kind, why } => {
                 tracing::warn!(session = %rec.id, source = kind, "not registering {CHANNEL_MCP_SERVER}: the configuration could not be checked ({why})");
-                Some(unsure_notice(kind, why))
+                Some(unsure_notice_for(harness, kind, why))
             }
         };
         if let Some(notice) = skip_notice {
             let first = self.channel_fallback.lock().unwrap().insert(rec.id.clone());
             // The instructions hook ran before this one and named the tool: put the command back.
             if let Some(text) = req.instructions.as_mut() {
-                *text = text.replace(&self.instructions_with(true), &self.instructions_with(false));
+                *text = text
+                    .replace(&self.instructions_with(harness.reply()), &self.instructions_with(ChannelReply::Command));
             }
             if first {
                 let event = AgentEvent::Notice { message: notice };
@@ -543,7 +888,8 @@ impl A2a {
         if self.channel_fallback.lock().unwrap().remove(&rec.id) {
             // The instructions hook ran with the fallback still set: name the tool again.
             if let Some(text) = req.instructions.as_mut() {
-                *text = text.replace(&self.instructions_with(false), &self.instructions_with(true));
+                *text = text
+                    .replace(&self.instructions_with(ChannelReply::Command), &self.instructions_with(harness.reply()));
             }
         }
         req.mcp_servers.push(McpServer {
@@ -553,7 +899,17 @@ impl A2a {
             startup_timeout_secs: Some(10),
             env: vec![("EMBER_URL".to_string(), url), ("EMBER_RUNTIME_TOKEN".to_string(), token)],
         });
-        if !req.allowed_tools.iter().any(|t| t == CHANNEL_POST_TOOL) {
+        // A Codex layer the name check does not read may define its own `ember-channels`: the call
+        // is then asked (the Codex adapter puts the unverified note on that card), never
+        // auto-approved.
+        let unread = match harness {
+            ToolHarness::Codex => codex_unread_layer(&codex_layer_paths(codex_home.as_deref(), &sources.codex_managed)),
+            _ => None,
+        };
+        if let Some(layer) = unread {
+            tracing::warn!(session = %rec.id, source = layer.kind, unreadable = layer.unreadable, "not auto-approving {CHANNEL_POST_TOOL}: {REASON_UNVERIFIED}");
+            req.allowed_tools.retain(|t| t != CHANNEL_POST_TOOL);
+        } else if harness.allow_rule() && !req.allowed_tools.iter().any(|t| t == CHANNEL_POST_TOOL) {
             req.allowed_tools.push(CHANNEL_POST_TOOL.to_string());
         }
     }
@@ -590,23 +946,28 @@ impl A2a {
     /// How the agent uses A2A. Stable across restarts (no per-process values), so it does not
     /// disturb prompt caching on resume.
     pub fn instructions(&self) -> String {
-        self.instructions_with(false)
+        self.instructions_with(ChannelReply::Command)
     }
 
-    /// [`A2a::instructions`]; `channel_by_tool` names the `channel_post` MCP tool as the way to
+    /// [`A2a::instructions`]; with a tool `how` it names the `channel_post` MCP tool as the way to
     /// answer a channel mention (with the command as a fallback) instead of the command alone.
-    fn instructions_with(&self, channel_by_tool: bool) -> String {
-        let channel_answer = if channel_by_tool {
-            format!(
+    fn instructions_with(&self, how: ChannelReply) -> String {
+        let channel_answer = match how {
+            ChannelReply::ClaudeTool => format!(
                 "call the tool `{CHANNEL_POST_TOOL}` with `channel` set to the channel id and \
                  `text` set to your answer; if the tool is not available, run `{CLI_NAME} channel \
                  post <channel-id> \"<text>\"`"
-            )
-        } else {
-            format!(
+            ),
+            ChannelReply::McpTool => format!(
+                "call the `{}` tool of the MCP server `{CHANNEL_MCP_SERVER}` with `channel` set to \
+                 the channel id and `text` set to your answer; if the tool is not available, run \
+                 `{CLI_NAME} channel post <channel-id> \"<text>\"`",
+                mcp::TOOL_NAME
+            ),
+            ChannelReply::Command => format!(
                 "run `{CLI_NAME} channel post <channel-id> \"<text>\"` (use `-` to read the text \
                  from stdin)"
-            )
+            ),
         };
         let path_note = match &self.config.cli_path {
             Some(p) => format!(" (also at `{}`, or `$EMBER_A2A_BIN`)", p.display()),
@@ -686,7 +1047,7 @@ impl A2a {
 
     /// [`A2a::instructions`] plus, for an active teammate, its team role.
     pub fn instructions_for(&self, rec: &SessionRecord) -> String {
-        let base = self.instructions_with(self.channel_reply_by_tool(rec));
+        let base = self.instructions_with(self.channel_reply(rec));
         match self.teammate_instructions(rec) {
             Some(team) => format!("{base}\n\n{team}"),
             None => base,
@@ -1020,7 +1381,7 @@ impl A2a {
 
     /// The user-message text for a batch of messages to one target (FR-T3).
     fn render(&self, rec: &SessionRecord, msgs: &[A2aMessage]) -> anyhow::Result<String> {
-        let by_tool = self.channel_reply_by_tool(rec);
+        let how = self.channel_reply(rec);
         let mut parts = Vec::new();
         for m in msgs {
             if let (Some(channel_id), Some(until)) = (&m.origin_channel, m.origin_guest_until) {
@@ -1032,7 +1393,7 @@ impl A2a {
                     channel_id,
                     until,
                     &m.text,
-                    by_tool,
+                    how,
                 ));
                 continue;
             }
@@ -1043,7 +1404,7 @@ impl A2a {
                     Some(name) => format!("channel #{name}, id {channel_id}"),
                     None => format!("channel {channel_id}"),
                 };
-                let reply_hint = channel::reply_hint(channel_id, by_tool);
+                let reply_hint = channel::reply_hint(channel_id, how);
                 parts.push(format!(
                     "{HEADER_TAG} Message {} from {who} ({place})\n\
                      This message is from a person in a channel, not from another agent.\n\
@@ -1108,7 +1469,8 @@ async fn watch_turns(a2a: Weak<A2a>, mut rx: tokio::sync::broadcast::Receiver<Pu
 
 #[cfg(test)]
 mod channel_tool_tests {
-    //! FR-T12 (#380 b): Claude Code answers a channel mention through the `channel_post` MCP tool.
+    //! FR-T12 (#380 b, c): Claude Code, Codex, Antigravity and ACP agents answer a channel mention
+    //! through the `channel_post` MCP tool.
     use super::*;
     use crate::agents::claude_code::{mcp_config, mcp_needs_file, ClaudeCodeAdapter, PrivateConfigFile};
     use crate::agents::scripted::ScriptedAdapter;
@@ -1226,16 +1588,15 @@ mod channel_tool_tests {
     }
 
     #[test]
-    fn fr_t12_hook_never_touches_other_harnesses() {
+    fn fr_t12_hook_never_touches_the_scripted_agent() {
         let a = world(Some(CLI));
-        for agent in [AgentKind::Codex, AgentKind::Antigravity, AgentKind::Scripted, acp()] {
-            let r = rec(&a, agent);
-            let mut req = request(&a, &r);
-            a.channel_tool_config(&r, &mut req);
-            assert!(req.mcp_servers.is_empty(), "{agent:?}");
-            assert!(req.allowed_tools.is_empty(), "{agent:?}");
-            assert!(!a.channel_reply_by_tool(&r), "{agent:?}");
-        }
+        let r = rec(&a, AgentKind::Scripted);
+        let mut req = request(&a, &r);
+        a.channel_tool_config(&r, &mut req);
+        assert!(req.mcp_servers.is_empty());
+        assert!(req.allowed_tools.is_empty());
+        assert!(!a.channel_reply_by_tool(&r));
+        assert_eq!(a.channel_reply(&r), ChannelReply::Command);
     }
 
     #[test]
@@ -1339,20 +1700,29 @@ mod channel_tool_tests {
         another agent.";
 
     #[test]
-    fn fr_t12_other_harnesses_keep_the_old_prompt_byte_for_byte() {
+    fn fr_t12_a_session_that_keeps_the_command_keeps_the_old_prompt_byte_for_byte() {
         let a = world(Some(CLI));
         let claude = a.instructions_for(&rec(&a, AgentKind::ClaudeCode));
-        for agent in [AgentKind::Codex, AgentKind::Antigravity, AgentKind::Scripted, acp()] {
-            let text = a.instructions_for(&rec(&a, agent));
-            assert!(text.ends_with(OLD_CHANNEL_PARAGRAPH), "{agent:?}: {text}");
-            assert_eq!(text, a.instructions(), "{agent:?}");
+        // The scripted agent, and every harness on another computer.
+        let mut keep = vec![rec(&a, AgentKind::Scripted)];
+        for agent in [AgentKind::Codex, AgentKind::Antigravity, acp()] {
+            let r = rec(&a, agent);
+            move_to(&a, &r, "pi-1");
+            keep.push(r);
+        }
+        for r in &keep {
+            let text = a.instructions_for(r);
+            assert!(text.ends_with(OLD_CHANNEL_PARAGRAPH), "{:?}: {text}", r.agent);
+            assert_eq!(text, a.instructions(), "{:?}", r.agent);
             // Everything before the channel answer is shared with Claude Code.
             let cut = "To answer there, ";
             assert_eq!(text[..text.find(cut).unwrap()], claude[..claude.find(cut).unwrap()]);
         }
-        // Without the binary Claude Code keeps the old text as well.
+        // Without the binary every harness keeps the old text as well.
         let b = world(None);
-        assert!(b.instructions_for(&rec(&b, AgentKind::ClaudeCode)).ends_with(OLD_CHANNEL_PARAGRAPH));
+        for agent in [AgentKind::ClaudeCode, AgentKind::Codex, AgentKind::Antigravity, acp()] {
+            assert!(b.instructions_for(&rec(&b, agent)).ends_with(OLD_CHANNEL_PARAGRAPH), "{agent:?}");
+        }
     }
 
     fn mention(id: &str, channel: &str, guest_until: Option<i64>) -> A2aMessage {
@@ -1382,9 +1752,21 @@ mod channel_tool_tests {
             "{claude}"
         );
         assert!(!claude.contains("ember-a2a channel post"));
-        let codex = a.render(&rec(&a, AgentKind::Codex), &[m]).unwrap();
+        let scripted = a.render(&rec(&a, AgentKind::Scripted), &[m.clone()]).unwrap();
+        for agent in [AgentKind::Codex, AgentKind::Antigravity, acp()] {
+            let text = a.render(&rec(&a, agent), &[m.clone()]).unwrap();
+            assert!(
+                text.ends_with(
+                    "To reply in the channel: call the channel_post tool of the MCP server ember-channels with channel \"chan1\" and text \"...\"\n\nhi there"
+                ),
+                "{agent:?}: {text}"
+            );
+            assert!(!text.contains("ember-a2a channel post") && !text.contains(CHANNEL_POST_TOOL), "{agent:?}");
+            let cut = |s: &str| s[..s.find("To reply in the channel:").unwrap()].to_string();
+            assert_eq!(cut(&text), cut(&scripted), "{agent:?}: the header is byte-identical");
+        }
         assert_eq!(
-            codex,
+            scripted,
             "[ember a2a] Message m1 from Mina (channel chan1)\n\
              This message is from a person in a channel, not from another agent.\n\
              To reply in the channel: ember-a2a channel post chan1 \"...\"\n\nhi there"
@@ -1395,12 +1777,24 @@ mod channel_tool_tests {
     fn fr_t12_guest_footer_per_recipient_keeps_the_untrusted_block() {
         let a = world(Some(CLI));
         let m = mention("m2", "chan1", Some(0));
-        let codex = a.render(&rec(&a, AgentKind::Codex), &[m.clone()]).unwrap();
+        let codex = a.render(&rec(&a, AgentKind::Scripted), &[m.clone()]).unwrap();
         assert_eq!(
             codex,
             channel::guest_message_text("m2", "Mina", None, "chan1", 0, "hi there"),
-            "unchanged for Codex"
+            "unchanged for a session that keeps the command"
         );
+        for agent in [AgentKind::Codex, AgentKind::Antigravity, acp()] {
+            let text = a.render(&rec(&a, agent), &[m.clone()]).unwrap();
+            assert!(
+                text.ends_with(
+                    "To reply in the channel: call the channel_post tool of the MCP server ember-channels with channel \"chan1\" and text \"...\""
+                ),
+                "{agent:?}: {text}"
+            );
+            let cut = |s: &str| s[..s.rfind("To reply in the channel:").unwrap()].to_string();
+            assert_eq!(cut(&text), cut(&codex), "{agent:?}: header and markers are byte-identical");
+            assert!(text.contains("UNTRUSTED input"), "{agent:?}");
+        }
         assert!(codex.ends_with("To reply in the channel: ember-a2a channel post chan1 \"...\""));
         let claude = a.render(&rec(&a, AgentKind::ClaudeCode), &[m]).unwrap();
         let tail = format!(
@@ -1447,12 +1841,12 @@ mod channel_tool_tests {
         std::fs::create_dir_all(&cwd).unwrap();
         let (home, cfg) = (d.path().join("home"), d.path().join("cfgdir"));
         put(&cfg.join(".claude.json"), &with_server("ember-channels"));
-        assert_eq!(taken(&cwd, Some(&home), Some(&cfg), &[]), NameCheck::Taken { kind: KIND_USER });
+        assert_eq!(taken(&cwd, Some(home.as_path()), Some(&cfg), &[]), NameCheck::Taken { kind: KIND_USER });
         std::fs::remove_file(cfg.join(".claude.json")).unwrap();
-        assert_eq!(taken(&cwd, Some(&home), Some(&cfg), &[]), NameCheck::Free);
+        assert_eq!(taken(&cwd, Some(home.as_path()), Some(&cfg), &[]), NameCheck::Free);
         put(&home.join(".claude.json"), &with_server("ember-channels"));
-        assert_eq!(taken(&cwd, Some(&home), Some(&cfg), &[]), NameCheck::Taken { kind: KIND_USER });
-        assert_eq!(taken(&cwd, Some(&home), None, &[]), NameCheck::Taken { kind: KIND_USER });
+        assert_eq!(taken(&cwd, Some(home.as_path()), Some(&cfg), &[]), NameCheck::Taken { kind: KIND_USER });
+        assert_eq!(taken(&cwd, Some(home.as_path()), None, &[]), NameCheck::Taken { kind: KIND_USER });
     }
 
     #[test]
@@ -1463,11 +1857,11 @@ mod channel_tool_tests {
         let home = d.path().join("home");
         let key = cwd.to_str().unwrap();
         put(&home.join(".claude.json"), &format!(r#"{{"projects":{{"{key}":{}}}}}"#, with_server("Ember-Channels")));
-        assert_eq!(taken(&cwd, Some(&home), None, &[]), NameCheck::Taken { kind: KIND_LOCAL });
+        assert_eq!(taken(&cwd, Some(home.as_path()), None, &[]), NameCheck::Taken { kind: KIND_LOCAL });
         let parent = d.path().join("proj");
         let pkey = parent.to_str().unwrap();
         put(&home.join(".claude.json"), &format!(r#"{{"projects":{{"{pkey}":{}}}}}"#, with_server("ember-channels")));
-        assert_eq!(taken(&cwd, Some(&home), None, &[]), NameCheck::Taken { kind: KIND_LOCAL });
+        assert_eq!(taken(&cwd, Some(home.as_path()), None, &[]), NameCheck::Taken { kind: KIND_LOCAL });
     }
 
     #[test]
@@ -1489,13 +1883,13 @@ mod channel_tool_tests {
         std::fs::create_dir_all(&cwd).unwrap();
         let (home, cfg) = (d.path().join("home"), d.path().join("cfg"));
         let m = d.path().join("none.json");
-        assert_eq!(taken(&cwd, Some(&home), Some(&cfg), &[m.clone()]), NameCheck::Free, "absent files");
+        assert_eq!(taken(&cwd, Some(home.as_path()), Some(&cfg), &[m.clone()]), NameCheck::Free, "absent files");
         put(&cwd.join(".mcp.json"), &with_server("github"));
         put(&home.join(".claude.json"), &with_server("ember-channels-2"));
         let other = d.path().join("elsewhere");
         let okey = other.to_str().unwrap();
         put(&cfg.join(".claude.json"), &format!(r#"{{"projects":{{"{okey}":{}}}}}"#, with_server("ember-channels")));
-        assert_eq!(taken(&cwd, Some(&home), Some(&cfg), &[m]), NameCheck::Free);
+        assert_eq!(taken(&cwd, Some(home.as_path()), Some(&cfg), &[m]), NameCheck::Free);
     }
 
     fn unsure(kind: &'static str, why: &'static str) -> NameCheck {
@@ -1515,11 +1909,11 @@ mod channel_tool_tests {
         let home = d.path().join("home");
         let big = format!(r#"{{"pad":"{}"}}"#, "x".repeat(MAX_CONFIG_BYTES as usize));
         put(&home.join(".claude.json"), &big);
-        assert_eq!(taken(&cwd, Some(&home), None, &[]), unsure(KIND_USER, "larger than 4 MiB"));
+        assert_eq!(taken(&cwd, Some(home.as_path()), None, &[]), unsure(KIND_USER, "larger than 4 MiB"));
         // Not a regular file (a directory).
         std::fs::remove_file(home.join(".claude.json")).unwrap();
         std::fs::create_dir_all(home.join(".claude.json")).unwrap();
-        assert_eq!(taken(&cwd, Some(&home), None, &[]), unsure(KIND_USER, "not a regular file"));
+        assert_eq!(taken(&cwd, Some(home.as_path()), None, &[]), unsure(KIND_USER, "not a regular file"));
         // Managed file with invalid JSON.
         let m = d.path().join("m.json");
         put(&m, "[");
@@ -1754,5 +2148,505 @@ mod channel_tool_tests {
         assert!(a.channel_fallback.lock().unwrap().is_empty());
         assert!(a.channel_reply_by_tool(&r));
         assert!(req.instructions.unwrap().contains(CHANNEL_POST_TOOL), "prompt names the tool again");
+    }
+
+    // ---- Codex, Antigravity and ACP agents (FR-T12, #380 c) ----
+
+    fn tool_harnesses() -> [AgentKind; 3] {
+        [AgentKind::Codex, AgentKind::Antigravity, acp()]
+    }
+
+    /// The registered entry is `ember-a2a mcp` with the session's two variables and nothing else.
+    fn assert_channel_entry(a: &A2a, r: &SessionRecord, req: &StartRequest) {
+        assert_eq!(req.mcp_servers.len(), 1, "{:?}", r.agent);
+        let s = &req.mcp_servers[0];
+        assert_eq!(s.name, "ember-channels");
+        assert_eq!(s.command, CLI);
+        assert_eq!(s.args, vec!["mcp".to_string()]);
+        assert_eq!(s.startup_timeout_secs, Some(10));
+        let token = env_of(req, "EMBER_RUNTIME_TOKEN");
+        assert_eq!(
+            s.env,
+            vec![
+                ("EMBER_URL".to_string(), "http://127.0.0.1:8740".to_string()),
+                ("EMBER_RUNTIME_TOKEN".to_string(), token.clone()),
+            ],
+            "the session's credentials and nothing else"
+        );
+        // The same token the command uses: no second one was issued.
+        assert_eq!(a.store.session_for_token(&token).unwrap().as_deref(), Some(r.id.as_str()));
+    }
+
+    #[test]
+    fn fr_t12_hook_registers_the_server_for_codex_antigravity_and_acp() {
+        let a = world(Some(CLI));
+        for agent in tool_harnesses() {
+            let r = rec(&a, agent);
+            let mut req = request(&a, &r);
+            a.channel_tool_config(&r, &mut req);
+            assert_channel_entry(&a, &r, &req);
+            assert!(a.channel_reply_by_tool(&r), "{agent:?}");
+            assert_eq!(a.channel_reply(&r), ChannelReply::McpTool, "{agent:?}");
+        }
+    }
+
+    #[test]
+    fn fr_t12_the_allow_rule_is_for_claude_code_and_codex_only() {
+        let a = world(Some(CLI));
+        for (agent, rule) in
+            [(AgentKind::ClaudeCode, true), (AgentKind::Codex, true), (AgentKind::Antigravity, false), (acp(), false)]
+        {
+            let r = rec(&a, agent);
+            let mut req = request(&a, &r);
+            a.channel_tool_config(&r, &mut req);
+            let want: Vec<String> = if rule { vec![CHANNEL_POST_TOOL.to_string()] } else { Vec::new() };
+            assert_eq!(req.allowed_tools, want, "{agent:?}");
+        }
+    }
+
+    #[test]
+    fn fr_t12_other_harnesses_skip_under_the_same_conditions_as_claude_code() {
+        for agent in tool_harnesses() {
+            // Another computer.
+            let a = world(Some(CLI));
+            let r = rec(&a, agent);
+            move_to(&a, &r, "pi-1");
+            let mut req = request(&a, &r);
+            a.channel_tool_config(&r, &mut req);
+            assert!(req.mcp_servers.is_empty() && req.allowed_tools.is_empty(), "{agent:?}: another computer");
+            assert!(!a.channel_reply_by_tool(&r), "{agent:?}");
+            // A request that already runs elsewhere.
+            let r = rec(&a, agent);
+            let mut req = request(&a, &r);
+            req.remote = Some(crate::agents::RemoteExec {
+                environment_id: "ember-x".into(),
+                exec_server_url: "ws://x".into(),
+            });
+            a.channel_tool_config(&r, &mut req);
+            assert!(req.mcp_servers.is_empty() && req.allowed_tools.is_empty(), "{agent:?}: remote");
+            // Missing credentials.
+            for drop in ["EMBER_RUNTIME_TOKEN", "EMBER_URL"] {
+                let mut req = request(&a, &r);
+                req.env.retain(|(k, _)| k != drop);
+                a.channel_tool_config(&r, &mut req);
+                assert!(req.mcp_servers.is_empty() && req.allowed_tools.is_empty(), "{agent:?}: {drop}");
+            }
+            // A server of that name already in the request.
+            let mut req = request(&a, &r);
+            req.mcp_servers.push(McpServer {
+                name: CHANNEL_MCP_SERVER.into(),
+                command: "/usr/bin/other".into(),
+                ..Default::default()
+            });
+            a.channel_tool_config(&r, &mut req);
+            assert_eq!(req.mcp_servers.len(), 1, "{agent:?}");
+            assert_eq!(req.mcp_servers[0].command, "/usr/bin/other", "{agent:?}");
+            assert!(req.allowed_tools.is_empty(), "{agent:?}");
+            // No binary.
+            let b = world(None);
+            let r = rec(&b, agent);
+            let mut req = request(&b, &r);
+            b.channel_tool_config(&r, &mut req);
+            assert!(req.mcp_servers.is_empty() && req.allowed_tools.is_empty(), "{agent:?}: no binary");
+        }
+    }
+
+    #[test]
+    fn fr_t12_mcp_prompt_names_the_server_and_the_tool_and_keeps_the_rules_and_the_fallback() {
+        let a = world(Some(CLI));
+        for agent in tool_harnesses() {
+            let text = a.instructions_for(&rec(&a, agent));
+            assert!(
+                text.contains(
+                    "To answer there, call the `channel_post` tool of the MCP server `ember-channels` with `channel` set to the channel id and `text` set to your answer; if the tool is not available, run `ember-a2a channel post <channel-id> \"<text>\"`. Reply only when you were addressed"
+                ),
+                "{agent:?}: {text}"
+            );
+            // No combined tool name is claimed: only Claude Code's is measured.
+            assert!(!text.contains(CHANNEL_POST_TOOL), "{agent:?}");
+            assert!(text.contains("for 30 minutes after a person mentioned you there"));
+            assert!(text.contains(&format!("at most {CHANNEL_POSTS_PER_MINUTE} posts a minute")));
+            assert!(text.contains("Your post is shown to the people in the channel"));
+            // Everything before the channel answer is the shared text.
+            let cut = "To answer there, ";
+            let old = a.instructions();
+            assert_eq!(text[..text.find(cut).unwrap()], old[..old.find(cut).unwrap()], "{agent:?}");
+        }
+    }
+
+    #[test]
+    fn fr_t12_codex_launch_carries_the_server_without_the_token_and_the_one_approval() {
+        let a = world(Some(CLI));
+        let r = rec(&a, AgentKind::Codex);
+        let mut req = request(&a, &r);
+        let token = env_of(&req, "EMBER_RUNTIME_TOKEN");
+        a.channel_tool_config(&r, &mut req);
+        let args = crate::agents::codex::app_server_args(&req);
+        assert_eq!(
+            args,
+            [
+                "app-server",
+                "-c",
+                "mcp_servers.ember-channels.command=\"/opt/ember/ember-a2a\"",
+                "-c",
+                "mcp_servers.ember-channels.args=[\"mcp\"]",
+                "-c",
+                "mcp_servers.ember-channels.startup_timeout_sec=10",
+                "-c",
+                "mcp_servers.ember-channels.env_vars=[\"EMBER_URL\", \"EMBER_RUNTIME_TOKEN\"]",
+                "-c",
+                "mcp_servers.ember-channels.tools.channel_post.approval_mode=\"approve\"",
+            ]
+        );
+        assert!(!args.join("\n").contains(&token), "the token is never an argument");
+        // Codex forwards the two variables by name from its own environment.
+        let (env, skipped) = crate::agents::codex::mcp_process_env(&req);
+        assert!(skipped.is_empty());
+        assert_eq!(
+            env,
+            [
+                ("EMBER_URL".to_string(), "http://127.0.0.1:8740".to_string()),
+                ("EMBER_RUNTIME_TOKEN".to_string(), token),
+            ]
+        );
+    }
+
+    #[test]
+    fn fr_t12_antigravity_session_file_carries_the_server_and_its_credentials() {
+        let a = world(Some(CLI));
+        let r = rec(&a, AgentKind::Antigravity);
+        let mut req = request(&a, &r);
+        let token = env_of(&req, "EMBER_RUNTIME_TOKEN");
+        a.channel_tool_config(&r, &mut req);
+        let cfg = crate::agents::antigravity::mcp_config(&req.mcp_servers).unwrap();
+        assert_eq!(
+            cfg,
+            serde_json::json!({ "mcpServers": { "ember-channels": {
+                "command": CLI,
+                "args": ["mcp"],
+                "env": { "EMBER_URL": "http://127.0.0.1:8740", "EMBER_RUNTIME_TOKEN": token },
+            } } })
+        );
+    }
+
+    #[test]
+    fn fr_t12_acp_session_new_carries_the_server_and_its_credentials() {
+        let a = world(Some(CLI));
+        let r = rec(&a, acp());
+        let mut req = request(&a, &r);
+        let token = env_of(&req, "EMBER_RUNTIME_TOKEN");
+        a.channel_tool_config(&r, &mut req);
+        assert_eq!(
+            crate::agents::acp::mcp_servers_param(&req.mcp_servers),
+            serde_json::json!([{
+                "name": "ember-channels",
+                "command": CLI,
+                "args": ["mcp"],
+                "env": [
+                    { "name": "EMBER_URL", "value": "http://127.0.0.1:8740" },
+                    { "name": "EMBER_RUNTIME_TOKEN", "value": token },
+                ],
+            }])
+        );
+    }
+
+    // ---- name check in the user's own Codex and Antigravity configuration ----
+
+    #[test]
+    fn fr_t12_codex_name_check_reads_the_user_project_and_system_files() {
+        let d = tempfile::tempdir().unwrap();
+        let cwd = d.path().join("proj/sub");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let home = d.path().join("codex-home");
+        assert_eq!(codex_channel_name_taken(&cwd, Some(home.as_path()), &[]), NameCheck::Free, "no file at all");
+        put(&home.join("config.toml"), "model = \"x\"\n[mcp_servers.other]\ncommand = \"y\"\n");
+        assert_eq!(codex_channel_name_taken(&cwd, Some(home.as_path()), &[]), NameCheck::Free);
+        put(&home.join("config.toml"), "[mcp_servers.Ember-Channels]\ncommand = \"y\"\n");
+        assert_eq!(
+            codex_channel_name_taken(&cwd, Some(home.as_path()), &[]),
+            NameCheck::Taken { kind: "user config.toml" },
+            "letter case is ignored"
+        );
+        assert_eq!(codex_channel_name_taken(&cwd, None, &[]), NameCheck::Free);
+        // A project file of an ancestor.
+        put(&d.path().join("proj/.codex/config.toml"), "[mcp_servers.\"ember-channels\"]\ncommand = \"y\"\n");
+        assert_eq!(codex_channel_name_taken(&cwd, None, &[]), NameCheck::Taken { kind: "project .codex/config.toml" });
+        std::fs::remove_file(d.path().join("proj/.codex/config.toml")).unwrap();
+        // A system file.
+        let system = d.path().join("etc/config.toml");
+        put(&system, "# ember-channels is ours\n");
+        assert_eq!(
+            codex_channel_name_taken(&cwd, None, &[system]),
+            NameCheck::Taken { kind: "system config.toml" },
+            "a comment that mentions the name counts: fail closed"
+        );
+    }
+
+    /// A quoted key may spell a character as an escape: `"ember\u002dchannels"` is the key
+    /// `ember-channels` for TOML and for JSON, so the text search decodes ASCII escapes.
+    #[test]
+    fn fr_t12_name_check_sees_a_name_written_with_an_escape() {
+        let d = tempfile::tempdir().unwrap();
+        let cwd = d.path().join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        for key in ["ember\\u002dchannels", "ember\\U0000002Dchannels", "\\x65mber-channels", "ember\\u002Dchannel\\u0073"] {
+            put(&cwd.join(".codex/config.toml"), &format!("[mcp_servers.\"{key}\"]\ncommand = \"y\"\n"));
+            assert_eq!(
+                codex_channel_name_taken(&cwd, None, &[]),
+                NameCheck::Taken { kind: "project .codex/config.toml" },
+                "{key}"
+            );
+        }
+        std::fs::remove_file(cwd.join(".codex/config.toml")).unwrap();
+        let home = d.path().join("home");
+        put(&home.join(".gemini/config/mcp_config.json"), &with_server("ember\\u002dchannels"));
+        assert_eq!(agy_channel_name_taken(&cwd, Some(home.as_path())), NameCheck::Taken { kind: "user mcp_config.json" });
+        // A Windows path in a literal string is no escape and no name.
+        assert!(!mentions_channel_server(b"notify = 'C:\\Users\\x\\update.exe'\n"));
+        assert_eq!(unescape_ascii(b"a\\u00e9\\u002d\\x4"), b"a\\u00e9-\\x4".to_vec());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fr_t12_codex_name_check_fails_closed_on_a_file_it_cannot_judge() {
+        let d = tempfile::tempdir().unwrap();
+        let home = d.path().join("codex-home");
+        std::fs::create_dir_all(home.join("config.toml")).unwrap();
+        assert_eq!(
+            codex_channel_name_taken(d.path(), Some(home.as_path()), &[]),
+            NameCheck::Unsure { kind: "user config.toml", why: "not a regular file" }
+        );
+    }
+
+    #[test]
+    fn fr_t12_agy_name_check_reads_the_user_legacy_and_project_files() {
+        let d = tempfile::tempdir().unwrap();
+        let cwd = d.path().join("proj/sub");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let home = d.path().join("home");
+        assert_eq!(agy_channel_name_taken(&cwd, Some(home.as_path())), NameCheck::Free);
+        // agy accepts comments and trailing commas in this file, and an empty legacy file exists
+        // on real machines: neither is an error for a text search.
+        put(&home.join(".gemini/config/mcp_config.json"), "{ // mine\n \"mcpServers\": { \"other\": { \"command\": \"x\", }, } }");
+        put(&home.join(".gemini/antigravity/mcp_config.json"), "");
+        assert_eq!(agy_channel_name_taken(&cwd, Some(home.as_path())), NameCheck::Free);
+        put(&home.join(".gemini/antigravity/mcp_config.json"), &with_server("EMBER-channels"));
+        assert_eq!(agy_channel_name_taken(&cwd, Some(home.as_path())), NameCheck::Taken { kind: "user mcp_config.json" });
+        put(&home.join(".gemini/antigravity/mcp_config.json"), "");
+        put(&home.join(".gemini/config/mcp_config.json"), &with_server("ember-channels"));
+        assert_eq!(agy_channel_name_taken(&cwd, Some(home.as_path())), NameCheck::Taken { kind: "user mcp_config.json" });
+        put(&d.path().join("proj/.agents/mcp_config.json"), &with_server("ember-channels"));
+        assert_eq!(
+            agy_channel_name_taken(&cwd, None),
+            NameCheck::Taken { kind: "project .agents/mcp_config.json" }
+        );
+    }
+
+    #[test]
+    fn fr_t12_hook_steps_aside_for_a_name_taken_in_codex_or_antigravity_configuration() {
+        let d = tempfile::tempdir().unwrap();
+        let a = world(Some(CLI));
+        set_sources(&a, d.path());
+        put(&d.path().join(".codex/config.toml"), "[mcp_servers.ember-channels]\ncommand = \"y\"\n");
+        put(&d.path().join(".gemini/config/mcp_config.json"), &with_server("ember-channels"));
+        for agent in [AgentKind::Codex, AgentKind::Antigravity] {
+            let r = rec(&a, agent);
+            let mut req = request(&a, &r);
+            req.instructions = Some(a.instructions_for(&r));
+            assert!(req.instructions.as_ref().unwrap().contains("tool of the MCP server"), "{agent:?}");
+            a.channel_tool_config(&r, &mut req);
+            assert!(req.mcp_servers.is_empty() && req.allowed_tools.is_empty(), "{agent:?}");
+            assert!(a.channel_fallback.lock().unwrap().contains(&r.id), "{agent:?}");
+            assert_eq!(a.channel_reply(&r), ChannelReply::Command, "{agent:?}");
+            // The prompt of this very start is the old text again.
+            assert_eq!(req.instructions.unwrap(), a.instructions(), "{agent:?}");
+            let n = a.sessions.store().events_after(&r.id, 0).unwrap().iter()
+                .filter(|e| matches!(&e.event, AgentEvent::Notice { message } if message == CHANNEL_FALLBACK_NOTICE))
+                .count();
+            assert_eq!(n, 1, "{agent:?}");
+        }
+        // An ACP agent's own configuration is not known to Ember: nothing is checked.
+        let r = rec(&a, acp());
+        let mut req = request(&a, &r);
+        a.channel_tool_config(&r, &mut req);
+        assert_eq!(req.mcp_servers.len(), 1);
+    }
+
+    #[test]
+    fn fr_t12_codex_home_of_the_start_request_wins_over_the_default() {
+        let d = tempfile::tempdir().unwrap();
+        let a = world(Some(CLI));
+        set_sources(&a, d.path());
+        put(&d.path().join(".codex/config.toml"), "[mcp_servers.ember-channels]\ncommand = \"y\"\n");
+        let account = d.path().join("account");
+        std::fs::create_dir_all(&account).unwrap();
+        let r = rec(&a, AgentKind::Codex);
+        let mut req = request(&a, &r);
+        req.env.push(("CODEX_HOME".into(), account.to_string_lossy().into_owned()));
+        a.channel_tool_config(&r, &mut req);
+        assert_eq!(req.mcp_servers.len(), 1, "the account's home has no such server");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fr_t12_unsure_notice_names_the_harness() {
+        let d = tempfile::tempdir().unwrap();
+        let a = world(Some(CLI));
+        set_sources(&a, d.path());
+        std::fs::create_dir_all(d.path().join(".codex/config.toml")).unwrap();
+        let r = rec(&a, AgentKind::Codex);
+        let mut req = request(&a, &r);
+        a.channel_tool_config(&r, &mut req);
+        assert!(req.mcp_servers.is_empty() && req.allowed_tools.is_empty(), "fail closed");
+        let notices: Vec<String> = a.sessions.store().events_after(&r.id, 0).unwrap().into_iter()
+            .filter_map(|e| match e.event { AgentEvent::Notice { message } => Some(message), _ => None })
+            .collect();
+        assert_eq!(
+            notices,
+            ["The channel tool was not registered because the Codex configuration (user config.toml) could not be checked (not a regular file); replies use the ember-a2a command."]
+        );
+        assert_eq!(
+            unsure_notice("user config", "unreadable"),
+            "The channel tool was not registered because the Claude Code configuration (user config) could not be checked (unreadable); replies use the ember-a2a command."
+        );
+    }
+
+    // ---- Codex layers the name check does not read ----
+
+    fn layer_paths(home: &Path, managed: &[PathBuf]) -> CodexLayerPaths {
+        codex_layer_paths(Some(home), managed)
+    }
+
+    #[test]
+    fn fr_t12_codex_layer_detection_finds_nothing_without_a_layer() {
+        let d = tempfile::tempdir().unwrap();
+        let home = d.path().join("codex-home");
+        assert_eq!(codex_unread_layer(&layer_paths(&home, &[])), None, "no CODEX_HOME at all");
+        put(&home.join("config.toml"), "model = \"x\"\n");
+        put(&home.join("plugins/p/README.md"), "");
+        put(&home.join("notes.toml"), "");
+        assert_eq!(codex_unread_layer(&layer_paths(&home, &[d.path().join("absent.plist")])), None);
+        assert_eq!(codex_unread_layer(&CodexLayerPaths::default()), None);
+    }
+
+    #[test]
+    fn fr_t12_codex_layer_detection_sees_each_kind_by_presence() {
+        let d = tempfile::tempdir().unwrap();
+        let home = d.path().join("codex-home");
+        put(&home.join("config.toml"), "");
+        put(&home.join("work.config.toml"), "not even toml [[[");
+        assert_eq!(
+            codex_unread_layer(&layer_paths(&home, &[])),
+            Some(UnreadLayer { kind: KIND_CODEX_PROFILE, unreadable: false })
+        );
+        std::fs::remove_file(home.join("work.config.toml")).unwrap();
+        for file in ["plugins/one/.mcp.json", "plugins/one/.codex-plugin/plugin.json"] {
+            put(&home.join(file), "garbage");
+            assert_eq!(
+                codex_unread_layer(&layer_paths(&home, &[])),
+                Some(UnreadLayer { kind: KIND_CODEX_PLUGIN, unreadable: false }),
+                "{file}"
+            );
+            std::fs::remove_file(home.join(file)).unwrap();
+        }
+        // Deeper than three levels is not looked at.
+        put(&home.join("plugins/a/b/c/d/.mcp.json"), "");
+        assert_eq!(codex_unread_layer(&layer_paths(&home, &[])), None);
+        let plist = d.path().join("Managed Preferences/com.openai.codex.plist");
+        put(&plist, "");
+        assert_eq!(
+            codex_unread_layer(&layer_paths(&home, &[plist.clone()])),
+            Some(UnreadLayer { kind: KIND_CODEX_MANAGED, unreadable: false })
+        );
+        // A managed directory counts as well.
+        let dir = d.path().join("ProgramData/OpenAI/Codex");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(
+            codex_unread_layer(&layer_paths(&home, &[dir])),
+            Some(UnreadLayer { kind: KIND_CODEX_MANAGED, unreadable: false })
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fr_t12_codex_layer_detection_fails_closed_on_a_location_it_cannot_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        // CODEX_HOME is a file: it cannot be listed.
+        let home = d.path().join("codex-home");
+        put(&home, "");
+        assert_eq!(
+            codex_unread_layer(&layer_paths(&home, &[])),
+            Some(UnreadLayer { kind: KIND_CODEX_PROFILE, unreadable: true })
+        );
+        // A plugin directory that cannot be listed (root can list it anyway, so skip then).
+        let home = d.path().join("codex-home2");
+        let locked = home.join("plugins/locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&locked).is_err() {
+            assert_eq!(
+                codex_unread_layer(&layer_paths(&home, &[])),
+                Some(UnreadLayer { kind: KIND_CODEX_PLUGIN, unreadable: true })
+            );
+        }
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // A managed path whose parent is a file cannot be judged.
+        let file = d.path().join("prefs");
+        put(&file, "");
+        assert_eq!(
+            codex_unread_layer(&layer_paths(&home, &[file.join("com.openai.codex.plist")])),
+            Some(UnreadLayer { kind: KIND_CODEX_MANAGED, unreadable: true })
+        );
+    }
+
+    #[test]
+    fn fr_t12_codex_layer_locations_follow_the_platform() {
+        let home = Path::new("/h/.codex");
+        let p = codex_layer_paths(Some(home), &[PathBuf::from("/m")]);
+        assert_eq!(p.profile_dirs, [home.to_path_buf()]);
+        assert_eq!(p.plugin_roots, [home.join("plugins")]);
+        assert_eq!(p.managed, [PathBuf::from("/m")]);
+        assert_eq!(codex_layer_paths(None, &[]), CodexLayerPaths::default());
+        let real = codex_managed_locations();
+        if cfg!(target_os = "macos") {
+            assert!(real.contains(&PathBuf::from("/Library/Managed Preferences/com.openai.codex.plist")));
+            assert!(real.contains(&PathBuf::from("/Library/Preferences/com.openai.codex.plist")));
+        } else if !cfg!(windows) {
+            assert!(real.is_empty());
+        }
+    }
+
+    #[test]
+    fn fr_t12_codex_layer_present_registers_the_server_without_the_auto_approval() {
+        let d = tempfile::tempdir().unwrap();
+        let a = world(Some(CLI));
+        set_sources(&a, d.path());
+        put(&d.path().join(".codex/work.config.toml"), "");
+        let r = rec(&a, AgentKind::Codex);
+        let mut req = request(&a, &r);
+        a.channel_tool_config(&r, &mut req);
+        assert_eq!(req.mcp_servers.len(), 1, "the server is still registered");
+        assert!(req.allowed_tools.is_empty(), "but not auto-approved");
+        let args = crate::agents::codex::app_server_args(&req);
+        assert!(!args.iter().any(|x| x.contains("approval_mode")), "{args:?}");
+        assert_eq!(a.channel_reply(&r), ChannelReply::McpTool);
+        // The managed preferences alone do the same.
+        std::fs::remove_file(d.path().join(".codex/work.config.toml")).unwrap();
+        let plist = d.path().join("com.openai.codex.plist");
+        put(&plist, "");
+        a.claude_sources.lock().unwrap().codex_managed = vec![plist.clone()];
+        let mut req = request(&a, &r);
+        a.channel_tool_config(&r, &mut req);
+        assert!(req.allowed_tools.is_empty());
+        // Without any layer the one approval is back, exactly once.
+        std::fs::remove_file(&plist).unwrap();
+        let mut req = request(&a, &r);
+        a.channel_tool_config(&r, &mut req);
+        let approvals: Vec<String> = crate::agents::codex::app_server_args(&req)
+            .into_iter()
+            .filter(|x| x.contains("approval_mode"))
+            .collect();
+        assert_eq!(approvals, ["mcp_servers.ember-channels.tools.channel_post.approval_mode=\"approve\""]);
     }
 }

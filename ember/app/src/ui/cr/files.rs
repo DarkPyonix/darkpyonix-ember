@@ -18,7 +18,7 @@ use std::rc::Rc;
 use compose_rust::runtime::{mutable_state_of, remember, MutableState};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
-use compose_rust::{Alignment, ButtonVariant, IconRole, ShapeRole};
+use compose_rust::{Alignment, IconRole, ShapeRole};
 
 use ember_client::state::Computer;
 
@@ -27,14 +27,18 @@ pub use crate::ui::files::{
     path_label, percent, progress_line, send_blocker, sendable_devices, transfer_service,
     offer_card_shown, user_actions, visible_offers, Answer, Device, DeviceKind, Direction, FilesKpi, FilesModel,
     HistoryEntry, HistoryResult, Offer, PathKind, Presence, ReceivedFile, SendDraft, SendTarget,
-    Transfer, TransferAction, TransferService, TransferState, FILE_PICKER_AVAILABLE, FILE_PICK_REASON,
+    Transfer, TransferAction, TransferService, action_button_name, TransferState, FILE_DIALOG_TITLE, FILE_PICKER_AVAILABLE, FILE_PICK_REASON, PickOutcome, pick_outcome,
     FILE_PICK_UNAVAILABLE, LOCK_LINE, UNAVAILABLE, clean_member_name, demo_files, is_demo,
 };
+/// Whether the share sheet picks files itself. It does not yet: its file card only says what is
+/// chosen, and the tray's 파일 고르기 opens the dialog.
+const SHARE_SHEET_PICKS_FILES: bool = false;
+
 use crate::ui::files::{choose_target, chip_avail, chip_label, chip_rows, chip_text_max_for, chip_width_est, files_line, fit_chip_text, send_state_at, server_status, share_tap_at, tile_tap_notice};
 use super::compat::Banner;
 use crate::model::Tone;
 use super::characters::{CharState, Character};
-use super::components::{EmberSheetSized, AppButton, ButtonKind, Clickable, EmberCard, EmberSheet, FilterChip, IconButton, Label, Pill, PillTone};
+use super::components::{EmberSheetSized, AppButton, ButtonKind, Clickable, EmberCard, EmberSheet, FilterChip, InkIconButton, Label, Pill, PillTone};
 use super::home::{fit_label, text_px, Cols, Part};
 use super::notice;
 use super::project::{HeaderGap, ThemeButton};
@@ -125,6 +129,8 @@ const ICON_VIDEO: &str = line_icon!("m15.75 10.5 4.72-4.72a.75.75 0 0 1 1.28.53v
 const ICON_AUDIO: &str = line_icon!("m9 9 10.5-3m0 6.553v3.75a2.25 2.25 0 0 1-1.632 2.163l-1.32.377a1.803 1.803 0 1 1-.99-3.467l2.31-.66a2.25 2.25 0 0 0 1.632-2.163Zm0 0V2.25L9 5.25v10.303m0 0v3.75a2.25 2.25 0 0 1-1.632 2.163l-1.32.377a1.803 1.803 0 0 1-.99-3.467l2.31-.66A2.25 2.25 0 0 0 9 15.553Z");
 const ICON_ZIP: &str = line_icon!("m20.25 7.5-.625 10.632a2.25 2.25 0 0 1-2.247 2.118H6.622a2.25 2.25 0 0 1-2.247-2.118L3.75 7.5m8.25 3v6.75m0 0-3-3m3 3 3-3M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125Z");
 const ICON_PAUSE: &str = line_icon!("M15.75 5.25v13.5m-7.5-13.5v13.5");
+/// `.fl-x`: the cancel button's cross (heroicons x-mark, as the mockup's `I("close")`).
+const ICON_CANCEL: &str = line_icon!("M6 18 18 6M6 6l12 12");
 const ICON_PLAY: &str = line_icon!("M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.347a1.125 1.125 0 0 1 0 1.972l-11.54 6.347a1.125 1.125 0 0 1-1.667-.986V5.653Z");
 
 /// What the device list shows beyond [`Device`]: the system line and when it was last seen. The
@@ -356,8 +362,8 @@ pub fn sample_extras() -> Extras {
 
 /// `EMBER_CR_FILES_SHEET=send` opens the send sheet at the start, for review captures.
 #[derive(Clone)]
-struct State {
-    sheet: MutableState<Option<SendDraft>>,
+pub(super) struct State {
+    pub(super) sheet: MutableState<Option<SendDraft>>,
     answered: MutableState<Vec<String>>,
     filter: MutableState<HistoryFilter>,
     /// The history's device filter: 0 is every device, then the devices in the history.
@@ -366,7 +372,7 @@ struct State {
 }
 
 impl State {
-    fn new() -> State {
+    pub(super) fn new() -> State {
         State {
             sheet: mutable_state_of((std::env::var("EMBER_CR_FILES_SHEET").as_deref() == Ok("send")).then(SendDraft::default)),
             answered: mutable_state_of(Vec::new()),
@@ -423,10 +429,7 @@ pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<Cre
         cu::ScrollColumn().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
             cu::Column().spacing(SP[4]).modifier(Modifier::new().fill_max_width().padding(pad)).content(|| {
                 if skip.show(EST_HEAD) {
-                    // On a phone the title sits below the menu button's row.
-                    if compact {
-                        cu::Spacer().modifier(Modifier::new().height(PHONE_MENU_ROW));
-                    }
+                    // On a phone the header keeps the menu button's room beside the title (FR-L27.10).
                     HeaderGap("파일", "연결된 모든 장비 사이에서 파일을 주고받습니다. 휴대폰과 태블릿도 포함됩니다.", compact, w <= 900.0, 6.0, compact, || {
                         // The share button is named "공유 시트 열기" (compose-rust v0.0.7, #460).
                         ShareButton(compact, {
@@ -438,13 +441,7 @@ pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<Cre
                         let open = move || s.set(Some(SendDraft::default()));
                         if compact {
                             // A round ink button, icon only (`.lbl{display:none}`).
-                            let p = ember_theme().palette;
-                            cu::Button("")
-                                .icon(IconRole::Send)
-                                .variant(ButtonVariant::Text)
-                                .color(paint(p.ink_text))
-                                .modifier(Modifier::new().size(H_BTN, H_BTN).background(paint(p.ink)).shape_role(ShapeRole::Full))
-                                .on_click(open);
+                            InkIconButton(IconRole::Send, open);
                         } else {
                             AppButton("보내기", Some(IconRole::Send), ButtonKind::Primary, false, true, false, open);
                         }
@@ -504,8 +501,6 @@ pub fn page_pad(width_dp: f32) -> f32 {
     }
 }
 
-/// The room of the shell's menu button row at the top of a phone.
-const PHONE_MENU_ROW: f32 = 19.0;
 
 /// `EMBER_CR_SCROLL=<dp|bottom|agents|tray|transfers|history>` for review captures: the toolkit
 /// could not scroll a column from code before v0.0.5 (v0.0.7: #385 fixed with
@@ -808,7 +803,21 @@ fn Stage(model: &FilesModel, members: &[CrewMember], extras: &Extras, st: &State
                                 files: vec![demo_files()[0].to_string()],
                             }));
                         } else {
-                            notice::post(FILE_PICK_UNAVAILABLE);
+                            // The platform's own dialog (compose-rust#483). Its one answer
+                            // arrives later on the UI thread and decides what the sheet does.
+                            let s = s.clone();
+                            compose_rust::FileDialog::open_files().title(FILE_DIALOG_TITLE).show(move |result| {
+                                let outcome = match result {
+                                    compose_rust::FileDialogResult::Chosen { paths, .. } => pick_outcome(Some(paths), true),
+                                    compose_rust::FileDialogResult::Cancelled => pick_outcome(None, true),
+                                    compose_rust::FileDialogResult::Unavailable => pick_outcome(None, false),
+                                };
+                                match outcome {
+                                    PickOutcome::Draft(draft) => s.set(Some(draft)),
+                                    PickOutcome::Nothing => {}
+                                    PickOutcome::Say(why) => notice::post(why),
+                                }
+                            });
                         }
                     });
                     if !can_pick {
@@ -1121,25 +1130,16 @@ fn TransferRow(t: &Transfer, devices: &[Device], st: &State) {
             for action in user_actions(t.state).iter().copied() {
                 let id = t.id.clone();
                 let glyph = match action {
-                    TransferAction::Pause => Some(ICON_PAUSE),
-                    TransferAction::Resume | TransferAction::Retry | TransferAction::Start => Some(ICON_PLAY),
-                    _ => None,
+                    TransferAction::Pause => ICON_PAUSE,
+                    TransferAction::Resume | TransferAction::Retry | TransferAction::Start => ICON_PLAY,
+                    _ => ICON_CANCEL,
                 };
                 let st_ver = st.version.clone();
                 let on_act = move || {
                     svc.control(&id, action);
                     st_ver.set(st_ver.get_untracked() + 1);
                 };
-                let name = match action {
-                    TransferAction::Pause => "일시 정지",
-                    TransferAction::Resume => "재개",
-                    TransferAction::Retry => "다시 시도",
-                    _ => "시작",
-                };
-                match glyph {
-                    Some(g) => RoundGlyph(g, name, on_act),
-                    None => IconButton(IconRole::Close, true, on_act),
-                }
+                RoundGlyph(glyph, action_button_name(action), on_act);
             }
         });
         // The claim is shown only where it is true (#487): plain HTTP is not end to end.
@@ -1359,7 +1359,7 @@ pub fn target_chip_width(label: &str, glyph: f32) -> f32 {
 }
 
 /// The send sheet: pick the receiver (every device and every agent), then the files (FR-L27.5).
-fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], ready: bool, lost: bool, w: f32) {
+pub(super) fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], ready: bool, lost: bool, w: f32) {
     let p = ember_theme().palette;
     let draft = st.sheet.get();
     let open = draft.is_some();
@@ -1576,7 +1576,7 @@ fn ShareTile(
 /// Laid out as `.fl-share` (FR-L27.7, #878): no title bar, the close button at the end of the
 /// file card, padding 12 16 20 and 12 between rows, and each section's receivers in one row that
 /// scrolls sideways (`.fl-share-row`).
-fn ShareSheet(open: &MutableState<bool>, devices: &[Device], members: &[CrewMember], ready: bool, lost: bool) {
+pub(super) fn ShareSheet(open: &MutableState<bool>, devices: &[Device], members: &[CrewMember], ready: bool, lost: bool) {
     let p = ember_theme().palette;
     let is_open = open.get();
     let close = {
@@ -1585,16 +1585,18 @@ fn ShareSheet(open: &MutableState<bool>, devices: &[Device], members: &[CrewMemb
     };
     let window = crate::ui::window_size::current_window_size();
     let bottom = super::components::sheet_wraps_content(window.width_dp);
-    // FR-L32.1 (#878): with no title bar the room is the whole sheet. The body takes its content
-    // height when that fits, and always in the bottom sheet, which scrolls taller content itself.
-    // TODO(compose-rust#778): cap instead of estimate.
+    // FR-L32.1 (#878, compose-rust#778, v0.0.11): with no title bar the room is the whole sheet.
+    // The body is capped at the room (`Modifier::max_height`), so it takes its content height
+    // when that fits and scrolls inside the cap when it does not.
     let room = super::components::sheet_body_max_height(window.width_dp, window.height_dp, false, 0.0);
     let rows = share_devices(devices);
     let agents = share_agents(members);
-    let (file_title, file_why) = share_file_card(&[], FILE_PICKER_AVAILABLE);
+    // The share sheet has no file step of its own (TODO(#673): open the file dialog from its file
+    // card), so it reads as it did before the tray's 파일 고르기 took the dialog.
+    let (file_title, file_why) = share_file_card(&[], SHARE_SHEET_PICKS_FILES);
     let tap = {
         let (devices, o) = (devices.to_vec(), open.clone());
-        move |target: SendTarget| match share_tap_at(&target, &devices, &[], FILE_PICKER_AVAILABLE, ready, lost) {
+        move |target: SendTarget| match share_tap_at(&target, &devices, &[], SHARE_SHEET_PICKS_FILES, ready, lost) {
             ShareTap::Blocked(why) => notice::post(why),
             ShareTap::Send(SendTarget::Device(id)) => match transfer_service().send(&id, Vec::new()) {
                 Ok(()) => o.set(false),
@@ -1606,7 +1608,6 @@ fn ShareSheet(open: &MutableState<bool>, devices: &[Device], members: &[CrewMemb
     };
     // The dialog draws the mockup's grab bar; the bottom sheet has the toolkit's own.
     let grab = !bottom;
-    let plain = bottom || share_body_estimate(!rows.is_empty(), !agents.is_empty(), grab) <= room;
     // An empty title: `.fl-share` has no header. Escape and the scrim still close it.
     EmberSheetSized("", is_open, SHARE_SHEET_WIDTH, false, close.clone(), None, || {
         let body = || {
@@ -1705,11 +1706,7 @@ fn ShareSheet(open: &MutableState<bool>, devices: &[Device], members: &[CrewMemb
             });
         };
         let surface = Modifier::new().fill_max_width().background(paint(p.surface_2));
-        if plain {
-            cu::Column().modifier(surface).content(body);
-        } else {
-            cu::ScrollColumn().modifier(surface.height(room)).content(body);
-        }
+        cu::ScrollColumn().modifier(surface.max_height(room)).content(body);
     });
 }
 
@@ -1730,54 +1727,36 @@ fn ShareRow(tiles: impl FnOnce()) {
     });
 }
 
-/// How tall the share sheet's body is (FR-L32.1): 12 above and 20 below, the dialog's 5 px grab
-/// bar when `grab`, the 68 px file card, the two 18 px section labels, each section's one row of
-/// 112 px tiles (a 20 px line when it has none), the three 46 px action rows with their
-/// separators and the three-line note, with 12 px between rows.
-pub(crate) fn share_body_estimate(devices: bool, agents: bool, grab: bool) -> f32 {
-    let tiles = |any: bool| if any { 112.0 } else { 20.0 };
-    let rows = [
-        if grab { Some(5.0) } else { None },
-        Some(68.0),
-        Some(18.0),
-        Some(tiles(devices)),
-        Some(18.0),
-        Some(tiles(agents)),
-        Some(3.0 * 46.0 + 2.0),
-        Some(54.0),
-    ];
-    let rows: Vec<f32> = rows.into_iter().flatten().collect();
-    SP[2] + rows.iter().sum::<f32>() + (rows.len() - 1) as f32 * SP[2] + SP[4]
-}
-
 /// The share sheet's width: the mockup's `min(400px, 100%)`.
 pub const SHARE_SHEET_WIDTH: f32 = 400.0;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fr_l27_10_the_phone_title_has_no_extra_row_above_it() {
+        let src = include_str!("files.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap()];
+        let head = &production[production.find("if skip.show(EST_HEAD) {").unwrap()..];
+        let head = &head[..head.find("HeaderGap(").unwrap()];
+        assert!(!head.contains("Spacer()"), "no row of the screen's own above the header");
+        assert!(production.contains("HeaderGap(\"파일\""));
+    }
+
     use super::*;
 
     #[test]
-    fn fr_l32_1_share_sheet_estimate_and_plain_body() {
-        // #878: the 채널에 올리기 row was cut at 390 and 1440 by a body fixed at 640; review r5
-        // found the last row and the note below the window edge at 390.
-        // 12 + 5 + 68 + 18 + 112 + 18 + 112 + 140 + 54 + 7 x 12 + 20 (the agents hint line is
-        // gone, review r6).
-        assert_eq!(share_body_estimate(true, true, true), 643.0);
-        assert_eq!(share_body_estimate(true, true, false), 643.0 - 5.0 - 12.0);
-        assert_eq!(share_body_estimate(false, false, true), 643.0 - 2.0 * 92.0);
-        // With no title bar the whole sheet is the room: the dialog at 1440 x 900 and the bottom
-        // sheet at 390 x 844 both hold the body at its content height.
-        let room = |w: f32, h: f32| super::super::components::sheet_body_max_height(w, h, false, 0.0);
-        assert!(share_body_estimate(true, true, true) <= room(1440.0, 900.0), "{}", room(1440.0, 900.0));
-        assert!(share_body_estimate(true, true, false) <= room(390.0, 844.0), "{}", room(390.0, 844.0));
+    fn fr_l32_1_share_sheet_caps_its_scroll_body() {
+        // #878, compose-rust#778 (v0.0.11): the body takes Modifier::max_height(room) instead of
+        // share_body_estimate or a fixed 640 height.
         let src = include_str!("files.rs");
         let production = &src[..src.find("#[cfg(test)]").unwrap()];
+        assert!(!production.contains(&["share_body", "_estimate"].concat()));
+        assert!(!production.contains(concat!("TODO(compose-rust#", "778")));
         let sheet = &production[production.find("fn ShareSheet(").unwrap()..];
         let sheet = &sheet[..sheet.find("\n}\n").unwrap()];
         assert!(!sheet.contains(".min(640.0)"), "{sheet}");
-        assert!(sheet.contains("let plain = bottom || share_body_estimate(!rows.is_empty(), !agents.is_empty(), grab) <= room;"));
-        assert!(sheet.contains("if plain {\n            cu::Column().modifier(surface).content(body);"));
+        assert!(!sheet.contains(".height(room)"), "{sheet}");
+        assert!(sheet.contains("cu::ScrollColumn().modifier(surface.max_height(room)).content(body);"), "{sheet}");
         assert!(!sheet.contains("wrap_lines"), "the receivers no longer wrap into lines");
     }
 
@@ -1827,8 +1806,11 @@ mod tests {
             assert_eq!(nodes.iter().filter(|n| n.0 == "Divider").count(), 2, "{size:?}");
             // One sideways row for the devices; no agents, so their line says so.
             assert_eq!(nodes.iter().filter(|n| n.0 == "ScrollRow").count(), 1, "{size:?}");
-            // The content fits: no fixed-height scrolling body.
-            assert_eq!(nodes.iter().filter(|n| n.0 == "ScrollColumn").count(), 0, "{size:?}");
+            // The body is a capped ScrollColumn (`SizeIn` with `max_h`), not a fixed-height one.
+            let scrolls: Vec<_> = nodes.iter().filter(|n| n.0 == "ScrollColumn").collect();
+            assert_eq!(scrolls.len(), 1, "{size:?}");
+            assert!(scrolls[0].2.iter().any(|m| m.starts_with("SizeIn") && m.contains("max_height:")), "{size:?}: {:?}", scrolls[0].2);
+            assert!(!scrolls[0].2.iter().any(|m| m.starts_with("Height(")), "{size:?}: {:?}", scrolls[0].2);
             // The sheet's close button (32 px, clickable) is still there, in the file card.
             let close = nodes.iter().any(|n| n.1.iter().any(|p| p.starts_with("OnClick=")) && n.2.windows(2).any(|w| w[0] == "Width(32.0)" && w[1] == "Height(32.0)"));
             assert!(close, "{size:?}: close button");
@@ -2168,6 +2150,25 @@ mod tests {
         assert_eq!(SHARE_SHEET_WIDTH, 400.0);
         assert_eq!(super::super::components::sheet_width(1440.0, SHARE_SHEET_WIDTH), 400.0);
         assert_eq!(super::super::components::sheet_width(390.0, SHARE_SHEET_WIDTH), 390.0);
+    }
+
+    #[test]
+    fn fr_l27_5_the_tray_button_opens_the_platform_file_dialog() {
+        // compose-rust#483 (#673): outside the demo 파일 고르기 asks for the platform's dialog and
+        // its one answer goes through `pick_outcome` (tested in `ui/files.rs`).
+        let production = include_str!("files.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(production.contains("compose_rust::FileDialog::open_files().title(FILE_DIALOG_TITLE).show(move |result| {"));
+        for arm in [
+            "compose_rust::FileDialogResult::Chosen { paths, .. } => pick_outcome(Some(paths), true),",
+            "compose_rust::FileDialogResult::Cancelled => pick_outcome(None, true),",
+            "compose_rust::FileDialogResult::Unavailable => pick_outcome(None, false),",
+            "PickOutcome::Draft(draft) => s.set(Some(draft)),",
+            "PickOutcome::Say(why) => notice::post(why),",
+        ] {
+            assert!(production.contains(arm), "{arm}");
+        }
+        assert!(production.contains("let can_pick = FILE_PICKER_AVAILABLE || demo;"), "the button is off where there is no dialog");
+        assert!(!SHARE_SHEET_PICKS_FILES);
     }
 
     #[test]

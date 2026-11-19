@@ -20,6 +20,7 @@ pub mod config;
 pub mod demo;
 pub mod device_link;
 pub mod export;
+pub mod fs_watch;
 pub mod editor_backup;
 pub mod editor_host;
 pub mod editor_reach;
@@ -204,8 +205,8 @@ fn server_choice_from_env(prefs: &prefs::Prefs) -> Result<Option<device_link::Pe
 fn open_window() {
     if let Some(target) = ide::parse_editor_args(std::env::args()) {
         // Separate IDE window (FR-L31): `--editor <project> <folder>` opens the editor as its own
-        // HTML-mode window in its own process until dioxus-compose#152 (the `window` element on a
-        // shared host) lands.
+        // HTML-mode window in its own process. The `Window` element (dioxus-compose#152) is in the
+        // pin; an HTML page under the shell's Compose root waits for dioxus-compose#161.
         // `EMBER_CR_SIZE=1100x400` opens a check window of that size beside the owner's.
         let (w, h): (u16, u16) = std::env::var("EMBER_CR_SIZE")
             .ok()
@@ -214,6 +215,8 @@ fn open_window() {
                 Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
             })
             .unwrap_or((1280, 820));
+        // The opened size stands in for a size the renderer has not reported yet (FR-L10.3, FR-L31.41).
+        ui::window_size::record_opened(f32::from(w), f32::from(h));
         let title: &'static str = Box::leak(format!("{} - Ember", target.project).into_boxed_str());
         services().ui.standalone_editor.set(true);
         services().ui.editor.set(Some(target));

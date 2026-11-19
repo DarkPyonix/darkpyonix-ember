@@ -107,8 +107,6 @@ pub struct Shared {
 // WidgetView accepts a function without props and owns a separate tree. Share signals between
 // the trees until WidgetView supports props and flex stretch sizing (dioxus-compose #160).
 thread_local! { static DOUBLE_SHIFT: RefCell<super::editor::DoubleShift> = RefCell::new(super::editor::DoubleShift::default()); }
-// v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward compose-rust's pointer events as oncontextmenu and ondoubleclick; its pin moves separately): tells a double-click from two `onclick`s.
-thread_local! { static DOUBLE_CLICK: RefCell<super::editor::DoubleClick> = RefCell::new(super::editor::DoubleClick::default()); }
 
 /// Milliseconds on a clock that only moves forward, for telling two Shift presses apart.
 pub(crate) fn now_ms() -> u64 {
@@ -163,7 +161,8 @@ fn init(target: EditorTarget) {
     let bottom_max = use_hook(|| Signal::new_in_scope(false, root));
     let position = use_hook(|| Signal::new_in_scope((1, 1), root));
     let stripes = use_hook(|| {
-        let mut initial = Stripes::default();
+        // FR-L31.41: a window 900 px wide or less opens with the left tool window closed.
+        let mut initial = Stripes::opening(crate::ui::window_size::window_size_untracked().width_dp);
         // Debug capture hook: start with the 확장 window showing (FR-L31.14).
         if crate::ui::editor_extensions::capture_hook().is_some() {
             initial.toggle(crate::ui::editor::ToolWindow::Extensions);
@@ -338,6 +337,12 @@ fn editor_pane() -> Element {
             }
         }
     }
+    // #895: a completion or code actions list asked for with the caret scrolled away has the
+    // editor reveal the caret first (Code-OSS's `revealPosition`), then opens at its new rectangle.
+    if crate::ui::editor_language::view::take_caret_reveal() {
+        let (line, col) = *s.position.peek();
+        handle.reveal(version, crate::ui::editor_language::caret_reveal_range(line, col), compose_rust::schema::RevealAlign::Nearest);
+    }
     // Edits the session asks for (an accepted completion, formatting, a rename, a code action) go to
     // the widget, which applies them as the reader's own and reports them back as changes.
     for command in s.bridge.borrow_mut().take_pending_edits(&doc.uri) {
@@ -360,6 +365,7 @@ fn editor_pane() -> Element {
     let click_s = s.clone(); let click_uri = uri.clone();
     let fold_s = s.clone(); let fold_uri = uri.clone();
     let selection_s = s.clone(); let selection_uri = uri;
+    let key_s = s.clone(); let pointer_s = s.clone(); let caret_s = s.clone();
     rsx! { CodeEditor {
         key: "{generation}", width: Some(box_w), height: Some(box_h), handle,
         text: doc.text, decorations: compose_rust::code::Decorations::from_bytes(doc.decoration_bytes), syntax_spans: crate::ui::editor::syntax_spans(&doc.syntax), folds: crate::ui::editor::folds(&doc.folds), tab_width: Some(doc.tab_width),
@@ -368,12 +374,18 @@ fn editor_pane() -> Element {
         font_size: Some(crate::ui::fonts::CODE_FONT_SIZE), line_height: Some(crate::ui::fonts::CODE_LINE_HEIGHT),
         gutter_min_width: Some(crate::ui::fonts::CODE_GUTTER_MIN_WIDTH), gutter_padding: Some(crate::ui::fonts::CODE_GUTTER_PADDING), text_inset: Some(crate::ui::fonts::CODE_TEXT_INSET),
         colors: crate::ui::fonts::CODE_EDITOR_COLORS,
+        // FR-L31.13: the language chords from the focused code (compose-rust#554), Cmd/Ctrl+click to a
+        // definition (compose-rust#555) and the caret a list opens under (compose-rust#553).
+        on_key_preview: move |e: compose_rust::KeyEvent| crate::ui::editor_language::view::code_key(&key_s, &e),
+        pointer_kinds: Some(compose_rust::PointerKinds::DOWN),
+        on_code_pointer: move |e: compose_rust::code::CodePointer| crate::ui::editor_language::view::code_pointer(&pointer_s, &e),
+        on_caret_rect: move |e: compose_rust::code::CaretRect| crate::ui::editor_language::view::set_caret_rect(&caret_s, e.rect),
         on_change: move |e: compose_rust::code::CodeChange| { keep_edited_tab(&change_s, &change_uri.path); change_s.editor_versions.borrow_mut().insert(generation, e.version); let event = change_s.bridge.borrow_mut().on_code_changed(&change_uri, e.version, WidgetRange::new(pos(e.range.start), pos(e.range.end)), e.text); send(&change_s, event); crate::ui::editor_states::view::edited(&change_s, &change_uri.path); },
         on_save: move |e: compose_rust::code::SaveRequest| { if !crate::ui::editor_states::view::manual_save_allowed(&save_s, &save_uri.path) { return; } let event = save_s.bridge.borrow().on_save_requested(&save_uri, e.version); send(&save_s, event); save_s.scm.refresh(); },
         on_hover: move |e: compose_rust::code::CodeHover| { let phase = match e.phase { compose_rust::schema::HoverPhase::Rest => EditorHoverPhase::Rest, _ => EditorHoverPhase::Leave }; let event = hover_s.bridge.borrow().on_code_hovered(&hover_uri, e.decoration.unwrap_or(0), pos(e.position), phase); send(&hover_s, event); },
         on_decoration_click: move |id| { let event = click_s.bridge.borrow().on_decoration_activated(&click_uri, id); send(&click_s, event); },
         on_fold_change: move |e: compose_rust::code::FoldChange| { let event = fold_s.bridge.borrow_mut().on_fold_changed(&fold_uri, e.start_line, e.collapsed); send(&fold_s, event); let mut rev = fold_s.revision; *rev.write() += 1; },
-        on_selection_change: move |e: compose_rust::code::SelectionChange| { let mut position = selection_s.position; position.set((e.active.line as usize + 1, e.active.column as usize + 1)); let mut find_sel = selection_s.find.selection; find_sel.set(((e.anchor.line, e.anchor.column), (e.active.line, e.active.column))); let event = selection_s.bridge.borrow().on_selection_changed(&selection_uri, e.version, pos(e.anchor), pos(e.active)); send(&selection_s, event); },
+        on_selection_change: move |e: compose_rust::code::SelectionChange| { crate::ui::editor_language::view::caret_moved(); let mut position = selection_s.position; position.set((e.active.line as usize + 1, e.active.column as usize + 1)); let mut find_sel = selection_s.find.selection; find_sel.set(((e.anchor.line, e.anchor.column), (e.active.line, e.active.column))); let event = selection_s.bridge.borrow().on_selection_changed(&selection_uri, e.version, pos(e.anchor), pos(e.active)); send(&selection_s, event); },
     } }
 }
 
@@ -389,7 +401,7 @@ pub mod page {
     use super::{
         base_name, editor_pane, is_webview_tab, join_path, now_ms, position_text, send, shared,
         webview_handle_from_tab, webview_pane_for_tab, webview_tab_path, workbench, BridgeAction,
-        HostCommand, PendingGoto, Shared, DOUBLE_CLICK, DOUBLE_SHIFT,
+        HostCommand, PendingGoto, Shared, DOUBLE_SHIFT,
     };
     use crate::ui::editor::{
         action_for_key, agent_status_text, apply_action, tooltip_text, Side, Stripes, ToolWindow,
@@ -767,11 +779,27 @@ pub mod page {
             crate::ui::palette::Payload::ExtensionCommand(id) => {
                 s.host.send(HostCommand::ExecuteCommand(id));
             }
+            // The ⋯ menu's own rows (FR-L31.38) are the window's, not an extension's.
+            crate::ui::palette::Payload::EditorMenu(cmd) => run_menu_command(s, cmd),
             payload @ (crate::ui::palette::Payload::SetEol(_)
             | crate::ui::palette::Payload::EncodingAction(_)
             | crate::ui::palette::Payload::SetEncoding { .. }
             | crate::ui::palette::Payload::SetLanguage(_)
             | crate::ui::palette::Payload::Cancel) => choose_format_item(s, payload),
+        }
+    }
+
+    /// Does a ⋯ menu row chosen in the palette, as the menu's own item does (FR-L31.38).
+    fn run_menu_command(s: &Shared, cmd: crate::ui::editor_menu::MenuCommand) {
+        use crate::ui::editor_menu::MenuCommand;
+        match cmd {
+            MenuCommand::Keymap(k) => {
+                let mut keymap_sig = s.keymap;
+                keymap_sig.set(k);
+                crate::services::services().ui.update_prefs(|p| p.keymap = k);
+            }
+            MenuCommand::AutoSave(mode) => crate::ui::editor_states::view::set_auto_save(mode),
+            MenuCommand::CloseEditor => crate::services::services().ui.close_editor(),
         }
     }
 
@@ -848,7 +876,10 @@ pub mod page {
                 let ranked = rank(&effective_query, &items);
                 (std::borrow::Cow::Owned(items), ranked, None)
             } else {
-                let items = items_for_workbench(mode, keymap, Os::current(), &s.folder, &files, &ext_commands, &recent);
+                let mut items = items_for_workbench(mode, keymap, Os::current(), &s.folder, &files, &ext_commands, &recent);
+                if matches!(mode, crate::ui::palette::Mode::Commands | crate::ui::palette::Mode::Everything) {
+                    items.to_mut().extend(crate::ui::editor_menu::palette_items(keymap, crate::ui::editor_states::view::auto_save()));
+                }
                 let ranked = rank(file_q, &items);
                 (items, ranked, suffix)
             }
@@ -1240,7 +1271,7 @@ pub mod page {
         // also while nothing else does (the workspace trust prompt is up); read from the toolkit
         // state at render, the top bar kept the 0 inset and the logo sat under the traffic lights.
         let window_safe = dioxus_compose::use_window_safe_area();
-        let leading = crate::ui::safe_area::safe_area_from_toolkit(window_safe.top, window_safe.leading, window_safe.trailing).leading;
+        let safe = crate::ui::safe_area::safe_area_from_toolkit(window_safe.top, window_safe.leading, window_safe.trailing);
         let _ = *s.revision.read();
         let (error, updates, edit_errors, gone, renamed) = {
             let mut state = s.host.state.lock().unwrap();
@@ -1405,7 +1436,7 @@ pub mod page {
         // The page is the viewport on every system, and the viewport follows the window's content
         // box on every dp change, so growing and shrinking both lay the page out again.
         let ed_style = format!("{} {grid}", crate::ui::editor::editor_page_size_style());
-        let error_style = format!("{} grid-column:1 / -1;", crate::ui::editor::editor_error_padding(cfg!(target_os = "macos"), window_safe.top));
+        let error_style = format!("{} grid-column:1 / -1;", crate::ui::editor::editor_error_padding(safe.top));
         rsx! {
             div { class: "{ed_class}", "data-theme": if dark { "dark" } else { "light" }, tabindex: "-1", style: "{ed_style}",
                 onkeydown: move |event| {
@@ -1471,7 +1502,7 @@ pub mod page {
                 if let Some(error) = error {
                     div { style: "{error_style}", "{error}" button { onclick: move |_| crate::services::services().ui.close_editor(), "닫기" } }
                 } else {
-                    {top_bar(&s, &branch, keymap, leading)}
+                    {top_bar(&s, &branch, keymap, safe)}
                     div { class: "ed-rail",
                         {stripe_column(&s, sel, keymap, Strip::Left)}
                         {stripe_column(&s, sel, keymap, Strip::Bottom)}
@@ -1492,23 +1523,22 @@ pub mod page {
                         } else {
                             {side_note(w, "ed-left")}
                         }
-                    } else {
-                        // FR-L31.26 (#874): an element that takes no grid cell, not a placeholder.
-                        div { class: "ed-none" }
                     }
                     section { class: "ed-main", style: if maximized { "display:none;" } else if has_left { "" } else { "margin-left:calc(var(--gap) * -1);" }, "aria-label": "편집기",
                         {crate::ui::workspace_trust::view::banner(&s)}
                         // FR-L31.36: no tab strip while no tab is open, as the mockup's empty editor
                         // (`editor.js:81`), so the empty state takes the whole panel. The ⋯ of the strip
                         // goes with it; its commands stay in quick open.
-                        if paths.is_empty() { div { class: "ed-none" } } else { {tab_strip(&s, &paths, &dirty, current.as_deref())} }
+                        if !paths.is_empty() { {tab_strip(&s, &paths, &dirty, current.as_deref())} }
                         if let Some((menu_path, x, y)) = s.tab_menu.read().clone() { {tab_context_menu(&s, &menu_path, x, y)} }
                         if let Some(path) = current.as_deref().filter(|p| !settings_shown && !is_webview_tab(p)) {
                             {breadcrumbs(&s, path)}
                         }
                         {crate::ui::editor_states::view::banners(&s, current.as_deref())}
                         if *s.find.open.read() && active.is_some() && !diff_shown && !conflict_shown && !compare_shown { {find_bar(&s)} }
-                        div { style: "flex:1; min-height:0; min-width:0; display:flex; overflow:hidden;",
+                        // FR-L31.13: the editor pane's box, which a list at the caret is kept inside.
+                        div { "data-ed": "code-pane", style: "flex:1; min-height:0; min-width:0; display:flex; overflow:hidden;",
+                            onmounted: move |event| crate::ui::editor_language::view::set_pane_mount(event.data()),
                             if conflict_shown { {crate::ui::editor_scm::view::conflict_pane(&s)} }
                             else if diff_shown { {crate::ui::editor_scm::view::diff_pane(&s)} }
                             else if compare_shown { {crate::ui::editor_states::view::compare_pane(&s)} }
@@ -1551,13 +1581,9 @@ pub mod page {
                     {stripe_column(&s, sel, keymap, Strip::Right)}
                     if let Some(w) = sel.selected(Side::Bottom) {
                         {bottom_window(&s, w)}
-                    } else {
-                        div { class: "ed-none" }
                     }
-                    // FR-L31.26 (#874): the overlays are all `position:fixed`, but a closed one is a
-                    // placeholder (a comment node), which the HTML layout places as a grid item. Seven
-                    // of them made two implicit rows and 16 px of gaps under the status bar, so they sit
-                    // in one box that takes no room (`.ed-layers`); a fixed box is drawn from the root.
+                    // FR-L31.26 (#874): the overlays are all `position:fixed`, grouped in one box that
+                    // takes no room (`.ed-layers`); a fixed box is drawn from the root.
                     div { class: "ed-layers",
                         if em_shown { {menu(&s, keymap)} }
                         // FR-L31.29: the palette's scrim. A click outside the list closes it; the list
@@ -1599,7 +1625,7 @@ pub mod page {
         rsx! { img { class: "i", src: "icon:{name}.{tone}{dark}", width: "{px}", height: "{px}" } }
     }
 
-    fn top_bar(s: &Shared, branch: &str, keymap: Keymap, leading: f32) -> Element {
+    fn top_bar(s: &Shared, branch: &str, keymap: Keymap, safe: crate::ui::safe_area::SafeArea) -> Element {
         let mut theme = s.theme;
         let theme_pref = *s.theme.read();
         let theme_title = format!("테마: {}", theme_pref.label());
@@ -1614,7 +1640,7 @@ pub mod page {
         let project_tip = tooltip_text("프로젝트 창", &keymap.hint(Action::Project, Os::current()));
         // The traffic lights float over the top bar's left end under FullSize. `leading` is the
         // page's hook reading (FR-L33.1), so a later report renders this again.
-        let strip_pad = crate::ui::editor::editor_strip_padding(cfg!(target_os = "macos"), leading);
+        let strip_pad = crate::ui::editor::editor_strip_padding(safe.leading, safe.trailing);
         rsx! {
             header { class: "ed-top", style: "{strip_pad}",
                 img { class: "logo logo-img", src: "icon:mark", width: "28", height: "28", alt: "Ember" }
@@ -1622,15 +1648,14 @@ pub mod page {
                 button { class: "ed-pj", title: "브랜치", "aria-label": "브랜치", onclick: move |_| crate::ui::editor_scm::view::show_git(&git_s), {icon_tone("git", 16, "text")} "{branch}" {icon_tone("chev-dn", 12, "muted")} }
                 div { class: "spacer" }
                 // FR-L31.29: the pill and the quick open list it opens share one box, so the list is
-                // placed against the pill. The conditional child sits inside the box, where its
-                // placeholder takes no room (dioxus-compose#266: in the bar it would be a flex item).
+                // placed against the pill.
                 div { class: "ed-findbox",
                 button { class: "ed-find", title: "{find}", "aria-label": "{find}", onclick: move |_| run_action(&find_s, Action::Find),
                     {icon_tone("search", 16, "muted")}
                     span { class: "hide-md", "{crate::ui::editor::FIND_PILL_LABEL}" }
                     kbd { class: "ed-sc", "{find_hint}" }
                 }
-                    if *s.palette_open.read() { {palette_sheet(s, keymap)} } else { div { class: "ed-none" } }
+                    if *s.palette_open.read() { {palette_sheet(s, keymap)} }
                 }
                 div { class: "ed-runcfg",
                     button { class: "ed-pj", title: "실행 구성", "aria-label": "실행 구성", onclick: move |_| crate::ui::editor_tasks::view::open(&runcfg_s), {icon_tone("play", 16, "text")} "실행 구성" {icon_tone("chev-dn", 12, "muted")} }
@@ -1654,8 +1679,9 @@ pub mod page {
     fn menu(s: &Shared, keymap: Keymap) -> Element {
         use crate::ui::editor_menu::{self as em, Submenu};
         let os = Os::current();
-        // The current tab's items (FR-L31.5) head the menu. They stand in for the right-click menu.
-        // v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward compose-rust's pointer events as oncontextmenu and ondoubleclick; its pin moves separately).
+        // The current tab's items (FR-L31.5) head the menu. A tab's right-click opens its own menu
+        // (`oncontextmenu`, compose-rust#417); this group is where Shift+F10 on the tab strip leads.
+        // TODO(#673): open the tab's own menu at the tab from the keyboard and drop this group.
         let current_tab = s.tabs.read().current_path().map(str::to_owned);
         let tab_items = current_tab.as_deref().map(|p| crate::ui::editor::tab_menu_items(&s.tabs.read(), p)).unwrap_or_default();
         let tab_label = current_tab.as_deref().map(|p| format!("탭: {}", crate::ui::editor::display_name(base_name(p)))).unwrap_or_default();
@@ -1720,8 +1746,8 @@ pub mod page {
                                 }
                             }
                         }
-                        // The language features are in the menu too: a key pressed while the code has the focus may not reach the page.
-                        // TODO(compose-rust#554): the chords alone are enough once the editor previews keys.
+                        // The language features are in the menu too, as Code-OSS's editor menu has them; their
+                        // chords also reach them from the focused code (`on_key_preview`, compose-rust#554).
                         for (action, label, hint) in crate::ui::editor_language::MENU {
                             {
                                 let s = s.clone();
@@ -2127,7 +2153,6 @@ pub mod page {
                             {
                                 match entry {
                                     TreeMenuEntry::Sep => rsx! { div { key: "sep{i}", class: "ed-msep" } },
-                                    TreeMenuEntry::Heading(h) => rsx! { div { key: "h{i}", class: "ed-mlab", "{h}" } },
                                     TreeMenuEntry::Item(item, enabled) => {
                                         let mut run = run_tree_item.clone();
                                         let hint = item.hint(mac);
@@ -2196,9 +2221,8 @@ pub mod page {
                         if !crate::ui::editor::tree_handles_key(prompt.read().as_ref()) {
                             return;
                         }
-                        // Shift+F10 stands in for right-click. v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward compose-rust's pointer events as oncontextmenu and ondoubleclick).
-                        // compose-rust#100: v0.0.6 sent only Enter as a key event (#832); recheck on v0.0.7
-                        // whether Shift+F10 now reaches this branch.
+                        // Shift+F10 or the context-menu key opens the context menu from the keyboard, as in
+                        // Code-OSS, beside right-click (compose-rust#417, #100, #717; #832).
                         {
                             let m = event.modifiers();
                             if crate::ui::editor::tab_menu_key(&key_name(&event.key()), m.contains(Modifiers::CONTROL), m.contains(Modifiers::SHIFT), m.contains(Modifiers::ALT), m.contains(Modifiers::META)) {
@@ -2506,13 +2530,9 @@ pub mod page {
                                         if was_open { expanded.write().remove(&path); }
                                         else { expanded.write().insert(path.clone()); host.send(HostCommand::List(path.clone())); }
                                     } else {
-                                        // A single click opens the preview tab; a double-click keeps it (FR-L31.5).
+                                        // A single click opens the preview tab; a double-click (`ondoubleclick`,
+                                        // compose-rust#417) keeps it (FR-L31.5).
                                         open_preview(&preview_s, &path);
-                                        // Two clicks within 500 ms stand in for `ondoubleclick`. v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward compose-rust's pointer events as oncontextmenu and ondoubleclick; its pin moves separately).
-                                        if DOUBLE_CLICK.with(|d| d.borrow_mut().click(&format!("tree:{path}"), now_ms())) {
-                                            let mut tabs = preview_s.tabs;
-                                            tabs.write().keep_open(&path);
-                                        }
                                         record_recent_file(&mut recent_files, &path);
                                     }
                                 },
@@ -2581,8 +2601,8 @@ pub mod page {
                     }
                     let key_str = key_name(&event.key());
                     let m = event.modifiers();
-                    // Shift+F10 / ContextMenu opens the ⋯ menu, which holds the current tab's items, while
-                    // the right-click menu cannot open. v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward compose-rust's pointer events as oncontextmenu and ondoubleclick; its pin moves separately).
+                    // Shift+F10 / ContextMenu opens the ⋯ menu, which holds the current tab's items; a
+                    // right-click opens the tab's own menu (compose-rust#417). TODO(#673): open that one here.
                     if crate::ui::editor::tab_menu_key(
                         &key_str,
                         m.contains(Modifiers::CONTROL),
@@ -2681,10 +2701,6 @@ pub mod page {
                             onclick: move |_| {
                                 scm.close_diff();
                                 tabs.write().activate(&path);
-                                // Two clicks within 500 ms stand in for `ondoubleclick`. v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward compose-rust's pointer events as oncontextmenu and ondoubleclick; its pin moves separately).
-                                if DOUBLE_CLICK.with(|d| d.borrow_mut().click(&format!("tab:{path}"), now_ms())) {
-                                    tabs.write().keep_open(&path);
-                                }
                                 record_recent_file(&mut recent_files, &path);
                                 if let Some(handle) = webview_handle_from_tab(&path) {
                                     host.send(HostCommand::Webview(ember_editor::webview::WebviewEvent::ViewState {
@@ -3022,8 +3038,7 @@ pub mod page {
                             rsx! {
                                 button { key: "{id}", class: if on { "on" } else { "" }, role: "tab", "aria-selected": if on { "true" } else { "false" }, title: "{label}",
                                     onclick: move |_| { terms::select(&sel); bump(); },
-                                    // F2 and the pencil button rename until a real double-click arrives.
-                                    // v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward compose-rust's pointer events as oncontextmenu and ondoubleclick; its pin moves separately).
+                                    // A double-click (compose-rust#417), F2 and the pencil button rename.
                                     ondoubleclick: move |_| { terms::begin_rename(&ren); bump(); },
                                     onkeydown: move |event| {
                                         let m = event.modifiers();
@@ -3101,11 +3116,12 @@ pub mod page {
                     if crate::terminal_input::is_paste_chord(&name, m.contains(Modifiers::CONTROL), m.contains(Modifiers::ALT), m.contains(Modifiers::SHIFT), m.contains(Modifiers::META)) {
                         event.stop_propagation();
                         event.prevent_default();
-                        // v0.0.7: #546 fixed (`compose_rust::clipboard::read_text`); workaround kept
-                        // until checked on a display (the read has to answer inside the dioxus-compose
-                        // window). Then read the clipboard, ask with `needs_multiline_warning` and send
-                        // `paste_bytes(text, state.bracketed_paste)`. Until then the chord only says why
-                        // nothing is pasted.
+                        // TODO(#673): `compose_rust::clipboard::read_text` (compose-rust#546) is in the pin
+                        // and answers on the HTML path (dioxus-compose's own Cmd+V uses it), but a
+                        // multi-line paste must first ask (`needs_multiline_warning`, Code-OSS's
+                        // dialog) and the window has no confirmation for it yet. Then read the
+                        // clipboard and send `paste_bytes(text, state.bracketed_paste)`; until then the
+                        // chord only says why nothing is pasted.
                         notice(crate::terminal_input::PASTE_UNAVAILABLE);
                         return;
                     }

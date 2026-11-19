@@ -30,7 +30,7 @@ pub fn launch(pref: ThemePref) {
     let scheme = pref.color_scheme();
     compose_rust::LaunchBuilder::new()
         .with_theme(crate::ui::fonts::app_theme(scheme))
-        .with_window(Window::new().with_title("Ember components (compose-rust)").with_size(1100, 800))
+        .with_window(super::shell::window_chrome(Window::new().with_title("Ember components (compose-rust)").with_size(1100, 800)))
         .launch(gallery);
 }
 

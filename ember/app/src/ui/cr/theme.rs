@@ -10,9 +10,8 @@
 //! compose-rust can register an app palette per colour role (`compose_rust::Palette`), but
 //! the Ember tokens (surface-2, hover, sel, the soft accents) have no role, so the tokens stay
 //! plain constants passed as `Paint::Literal`.
-//! v0.0.7: #374 fixed (`Text::font` and `TextField::font` take a `FontRefs` stack); workaround
-//! kept until checked on a display (the Inter and Pretendard files of #216 are not bundled yet,
-//! so the theme still sets one face per `TypeRole`).
+//! The fonts are the toolkit theme's: `ui::fonts::app_theme` sets the bundled Inter and
+//! Pretendard stack for the prose roles and JetBrains Mono for `Mono` (compose-rust#374, #216).
 //! Layered card and sheet shadow tokens follow the mockup (#214).
 
 use compose_rust::{Color, Paint};
@@ -22,7 +21,7 @@ use compose_rust::ui::{Modifier, Shadow};
 // Dioxus module's definitions are the single source until phase 8 moves them here.
 pub use crate::ui::theme::{Scheme, ThemePref};
 
-/// The scheme the OS reports (`compose_rust::system_color_scheme`, compose-rust#97, v0.0.10), and
+/// The scheme the OS reports (`compose_rust::system_color_scheme`, compose-rust#97, v0.0.11), and
 /// light before the renderer's first report. The read is not a subscription: a change of the
 /// system appearance shows at the next recomposition.
 pub fn system_scheme() -> Scheme {
@@ -137,6 +136,16 @@ impl EmberTheme {
         match self.scheme {
             Scheme::Light => Color::argb(0x12_000000),
             Scheme::Dark => Color::argb(0x1a_000000),
+        }
+    }
+
+    /// The opacity of the press tint as the toolkit takes it (`Modifier::press_feedback`):
+    /// 0.07 in light and 0.10 in dark (`style.css` `.ripple-clip.in{opacity:.07}` and its dark
+    /// rule `opacity:.1`). The toolkit lays the tint in the pressed element's ink.
+    pub fn press_alpha(&self) -> f32 {
+        match self.scheme {
+            Scheme::Light => 0.07,
+            Scheme::Dark => 0.10,
         }
     }
 
@@ -565,6 +574,9 @@ mod tests {
             EmberTheme::new(Scheme::Dark).press_tint().to_argb(),
             0x1a_000000
         );
+        // FR-L34.1: the opacity sent to the toolkit, `.ripple-clip.in` light and dark.
+        assert_eq!(EmberTheme::new(Scheme::Light).press_alpha(), 0.07);
+        assert_eq!(EmberTheme::new(Scheme::Dark).press_alpha(), 0.10);
     }
 
     #[test]

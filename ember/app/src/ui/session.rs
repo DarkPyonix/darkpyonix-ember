@@ -56,6 +56,12 @@ const WEB_EMPTY: &str = "열려 있는 웹 포트가 없습니다";
 const WEB_UNSUPPORTED: &str = "이 컴퓨터는 포트 목록을 지원하지 않습니다";
 const WEB_LOOPBACK_ONLY: &str = "이 컴퓨터 안에서만 열 수 있습니다";
 const WEB_NO_HOST: &str = "주소를 알 수 없어 열 수 없습니다";
+const WEB_PEER_COMPUTER: &str = "피어로만 연결된 컴퓨터라 열 수 있는 주소가 없습니다";
+const WEB_PEER_SERVER: &str = "서버에 피어로 연결되어 있어 열 수 있는 주소가 없습니다";
+const WEB_UNVERIFIED: &str =
+    "확인되지 않은 주소입니다. 프록시나 터널 뒤에 있거나 다른 네트워크에 있으면 열리지 않습니다";
+const WEB_UNVERIFIED_MARK: &str = "추정 주소";
+const WEB_FAILED: &str = "포트 목록을 불러오지 못했습니다";
 const COMPUTER_LOADING: &str = "확인하는 중입니다";
 const NO_SESSION: &str = "세션이 없습니다";
 const PR_TITLE: &str = "PR과 CI";
@@ -171,6 +177,11 @@ pub const UI_STRINGS: &[&str] = &[
     WEB_UNSUPPORTED,
     WEB_LOOPBACK_ONLY,
     WEB_NO_HOST,
+    WEB_PEER_COMPUTER,
+    WEB_PEER_SERVER,
+    WEB_UNVERIFIED,
+    WEB_UNVERIFIED_MARK,
+    WEB_FAILED,
     COMPUTER_LOADING,
     NO_SESSION,
     NONE_YET,
@@ -181,21 +192,39 @@ pub const UI_STRINGS: &[&str] = &[
 // Web pages (FR-L18, FR-P7, #326)
 // ---------------------------------------------------------------------------------------------
 
+/// Why a computer has no host to open a port on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NoHost {
+    /// Nothing says where it is.
+    #[default]
+    Unknown,
+    /// The computer is registered by peer only (reached over the transport).
+    PeerComputer,
+    /// It is the server's own computer and the app reaches the server as a peer (FR-N9).
+    PeerServer,
+}
+
 /// Where a session's computer can be reached from this app: `local` when its loopback is this
-/// machine's loopback, otherwise the `host` its ports are served on (None when unknown).
+/// machine's loopback, otherwise the `host` its ports are served on. `unverified` marks a host
+/// that is a guess (a server address that may be a reverse proxy or a tunnel); `no_host` says
+/// why `host` is None on a computer that is not local.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ComputerHost {
     pub local: bool,
     pub host: Option<String>,
+    pub unverified: bool,
+    pub no_host: NoHost,
 }
 
 /// One row of the 웹 페이지 list. `url` is None when the page cannot be opened from here, and
-/// `note` then says why.
+/// `note` then says why. An `unverified` row has a `url` that may not open, a mark in its
+/// `label`, and a `note` that says why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebPage {
     pub label: String,
     pub url: Option<String>,
     pub note: Option<&'static str>,
+    pub unverified: bool,
     /// The address shown (`url`, or `:port` when it cannot be opened).
     pub address: String,
     /// The listening process, empty when the node did not name it.
@@ -228,20 +257,74 @@ fn url_host(url: &str) -> Option<String> {
 }
 
 fn is_loopback_host(host: &str) -> bool {
-    host == "localhost" || host == "::1" || host.starts_with("127.")
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => ip.is_loopback(),
+        Err(_) => host.eq_ignore_ascii_case("localhost"),
+    }
 }
 
-/// How to reach the session's computer. A local computer of a server on another machine is
-/// not this machine: its loopback ports stay closed and its LAN ports use the server's host.
-/// A remote computer uses the host of its own `url` (empty or a peer address: unknown).
-pub fn computer_host(local: bool, computer_url: &str, server_url: &str) -> ComputerHost {
-    if local {
-        return match url_host(server_url) {
-            Some(h) if !is_loopback_host(&h) => ComputerHost { local: false, host: Some(h) },
-            _ => ComputerHost { local: true, host: None },
-        };
+/// True when a server host can be taken as the machine's own address on a local network: a
+/// private, link-local or carrier-grade NAT (100.64.0.0/10, used by mesh VPNs) IPv4 address, a
+/// unique local or link-local IPv6 address, a name with no dot, or a name under `.local`,
+/// `.lan`, `.internal` or `.home.arpa`. Any other host (a public IP address, a public name) may
+/// be a reverse proxy or a tunnel in front of the server: the server does not know its own
+/// public address, so the app cannot tell and treats it as a guess (FR-L18, #519).
+fn is_lan_host(host: &str) -> bool {
+    use std::net::IpAddr;
+    match host.parse::<IpAddr>() {
+        Ok(IpAddr::V4(v4)) => {
+            let o = v4.octets();
+            v4.is_private() || v4.is_link_local() || (o[0] == 100 && (o[1] & 0xc0) == 64)
+        }
+        Ok(IpAddr::V6(v6)) => {
+            let first = v6.segments()[0];
+            (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80
+        }
+        Err(_) => {
+            let name = host.trim_end_matches('.').to_ascii_lowercase();
+            !name.contains('.')
+                || [".local", ".lan", ".internal", ".home.arpa"].iter().any(|suffix| name.ends_with(suffix))
+        }
     }
-    ComputerHost { local: false, host: url_host(computer_url) }
+}
+
+/// The server machine as seen from this app, from the app's server address: this machine when
+/// the address is loopback, no host when the server is reached as a peer (`peer:<id>`, FR-N9),
+/// otherwise the address's host, marked unverified unless it is a local-network address.
+fn server_machine_host(server_url: &str) -> ComputerHost {
+    if server_url.starts_with("peer:") {
+        return ComputerHost { no_host: NoHost::PeerServer, ..Default::default() };
+    }
+    match url_host(server_url) {
+        Some(h) if is_loopback_host(&h) => ComputerHost { local: true, ..Default::default() },
+        Some(h) => ComputerHost { unverified: !is_lan_host(&h), host: Some(h), ..Default::default() },
+        None => ComputerHost::default(),
+    }
+}
+
+/// How to reach the session's computer. The server's own computer is the server machine
+/// ([`server_machine_host`]): on another machine its loopback ports stay closed and its other
+/// ports use the server's host. A registered computer uses the host the server reports (from
+/// `url` for an older server); a loopback host there is the server machine again, never this
+/// device. A computer registered by peer only has no host.
+pub fn computer_host(computer: &crate::server::ComputerView, server_url: &str) -> ComputerHost {
+    use crate::server::ComputerAddress;
+    if computer.local || computer.address == ComputerAddress::Server {
+        return server_machine_host(server_url);
+    }
+    let host = match &computer.address {
+        ComputerAddress::Host { host } if !host.is_empty() => Some(host.clone()),
+        ComputerAddress::Peer => None,
+        _ => url_host(&computer.url),
+    };
+    match host {
+        Some(h) if is_loopback_host(&h) => server_machine_host(server_url),
+        Some(h) => ComputerHost { host: Some(h), ..Default::default() },
+        None if computer.address == ComputerAddress::Peer || computer.peer.is_some() => {
+            ComputerHost { no_host: NoHost::PeerComputer, ..Default::default() }
+        }
+        None => ComputerHost::default(),
+    }
 }
 
 fn web_host_text(host: &str) -> String {
@@ -252,8 +335,21 @@ fn web_host_text(host: &str) -> String {
     }
 }
 
+/// The address a port is bound to, when the node reports one that can be opened as it is: an
+/// IP address that is not unspecified and not IPv6 link-local (that needs a zone this app does
+/// not have). Anything else, a name included, is ignored.
+fn usable_bound_address(address: Option<&str>) -> Option<String> {
+    use std::net::IpAddr;
+    let ip = address?.parse::<IpAddr>().ok()?;
+    let link_local_v6 = matches!(ip, IpAddr::V6(v6) if (v6.segments()[0] & 0xffc0) == 0xfe80);
+    (!ip.is_unspecified() && !link_local_v6).then(|| ip.to_string())
+}
+
 /// The 웹 페이지 list from the node's listening ports: sorted by port, one row per
-/// (port, address). A loopback port opens only on the local computer.
+/// (port, address). A loopback port opens only on the local computer. A port bound to one
+/// specific address opens on that address, because it does not answer on loopback or on the
+/// computer's other addresses (#519). A row whose address is a guess is marked unverified.
+/// A failed load is one fixed sentence; the error text is not shown.
 pub fn web_pages_from(
     result: Result<ember_client::api::Ports, String>,
     computer: &ComputerHost,
@@ -261,26 +357,46 @@ pub fn web_pages_from(
     use ember_client::api::PortScope;
     let ports = match result {
         Ok(p) => p,
-        Err(e) => return WebPagesLoad::Failed(format!("포트 목록을 불러오지 못했습니다: {e}")),
+        Err(_) => return WebPagesLoad::Failed(WEB_FAILED.to_string()),
     };
     if !ports.supported {
         return WebPagesLoad::Unsupported;
     }
+    let no_host_note = match computer.no_host {
+        NoHost::Unknown => WEB_NO_HOST,
+        NoHost::PeerComputer => WEB_PEER_COMPUTER,
+        NoHost::PeerServer => WEB_PEER_SERVER,
+    };
+    // Nothing says this device can reach the computer's addresses when its own host is absent
+    // or a guess.
+    let host_is_a_guess = !computer.local && (computer.host.is_none() || computer.unverified);
     let mut rows: Vec<(u16, WebPage)> = Vec::new();
     for lp in &ports.ports {
         let port = lp.port;
-        let (url, note) = match lp.scope {
-            PortScope::Loopback if computer.local => (Some(format!("http://127.0.0.1:{port}")), None),
-            PortScope::Loopback => (None, Some(WEB_LOOPBACK_ONLY)),
-            _ => match (&computer.host, computer.local) {
-                (Some(h), _) => (Some(format!("http://{}:{port}", web_host_text(h))), None),
-                (None, true) => (Some(format!("http://127.0.0.1:{port}")), None),
-                (None, false) => (None, Some(WEB_NO_HOST)),
+        let bound = match lp.scope {
+            PortScope::Any => None,
+            _ => usable_bound_address(lp.address.as_deref()),
+        };
+        let at = |host: &str| Some(format!("http://{}:{port}", web_host_text(host)));
+        // (url, why it cannot open, whether the url is a guess)
+        let (url, note, unverified) = match (lp.scope, bound) {
+            (PortScope::Loopback, Some(b)) if computer.local => (at(&b), None, false),
+            (PortScope::Loopback, None) if computer.local => (at("127.0.0.1"), None, false),
+            (PortScope::Loopback, _) => (None, Some(WEB_LOOPBACK_ONLY), false),
+            (_, Some(b)) => (at(&b), None, host_is_a_guess),
+            (_, None) => match (&computer.host, computer.local) {
+                (Some(h), _) => (at(h), None, computer.unverified),
+                (None, true) => (at("127.0.0.1"), None, false),
+                (None, false) => (None, Some(no_host_note), false),
             },
         };
+        let note = if unverified { Some(WEB_UNVERIFIED) } else { note };
         let shown = url.clone().unwrap_or_else(|| format!(":{port}"));
-        let label = if lp.process.is_empty() { shown.clone() } else { format!("{shown} ({})", lp.process) };
-        rows.push((port, WebPage { label, url, note, address: shown, process: lp.process.clone() }));
+        let mut label = if lp.process.is_empty() { shown.clone() } else { format!("{shown} ({})", lp.process) };
+        if unverified {
+            label = format!("{label} · {WEB_UNVERIFIED_MARK}");
+        }
+        rows.push((port, WebPage { label, url, note, unverified, address: shown, process: lp.process.clone() }));
     }
     rows.sort_by(|a, b| (a.0, &a.1.url, &a.1.label).cmp(&(b.0, &b.1.url, &b.1.label)));
     rows.dedup_by(|b, a| a.0 == b.0 && a.1.url == b.1.url);
@@ -288,6 +404,11 @@ pub fn web_pages_from(
         return WebPagesLoad::Empty;
     }
     WebPagesLoad::Ready(rows.into_iter().map(|(_, w)| w).collect())
+}
+
+/// The sentence of the loading row, which is drawn with a spinner; None in every other state.
+pub fn web_menu_loading(load: &WebPagesLoad) -> Option<&'static str> {
+    matches!(load, WebPagesLoad::Loading).then_some(WEB_LOADING)
 }
 
 /// The OptionSheet lines of a load state: one per page, or the single state line.
@@ -304,42 +425,69 @@ pub fn web_menu_lines(load: &WebPagesLoad) -> Vec<String> {
 /// The head of the 웹 페이지 menu (mockup `webMenu` `.sdrop-h b`).
 pub const WEB_MENU_HEAD: &str = "웹 페이지 열기";
 
+/// The line under the 웹 페이지 menu's head (mockup `webMenu` `.sdrop-h span`, `computer · ip`):
+/// the session's computer and the host its ports are served on. A local computer's host is
+/// this machine's loopback; a host that is not known is left out, and so is a name that was
+/// not read. Nothing when neither is known.
+pub fn web_menu_subtitle(computer: Option<&str>, host: &ComputerHost) -> Option<String> {
+    let name = computer.map(str::trim).filter(|c| !c.is_empty());
+    let addr = match (&host.host, host.local) {
+        (Some(h), _) => Some(web_host_text(h)),
+        (None, true) => Some("127.0.0.1".to_string()),
+        (None, false) => None,
+    };
+    match (name, addr) {
+        (Some(n), Some(a)) => Some(format!("{n} \u{b7} {a}")),
+        (Some(n), None) => Some(n.to_string()),
+        (None, Some(a)) => Some(a),
+        (None, None) => None,
+    }
+}
+
 /// One row of the 웹 페이지 menu (FR-L10.4, #888): the address in the mono face, the process and
-/// why it cannot be opened below it, and whether it opens (the green 감지됨 pill).
+/// why it cannot be opened below it, and whether it opens (the green 감지됨 pill). `loading` marks
+/// the loading row, drawn with the app's spinner (FR-L18, #519).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebMenuItem {
     pub title: String,
     pub detail: Option<String>,
     pub detected: bool,
     pub mono: bool,
+    pub loading: bool,
 }
 
 /// The menu's rows, in the order of [`web_menu_lines`], so [`web_tap`] answers for row `idx`.
+/// A row whose address is a guess has "추정 주소" at the end of its line.
 pub fn web_menu_items(load: &WebPagesLoad) -> Vec<WebMenuItem> {
     match load {
         WebPagesLoad::Ready(pages) => pages
             .iter()
             .map(|w| {
                 let parts: Vec<&str> = [w.process.as_str(), w.note.unwrap_or("")].into_iter().filter(|t| !t.is_empty()).collect();
+                let title =
+                    if w.unverified { format!("{} \u{b7} {WEB_UNVERIFIED_MARK}", w.address) } else { w.address.clone() };
                 WebMenuItem {
-                    title: w.address.clone(),
+                    title,
                     detail: (!parts.is_empty()).then(|| parts.join(" \u{b7} ")),
                     detected: w.url.is_some(),
                     mono: true,
+                    loading: false,
                 }
             })
             .collect(),
         other => web_menu_lines(other)
             .into_iter()
-            .map(|title| WebMenuItem { title, detail: None, detected: false, mono: false })
+            .map(|title| WebMenuItem { title, detail: None, detected: false, mono: false, loading: matches!(other, WebPagesLoad::Loading) })
             .collect(),
     }
 }
 
-/// What a tap on line `idx` does: open a url, or post a text.
+/// What a tap on line `idx` does: open a url, open a url whose address is a guess and say so,
+/// or post a text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WebTap {
     Open(String),
+    OpenSaying(String, String),
     Say(String),
     Nothing,
 }
@@ -347,6 +495,9 @@ pub enum WebTap {
 pub fn web_tap(load: &WebPagesLoad, idx: usize) -> WebTap {
     match load {
         WebPagesLoad::Ready(pages) => match pages.get(idx) {
+            Some(WebPage { url: Some(u), unverified: true, note: Some(n), .. }) => {
+                WebTap::OpenSaying(u.clone(), (*n).to_string())
+            }
             Some(WebPage { url: Some(u), .. }) => WebTap::Open(u.clone()),
             Some(WebPage { note: Some(n), .. }) => WebTap::Say((*n).to_string()),
             _ => WebTap::Nothing,
@@ -2210,11 +2361,24 @@ mod tests {
     }
 
     fn remote(host: &str) -> ComputerHost {
-        ComputerHost { local: false, host: Some(host.into()) }
+        ComputerHost { host: Some(host.into()), ..Default::default() }
     }
 
     fn local_host() -> ComputerHost {
-        ComputerHost { local: true, host: None }
+        ComputerHost { local: true, ..Default::default() }
+    }
+
+    fn no_host(why: NoHost) -> ComputerHost {
+        ComputerHost { no_host: why, ..Default::default() }
+    }
+
+    fn guessed(host: &str) -> ComputerHost {
+        ComputerHost { host: Some(host.into()), unverified: true, ..Default::default() }
+    }
+
+    /// A port bound to one specific address.
+    fn bound(port: u16, scope: ember_client::api::PortScope, address: &str) -> ember_client::api::ListeningPort {
+        ember_client::api::ListeningPort { port, scope, address: Some(address.into()), ..Default::default() }
     }
 
     fn ready(l: WebPagesLoad) -> Vec<WebPage> {
@@ -2222,6 +2386,20 @@ mod tests {
             WebPagesLoad::Ready(v) => v,
             other => panic!("not ready: {other:?}"),
         }
+    }
+
+    use crate::server::{ComputerAddress, ComputerView};
+
+    fn view(local: bool, address: ComputerAddress) -> ComputerView {
+        ComputerView { id: "c1".into(), name: "box".into(), local, url: String::new(), peer: None, address }
+    }
+
+    fn server_view() -> ComputerView {
+        view(true, ComputerAddress::Server)
+    }
+
+    fn host_view(host: &str) -> ComputerView {
+        view(false, ComputerAddress::Host { host: host.into() })
     }
 
     #[test]
@@ -2256,7 +2434,7 @@ mod tests {
     #[test]
     fn fr_l18_web_peer_addressed_computer_has_no_url() {
         use ember_client::api::PortScope::*;
-        let none = ComputerHost { local: false, host: None };
+        let none = no_host(NoHost::Unknown);
         let l = ready(web_pages_from(Ok(ports_of(vec![lp(3000, Any, ""), lp(4000, Lan, "bun")])), &none));
         assert_eq!(l[0].url, None);
         assert_eq!(l[0].note, Some("주소를 알 수 없어 열 수 없습니다"));
@@ -2288,8 +2466,33 @@ mod tests {
         assert_eq!(web_pages_from(Ok(ports_of(Vec::new())), &h), WebPagesLoad::Empty);
         assert_eq!(
             web_pages_from(Err("timeout".into()), &h),
-            WebPagesLoad::Failed("포트 목록을 불러오지 못했습니다: timeout".into())
+            WebPagesLoad::Failed("포트 목록을 불러오지 못했습니다".into())
         );
+    }
+
+    /// #519 (4): a failed load is one fixed Korean sentence; the transport's English text never
+    /// reaches the list.
+    #[test]
+    fn fr_l18_web_failed_line_has_no_transport_text() {
+        let load = web_pages_from(
+            Err("error sending request for url (http://127.0.0.1:8740/api/computers/c1/ports): connection refused".into()),
+            &remote("h"),
+        );
+        let lines = web_menu_lines(&load);
+        assert_eq!(lines, ["포트 목록을 불러오지 못했습니다"]);
+        assert!(!lines[0].chars().any(|c| c.is_ascii_alphabetic()), "{}", lines[0]);
+        assert_eq!(web_tap(&load, 0), WebTap::Say("포트 목록을 불러오지 못했습니다".into()));
+    }
+
+    /// #519 (4): only the loading state draws the spinner row, with the loading sentence.
+    #[test]
+    fn fr_l18_web_loading_row_has_a_spinner_and_no_other_state_does() {
+        assert_eq!(web_menu_loading(&WebPagesLoad::Loading), Some("불러오는 중입니다"));
+        assert_eq!(web_tap(&WebPagesLoad::Loading, 0), WebTap::Nothing);
+        let ready = web_pages_from(Ok(ports_of(vec![lp(3000, ember_client::api::PortScope::Lan, "node")])), &remote("h"));
+        for other in [WebPagesLoad::Empty, WebPagesLoad::Unsupported, WebPagesLoad::Failed("x".into()), ready] {
+            assert_eq!(web_menu_loading(&other), None, "{other:?}");
+        }
     }
 
     #[test]
@@ -2308,6 +2511,25 @@ mod tests {
             web_menu_lines(&WebPagesLoad::Unsupported),
             ["이 컴퓨터는 포트 목록을 지원하지 않습니다"]
         );
+        assert_eq!(
+            web_tap(&WebPagesLoad::Unsupported, 0),
+            WebTap::Say("이 컴퓨터는 포트 목록을 지원하지 않습니다".into())
+        );
+    }
+
+    #[test]
+    fn fr_l10_4_web_menu_subtitle_is_the_computer_and_its_address() {
+        // Mockup `webMenu`: `esc(s.computer)+' · '+ip`.
+        let remote = ComputerHost { host: Some("192.168.0.10".into()), ..Default::default() };
+        assert_eq!(web_menu_subtitle(Some("mac-mini"), &remote).as_deref(), Some("mac-mini \u{b7} 192.168.0.10"));
+        let local = ComputerHost { local: true, ..Default::default() };
+        assert_eq!(web_menu_subtitle(Some("이 컴퓨터"), &local).as_deref(), Some("이 컴퓨터 \u{b7} 127.0.0.1"));
+        let unknown = ComputerHost::default();
+        assert_eq!(web_menu_subtitle(Some("studio"), &unknown).as_deref(), Some("studio"));
+        assert_eq!(web_menu_subtitle(Some("  "), &remote).as_deref(), Some("192.168.0.10"));
+        assert_eq!(web_menu_subtitle(None, &unknown), None);
+        let v6 = ComputerHost { host: Some("fe80::1".into()), ..Default::default() };
+        assert_eq!(web_menu_subtitle(Some("a"), &v6).as_deref(), Some("a \u{b7} [fe80::1]"));
     }
 
     #[test]
@@ -2316,27 +2538,226 @@ mod tests {
         assert_eq!(WEB_MENU_HEAD, "웹 페이지 열기");
         let load = web_pages_from(Ok(ports_of(vec![lp(3000, Lan, "node"), lp(5173, Loopback, "vite")])), &remote("h"));
         let rows = web_menu_items(&load);
-        assert_eq!(rows[0], WebMenuItem { title: "http://h:3000".into(), detail: Some("node".into()), detected: true, mono: true });
+        assert_eq!(rows[0], WebMenuItem { title: "http://h:3000".into(), detail: Some("node".into()), detected: true, mono: true, loading: false });
         assert_eq!(
             rows[1],
-            WebMenuItem { title: ":5173".into(), detail: Some("vite \u{b7} 이 컴퓨터 안에서만 열 수 있습니다".into()), detected: false, mono: true }
+            WebMenuItem { title: ":5173".into(), detail: Some("vite \u{b7} 이 컴퓨터 안에서만 열 수 있습니다".into()), detected: false, mono: true, loading: false }
         );
         // A state line is one plain row, so a tap still says it.
         assert_eq!(
             web_menu_items(&WebPagesLoad::Empty),
-            [WebMenuItem { title: "열려 있는 웹 포트가 없습니다".into(), detail: None, detected: false, mono: false }]
+            [WebMenuItem { title: "열려 있는 웹 포트가 없습니다".into(), detail: None, detected: false, mono: false, loading: false }]
         );
         assert_eq!(web_menu_items(&WebPagesLoad::Loading).len(), web_menu_lines(&WebPagesLoad::Loading).len());
+        assert!(web_menu_items(&WebPagesLoad::Loading)[0].loading, "the loading row carries the spinner");
     }
 
     #[test]
     fn fr_l18_web_computer_host_from_the_address() {
-        assert_eq!(computer_host(true, "", "http://127.0.0.1:8740"), local_host());
-        assert_eq!(computer_host(true, "", "http://mini.local:8740"), remote("mini.local"));
-        assert_eq!(computer_host(false, "http://192.168.0.20:8740/x", ""), remote("192.168.0.20"));
-        assert_eq!(computer_host(false, "http://[fd00::2]:8740", ""), remote("fd00::2"));
-        assert_eq!(computer_host(false, "", "http://127.0.0.1:8740"), ComputerHost { local: false, host: None });
-        assert_eq!(computer_host(false, "peer:abc", ""), ComputerHost { local: false, host: None });
+        // The server's own computer: the host of the app's server address.
+        assert_eq!(computer_host(&server_view(), "http://127.0.0.1:8740"), local_host());
+        assert_eq!(computer_host(&server_view(), "http://localhost:8740"), local_host());
+        assert_eq!(computer_host(&server_view(), "http://mini.local:8740"), remote("mini.local"));
+        // A registered computer: the host the server reports.
+        assert_eq!(computer_host(&host_view("192.168.0.20"), "http://127.0.0.1:8740"), remote("192.168.0.20"));
+        assert_eq!(computer_host(&host_view("fd00::2"), ""), remote("fd00::2"));
+        // A registered computer is never this machine's loopback by itself.
+        assert!(!computer_host(&host_view("192.168.0.20"), "http://127.0.0.1:8740").local);
+        // Nothing known: no host, and not the peer wording.
+        assert_eq!(computer_host(&view(false, ComputerAddress::Unknown), "http://127.0.0.1:8740"), no_host(NoHost::Unknown));
+    }
+
+    /// An older server sends no `address`: the host comes from `url`, and a computer with only a
+    /// peer id is peer-only.
+    #[test]
+    fn fr_l18_web_computer_host_from_an_older_server() {
+        let mut by_url = view(false, ComputerAddress::Unknown);
+        by_url.url = "http://user:pw@192.168.0.20:8740/x".into();
+        assert_eq!(computer_host(&by_url, ""), remote("192.168.0.20"));
+        let mut by_peer = view(false, ComputerAddress::Unknown);
+        by_peer.peer = Some("abcd".into());
+        assert_eq!(computer_host(&by_peer, ""), no_host(NoHost::PeerComputer));
+    }
+
+    /// A node registered on the server machine's own loopback is the server machine: its host is
+    /// the server's, never this device's loopback.
+    #[test]
+    fn fr_l18_web_loopback_node_url_means_the_server_machine() {
+        assert_eq!(computer_host(&host_view("127.0.0.1"), "http://192.168.0.5:8740"), remote("192.168.0.5"));
+        assert_eq!(computer_host(&host_view("localhost"), "http://127.0.0.1:8740"), local_host());
+        assert_eq!(computer_host(&host_view("::1"), "https://ember.example.com"), guessed("ember.example.com"));
+        assert_eq!(computer_host(&host_view("127.0.0.1"), "peer:abcd"), no_host(NoHost::PeerServer));
+    }
+
+    /// #519 (2): which server hosts are taken as they are, and which are a guess.
+    #[test]
+    fn fr_l18_web_server_host_is_unverified_unless_it_is_a_lan_address() {
+        for lan in [
+            "http://192.168.0.5:8740",
+            "http://10.1.2.3:8740",
+            "http://172.16.0.9:8740",
+            "http://172.31.255.1:8740",
+            "http://169.254.10.1:8740",
+            "http://100.100.1.2:8740",
+            "http://[fd00::5]:8740",
+            "http://mini:8740",
+            "http://mini.local:8740",
+            "http://Mini.LAN:8740",
+            "http://box.home.arpa:8740",
+            "http://ember.internal:8740",
+        ] {
+            let h = computer_host(&server_view(), lan);
+            assert!(h.host.is_some() && !h.unverified && !h.local, "{lan}: {h:?}");
+        }
+        for guess in [
+            "https://ember.example.com",
+            "http://ember.example.com:8740",
+            "http://203.0.113.7:8740",
+            "http://172.32.0.1:8740",
+            "http://100.128.0.1:8740",
+            "http://[2001:db8::1]:8740",
+            "https://abc123.trycloudflare.com",
+        ] {
+            let h = computer_host(&server_view(), guess);
+            assert!(h.host.is_some() && h.unverified && !h.local, "{guess}: {h:?}");
+        }
+    }
+
+    /// #519 (2), state "address unverified": the row is still offered, its label carries the
+    /// mark, and the tap opens it and says why it may not open.
+    #[test]
+    fn fr_l18_web_unverified_address_is_marked_and_still_opens() {
+        use ember_client::api::PortScope::*;
+        let host = computer_host(&server_view(), "https://ember.example.com");
+        let load = web_pages_from(Ok(ports_of(vec![lp(3000, Any, "node"), lp(5173, Loopback, "vite")])), &host);
+        let pages = ready(load.clone());
+        assert_eq!(pages[0].url.as_deref(), Some("http://ember.example.com:3000"));
+        assert!(pages[0].unverified);
+        assert_eq!(pages[0].label, "http://ember.example.com:3000 (node) · 추정 주소");
+        assert_eq!(
+            pages[0].note,
+            Some("확인되지 않은 주소입니다. 프록시나 터널 뒤에 있거나 다른 네트워크에 있으면 열리지 않습니다")
+        );
+        assert_eq!(
+            web_tap(&load, 0),
+            WebTap::OpenSaying(
+                "http://ember.example.com:3000".into(),
+                "확인되지 않은 주소입니다. 프록시나 터널 뒤에 있거나 다른 네트워크에 있으면 열리지 않습니다".into()
+            )
+        );
+        // The server machine's loopback is not this device's: closed, as for any other computer.
+        assert_eq!(pages[1].url, None);
+        assert!(!pages[1].unverified);
+        // A LAN server address carries no mark.
+        let lan = ready(web_pages_from(Ok(ports_of(vec![lp(3000, Any, "node")])), &remote("192.168.0.5")));
+        assert!(!lan[0].unverified);
+        assert_eq!(lan[0].label, "http://192.168.0.5:3000 (node)");
+        assert_eq!(lan[0].note, None);
+    }
+
+    /// #519 (1), state "no host for a peer-only computer": its own sentence, not "unknown".
+    #[test]
+    fn fr_l18_web_peer_only_computer_says_it_has_no_host() {
+        use ember_client::api::PortScope::*;
+        let host = computer_host(&view(false, ComputerAddress::Peer), "http://192.168.0.5:8740");
+        assert_eq!(host, no_host(NoHost::PeerComputer));
+        let load = web_pages_from(Ok(ports_of(vec![lp(3000, Any, "node")])), &host);
+        let pages = ready(load.clone());
+        assert_eq!(pages[0].url, None);
+        assert_eq!(pages[0].label, ":3000 (node)");
+        assert_eq!(pages[0].note, Some("피어로만 연결된 컴퓨터라 열 수 있는 주소가 없습니다"));
+        assert_ne!(pages[0].note, Some("주소를 알 수 없어 열 수 없습니다"));
+        assert_eq!(web_tap(&load, 0), WebTap::Say("피어로만 연결된 컴퓨터라 열 수 있는 주소가 없습니다".into()));
+    }
+
+    /// #519 (2): a server reached as a peer (`peer:<id>`, FR-N9) has no host either.
+    #[test]
+    fn fr_l18_web_server_reached_as_a_peer_has_no_host() {
+        use ember_client::api::PortScope::*;
+        let host = computer_host(&server_view(), "peer:abcd1234");
+        assert_eq!(host, no_host(NoHost::PeerServer));
+        let pages = ready(web_pages_from(Ok(ports_of(vec![lp(3000, Lan, "node"), lp(5173, Loopback, "vite")])), &host));
+        assert_eq!(pages[0].url, None);
+        assert_eq!(pages[0].note, Some("서버에 피어로 연결되어 있어 열 수 있는 주소가 없습니다"));
+        assert_eq!(pages[1].note, Some("이 컴퓨터 안에서만 열 수 있습니다"), "loopback keeps its own reason");
+    }
+
+    /// #519 (3): a port bound to one specific address opens on that address.
+    #[test]
+    fn fr_l18_web_bound_address_is_used_instead_of_loopback_or_the_host() {
+        use ember_client::api::PortScope::*;
+        // On this machine: not 127.0.0.1, which a specific bind does not answer on.
+        let l = ready(web_pages_from(
+            Ok(ports_of(vec![bound(3000, Lan, "192.168.0.7"), bound(4000, Loopback, "::1"), bound(5000, Loopback, "127.0.0.2")])),
+            &local_host(),
+        ));
+        assert_eq!(l[0].url.as_deref(), Some("http://192.168.0.7:3000"));
+        assert_eq!(l[1].url.as_deref(), Some("http://[::1]:4000"));
+        assert_eq!(l[2].url.as_deref(), Some("http://127.0.0.2:5000"));
+        assert!(l.iter().all(|w| !w.unverified));
+        // On another computer: the bound address, not the address its node is registered by.
+        let r = ready(web_pages_from(
+            Ok(ports_of(vec![bound(3000, Lan, "10.8.0.5"), bound(4000, Loopback, "127.0.0.1")])),
+            &remote("192.168.0.20"),
+        ));
+        assert_eq!(r[0].url.as_deref(), Some("http://10.8.0.5:3000"));
+        assert!(!r[0].unverified);
+        assert_eq!(r[1].url, None, "another computer's loopback stays closed");
+        assert_eq!(r[1].note, Some("이 컴퓨터 안에서만 열 수 있습니다"));
+    }
+
+    /// A bound address that cannot be used as it is falls back to the computer's host.
+    #[test]
+    fn fr_l18_web_bound_address_that_is_not_usable_is_ignored() {
+        use ember_client::api::PortScope::*;
+        let v = vec![
+            bound(3000, Lan, "fe80::1"),
+            bound(3001, Lan, "evil.example/x"),
+            bound(3002, Any, "0.0.0.0"),
+            bound(3003, Lan, ""),
+        ];
+        let r = ready(web_pages_from(Ok(ports_of(v)), &remote("192.168.0.20")));
+        let urls: Vec<_> = r.iter().map(|w| w.url.clone().unwrap()).collect();
+        assert_eq!(
+            urls,
+            [
+                "http://192.168.0.20:3000",
+                "http://192.168.0.20:3001",
+                "http://192.168.0.20:3002",
+                "http://192.168.0.20:3003"
+            ]
+        );
+    }
+
+    /// A bound address of a computer whose own host is absent or a guess is offered with the mark:
+    /// nothing says this device can reach it.
+    #[test]
+    fn fr_l18_web_bound_address_is_unverified_when_the_computer_host_is_not_known() {
+        use ember_client::api::PortScope::*;
+        for host in [no_host(NoHost::PeerComputer), no_host(NoHost::PeerServer), guessed("ember.example.com")] {
+            let r = ready(web_pages_from(Ok(ports_of(vec![bound(3000, Lan, "192.168.0.7")])), &host));
+            assert_eq!(r[0].url.as_deref(), Some("http://192.168.0.7:3000"), "{host:?}");
+            assert!(r[0].unverified, "{host:?}");
+            assert_eq!(r[0].label, "http://192.168.0.7:3000 · 추정 주소");
+        }
+    }
+
+    #[test]
+    fn fr_l18_web_texts_are_in_the_checked_list() {
+        for t in [
+            "불러오는 중입니다",
+            "열려 있는 웹 포트가 없습니다",
+            "이 컴퓨터는 포트 목록을 지원하지 않습니다",
+            "이 컴퓨터 안에서만 열 수 있습니다",
+            "주소를 알 수 없어 열 수 없습니다",
+            "피어로만 연결된 컴퓨터라 열 수 있는 주소가 없습니다",
+            "서버에 피어로 연결되어 있어 열 수 있는 주소가 없습니다",
+            "확인되지 않은 주소입니다. 프록시나 터널 뒤에 있거나 다른 네트워크에 있으면 열리지 않습니다",
+            "추정 주소",
+            "포트 목록을 불러오지 못했습니다",
+        ] {
+            assert!(UI_STRINGS.contains(&t), "{t}");
+        }
     }
 
     // ---- NFR-L4 ------------------------------------------------------------------------------

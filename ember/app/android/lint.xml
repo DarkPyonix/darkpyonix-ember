@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+Lint configuration for the generated Gradle project's app module. build-android.sh copies it to
+app/lint.xml before `dx build` in a release build; dx writes the module's other files around it
+and does not remove it.
+
+A release build runs assembleRelease, which runs lintVitalAnalyzeRelease; a debug build runs no
+lint. The first release-signed build (publish-release run 43874185801) stopped there: the
+androidx.lifecycle lint jar's NonNullableMutableLiveDataDetector (issue NullSafeMutableLiveData)
+crashed with IncompatibleClassChangeError on AndroidBack.kt, because it was compiled against a
+newer Kotlin analysis API than the lint in dx 0.7.10's Android Gradle plugin (8.7.0). The
+generated build.gradle.kts cannot be edited before dx runs Gradle, so lint is switched off here
+for the whole module, the same as `lint { checkReleaseBuilds = false }`: switching off only that
+issue would leave the other lifecycle detectors, built the same way, to crash next.
+-->
+<lint>
+    <issue id="all" severity="ignore" />
+</lint>

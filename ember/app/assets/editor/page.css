@@ -28,11 +28,10 @@ html,body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font
 /* A12: 300px wide, not shrunk by the spacer beside it (the mockup's max-width:1100px auto width and
    560px hide still apply below this). */
 @media (min-width:1101px){.ed-top .ed-find{flex:none;width:300px}}
-/* FR-L31.26 (#874): the overlays' box and a closed tool window's stand-in take no grid row, so the
-   status bar ends at the page's bottom. TODO(dioxus-compose#266): placeholder comment nodes become
-   grid items; drop .ed-layers and .ed-none once they make no box. */
+/* FR-L31.26 (#874): the overlays' box takes no grid row, so the status bar ends at the page's bottom.
+   dioxus-compose#266 (94ade333): placeholder comment nodes no longer make layout boxes in a grid or
+   flex container, so no stand-in rule is needed for a closed tool window or conditional child. */
 .ed-layers{grid-row:1;grid-column:1;width:0;height:0;min-width:0;min-height:0}
-.ed-none{display:none}
 /* FR-L31.29 (#895, design review E4): quick open hangs under the find pill. The pill's box is the
    list's containing block; the list is as wide as the old sheet and ends at the pill's right edge.
    Its query row is a row with a line under it, so the popover has one frame. */
@@ -66,7 +65,6 @@ html,body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font
 .ed-scm-st.green{background:var(--c-green-soft);color:var(--c-green)}
 .ed-scm-st.red{background:var(--c-red-soft);color:var(--c-red)}
 .ed-scm-st.blue{background:var(--c-blue-soft);color:var(--c-blue)}
-.ed-scm-st.sky{background:var(--c-sky-soft);color:var(--c-sky)}
 .ed-scm-st.grey{background:var(--c-grey-soft);color:var(--text-2)}
 .ed-scm-cb{width:18px;height:18px;flex:none;border:1.5px solid var(--c-grey);border-radius:5px;background:var(--surface);cursor:pointer;padding:0;display:grid;place-items:center;box-sizing:border-box}
 .ed-scm-cb.on{background:var(--ink);border-color:var(--ink)}

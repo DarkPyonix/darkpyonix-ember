@@ -16,7 +16,7 @@ Behaviour changes for the IDE window come from `ember/proxy/`.
 | `product.overrides.json` | Deep-merged into upstream `product.json`: DarkPyonix names, Open VSX gallery, telemetry off. |
 | `build.sh` | Fetch tag → apply overrides → `npm ci` → gulp `core-ci` + Copilot extension → gulp `vscode-reh-web-<target>-min-ci` → `tar.gz` + `.sha256`. CI only; see [Build notes](#build-notes). |
 | `check-product.sh` | Fails if a `product.json` is not on Open VSX, has telemetry on, or names a Microsoft marketplace/update/telemetry endpoint. |
-| `regress.sh` | Extension regression (NFR-W1, #84): installs `regression/extensions.json` from Open VSX, parses extension host logs, compares with `regression/expected.json`. Activation needs a client (`OSE_REGRESS_CLIENT`, not built); `--self-test` runs offline. The list is provisional until the owner confirms it. |
+| `regress.sh` | Extension regression (NFR-W1, #84): installs `regression/extensions.json` from Open VSX at the pinned versions, parses extension host logs, compares with `regression/expected.json`. Activation needs a client (`OSE_REGRESS_CLIENT`); `--self-test` runs offline. See [Extension regression](#extension-regression). |
 | `smoke.sh` | Starts a packaged build and checks: workbench served, Open VSX search, extension install. |
 
 Builds run in GitHub Actions (`.github/workflows/test-ose.yml`), never on a developer machine:
@@ -32,6 +32,7 @@ checks the result, so it is safe anywhere.
 | `linux-arm64` | `ubuntu-22.04-arm` | Raspberry Pi 4/5 on a **64-bit** OS (Raspberry Pi OS Bookworm, glibc 2.36) |
 | `darwin-arm64` | `macos-15` | Apple silicon |
 | `darwin-x64` | `macos-15-intel` | Intel Mac |
+| `windows-x64` | `windows-2022` | Windows 10 and later, x64; launcher `bin/dpx-ose-server.cmd` (#83; built and smoke-tested in CI run 43692860054) |
 
 Each build produces `dpx-ose-<tag>-<target>.tar.gz` and its `.sha256`. The archive is
 self-contained: it bundles the Node runtime pinned in upstream `remote/.npmrc`, so the host does
@@ -40,8 +41,174 @@ rebuild) runs the matrix in `test-ose.yml`. When that run succeeds, `publish-ose
 that run's archives, checks them against their checksums and publishes a GitHub release with all
 archives and `SHA256SUMS`, so the release holds exactly the files the build produced.
 
+After the build, the **Live checks** job runs once per target on the same runner type
+(`docs/SPEC.md`, FR-W4 acceptance step 4). It downloads the archive the run built, verifies the
+checksum, unpacks it, and runs the Ember editor session's live tests against it
+(`ember/editor-conn/tests/live_ose.rs`, `ember/editor/tests/live_session.rs`,
+`ember/editor/tests/fr_l31_14_live_extensions.rs`), then the extension regression. A failing live
+test fails the run, so `publish-ose.yml` publishes nothing from it. This job is written and has
+not run in CI yet.
+
+### Windows
+
+`windows-x64` is built natively on a `windows-2022` runner (`docs/INTENT.md` D49, provisional,
+#83). The same `build.sh` runs under Git Bash and calls Code-OSS's
+`vscode-reh-web-win32-x64-min-ci` task, the task upstream's own Windows pipeline uses
+([product-build-win32-compile.yml](https://github.com/microsoft/vscode/blob/1.139.1/build/azure-pipelines/win32/steps/product-build-win32-compile.yml)).
+Native modules need the Visual Studio 2022 C++ build tools and Python, which the runner image has
+([VS Code: How to Contribute](https://github.com/microsoft/vscode/wiki/How-to-Contribute)). It is
+not cross-compiled, because native modules are built for the build host.
+
+The archive has the same shape as the others, `dpx-ose-<tag>-windows-x64.tar.gz` and `.sha256`,
+so the fetch script, the jobs and the release handle one format; Windows 10 and later read it
+with their own `tar.exe` (`tar -xzf dpx-ose-<tag>-windows-x64.tar.gz`).
+
+The launcher is `bin/dpx-ose-server.cmd`, which runs `node.exe out\server-main.js` from the
+build root ([code-server.cmd](https://github.com/microsoft/vscode/blob/1.139.1/resources/server/bin/code-server.cmd)).
+`EMBER_OSE_SERVER` names the `.cmd`, but `ember-node` and `smoke.sh` start those two directly,
+so stopping the child stops the server and no `cmd.exe` re-quotes the arguments. Without
+`EMBER_OSE_SERVER`, `ember-node` looks for `%LOCALAPPDATA%\dpx-ose-*\bin\dpx-ose-server.cmd`.
+
+Known limits on Windows (not built):
+
+- The live tests (`live_ose.rs`, `live_session.rs`, `fr_l31_14_live_extensions.rs`) are
+  `#![cfg(unix)]`: they stop the server with process groups and `pkill`. The **Smoke
+  (windows-x64)** job runs `smoke.sh` on the downloaded archive instead (start, `/version`, Open
+  VSX search and install).
+- Stopping an OSE kills `node.exe` only; the extension host and other children it started are
+  not killed with it (no job object).
+- The token files keep the default ACL: any process of the same user and an administrator can
+  read them.
+
 To move to a new Code-OSS release: change `VERSION`, open a PR (the `product` job checks the new
 upstream `product.json` against the overrides in seconds), then run the workflow manually or tag.
+
+## Extension regression
+
+`regress.sh` answers one question for a list of extensions: does each one install from Open VSX
+into this OSE build and activate in its extension host without an error (NFR-W1, #84).
+
+- `regression/extensions.json` is the list. Each entry is `{id, version, open}`. `version` is the
+  exact Open VSX version that is installed, so two runs test the same extension code. `null`
+  installs the newest version the OSE accepts; the run prints the installed folders, and the
+  version is pinned from that. `open` is a file of `regression/workspace/` whose language
+  triggers the extension, or `null` for an extension that activates at startup.
+- `regression/expected.json` records the expected result of each: `pass`, or `known-fail` with a
+  `reason`. A `pass` that does not activate fails the run. A `known-fail` that activates prints a
+  warning, so the record is corrected.
+- `regression/workspace/` is a small project (YAML, JavaScript, Python, Go, Rust, TOML, Java). It
+  is copied for each run and never built.
+
+The extension host starts only when a client connects, so the run needs one. The client is
+Ember's own editor session, `ember/editor/tests/nfr_w1_extension_regression.rs`: it connects, opens
+every `open` file and stays connected for `OSE_REGRESS_SETTLE` seconds (default 30).
+
+```sh
+export EMBER_OSE_SERVER="$(ember/editor-conn/scripts/fetch-ose-artifact.sh)"
+export OSE_REGRESS_CLIENT='cargo test --locked --manifest-path ember/editor/Cargo.toml --test nfr_w1_extension_regression -- --ignored --nocapture'
+OSE_REGRESS_OUT=.scratch/regress ember/ose/regress.sh "$(dirname "$(dirname "$EMBER_OSE_SERVER")")"
+```
+
+`OSE_REGRESS_OUT` keeps `results.json` (the status of every listed extension), `installed.txt` and
+the extension host logs. In CI the Live checks job runs this per target and uploads the folder as
+`ose-regress-<target>`.
+
+Status today: the list is the five extensions the leader approved on 2026-11-15: two language
+servers (`redhat.vscode-yaml`, `dbaeumer.vscode-eslint`), the most used language extension
+(`ms-python.python`), a debugger (`ms-python.debugpy`) and a webview panel (`mhutchie.git-graph`).
+The live checks ran once on all four targets (run 43670763653) with the earlier list; this list
+has not run yet, so every `expected.json` entry is an unverified `pass` and the step does not
+fail the job. `ms-python.debugpy` and `mhutchie.git-graph` have no pinned version: their first
+resolving run prints the version to pin. The check is "installed and activated without a failure
+line". Results are compared with our own previous OSE release, not with another vendor's build.
+
+### Deep checks (#929)
+
+A second run, `OSE_REGRESS_MODE=deep`, makes the deeper check of every entry with a `deep` field,
+through the same client command (`nfr_w1_deep_checks` runs, the activation client skips itself).
+The workspace copy is made a git repository with one commit first, so Git Graph shows its full
+page. Each check writes `pass`, `fail` or `not-run` with a reason to `OSE_REGRESS_DEEP/<id>.json`;
+`regress.py compare-deep` compares them with `deep.expect` in `expected.json` and writes
+`deep.json`. Only a `fail` where `pass` is expected fails the run; `not-run` prints a warning.
+
+```sh
+OSE_REGRESS_MODE=deep OSE_REGRESS_OUT=.scratch/regress-deep ember/ose/regress.sh "$(dirname "$(dirname "$EMBER_OSE_SERVER")")"
+```
+
+- **Webview** (`mhutchie.git-graph`, written, not yet run): the client runs `git-graph.view`
+  (retried while the extension registers it), waits for `$createWebviewPanel` and `$setHtml`,
+  reports the page shown (`$onDidChangeWebviewPanelViewStates`) and ready, sends
+  `{"command":"loadRepos","check":false}` with `$onMessage` and waits for a `$postMessage` whose
+  `command` is `loadRepos` (Git Graph's `respondLoadRepos`, `src/gitGraphView.ts`).
+- **Debug** (`ms-python.debugpy`, not built): reports `not-run`, or `not-run: no python3` when the
+  machine has no `python3` (the check needs one for debugpy's adapter and the program). The
+  editor client answers every `MainThreadDebugService` call with a default reply and never calls
+  `ExtHostDebugService` (#445). What one session of `sample.py` with a breakpoint on line 2 needs,
+  as the workbench does it at 1.139.1:
+  1. Record what the extension host registers: `$registerDebugTypes(types)`,
+     `$registerDebugConfigurationProvider(type, triggerKind, hasProvide, hasResolve, hasResolve2, handle)`,
+     `$registerDebugAdapterDescriptorFactory(type, handle)` (and their `$unregister*`).
+  2. Resolve the configuration `{type: "debugpy", request: "launch", program, console: "internalConsole", stopOnEntry: false}`
+     through the provider's handle: `$resolveDebugConfiguration(handle, folder, config, token)`,
+     `$substituteVariables(folder, config)`, then
+     `$resolveDebugConfigurationWithSubstitutedVariables(handle, folder, config, token)`.
+  3. Start the adapter: `$startDASession(adapterHandle, IDebugSessionFullDto {id, type, name, parent, folderUri, configuration})`
+     (the extension host asks the descriptor factory itself), then `$acceptDebugSessionStarted(session)`.
+  4. Speak DAP through `$sendDAMessage(adapterHandle, message)` and receive `$acceptDAMessage(adapterHandle, message)`
+     (and `$acceptDAError`, `$acceptDAExit`): `initialize`, `launch`, wait for the `initialized`
+     event, `setBreakpoints` (source `sample.py`, line 2), `configurationDone`, wait for the
+     `stopped` event, `threads`, `stackTrace` (the top frame is `answer` at line 2), `disconnect`,
+     then `$stopDASession(adapterHandle)` and `$acceptDebugSessionTerminated(session)`.
+     A `runInTerminal` reverse request would need `$runInTerminal`; `internalConsole` avoids it.
+     Unverified: whether debugpy's resolver finds an interpreter through `ms-python.python` with
+     no workbench UI, or needs `"python": "<path of python3>"` in the configuration.
+
+  Shapes: [`extHost.protocol.ts`](https://github.com/microsoft/vscode/blob/1.139.1/src/vs/workbench/api/common/extHost.protocol.ts)
+  (`MainThreadDebugServiceShape` L2271, `ExtHostDebugServiceShape` L3320, the breakpoint and
+  session DTOs L3241-3318), [`extHostDebugService.ts`](https://github.com/microsoft/vscode/blob/1.139.1/src/vs/workbench/api/common/extHostDebugService.ts)
+  (`$startDASession` L597, `$sendDAMessage` L697) and
+  [`mainThreadDebugService.ts`](https://github.com/microsoft/vscode/blob/1.139.1/src/vs/workbench/api/browser/mainThreadDebugService.ts)
+  (the resolve calls L197-295, the adapter L508-517). Actor ids: `MainThreadDebugService` 14,
+  `ExtHostDebugService` 92 (`ember/editor-conn/src/rpc_ids.rs`).
+
+What the run does not show: behaviour after activation (a language server answering, a formatter
+formatting), an activation that starts and never finishes, and a comparison with the same
+extensions under Microsoft's build.
+
+## Release check on a Raspberry Pi and a Mac
+
+`docs/SPEC.md` FR-W4 acceptance step 5 asks for one manual check per release on a Raspberry Pi
+(64-bit OS) and a Mac, because CI runners are not those machines and nobody looks at the window
+there. Run it on the machine itself, in a checkout of this repository, with `gh` signed in.
+
+```sh
+tag=ose-v1.139.1    # the release to check
+
+# 1. Download the published archive for this machine, check it against the release's SHA256SUMS,
+#    unpack it into .scratch/ose. Prints the launcher path.
+server="$(OSE_RELEASE=$tag ember/editor-conn/scripts/fetch-ose-artifact.sh)"
+
+# 2. The automated part: product.json, start, Open VSX search, install.
+ember/ose/smoke.sh "$(dirname "$(dirname "$server")")"
+
+# 3. The part that needs a person. Open the printed URL in a browser.
+export DPX_OSE_SERVER="$server"
+cd ember/proxy && python -m dpx.serve --root ~/work
+```
+
+In the IDE window, check three things:
+
+1. The window opens and shows the folder.
+2. The Extensions view finds an extension by name (Open VSX) and installs it.
+3. Help → About shows "DarkPyonix OSE" and the Code-OSS version of the tag.
+
+Then add a row below, in the pull request or commit that follows the release.
+
+| Release | Machine and OS | Date | Steps 1 to 3 of the script | Window checks 1 to 3 | By |
+| ------- | -------------- | ---- | -------------------------- | -------------------- | -- |
+| (none yet) | | | | | |
+
+No release has been checked this way yet.
 
 ## Build notes
 

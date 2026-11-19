@@ -308,9 +308,9 @@ fn fr_l31_leaving_an_empty_new_name_field_closes_it_and_a_typed_name_stays() {
 }
 
 // FR-L31 (#832, #827 rule 2): Shift+F10 or the context-menu key on a focused tree row opens the
-// tree's context menu with the row's items, as in Code-OSS. This pins Ember's side of the key
-// path; on the v0.0.6 pin the renderer sends only Enter (compose-rust#100), so a real run does not
-// reach this handler yet.
+// tree's context menu with the row's items, as in Code-OSS, beside right-click (compose-rust#417).
+// This pins Ember's side of the key path; compose-rust#100 and #717 are in the v0.0.11 pin, and a
+// real run reaching this handler is not yet checked on a display.
 #[test]
 fn fr_l31_shift_f10_and_the_context_menu_key_on_a_tree_row_open_its_context_menu() {
     let _guard = crate::services::test_guard();
@@ -351,6 +351,26 @@ fn fr_l31_shift_f10_and_the_context_menu_key_on_a_tree_row_open_its_context_menu
     page.dom.key_down(row, Key::F10, Code::F10, Modifiers::empty());
     page.dom.render();
     assert_eq!(crate::ui::editor_tree_menu::open_menu(), None);
+}
+
+// FR-L31.5 (compose-rust#417, #673): the tree row and the tab keep a preview on the real
+// `ondoubleclick` and open their menus on `oncontextmenu`; two `onclick`s within 500 ms no longer
+// stand in for a double-click.
+#[test]
+fn fr_l31_5_double_click_and_right_click_are_the_real_events() {
+    let page = include_str!("editor_workbench.rs");
+    let production = &page[..page.find("#[cfg(test)]").unwrap_or(page.len())];
+    assert!(!production.contains(concat!("DOUBLE", "_CLICK")), "the 500 ms stand-in is gone");
+    let editor = include_str!("editor.rs");
+    assert!(!editor.contains(concat!("pub struct Double", "Click")) && !editor.contains(concat!("DOUBLE_CLICK", "_MS")));
+    let tree = &production[production.find(r#"role: "treeitem", "aria-label": "{row_label}""#).expect("tree row")..];
+    let tree = &tree[..tree.find("chev-sp").expect("row content")];
+    assert!(tree.contains("ondoubleclick:") && tree.contains("keep_open(&keep_path)"), "a double-click keeps the preview");
+    assert!(tree.contains("oncontextmenu:") && tree.contains("TreeMenuAt::Pointer"), "a right-click opens the context menu");
+    let tab = &production[production.find(r#"role: "tab", "aria-selected": "{selected}""#).expect("editor tab")..];
+    let tab = &tab[..tab.find("onkeydown:").expect("tab keys")];
+    assert!(tab.contains("ondoubleclick:") && tab.contains("oncontextmenu:") && tab.contains("tab_menu.set(Some("));
+    assert!(!tab[..tab.find("ondoubleclick:").unwrap()].contains("keep_open"), "a single click does not keep the tab");
 }
 
 // FR-L31.9 (#781): 파일 열기 on a change row of the 커밋 window. The window's status and repository
@@ -639,6 +659,56 @@ fn fr_l31_26_the_status_bar_is_32_high_and_flush_with_the_page_bottom() {
         ed_rect.y + ed_rect.height,
     );
     assert!(close(ed_rect.y + ed_rect.height, 900.0), "the page fills the viewport: {ed_rect:?}");
+    let page_css = include_str!("../../assets/editor/page.css");
+    let wb = include_str!("editor_workbench.rs");
+    assert!(!page_css.contains(&[".ed", "-none"].concat()), "dioxus-compose#266: .ed-none stand-in is gone");
+    assert!(!page_css.contains(concat!("TODO(dioxus-compose#", "266")));
+    assert!(!wb.contains(&["\"ed", "-none\""].concat()), "dioxus-compose#266: no ed-none div in the workbench");
+}
+
+/// A node's laid-out box in the page, as `(x, y, width, height)`: its layout's location added up
+/// through its parents, so a node that draws nothing (a pane, a widget's placeholder) has one too.
+fn page_box(page: &Page, node: NodeId) -> (f32, f32, f32, f32) {
+    let doc = page.dom.document();
+    let n = doc.get_node(node).expect("the node");
+    let size = n.final_layout.size;
+    let (mut x, mut y, mut at) = (0.0, 0.0, Some(node));
+    while let Some(id) = at {
+        let Some(node) = doc.get_node(id) else { break };
+        x += node.final_layout.location.x;
+        y += node.final_layout.location.y;
+        at = node.parent;
+    }
+    (x, y, size.width, size.height)
+}
+
+// FR-L31.40 (#301): the code editor's box is the editor pane under the breadcrumb row less the
+// 8 px above the first line (FR-L31.27), and ends where the pane does, above the bottom panel: the
+// box `use_widget_box` hands the editor is the area the reader sees, so a line the editor counts
+// as on screen is drawn there. The window measured the same (pane 1054x456 at 337,135 and box
+// 1054x448 at 1440x900); this keeps the stylesheet and the pane's inline sizes from drifting.
+#[test]
+fn fr_l31_40_the_code_editor_box_is_the_pane_under_the_breadcrumb_less_the_top_room() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_styled();
+    page.click_row();
+    page.deliver(opened(3));
+    let widget = page.find_where("the code editor", |id| page.attr(id, "data-compose-widget").is_some()).expect("the code editor's box");
+    let pane = page.find("data-ed", "code-pane").expect("the editor pane");
+    let crumbs = page.find("class", "ed-crumbs").expect("the breadcrumb row");
+    let bottom = page.find("aria-label", "아래 도구 창").expect("the bottom tool window");
+    for (width, height) in [(1440.0, 900.0), (1280.0, 820.0), (1000.0, 620.0)] {
+        let _ = page.dom.layout(width, height, 1.0);
+        let (w, p, c, b) = (page_box(&page, widget), page_box(&page, pane), page_box(&page, crumbs), page_box(&page, bottom));
+        let close = |a: f32, b: f32| (a - b).abs() < 0.5;
+        let at = format!("at {width}x{height}: box {w:?}, pane {p:?}, crumbs {c:?}, bottom panel {b:?}");
+        assert!(p.3 > 0.0 && w.3 > 0.0, "laid out {at}");
+        assert!(close(p.1, c.1 + c.3), "the pane starts under the breadcrumb row {at}");
+        assert!(close(w.0, p.0) && close(w.2, p.2), "the box is the pane's width {at}");
+        assert!(close(w.1, p.1 + 8.0), "8 px above the box {at}");
+        assert!(close(w.1 + w.3, p.1 + p.3), "the box ends where the pane does {at}");
+        assert!(w.1 + w.3 <= b.1 + 0.5, "the box ends above the bottom panel {at}");
+    }
 }
 
 /// The page grid's and the status bar's boxes, as `(x, y, width, height)`, with the page laid out
@@ -817,6 +887,17 @@ fn fr_l31_32_status_badges_take_the_soft_pair_of_the_letters_colour() {
     assert!(!scm.contains(r#"r#type: "checkbox""#));
 }
 
+// FR-L31.39: every letter takes the mockup's pair (`vcs.js:19` `VCS_ST`): M orange, A green,
+// D red, R blue; untracked (U, git's `?`) joins A, C joins R, a conflict joins M.
+#[test]
+fn fr_l31_39_status_badges_follow_the_mockups_map() {
+    use crate::ui::editor_scm::{letter_color, letter_tone};
+    for (letter, tone) in [('M', "orange"), ('A', "green"), ('D', "red"), ('R', "blue"), ('C', "blue"), ('U', "green"), ('!', "orange")] {
+        assert_eq!(letter_tone(letter), tone, "{letter}");
+        assert_eq!(letter_color(letter), format!("var(--c-{tone})"), "{letter}");
+    }
+}
+
 // FR-L31.33 (#895, design review E8): the commit button is the mockup's: at least 40px high across
 // the window, 14/500 with the branch in mono, and its icon in the fill's text colour.
 #[test]
@@ -962,7 +1043,7 @@ fn toolkit_probe() {
 fn fr_l33_1_the_safe_area_arriving_after_the_first_render_moves_the_top_bar() {
     use compose_rust::protocol::HostEvent;
     use compose_rust::{EventPayload, WindowHeightClass, WindowSizeClass};
-    use crate::ui::safe_area::{current_platform, safe_area_for, SafeArea};
+    use crate::ui::safe_area::SafeArea;
     let _guard = crate::services::test_guard();
     // A toolkit Host resets the window's measurement when it is made, so it comes first.
     let mut toolkit = compose_rust::Host::new(|| Box::new(compose_rust::Recomposer::new(toolkit_probe)));
@@ -973,7 +1054,7 @@ fn fr_l33_1_the_safe_area_arriving_after_the_first_render_moves_the_top_bar() {
     assert!(page.find("aria-label", crate::ui::workspace_trust::PROMPT_TITLE).is_some(), "the trust prompt is up");
     let top = page.find("class", "ed-top").expect("the top bar");
     let before = page.attr(top, "style").unwrap_or_default();
-    assert_eq!(before, crate::ui::editor::editor_strip_padding(cfg!(target_os = "macos"), 0.0), "nothing reported yet");
+    assert_eq!(before, crate::ui::editor::editor_strip_padding(0.0, 0.0), "nothing reported yet");
 
     let lights = SafeArea { top: 28.0, leading: 78.0, trailing: 0.0 };
     toolkit
@@ -996,7 +1077,7 @@ fn fr_l33_1_the_safe_area_arriving_after_the_first_render_moves_the_top_bar() {
     page.dom.render();
     let top = page.find("class", "ed-top").expect("the top bar");
     let after = page.attr(top, "style").unwrap_or_default();
-    let expected = crate::ui::editor::editor_strip_padding(cfg!(target_os = "macos"), safe_area_for(current_platform(), lights).leading);
+    let expected = crate::ui::editor::editor_strip_padding(lights.leading, lights.trailing);
     assert_eq!(after, expected, "the top bar follows the reported safe area with the prompt up");
     assert!(page.find("aria-label", crate::ui::workspace_trust::PROMPT_TITLE).is_some(), "the prompt is still up");
     compose_rust::window::reset_window_size();

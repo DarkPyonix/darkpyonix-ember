@@ -241,13 +241,37 @@ async fn fr_t14_a_guest_credential_is_401_on_the_owner_door() {
         ("GET", format!("/api/sessions/{sid}")),
         ("GET", "/api/projects".to_string()),
         ("GET", "/api/computers".to_string()),
+        ("GET", "/api/computers/local".to_string()),
+        ("GET", format!("/api/sessions/{sid}/computer")),
     ] {
-        let (status, _) = call(&owner, m, &u, Some(&cred), Some(json!({"text": "hi"}))).await;
+        let (status, body) = call(&owner, m, &u, Some(&cred), Some(json!({"text": "hi"}))).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{m} {u}");
+        assert!(!body.to_string().contains("address"), "no computer address in a refusal: {body}");
     }
     // The guest family is not exempt on the owner door: a guest credential there is 401 too.
     let (status, _) = call(&owner, "GET", &format!("/api/guest/channels/{ch}/messages"), Some(&cred), None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "the owner door does not exempt /api/guest");
+}
+
+/// FR-L18 (#519): a computer's address (the host of its node URL) is owner data. The guest door
+/// serves no route that carries it, under the owner's paths or under `/api/guest`.
+#[tokio::test]
+async fn fr_l18_computer_address_is_not_served_on_the_guest_door() {
+    let dir = tempfile::tempdir().unwrap();
+    let fx = fixture(dir.path());
+    let (_, cred, _) = join(&fx, "Mina").await;
+    let sid = &fx.session_id;
+    for u in [
+        "/api/computers".to_string(),
+        "/api/computers/local".to_string(),
+        format!("/api/sessions/{sid}/computer"),
+        "/api/guest/computers".to_string(),
+        format!("/api/guest/sessions/{sid}/computer"),
+    ] {
+        let (status, body) = call(&fx.guest, "GET", &u, Some(&cred), None).await;
+        assert!(!status.is_success(), "GET {u} answered {status}");
+        assert!(!body.to_string().contains("address"), "GET {u}: {body}");
+    }
 }
 
 #[tokio::test]

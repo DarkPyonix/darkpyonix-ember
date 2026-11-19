@@ -615,30 +615,8 @@ pub fn tab_menu_items(tabs: &EditorTabs, path: &str) -> Vec<(TabMenuItem, bool)>
     items
 }
 
-/// Two clicks on the same target within this many milliseconds are a double-click (FR-L31.5).
-pub const DOUBLE_CLICK_MS: u64 = 500;
-
-/// Tells a double-click from two clicks out of `onclick` alone. v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward compose-rust's pointer events as oncontextmenu and ondoubleclick; its pin moves separately).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct DoubleClick {
-    last: Option<(String, u64)>,
-}
-
-impl DoubleClick {
-    /// A click on `target` at `now_ms`. Returns true when it is the second click on the same target within
-    /// [`DOUBLE_CLICK_MS`]; that pair is used up, so a third click starts over.
-    pub fn click(&mut self, target: &str, now_ms: u64) -> bool {
-        let double = self
-            .last
-            .as_ref()
-            .is_some_and(|(t, at)| t == target && now_ms.saturating_sub(*at) <= DOUBLE_CLICK_MS);
-        self.last = if double { None } else { Some((target.to_string(), now_ms)) };
-        double
-    }
-}
-
 /// Whether a key on the focused tab strip opens the tab menu: Shift+F10 or the ContextMenu key, as in
-/// Code-OSS. The key and the ⋯ menu stand in for the right-click menu. v0.0.7: #417 fixed; workaround kept until checked on a display (dioxus-compose has to forward compose-rust's pointer events as oncontextmenu and ondoubleclick; its pin moves separately).
+/// Code-OSS, beside the right-click menu (`oncontextmenu`, compose-rust#417).
 pub fn tab_menu_key(key: &str, ctrl: bool, shift: bool, alt: bool, meta: bool) -> bool {
     match key {
         "F10" => shift && !ctrl && !alt && !meta,
@@ -800,19 +778,26 @@ pub fn editor_page_size_style() -> &'static str {
     "width:100vw; height:100vh;"
 }
 
-/// The padding of the page's error message, which is drawn with no top bar above it. Under
-/// FullSize the window controls float over the page's top, so the message starts below the
-/// title strip the window reports (`strip_top`, 0 until the first report); otherwise the native
-/// title bar is outside the page and only the message's own 20px is kept.
-pub fn editor_error_padding(full_size: bool, strip_top: f32) -> String {
-    let top = if full_size { 20.0 + strip_top.max(0.0) } else { 20.0 };
+/// The padding of the page's error message, which is drawn with no top bar above it. The
+/// message starts below the title strip the window reports (`strip_top`, 0 until the first
+/// report and where the window manager draws the title bar) on every system (FR-L33).
+pub fn editor_error_padding(strip_top: f32) -> String {
+    let top = 20.0 + strip_top.max(0.0);
     format!("padding:20px; padding-top:{top}px;")
 }
 
-/// The top bar's left padding past the window controls: under FullSize the traffic lights float
-/// over its left end, so it starts after their footprint; otherwise nothing is added.
-pub fn editor_strip_padding(full_size: bool, leading: f32) -> String {
-    if full_size { format!("padding-left:{leading}px;") } else { String::new() }
+/// The top bar's padding past the window controls, exactly as the window reports them on every
+/// system (FR-L33): the leading set (macOS traffic lights) at the left, the trailing set (Windows
+/// caption buttons, a Linux desktop's own) at the right. Nothing for a zero edge.
+pub fn editor_strip_padding(leading: f32, trailing: f32) -> String {
+    let mut s = String::new();
+    if leading > 0.0 {
+        s.push_str(&format!("padding-left:{leading}px;"));
+    }
+    if trailing > 0.0 {
+        s.push_str(&format!("padding-right:{trailing}px;"));
+    }
+    s
 }
 
 /// The page grid while the bottom tool window is maximized (the mockup's `.ed.max`): the editor row
@@ -1661,7 +1646,22 @@ impl Default for Stripes {
     }
 }
 
+/// Width in px at and below which the mockup lays the left tool window over the editor island
+/// and opens with it closed (`editor.css` `@media (max-width:900px)`, `editor.js` `onHash`).
+pub const NARROW_WINDOW_PX: f32 = 900.0;
+
 impl Stripes {
+    /// The stripes a window opened `width` px wide starts with (FR-L31.41): the default, less the
+    /// left tool window when the window is narrow, because there it would cover the code. A width
+    /// not known yet (0, nothing reported and no opened size) keeps the default.
+    pub fn opening(width: f32) -> Stripes {
+        let mut s = Stripes::default();
+        if width > 0.0 && width <= NARROW_WINDOW_PX {
+            s.left = None;
+        }
+        s
+    }
+
     pub fn selected(&self, side: Side) -> Option<ToolWindow> {
         match side {
             Side::Left => self.left,
@@ -1989,6 +1989,36 @@ pub fn diff_gutter_decorations(version: u32, markers: &[DiffLineMarker]) -> comp
     compose_rust::code::GutterDecorations::new(list)
 }
 
+/// The tints over a diff's added and changed lines (FR-L31.10, compose-rust#542): one
+/// `Decoration::line_background` per run of neighbouring lines of the same kind. A removed line has
+/// no line of its own in the working text, so it keeps its gutter dot and gets no tint.
+pub fn diff_line_tints(version: u32, markers: &[DiffLineMarker]) -> Vec<compose_rust::code::Decoration> {
+    use compose_rust::code::Decoration;
+    use compose_rust::ColorRole;
+    let mut runs: Vec<(u32, u32, DiffLineKind)> = Vec::new();
+    for m in markers.iter().filter(|m| m.kind != DiffLineKind::Deleted) {
+        match runs.last_mut() {
+            Some((_, end, kind)) if *kind == m.kind && *end + 1 == m.line => *end = m.line,
+            _ => runs.push((m.line, m.line, m.kind)),
+        }
+    }
+    runs.into_iter()
+        .map(|(start, end, kind)| {
+            let role = if kind == DiffLineKind::Added { ColorRole::DiffAdded } else { ColorRole::DiffModified };
+            Decoration::line_background(version, start, end, role)
+        })
+        .collect()
+}
+
+/// The document's own decorations with the diff's line tints after them.
+pub fn with_diff_line_tints(decorations: compose_rust::code::Decorations, version: u32, markers: &[DiffLineMarker]) -> compose_rust::code::Decorations {
+    let tints = diff_line_tints(version, markers);
+    if tints.is_empty() {
+        return decorations;
+    }
+    compose_rust::code::Decorations::new(decorations.decorations().into_iter().chain(tints))
+}
+
 /// The 0-indexed line number of the first change between old and new text.
 pub fn first_diff_line(old_text: &str, new_text: &str) -> Option<u32> {
     compute_line_diffs(old_text, new_text).first().map(|m| m.line)
@@ -2110,6 +2140,29 @@ mod tests {
             let mut stripes = Stripes::default();
             assert_eq!(apply_action(action, &mut tabs, &mut stripes), is_implemented(action), "{action:?}");
         }
+    }
+
+    #[test]
+    fn fr_l31_41_a_narrow_window_opens_with_the_left_tool_window_closed() {
+        for w in [390.0, 768.0, 900.0] {
+            let s = Stripes::opening(w);
+            assert_eq!(s.selected(Side::Left), None, "{w}");
+            assert_eq!(s.selected(Side::Bottom), Some(ToolWindow::Terminal), "{w}");
+            assert_eq!(s.selected(Side::Right), None, "{w}");
+        }
+        for w in [0.0, 901.0, 1024.0, 1440.0] {
+            assert_eq!(Stripes::opening(w), Stripes::default(), "{w}");
+        }
+        assert_eq!(Stripes::default().selected(Side::Left), Some(ToolWindow::Project));
+    }
+
+    #[test]
+    fn fr_l31_41_the_window_opens_its_stripes_for_its_width() {
+        let page = include_str!("editor_workbench.rs");
+        assert!(page.contains("Stripes::opening(crate::ui::window_size::window_size_untracked().width_dp)"));
+        let lib = include_str!("../lib.rs");
+        let editor = &lib[lib.find("Separate IDE window (FR-L31)").unwrap()..lib.find("ui::cr::gallery::requested()").unwrap()];
+        assert!(editor.contains("ui::window_size::record_opened(f32::from(w), f32::from(h));"));
     }
 
     #[test]
@@ -2282,5 +2335,30 @@ mod tests {
 
         let empty = diff_gutter_decorations(1, &[]);
         assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn fr_l31_10_added_and_changed_lines_are_tinted_in_runs() {
+        use compose_rust::{ColorRole, DecorationKind};
+
+        let markers = vec![
+            DiffLineMarker { line: 0, kind: DiffLineKind::Added },
+            DiffLineMarker { line: 1, kind: DiffLineKind::Added },
+            DiffLineMarker { line: 2, kind: DiffLineKind::Modified },
+            DiffLineMarker { line: 4, kind: DiffLineKind::Deleted },
+            DiffLineMarker { line: 6, kind: DiffLineKind::Modified },
+        ];
+        let tints = diff_line_tints(3, &markers);
+        assert_eq!(tints.len(), 3, "two added lines are one run, the removed line has no tint");
+        assert!(tints.iter().all(|t| t.kind == DecorationKind::LineBackground && t.version == 3));
+        assert_eq!((tints[0].range.start.line, tints[0].range.end.line, tints[0].color), (0, 1, Some(ColorRole::DiffAdded)));
+        assert_eq!((tints[1].range.start.line, tints[1].range.end.line, tints[1].color), (2, 2, Some(ColorRole::DiffModified)));
+        assert_eq!((tints[2].range.start.line, tints[2].range.end.line, tints[2].color), (6, 6, Some(ColorRole::DiffModified)));
+
+        let own = compose_rust::code::Decorations::new([compose_rust::code::Decoration::line_background(3, 9, 9, ColorRole::DiffRemoved)]);
+        let merged = with_diff_line_tints(own.clone(), 3, &markers).decorations();
+        assert_eq!(merged.len(), 4, "the document's own decorations stay first");
+        assert_eq!(merged[0].range.start.line, 9);
+        assert_eq!(with_diff_line_tints(own.clone(), 3, &[]), own, "no change sends the same list");
     }
 }

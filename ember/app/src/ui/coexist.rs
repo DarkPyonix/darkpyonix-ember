@@ -158,6 +158,12 @@ pub struct SharedUi {
     pub owner_claim_dismissed: MutableState<Option<String>>,
     /// The update check (NFR-R2, #880), written by `self_update` from a worker.
     pub self_update: MutableState<crate::self_update::UpdateState>,
+    /// `true` while the 루틴 screen's create or edit form is open and holds unsaved changes
+    /// (FR-L25, #596), so a shell navigation away from 루틴 asks the discard question first.
+    pub routine_form_dirty: MutableState<bool>,
+    /// A shell navigation (another menu or global search) intercepted while [`routine_form_dirty`]
+    /// is true; the 루틴 screen shows the discard confirmation sheet for it (FR-L25, #596).
+    pub routine_pending_leave: MutableState<Option<crate::ui::routines::Leave>>,
     mirrors: Arc<OnceLock<DioxusMirrors>>,
 }
 
@@ -182,6 +188,8 @@ impl SharedUi {
             owner_claim: mutable_state_of(Default::default()),
             owner_claim_dismissed: mutable_state_of(None),
             self_update: mutable_state_of(crate::self_update::UpdateState::NotInstalled),
+            routine_form_dirty: mutable_state_of(false),
+            routine_pending_leave: mutable_state_of(None),
             mirrors: Arc::new(OnceLock::new()),
         }
     }
@@ -278,8 +286,10 @@ impl SharedUi {
     }
 
     /// Open the Ember 에디터 for a project in its own window (FR-L7, FR-L31).
-    /// TODO(dioxus-compose#152): once the `window` element on a shared host lands, open the
-    /// editor window in the same process instead of spawning `--editor <project> <folder>`.
+    /// TODO(dioxus-compose#161): open the editor window in the same process instead of spawning
+    /// `--editor <project> <folder>`. The `Window` element (dioxus-compose#152) is in the pin; the
+    /// shell is a Compose root and the editor an HTML page, and an HTML view inside a Compose root
+    /// aborts the real renderer (#161).
     pub fn open_editor(&self, project: String, folder: String) {
         self.open_editor_connection(project, folder, None, None, None, None, None);
     }

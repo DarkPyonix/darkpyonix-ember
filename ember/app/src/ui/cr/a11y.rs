@@ -8,8 +8,11 @@
 //! `accessible_name`, which is owned.
 
 pub const THEME: &str = "테마 전환";
+pub const SEARCH: &str = "검색";
 pub const SETTINGS: &str = "설정";
-pub const PLATFORM: &str = "플랫폼";
+pub const PLATFORM: &str = "플랫폼 미리보기 전환";
+pub const DEMO_RESET: &str = "데모 초기화";
+pub const SIDEBAR_TOGGLE: &str = "사이드바 접기/펼치기";
 pub const MENU: &str = "메뉴";
 pub const NEW_CHANNEL: &str = "새 채널";
 pub const MEMBERS: &str = "멤버";
@@ -30,6 +33,8 @@ pub const BACK: &str = "뒤로";
 /// The scroll arrows of the project screen's computer strip (FR-L26, #671).
 pub const SCROLL_LEFT: &str = "왼쪽으로 스크롤";
 pub const SCROLL_RIGHT: &str = "오른쪽으로 스크롤";
+/// The project list's search button at 900 dp and below: it opens the 팀원 검색 row (FR-L26).
+pub const OPEN_MEMBER_SEARCH: &str = "팀원 검색 열기";
 
 /// The names of the option popovers, the mockup's `aria-label`s where it has one (FR-L10.4,
 /// #888). `components::PopoverMenu` gives the box this name.
@@ -40,14 +45,20 @@ pub const PROJECT_PICKER: &str = "프로젝트 선택";
 pub const COMPUTER_PICKER: &str = "컴퓨터 선택";
 pub const MODEL_PICKER: &str = "하네스와 모델 선택";
 pub const ACCOUNT_PICKER: &str = "계정 선택";
+/// The 버전 관리 branch popover (mockup `aria-label="브랜치 전환"`).
+pub const BRANCH_PICKER: &str = "브랜치 전환";
+/// The 버전 관리 저장소 menu (mockup `aria-label="프로젝트 저장소"`).
+pub const REPO_PICKER: &str = "프로젝트 저장소";
+/// The 새 브랜치 기준 menu.
+pub const BASE_PICKER: &str = "기준 브랜치 선택";
 
 /// The reviewed Korean names of the icon-only controls outside the nav menus (those take
 /// `NavMenu::label`).
-pub fn rail_labels() -> [&'static str; 21] {
+pub fn rail_labels() -> [&'static str; 24] {
     [
-        THEME, SETTINGS, PLATFORM, MENU, NEW_CHANNEL, MEMBERS, MORE, ATTACH, EMOJI,
-        VERSION_CONTROL, PROJECT_SETTINGS, OPEN_SESSION, CLOSE, SEND, SHARE, OTHER_IDE,
-        SESSION_MENU, OPEN_SCREEN, BACK, SCROLL_LEFT, SCROLL_RIGHT,
+        THEME, SEARCH, SETTINGS, PLATFORM, DEMO_RESET, SIDEBAR_TOGGLE, MENU, NEW_CHANNEL, MEMBERS,
+        MORE, ATTACH, EMOJI, VERSION_CONTROL, PROJECT_SETTINGS, OPEN_SESSION, CLOSE, SEND, SHARE,
+        OTHER_IDE, SESSION_MENU, OPEN_SCREEN, BACK, SCROLL_LEFT, SCROLL_RIGHT,
     ]
 }
 

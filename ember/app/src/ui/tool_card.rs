@@ -2,7 +2,8 @@
 //! approval card text (#536). The compose-rust view in `ui/cr/conversation.rs` only draws them.
 //!
 //! Mockup `session.js`: an edit shows the file name, a green `+N` and a red `-N` pill and the
-//! changed lines; an approval shows the command only, titled `<컴퓨터>에서 명령을 실행할까요?`.
+//! changed lines (no context lines, no pill for a count of zero); an approval shows the command
+//! only, titled `<컴퓨터>에서 명령을 실행할까요?`, and folds into one row once it is resolved.
 
 use serde_json::Value;
 
@@ -37,6 +38,21 @@ pub struct FileDiff {
 
 /// The most changed lines a card draws; the pills still count all of them.
 pub const MAX_DIFF_LINES: usize = 40;
+
+/// The changed lines of a file change, in order, without the context around them. The mockup's
+/// edit card (`session.js` `m.diff`) lists only `+` and `-` lines, so the card draws these.
+pub fn changed_lines(d: &FileDiff) -> Vec<&DiffLine> {
+    d.lines.iter().filter(|l| !matches!(l, DiffLine::Context(_))).collect()
+}
+
+/// The count pills of a file-change card: the green `+N` and the red `-N`. A count of zero has
+/// no pill (an edit that only adds lines read `+6 -0`), unless nothing changed at all, which
+/// reads `+0`.
+pub fn count_pills(added: usize, removed: usize) -> (Option<String>, Option<String>) {
+    let plus = (added > 0 || removed == 0).then(|| format!("+{added}"));
+    let minus = (removed > 0).then(|| format!("-{removed}"));
+    (plus, minus)
+}
 
 fn base_name(path: &str) -> String {
     let p = path.trim();
@@ -211,6 +227,12 @@ fn command_of(input: &Value) -> Option<String> {
     }
 }
 
+/// Whether the approval card offers "allow always": not when the server marks the input
+/// `allow_always: false` (FR-T12, the `channel_post` call, which must not be remembered).
+pub fn offers_allow_always(input: &Value) -> bool {
+    input.get("allow_always") != Some(&Value::Bool(false))
+}
+
 /// The approval card's title and body for `tool` with `input` on `computer`.
 pub fn approval_text(computer: Option<&str>, tool: &str, input: &Value) -> ApprovalText {
     let pc = computer.map(str::trim).filter(|c| !c.is_empty()).unwrap_or(THIS_COMPUTER);
@@ -237,10 +259,15 @@ pub fn approval_text(computer: Option<&str>, tool: &str, input: &Value) -> Appro
         };
     }
     let name = if tool.trim().is_empty() { "도구" } else { tool };
+    // A server note (FR-T12: the server name is unverified) is what the person needs to read.
+    let body = match input.get("note") {
+        Some(Value::String(note)) if !note.trim().is_empty() => note.clone(),
+        _ => crate::model::json_summary(input, 200),
+    };
     ApprovalText {
         kind: ApprovalKind::Other,
         title: format!("{pc}에서 {name}을(를) 실행할까요?"),
-        body: crate::model::json_summary(input, 200),
+        body,
     }
 }
 
@@ -317,6 +344,19 @@ mod tests {
     }
 
     #[test]
+    fn fr_l5_card_lists_changed_lines_only_and_hides_a_zero_count() {
+        let out = "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,3 +1,3 @@\n fn main() {\n-    old();\n+    new();\n }\n";
+        let d = parse_unified_diff(out).unwrap();
+        assert_eq!(d.lines.len(), 4, "the model keeps the context");
+        let shown: Vec<String> = changed_lines(&d).into_iter().map(DiffLine::shown).collect();
+        assert_eq!(shown, vec!["-    old();".to_string(), "+    new();".to_string()]);
+        assert_eq!(count_pills(6, 0), (Some("+6".into()), None));
+        assert_eq!(count_pills(0, 3), (None, Some("-3".into())));
+        assert_eq!(count_pills(2, 1), (Some("+2".into()), Some("-1".into())));
+        assert_eq!(count_pills(0, 0), (Some("+0".into()), None));
+    }
+
+    #[test]
     fn fr_l5_bash_approval_shows_the_command_on_the_computer() {
         let t = approval_text(Some("작업실 맥"), "Bash", &json!({"command": "cargo test", "description": "run"}));
         assert_eq!(t.kind, ApprovalKind::Command);
@@ -340,5 +380,19 @@ mod tests {
         assert_eq!(t.title, "pc에서 WebFetch을(를) 실행할까요?");
         assert!(t.body.contains("https://e.x"));
         assert!(!t.body.contains('\n'));
+    }
+
+    /// FR-T12: a card the server marks `allow_always: false` has no always button, and a
+    /// server note is the body instead of the raw summary.
+    #[test]
+    fn fr_t12_channel_post_card_offers_allow_once_only_and_shows_the_note() {
+        assert!(offers_allow_always(&json!({"command": "ls"})));
+        assert!(offers_allow_always(&json!({"allow_always": true})));
+        assert!(!offers_allow_always(&json!({"ServerName": "ember-channels", "allow_always": false})));
+        assert!(offers_allow_always(&json!(null)));
+        let note = "서버 이름을 확인하지 못했습니다.";
+        let t = approval_text(None, "mcp__ember-channels__channel_post", &json!({"note": note, "log_reason": "unverified", "allow_always": false}));
+        assert_eq!(t.kind, ApprovalKind::Other);
+        assert_eq!(t.body, note);
     }
 }

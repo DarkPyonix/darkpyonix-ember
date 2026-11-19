@@ -453,6 +453,7 @@ async fn fr_t14_every_owner_route_is_404_on_the_guest_door() {
         "/api/computers/enrol-codes/x/deny",
         "/api/computers/local/harnesses/detect",
         "/api/computers/x/fs/read",
+        "/api/computers/x/fs/watch",
         "/api/devices",
         "/api/hub",
         "/api/hub/link",

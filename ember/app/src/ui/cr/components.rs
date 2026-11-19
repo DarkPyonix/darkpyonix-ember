@@ -15,7 +15,7 @@
 use compose_rust::ui as cu;
 use compose_rust::ui::{Modifier, Role};
 use compose_rust::{
-    Alignment, ButtonVariant, Color, ColorRole, FontRef, FontRefs, GenericFamily, IconRole,
+    Alignment, ButtonVariant, Color, ColorRole, IconRole,
     KeyEvent, OverflowWrap, Paint, ShapeRole, TextAlign, TextOverflow, TypeRole, WordBreak,
 };
 
@@ -26,30 +26,9 @@ use super::theme::Palette;
 // Fonts
 // ---------------------------------------------------------------------------------------------
 
-/// The font stack for prose (`--font`): Inter, then Apple SD Gothic Neo and Noto Sans KR for
-/// Hangul, then the system UI face. The toolkit resolves installed families by name; it has no
-/// way to bundle a font file yet, so Inter applies where it is installed.
-/// v0.0.7: #374 fixed (`Text::font` and `TextField::font` exist); workaround kept until checked on
-/// a display (wiring this stack into `Label` and `Txt` changes every label's face, and Inter and
-/// Pretendard are not bundled yet, #216), so nothing calls this yet.
-#[allow(dead_code)]
-pub fn font_refs(mono: bool) -> FontRefs {
-    if mono {
-        FontRefs::new([
-            FontRef::System("JetBrains Mono".into()),
-            FontRef::System("SF Mono".into()),
-            FontRef::System("Menlo".into()),
-            FontRef::Generic(GenericFamily::Monospace),
-        ])
-    } else {
-        FontRefs::new([
-            FontRef::System("Inter".into()),
-            FontRef::System("Apple SD Gothic Neo".into()),
-            FontRef::System("Noto Sans KR".into()),
-            FontRef::Generic(GenericFamily::SystemUi),
-        ])
-    }
-}
+// The prose and mono font stacks are the toolkit theme's: `ui::fonts::app_theme` registers the
+// bundled Inter, Pretendard and JetBrains Mono faces and sets them for every `TypeRole`
+// (compose-rust#374, Ember #216), so `Label` and `Txt` name no font of their own.
 
 /// The app palette colour standing in for a toolkit colour role, so a screen that still names
 /// a role draws the mockup's tokens in both schemes.
@@ -112,6 +91,18 @@ fn with_height(m: Modifier, height: Option<f32>) -> Modifier {
     }
 }
 
+/// The press feedback every pressable sends (FR-L34.1, #250): the mockup's calm press, a scale
+/// to 0.975 and a tint at 0.07 in light and 0.10 in dark (`core.js` `pressStart`, `style.css`
+/// `.ripple-clip`). The toolkit's own defaults are the same numbers today
+/// (`ModifierChain.kt` `PRESS_SCALE`, `PRESS_TINT_LIGHT`, `PRESS_TINT_DARK`); Ember sends them
+/// so the values are the mockup's whatever the toolkit's defaults become, and so the dark tint
+/// follows Ember's scheme. The renderer draws the tint and the keyboard focus ring in the shape
+/// the same node carries (`pressedShape`), so a pressable puts its `corner_radius`,
+/// `corner_radii` or `shape_role` on the node that takes the click (FR-L34.2, #251).
+pub fn pressable(modifier: Modifier) -> Modifier {
+    modifier.press_feedback(PRESS_SCALE, ember_theme().press_alpha())
+}
+
 /// A container that reacts to a click.
 ///
 /// This is the container's own `on_click`, which the renderer turns into a button: keyboard
@@ -126,14 +117,14 @@ pub fn Clickable(
     mut on_click: impl FnMut() + 'static,
     content: impl FnOnce(),
 ) {
-    cu::Box().modifier(modifier).alignment(alignment).on_click(move || on_click()).content(content);
+    cu::Box().modifier(pressable(modifier)).alignment(alignment).on_click(move || on_click()).content(content);
 }
 
 /// A [`Clickable`] whose child is only an icon or a glyph, named for assistive technology with
 /// `Modifier::label` (compose-rust v0.0.7, #460, #429). `label` is `&'static str` on purpose:
-/// the toolkit keeps every distinct label for the life of the program (at most 4096), so a name
-/// built from data (a routine name, a commit subject) takes a `Button`'s `accessible_name`
-/// instead.
+/// the toolkit keeps a 128-entry LRU cache of distinct labels (`compose-rust/src/ui/mod.rs`
+/// `LabelCache`, compose-rust#456, v0.0.11), so a name built from data (a routine name, a commit
+/// subject) takes a `Button`'s `accessible_name` instead.
 pub fn NamedClickable(
     label: &'static str,
     modifier: Modifier,
@@ -142,6 +133,40 @@ pub fn NamedClickable(
     content: impl FnOnce(),
 ) {
     Clickable(modifier.label(label).role(Role::Button).click_action(true), alignment, on_click, content);
+}
+
+/// A [`NamedClickable`] that cannot act now: the same painted box, named and a disabled button
+/// to assistive technology, with no click handler and so no press feedback.
+pub fn NamedDisabled(label: &'static str, modifier: Modifier, alignment: Alignment, content: impl FnOnce()) {
+    cu::Box().modifier(modifier.label(label).role(Role::Button).disabled(true)).alignment(alignment).content(content);
+}
+
+// TODO(compose-rust#831): a container
+// takes its name from `Modifier::label` only (`compose-rust/src/ui/mod.rs` `LabelCache`, a
+// 128-entry LRU cache in v0.0.11), and a `Button` with content insets its children by the design
+// system's 16 dp by default (`HostButton.kt` `labelPadding`; `Button::content_padding` is in
+// v0.0.11, compose-rust#789). So a painted box whose name is built from data (a path, a commit
+// subject, a profile name) keeps a clear `Button` over it for the name, the focus and the click.
+// When a container takes an owned name, move every caller onto [`Clickable`] with that name and
+// delete this.
+/// The control of a painted box whose accessible name is built from data: a clear toolkit
+/// `Button` exactly over its `Box` parent. It takes the parent's bounds without changing them
+/// (`Modifier::match_parent_size`, compose-rust#431), so the box keeps the size of what it
+/// paints. `expanded` says whether the menu it opens is open (FR-L10.4). A name that is one of a
+/// fixed set never comes here: it goes on the painted box itself through [`NamedClickable`].
+pub fn DataNamedOverlay(name: &str, enabled: bool, expanded: Option<bool>, on_click: impl FnMut() + 'static) {
+    let m = Modifier::new().match_parent_size();
+    let m = match expanded {
+        Some(open) => m.expanded(open),
+        None => m,
+    };
+    cu::Button(name)
+        .accessible_name(name)
+        .enabled(enabled)
+        .variant(ButtonVariant::Text)
+        .color(Paint::Literal(Color::argb(0)))
+        .modifier(m)
+        .on_click(on_click);
 }
 
 /// The label of a copy button. The button puts text the screen already holds on the clipboard
@@ -443,6 +468,8 @@ pub struct PopRow {
     pub danger: bool,
     /// The title is an address, set in the mono face at 12 (`.sdrop-i .mono`).
     pub mono: bool,
+    /// The row is a loading line: the app's spinner sits where the icon goes (FR-L18, #519).
+    pub spinner: bool,
 }
 
 /// What a [`PopoverMenu`] shows.
@@ -460,14 +487,15 @@ pub struct PopMenu<'a> {
 }
 
 /// An option menu hanging from the control that opens it (FR-L10.4, #888): the toolkit
-/// `Popover` (compose-rust v0.0.10) with `anchor` as its first child, below the control and
+/// `Popover` (compose-rust v0.0.11) with `anchor` as its first child, below the control and
 /// lined up with `menu.align`. Escape and a press outside call `on_dismiss`; the renderer moves
 /// the box inside the window and gives focus back to the control when it closes
 /// (`HostPopover.kt` `PopoverContent`). A row tap calls `on_dismiss` and then `on_choose(i)`.
 /// `footer` is drawn under a line below the rows (`.sdrop-f`). At 560 and below a mode menu is a
 /// bottom sheet with the same rows ([`pop_presentation`]).
-/// Not built: arrow keys between rows and focus on the current row when the menu opens
-/// (TODO(compose-rust#504): only Enter reaches the Host).
+/// (TODO(compose-rust#810, in v0.0.11): `HostPopover.kt` moves focus between `Role::MenuItem`
+/// rows with the arrow keys and focuses the `selected(true)` row when the popover opens, and
+/// `Modifier::has_popup(true)` marks the control; waits for a display check.)
 pub fn PopoverMenu(
     open: bool,
     menu: PopMenu<'_>,
@@ -647,7 +675,10 @@ pub fn pop_anchor_weight(weight: Option<f32>, modifier: Modifier) -> Modifier {
 }
 
 /// The body of a [`PopExtra::plain_sheet`]: the head and the padded rows of the popover box,
-/// named as the box is, with no title bar above it.
+/// with no title bar above it. The column itself says nothing to assistive technology: named
+/// as a menu, the macOS tree turned it into one static text (`value=menu`) and dropped every
+/// row under it at 390 (review st, A FAIL 1), so the rows sit straight in the sheet as the old
+/// option sheet's did, each a named menu item that says whether it is the current one.
 fn PopPlainSheetBody(
     menu: &PopMenu<'_>,
     m: &PopMetrics,
@@ -655,7 +686,7 @@ fn PopPlainSheetBody(
     on_dismiss: impl FnMut() + Clone + 'static,
     on_choose: impl FnMut(usize) + Clone + 'static,
 ) {
-    cu::Column().modifier(Modifier::new().fill_max_width().role(Role::Menu).label(menu.name)).content(|| {
+    cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
         if !menu.head.is_empty() {
             PopHead(menu.kind, menu.head, menu.sub, m);
         }
@@ -692,19 +723,30 @@ fn PopRowView(r: &PopRow, kind: PopKind, m: &PopMetrics, on_click: impl FnMut() 
             cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
                 // The side padding, and the row's minimum height.
                 cu::Spacer().modifier(Modifier::new().width(m.row_pad.1).height(m.row_min_h));
-                if let Some(svg) = r.icon {
+                if r.spinner {
+                    super::compat::Spinner(12.0);
+                    cu::Spacer().modifier(Modifier::new().width(m.row_gap));
+                } else if let Some(svg) = r.icon {
                     super::shell::NavIcon(svg, icon_c.to_argb(), 16.0);
                     cu::Spacer().modifier(Modifier::new().width(m.row_gap));
                 }
                 // Zero wide and weighted, so a long description wraps instead of widening the row.
                 cu::Column().spacing(2.0).modifier(Modifier::new().width(0.0).weight(1.0)).content(|| {
                     cu::Spacer().modifier(Modifier::new().height(m.row_pad.0 - 2.0));
-                    cu::Row().spacing(6.0).alignment(Alignment::CenterStart).content(|| {
-                        if r.mono {
-                            MonoLabel(&r.title, Fs::Xs, Weight::Regular, Some(paint(title_c)));
-                        } else {
-                            Label(&r.title, Fs::Md, Weight::Semibold, Some(paint(title_c)), Some(1));
-                        }
+                    cu::Row().spacing(6.0).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                        // With a badge the title is zero wide and weighted, so the badge keeps its
+                        // own width at the row's end (the session model menu's one row squeezed
+                        // 준비 중 to 준비... before), and the title wraps to a second line rather
+                        // than being cut (review st, A FAIL 2: "실행 중인 세션의 모델은 바꿀 수..."
+                        // in the 340 wide menu).
+                        let title_mod = if r.badge.is_some() { Modifier::new().width(0.0).weight(1.0) } else { Modifier::new() };
+                        cu::Box().modifier(title_mod).content(|| {
+                            if r.mono {
+                                MonoLabel(&r.title, Fs::Xs, Weight::Regular, Some(paint(title_c)));
+                            } else {
+                                Label(&r.title, Fs::Md, Weight::Semibold, Some(paint(title_c)), Some(pop_title_lines(r)));
+                            }
+                        });
                         if let Some((text, tone)) = &r.badge {
                             Pill(text, *tone, true);
                         }
@@ -722,6 +764,12 @@ fn PopRowView(r: &PopRow, kind: PopKind, m: &PopMetrics, on_click: impl FnMut() 
             });
         },
     );
+}
+
+/// How many lines a row's title may take: two beside a badge, where the title has only what the
+/// badge leaves, one otherwise.
+pub fn pop_title_lines(r: &PopRow) -> u32 {
+    if r.badge.is_some() { 2 } else { 1 }
 }
 
 /// `.sdrop-f`: 4 above, a line, then the caller's controls padded 10.
@@ -823,6 +871,23 @@ pub fn MonoLabel(text: &str, fs: Fs, weight: Weight, color: Option<Paint>) {
     );
 }
 
+/// One line in the mono face, cut with an ellipsis (the visible name of [`NameThenPillFace`]).
+fn MonoLine(text: &str, fs: Fs, weight: Weight, color: Option<Paint>) {
+    let color = color.unwrap_or_else(|| paint(ember_theme().palette.text));
+    drop(
+        cu::Text(text)
+            .word_break(WordBreak::KeepAll)
+            .type_role(TypeRole::Mono)
+            .font_size(fs.size())
+            .line_height(fs.line_height())
+            .font_weight(weight.value())
+            .letter_spacing(fs.letter_spacing())
+            .color(color)
+            .max_lines(1)
+            .overflow(TextOverflow::Ellipsis),
+    );
+}
+
 /// Text for screens that still name a toolkit type role: the role maps to a step of the scale,
 /// and a role colour maps to its token in the current scheme.
 pub fn Txt(
@@ -843,8 +908,7 @@ pub fn Txt(
     };
     let mut t = cu::Text(text).word_break(WordBreak::KeepAll);
     if mono {
-        // The theme's monospace face. v0.0.7: #374 fixed (`Text::font`); the bundled font stack
-        // waits for the fonts themselves (#216), see `font_refs`.
+        // The theme's monospace face: the bundled JetBrains Mono stack (`ui::fonts::mono_font`).
         t = t.type_role(TypeRole::Mono);
     }
     let mut t = t
@@ -891,10 +955,6 @@ pub struct FieldOptions {
     /// also counts towards the horizontal one. A framed field defaults to [`FIELD_INSET`]
     /// ([`FIELD_INSET_MULTILINE`] when multiline) and takes this in its place.
     pub inset: Option<(f32, f32)>,
-    /// A single-line field whose hint can be a long value (a remembered path or model): Ember
-    /// draws the hint itself on one line with an ellipsis, under the field while it is empty,
-    /// because the toolkit's placeholder always wraps (FR-L10.1, #878). Ignored when multiline.
-    pub one_line_hint: bool,
     pub height: Option<f32>,
     pub corner_radius: Option<f32>,
     pub background: Option<Paint>,
@@ -909,6 +969,13 @@ pub struct FieldOptions {
     pub on_focus_gained: Option<Box<dyn FnMut()>>,
     pub on_focus_lost: Option<Box<dyn FnMut()>>,
     pub on_key_down: Option<Box<dyn FnMut(KeyEvent)>>,
+    /// Binds the field to a focus handle, so `handle.request()` puts the caret in it
+    /// (compose-rust#410, `TextField::focus_handle`).
+    pub focus: Option<cu::FocusHandle>,
+    /// The field's name for assistive technology when the placeholder is an example rather than
+    /// a name (the branch menu's `feat/새-브랜치` is "새 브랜치 이름"). `&'static str` for the
+    /// reason [`NamedClickable`] gives.
+    pub label: Option<&'static str>,
 }
 
 /// The type step of a field's text and placeholder when no role is named (style.css `.field`).
@@ -1019,62 +1086,21 @@ fn BareField(o: FieldOptions) {
             if side > 0.0 {
                 cu::Spacer().modifier(Modifier::new().width(side));
             }
-            if o.one_line_hint && !multiline {
-                OneLineHintField(o);
-            } else {
-                FieldNode(o, inner);
-            }
+            FieldNode(o, inner);
             if side > 0.0 {
                 cu::Spacer().modifier(Modifier::new().width(side));
             }
         });
 }
 
-/// A single-line field with its hint drawn by Ember: a one-line `muted` label that ends in an
-/// ellipsis, under the field, while the field is empty (FR-L10.1, #878). The toolkit draws its
-/// placeholder with no line limit, so a long path wrapped onto a second line the 40 px field
-/// clipped. TODO(compose-rust): a placeholder line limit on `TextField` (no issue yet) lets the
-/// toolkit draw it again.
-fn OneLineHintField(o: FieldOptions) {
-    use compose_rust::runtime::{mutable_state_of, remember};
-    let mut o = o;
-    let p = ember_theme().palette;
-    let starts_empty = o.text.as_deref().map_or(true, str::is_empty);
-    let empty = remember(|| mutable_state_of(starts_empty));
-    let hint = std::mem::take(&mut o.placeholder);
-    let mut user = o.on_value_change.take();
-    let typed = empty.clone();
-    o.on_value_change = Some(Box::new(move |t: String| {
-        typed.set(t.is_empty());
-        if let Some(f) = user.as_mut() {
-            f(t);
-        }
-    }));
-    let show = empty.get();
-    // The desktop renderer gives a weighted child at least its narrowest width, and a one-line
-    // label reports its whole line there: the hint took 708 of the 696 px share (r5 captures,
-    // 1440 and 390), ran under the trailing 12 px inset to the frame and showed no ellipsis.
-    // A zero width makes the column's narrowest width 0, so it takes its share; the box inside
-    // fills it and clips what is left.
-    cu::Column().modifier(Modifier::new().weight(1.0).width(0.0)).content(move || {
-        cu::Box()
-            .alignment(Alignment::CenterStart)
-            .modifier(Modifier::new().fill_max_width().clip(true))
-            .content(move || {
-                if show && !hint.is_empty() {
-                    // `WrapLabel` so a path with no space ellipsises inside the box instead of
-                    // asking for its whole width.
-                    WrapLabel(&hint, FIELD_FONT, Weight::Regular, Some(paint(p.muted)), Some(1));
-                }
-                FieldNode(o, Modifier::new().fill_max_width());
-            });
-    });
-}
-
 /// The toolkit field with every option but the frame, which `modifier` carries.
 fn FieldNode(o: FieldOptions, modifier: Modifier) {
     // compose-rust#444 (v0.0.8): the placeholder and the typed text break Korean only at spaces,
     // and a long token such as a path or a URL breaks inside itself rather than clipping.
+    let modifier = match o.label {
+        Some(name) => modifier.label(name),
+        None => modifier,
+    };
     let mut f = cu::TextField()
         .modifier(modifier)
         .word_break(WordBreak::KeepAll)
@@ -1114,6 +1140,9 @@ fn FieldNode(o: FieldOptions, modifier: Modifier) {
     }
     if let Some(h) = o.on_key_down {
         f = f.on_key_down(h);
+    }
+    if let Some(h) = &o.focus {
+        f = f.focus_handle(h);
     }
     drop(f);
 }
@@ -1193,6 +1222,9 @@ pub fn name_then_pill_width(room: f32, natural: f32, pill: f32, gap: f32) -> Opt
 /// pill and whatever follows the row stay on screen (CSS `flex:0 1 auto;min-width:0` on the
 /// name and `flex:none` on the pill; `.detail .topbar` in the mockup). The pill never shrinks.
 ///
+/// TODO(compose-rust#778, after v0.0.11): the measuring below goes when the pin has a weight that
+/// leaves a child its own size.
+///
 /// The toolkit has no weight that leaves a child its own size (Compose `weight(fill = false)`)
 /// and no maximum width: a weighted child fills its share, and unweighted ones are measured
 /// first, in order, each with what the ones before it left (compose-rust
@@ -1205,6 +1237,19 @@ pub fn name_then_pill_width(room: f32, natural: f32, pill: f32, gap: f32) -> Opt
 /// its own width and the name is cut to the remainder. The gap is a spacer of its own, not row
 /// spacing, so the trailing spacer costs no second gap.
 pub fn NameThenPill(name: &str, fs: Fs, weight: Weight, color: Option<Paint>, gap: f32, pill: impl FnOnce()) {
+    NameThenPillFace(name, fs, weight, color, false, gap, pill);
+}
+
+/// [`NameThenPill`] with the name in the mono face when `mono` is true (a resolved approval's
+/// command, `.cmd code`, review st B): the measuring copy and the visible name both use the
+/// face, so the measured width is the drawn one.
+pub fn NameThenPillFace(name: &str, fs: Fs, weight: Weight, color: Option<Paint>, mono: bool, gap: f32, pill: impl FnOnce()) {
+    NameThenPillLines(name, fs, weight, color, mono, 1, gap, pill);
+}
+
+/// [`NameThenPillFace`] whose name may wrap to `lines` lines when it does not fit beside the
+/// pill (a model name in the 1280 model table, FR-L20b, #886), instead of ending in "...".
+pub fn NameThenPillLines(name: &str, fs: Fs, weight: Weight, color: Option<Paint>, mono: bool, lines: u32, gap: f32, pill: impl FnOnce()) {
     let room = compose_rust::runtime::remember_node_size();
     let natural = compose_rust::runtime::remember_node_size();
     let pill_size = compose_rust::runtime::remember_node_size();
@@ -1222,9 +1267,10 @@ pub fn NameThenPill(name: &str, fs: Fs, weight: Weight, color: Option<Paint>, ga
                 cu::Box().modifier(Modifier::new().observe_size_every_dp(natural.token())).content(|| {
                     // The measuring copy: the name's own font, clear ink, out of the
                     // accessibility tree (a `hidden` container still exposes its text).
+                    let copy = cu::Text(name).word_break(WordBreak::KeepAll);
+                    let copy = if mono { copy.type_role(TypeRole::Mono) } else { copy };
                     drop(
-                        cu::Text(name)
-                            .word_break(WordBreak::KeepAll)
+                        copy
                             .font_size(fs.size())
                             .line_height(fs.line_height())
                             .font_weight(weight.value())
@@ -1241,7 +1287,11 @@ pub fn NameThenPill(name: &str, fs: Fs, weight: Weight, color: Option<Paint>, ga
                     None => Modifier::new().weight(1.0).width(0.0),
                 };
                 cu::Box().alignment(Alignment::CenterStart).modifier(name_box).content(|| {
-                    Label(name, fs, weight, color, Some(1));
+                    if mono {
+                        MonoLine(name, fs, weight, color);
+                    } else {
+                        Label(name, fs, weight, color, Some(lines));
+                    }
                 });
                 cu::Spacer().modifier(Modifier::new().width(gap));
                 // No weight and no width: the pill is as wide as its content, always.
@@ -1380,19 +1430,54 @@ pub fn AppButton(
         // label style (about 17/600). compose-rust v0.0.7 sends both only when they are set.
         .font_size(s.fs.size())
         .font_weight(s.weight.value())
-        .modifier(
+        .modifier(pressable(
             Modifier::new()
                 .fill_max_width_if(fill_max_width)
                 .height(s.height)
                 .background(paint(s.fill))
                 .border(1.0, paint(s.border))
                 .shape_role(ShapeRole::Full),
-        )
+        ))
         .on_click(on_click);
+    // With an icon the renderer draws the text beside the glyph and the button itself had no
+    // name (review st, E: the branch menu's 만들기 was `AXButton desc=` with a separate text).
     if let Some(i) = icon {
-        b = b.icon(i);
+        b = b.icon(i).accessible_name(text);
     }
     drop(b);
+}
+
+/// An [`AppButton`] that opens a menu: the same pill, and it says whether the menu is open
+/// (`Modifier::expanded`, FR-L10.4). Its text is its accessible name.
+pub fn AppMenuButton(
+    text: &str,
+    kind: ButtonKind,
+    small: bool,
+    enabled: bool,
+    fill_max_width: bool,
+    expanded: bool,
+    on_click: impl FnMut() + 'static,
+) {
+    let theme = ember_theme();
+    let s = button_style_for(kind, small, enabled, theme.palette);
+    drop(
+        cu::Button(text)
+            .enabled(enabled)
+            .variant(ButtonVariant::Text)
+            .color(paint(s.text))
+            .font_size(s.fs.size())
+            .font_weight(s.weight.value())
+            .modifier(pressable(
+                Modifier::new()
+                    .fill_max_width_if(fill_max_width)
+                    .height(s.height)
+                    .background(paint(s.fill))
+                    .border(1.0, paint(s.border))
+                    .shape_role(ShapeRole::Full)
+                    .expanded(expanded),
+            ))
+            .on_click(on_click),
+    );
 }
 
 /// A pill that is one choice of several, the mockup's `.seg button`: the chosen one is `ink`,
@@ -1503,7 +1588,21 @@ pub fn IconButton(icon: IconRole, small: bool, on_click: impl FnMut() + 'static)
         .icon(icon)
         .color(paint(theme.palette.text_2))
         .variant(ButtonVariant::Text)
-        .modifier(ring)
+        .modifier(pressable(ring))
+        .on_click(on_click);
+}
+
+/// The phone's form of a primary button: a 40 px `ink` circle with the toolkit glyph in
+/// `ink_text` and no border (the mockup hides a primary button's label at 560 px and below,
+/// `.lbl{display:none}`). The files screen's 보내기 and the project screen's 새 팀원 use it; each
+/// built the same button by hand, outside [`pressable`] (FR-L34.5, #250).
+pub fn InkIconButton(icon: IconRole, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    cu::Button("")
+        .icon(icon)
+        .variant(ButtonVariant::Text)
+        .color(paint(p.ink_text))
+        .modifier(pressable(Modifier::new().size(H_BTN, H_BTN).background(paint(p.ink)).shape_role(ShapeRole::Full)))
         .on_click(on_click);
 }
 
@@ -1556,12 +1655,12 @@ pub fn PickChip(
     let mut b = cu::Button(text)
         .variant(ButtonVariant::Text)
         .color(paint(theme.palette.text_2))
-        .modifier(
+        .modifier(pressable(
             Modifier::new()
                 .height(height)
                 .background(paint(fill))
                 .shape_role(ShapeRole::Full),
-        )
+        ))
         .on_click(on_click);
     if let Some(i) = icon {
         b = b.icon(i);
@@ -1621,8 +1720,9 @@ pub fn EmberCardSized(
         .border(1.0, paint(border))
         .corner_radius(CORNER_LG);
     // A Box rather than `Card`, whose design-system shape ignores `corner_radius`.
-    // TODO(compose-rust): the mockup's 16/20 padding is asymmetric; `Modifier.padding` is
-    // uniform, so 16 is used on all sides unless the caller passes one.
+    // TODO(compose-rust#826): the mockup's 16/20 padding is asymmetric and `Modifier::padding`
+    // is uniform, so 16 is used on all sides unless the caller passes one. The side spacers go
+    // when the toolkit takes a padding per side.
     // The 4 dp spacers raise the uniform 16 to the mockup's 20 on the sides (`--pad-card`).
     let side = if padding.is_some() { 0.0 } else { PAD_CARD_H - PAD_CARD_V };
     cu::Box().modifier(m.padding(padding.unwrap_or(PAD_CARD_V))).content(|| {
@@ -1649,7 +1749,8 @@ pub fn InsetPanelSized(fill_max_width: bool, fill_max_height: bool, content: imp
     if fill_max_height {
         m = m.fill_max_height();
     }
-    // TODO(compose-rust): the mockup's 12/16 padding is asymmetric; 12 on all sides for now.
+    // TODO(compose-rust#826): the mockup's 12/16 padding is asymmetric; 12 on all sides and the
+    // 4 dp spacers below until the toolkit takes one per side.
     let panel = cu::Box().modifier(m.background(paint(theme.palette.surface_2)).corner_radius(CORNER_MD).padding(PAD_ROW_V));
     let panel = if fill_max_height { panel.alignment(Alignment::CenterStart) } else { panel };
     panel
@@ -1711,6 +1812,27 @@ pub(crate) fn sheet_wraps_content(window_width_dp: f32) -> bool {
     sheet_presentation(window_width_dp, false) == SheetPresentation::Bottom
 }
 
+/// Whether a sheet is the whole window at this width (FR-L32.1, FR-L33): the one boundary every
+/// full-screen geometry asks, so a sheet's own width, height and strip agree with its presentation.
+pub(crate) fn sheet_is_full_screen(window_width_dp: f32, monitor: bool) -> bool {
+    sheet_presentation(window_width_dp, monitor) == SheetPresentation::FullScreen
+}
+
+/// The strip a full-screen sheet leaves above its header for the window's own buttons (FR-L33):
+/// where the sheet is the whole window (the monitor presentation at 560 and below) it starts at
+/// the window's top edge, under the macOS traffic lights, so it reserves the height they cover,
+/// as the bottom-tab shell does above every screen (`safe_area::title_strip_height`). A bottom
+/// sheet or a dialog sits clear of them and reserves nothing, and so does a zero report (macOS
+/// full screen, FR-L33.2). [`EmberSheetSized`] sends it before the shared header; a sheet with no
+/// shared title draws its own header and reserves the same strip through it (`vcs_sheet_top_inset`).
+pub(crate) fn full_screen_sheet_top_inset(window_width_dp: f32, monitor: bool, area: crate::ui::safe_area::SafeArea) -> f32 {
+    if sheet_is_full_screen(window_width_dp, monitor) {
+        crate::ui::safe_area::title_strip_height(area, true)
+    } else {
+        0.0
+    }
+}
+
 /// The sheet header and the separator under it (`SheetHeader` and `cu::Separator`), FR-L32.1.
 pub(crate) const SHEET_HEADER_CHROME_H: f32 = SHEET_HEADER_H + 1.0;
 
@@ -1721,14 +1843,24 @@ pub(crate) const SHEET_FOOTER_H: f32 = 1.0 + SP[2] + H_CTL + SP[4];
 pub(crate) const SHEET_BOTTOM_MAX_FRACTION: f32 = 0.85;
 
 /// The tallest a sheet may be (`.sheet` in the mockup): 85 percent of the window for a bottom
-/// sheet, the whole window for the full-screen monitor, and the window less 32 dp for a dialog.
+/// sheet, the whole window for the full-screen monitor, and for a dialog the window less 32 dp,
+/// or less the traffic lights' strip above and below where there is one ([`dialog_max_height`]).
 pub(crate) fn sheet_max_height(window_width_dp: f32, window_height_dp: f32, monitor: bool) -> f32 {
     let h = window_height_dp.max(0.0);
     match sheet_presentation(window_width_dp, monitor) {
         SheetPresentation::Bottom => h * SHEET_BOTTOM_MAX_FRACTION,
         SheetPresentation::FullScreen => h,
-        SheetPresentation::Dialog => (h - 32.0).max(0.0),
+        SheetPresentation::Dialog => dialog_max_height(h, crate::ui::safe_area::safe_area()),
     }
+}
+
+/// The tallest a centred dialog may be (FR-L33): the window less 16 dp above and below, and,
+/// where the window's own buttons cover a top strip (the macOS traffic lights), less that strip
+/// above and below, so the dialog's top edge and its header stay below the strip (review sf: the
+/// monitor dialog at 561 and 1440 put "이 컴퓨터" under the lights). A zero report changes nothing.
+pub(crate) fn dialog_max_height(window_height_dp: f32, area: crate::ui::safe_area::SafeArea) -> f32 {
+    let margin = crate::ui::safe_area::title_strip_height(area, true).max(16.0);
+    (window_height_dp.max(0.0) - 2.0 * margin).max(0.0)
 }
 
 /// The body height used while the window height is unknown (not yet reported).
@@ -1747,15 +1879,32 @@ pub(crate) fn sheet_body_max_height(window_width_dp: f32, window_height_dp: f32,
     if window_height_dp <= 0.0 {
         return SHEET_BODY_UNKNOWN_H;
     }
-    (sheet_max_height(window_width_dp, window_height_dp, monitor) - chrome_h).max(0.0)
+    let room = sheet_bottom_room(window_width_dp, monitor);
+    (sheet_max_height(window_width_dp, window_height_dp, monitor) - chrome_h - room).max(0.0)
+}
+
+/// The room a bottom sheet keeps under its last row for the phone's gesture bar or home
+/// indicator (`env(safe-area-inset-bottom)` in the mockup, FR-L28.4). compose-rust v0.0.11
+/// reports no bottom safe area (`WindowSafeArea` has top, leading and trailing only) and its
+/// `Sheet` does not pad for the navigation bar, so a fixed phone value is used on every system.
+pub const SHEET_PHONE_BOTTOM_ROOM: f32 = 24.0;
+
+/// [`SHEET_PHONE_BOTTOM_ROOM`] for a bottom sheet, 0 for a dialog or the full-screen monitor.
+pub(crate) fn sheet_bottom_room(window_width_dp: f32, monitor: bool) -> f32 {
+    if sheet_presentation(window_width_dp, monitor) == SheetPresentation::Bottom {
+        SHEET_PHONE_BOTTOM_ROOM
+    } else {
+        0.0
+    }
 }
 
 /// The 32 px round close button of a sheet header, with the mockup's line icon.
 /// Its accessible name is "닫기" (compose-rust v0.0.7, #460).
-/// v0.0.7: #476 fixed (containers take `on_key_down`, and `Batch::request_focus` exists);
-/// workaround kept until checked on a display (FR-L32, #502: that Escape reaches the modal's
-/// `on_dismiss`). Ember passes the same close callback (guarded where a guard exists) to the
-/// modal's `on_dismiss`, so Escape closes every sheet once the renderer delivers it.
+/// compose-rust v0.0.11 registers every open `Dialog`, `Sheet` and `Popover` on
+/// `OverlayFocusStack` and delivers Escape to the top-most open modal's `on_dismiss`
+/// (FR-L32, #502; not yet verified on a display). Ember passes the same close callback
+/// (guarded where a guard exists) to the modal's `on_dismiss`, so Escape closes every sheet
+/// and dialog, top-most first.
 pub fn CloseButton(on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     NamedClickable(
@@ -1822,27 +1971,39 @@ pub fn EmberSheetSized(
 ) {
     let theme = ember_theme();
     // The mockup's `.modal` scrim, rgba(0, 0, 0, 0.3), set on every presentation (compose-rust#384,
-    // v0.0.10 `ModalScope::scrim`). The layered card shadow (#214) replaces the Material tint ring that `elevation` painted.
+    // v0.0.11 `ModalScope::scrim`). The layered card shadow (#214) replaces the Material tint ring that `elevation` painted.
     // Explicit zero padding suppresses the renderer dialog's theme padding, which otherwise
     // adds space around the frame and prevents a full-screen sheet.
     let modifier = with_shadows(Modifier::new().padding(0.0), theme.shadow_sm()).background(paint(theme.palette.surface));
     // `.sheet.card` (FR-L32, #583): the 1 px `line` border is what separates a dark sheet from
     // the dimmed page. The full-screen monitor has none (`border:0` at 560 px and below).
-    let framed = modifier.border(1.0, paint(theme.palette.line));
+    let framed = modifier.clone().border(1.0, paint(theme.palette.line));
     let dismiss = on_dismiss.clone();
+    let window = crate::ui::window_size::current_window_size();
+    let presentation = sheet_presentation(window.width_dp, monitor);
+    let top_inset = full_screen_sheet_top_inset(window.width_dp, monitor, crate::ui::safe_area::safe_area());
+    let strip_bg = theme.palette.surface;
+    let bottom_room = sheet_bottom_room(window.width_dp, monitor);
     // An empty title draws no header: the share sheet is the mockup's `.fl-share`, which has
     // none and puts its close button in its first card (FR-L27.7).
     let body = move || {
         cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
             if !title.is_empty() {
+                if top_inset > 0.0 {
+                    // FR-L33: the full-screen sheet's header starts below the traffic lights
+                    // (review ba D: "이 컴퓨터" sat under them at 390).
+                    cu::Spacer().modifier(Modifier::new().fill_max_width().height(top_inset).background(paint(strip_bg)));
+                }
                 SheetHeader(title, dismiss, actions);
                 cu::Separator(Some(paint(theme.palette.line)));
             }
             content();
+            if bottom_room > 0.0 {
+                // FR-L28.4: the last row stays above the gesture bar.
+                cu::Spacer().modifier(Modifier::new().fill_max_width().height(bottom_room));
+            }
         });
     };
-    let window = crate::ui::window_size::current_window_size();
-    let presentation = sheet_presentation(window.width_dp, monitor);
     if presentation == SheetPresentation::Bottom {
         // compose-rust#445 (v0.0.9): the sheet is as tall as its content up to 85 percent of the
         // window, and taller content scrolls inside it, so a short sheet wraps its content.
@@ -1948,6 +2109,12 @@ pub fn search_field_offset() -> f32 {
 /// `text`); workaround kept until checked on a display (the bare field inside Ember's own pill
 /// must be compared with the mockup before the frame moves onto the field).
 pub fn SearchField(placeholder: &str, height: f32, on_change: impl FnMut(String) + 'static) {
+    SearchFieldFocus(placeholder, height, None, on_change);
+}
+
+/// [`SearchField`] bound to a focus handle: a search row that opens on a tap asks for the focus
+/// through it, so the user types at once (compose-rust#410).
+pub fn SearchFieldFocus(placeholder: &str, height: f32, focus: Option<cu::FocusHandle>, on_change: impl FnMut(String) + 'static) {
     let p = ember_theme().palette;
     let placeholder = placeholder.to_string();
     let on_change = std::rc::Rc::new(std::cell::RefCell::new(Some(on_change)));
@@ -1978,6 +2145,7 @@ pub fn SearchField(placeholder: &str, height: f32, on_change: impl FnMut(String)
                 weight: Some(1.0),
                 placeholder: placeholder.clone(),
                 on_value_change: on_change.borrow_mut().take().map(|f| Box::new(f) as Box<dyn FnMut(String)>),
+                focus: focus.clone(),
                 ..Default::default()
             });
             // `.searchbox` padding 0 16: typed text stops short of the round end.
@@ -2256,53 +2424,39 @@ mod tests {
     }
 
     #[test]
-    fn fr_l10_1_one_line_hint_is_an_ellipsised_label_under_an_empty_field() {
-        // #878: the 새 세션 folder hint (a long path) wrapped onto a clipped second line.
+    fn fr_l10_1_one_line_hint_is_the_toolkit_placeholder() {
+        // compose-rust#786 (v0.0.11): a single-line TextField keeps its placeholder on one line
+        // with an ellipsis in the renderer, so the placeholder is sent directly to the field and
+        // no separate label is drawn under it.
         let nodes = emitted_nodes(|| {
             EmberField(FieldOptions {
                 fill_max_width: true,
-                one_line_hint: true,
                 placeholder: "/Users/someone/work/a-very-long-folder/with/many/parts".to_string(),
                 ..Default::default()
             })
         });
         let field = the(&nodes, "TextField");
         assert!(
-            !field.props.iter().any(|p| p.starts_with("Placeholder=") && p.contains("/Users")),
-            "the toolkit placeholder is not sent: {:?}",
+            field.props.iter().any(|p| p == "Placeholder=String(\"/Users/someone/work/a-very-long-folder/with/many/parts\")"),
+            "the toolkit placeholder is sent on the field: {:?}",
             field.props
         );
-        let hint = nodes
-            .iter()
-            .find(|n| n.widget == "Text" && n.props.iter().any(|p| p.contains("/Users/someone")))
-            .expect("the hint label");
-        assert!(hint.props.iter().any(|p| p == "MaxLines=Integer(1)"), "{:?}", hint.props);
-        assert!(hint.props.iter().any(|p| p.starts_with("Overflow=")), "{:?}", hint.props);
-        // The hint and the field share one box, the hint first so the field is on top.
-        let stack = parent_of(&nodes, field);
-        assert_eq!(stack.widget, "Box");
-        assert!(stack.mods.iter().any(|m| m.starts_with("Clip")), "{:?}", stack.mods);
-        assert_eq!(hint.parent, Some(stack.id));
-        // The share of the row is taken by a column (#878: a weighted Box overran the inset).
-        let share = parent_of(&nodes, stack);
-        assert_eq!(share.widget, "Column");
-        assert!(share.mods.iter().any(|m| m == "Weight(1.0)"), "{:?}", share.mods);
-        assert!(share.mods.iter().any(|m| m == "Width(0.0)"), "no narrowest width: {:?}", share.mods);
-        assert!(hint.id < field.id, "the hint is under the field");
-        // A field that starts with text shows no hint.
-        let nodes = emitted_nodes(|| {
-            EmberField(FieldOptions { one_line_hint: true, placeholder: "힌트".into(), text: Some("값".into()), ..Default::default() })
-        });
-        assert!(!nodes.iter().any(|n| n.widget == "Text" && n.props.iter().any(|p| p.contains("힌트"))));
+        assert!(
+            !nodes.iter().any(|n| n.widget == "Text"),
+            "no stand-in hint label is drawn under the field"
+        );
+        let production = include_str!("components.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(!production.contains(&["OneLine", "HintField"].concat()));
+        assert!(!production.contains(concat!("TODO(compose-rust#", "786")));
     }
 
     #[test]
-    fn fr_l10_1_new_session_long_hints_stay_on_one_line() {
+    fn fr_l10_1_new_session_long_hints_are_the_field_placeholder() {
         let src = include_str!("new_session.rs");
         for ph in ["\"/path/to/project\"", "\"에이전트 기본값\""] {
             let at = src.find(ph).unwrap_or_else(|| panic!("{ph}"));
             let opts = &src[src[..at].rfind("EmberField(FieldOptions {").expect("field")..at];
-            assert!(opts.contains("one_line_hint: true"), "{ph}: {opts}");
+            assert!(!opts.contains("one_line_hint"), "{ph}: {opts}");
         }
     }
 
@@ -2461,11 +2615,14 @@ mod tests {
     }
 
     #[test]
-    fn font_stack_names_inter_then_korean() {
-        let refs = font_refs(false).refs();
-        assert_eq!(refs[0], FontRef::System("Inter".into()));
-        assert_eq!(refs[1], FontRef::System("Apple SD Gothic Neo".into()));
-        assert!(font_refs(true).refs().contains(&FontRef::Generic(GenericFamily::Monospace)));
+    fn the_font_stack_is_the_themes_and_no_screen_helper_names_one() {
+        // compose-rust#374, Ember #216 (#673): the unused stand-in stack is gone; the theme
+        // carries the bundled faces (`ui::fonts`, tested there).
+        let production = include_str!("components.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(!production.contains(&["fn font", "_refs"].concat()));
+        assert!(!production.contains(&["Apple SD", " Gothic Neo"].concat()), "no system face is named");
+        let theme = crate::ui::fonts::app_theme(compose_rust::ColorScheme::Light);
+        assert_eq!(theme.design_system, compose_rust::DesignSystem::Cupertino);
     }
 
     #[test]
@@ -2671,6 +2828,174 @@ mod tests {
         assert!(flow.mods.iter().any(|m| m == "FillMaxWidth"), "{:?}", flow.mods);
         let pills = nodes.iter().filter(|n| n.parent == Some(flow.id)).count();
         assert_eq!(pills, 4, "each choice is a child of the wrapping row");
+    }
+
+    /// The node that takes the click, as the renderer finds it: the one with `OnClick`.
+    fn clicked(nodes: &[EmittedNode]) -> &EmittedNode {
+        nodes.iter().find(|n| n.props.iter().any(|p| p.starts_with("OnClick="))).expect("a node with OnClick")
+    }
+
+    /// Every shared pressable, composed alone: containers through `Clickable` and the four
+    /// toolkit `Button`s.
+    fn shared_pressables() -> Vec<(&'static str, fn())> {
+        let cases: [(&'static str, fn()); 12] = [
+            ("Clickable", || Clickable(Modifier::new().size(40.0, 40.0), Alignment::Center, || {}, || {})),
+            ("NamedClickable", || {
+                NamedClickable(crate::ui::cr::a11y::CLOSE, Modifier::new().size(40.0, 40.0), Alignment::Center, || {}, || {})
+            }),
+            ("MenuRow", || MenuRow("항목", 200.0, false, || {})),
+            ("ChoiceButton", || ChoiceButton("선택", Choice::Toggle, true, false, true, || {})),
+            ("FilterChip", || FilterChip("전체", false, || {})),
+            ("BackButton", || BackButton(|| {})),
+            ("CloseButton", || CloseButton(|| {})),
+            ("AppButton", || AppButton("저장", None, ButtonKind::Default, false, true, false, || {})),
+            ("AppButton primary small", || AppButton("저장", None, ButtonKind::Primary, true, true, false, || {})),
+            ("IconButton", || IconButton(IconRole::Close, false, || {})),
+            ("InkIconButton", || InkIconButton(IconRole::Add, || {})),
+            ("PickChip", || PickChip("프로젝트", Some(IconRole::Close), false, false, || {})),
+        ];
+        cases.to_vec()
+    }
+
+    #[test]
+    fn fr_l34_1_every_shared_pressable_sends_the_mockup_press() {
+        // #250. `core.js` pressStart: scale 0.975; `style.css` `.ripple-clip.in`: opacity .07,
+        // .1 in dark. Sent on the node that takes the click, which is the one the renderer
+        // scales and tints (`ModifierChain.kt` reads the node's last `PressFeedback`).
+        let _guard = crate::services::test_guard();
+        let alpha = ember_theme().press_alpha();
+        assert!(alpha == 0.07 || alpha == 0.10, "{alpha}");
+        let want = format!("{:?}", compose_rust::schema::Modifier::PressFeedback { scale: 0.975, tint_alpha: alpha });
+        for (name, content) in shared_pressables() {
+            let nodes = emitted_nodes(content);
+            let node = clicked(&nodes);
+            assert!(node.mods.contains(&want), "{name}: {:?}", node.mods);
+            assert_eq!(node.mods.iter().filter(|m| m.starts_with("PressFeedback")).count(), 1, "{name}: sent once");
+        }
+        // No screen sets its own press values: the helper is the one place.
+        for (file, src) in [
+            ("session.rs", include_str!("session.rs")),
+            ("home.rs", include_str!("home.rs")),
+            ("project.rs", include_str!("project.rs")),
+            ("vcs.rs", include_str!("vcs.rs")),
+            ("shell.rs", include_str!("shell.rs")),
+            ("channels.rs", include_str!("channels.rs")),
+            ("files.rs", include_str!("files.rs")),
+        ] {
+            assert!(!src.contains(".press_feedback("), "{file} sets press values of its own");
+        }
+    }
+
+    #[test]
+    fn a_data_named_overlay_takes_its_box_and_a_disabled_named_box_has_no_click() {
+        // compose-rust#431, #429 (#673). The one clear button that names a painted box from
+        // data: the name as text and as accessible name, the box's bounds and no more, and the
+        // open state of a menu when it has one. `FillMaxSize` widened a box without a width.
+        let _guard = crate::services::test_guard();
+        let nodes = emitted_nodes(|| {
+            cu::Box().content(|| DataNamedOverlay("feat/673", true, Some(true), || {}));
+        });
+        let over = the(&nodes, "Button");
+        for want in ["Text=String(\"feat/673\")", "AccessibleName=String(\"feat/673\")"] {
+            assert!(over.props.iter().any(|p| p == want), "{want}: {:?}", over.props);
+        }
+        assert!(over.props.iter().any(|p| p.starts_with("OnClick=")), "{:?}", over.props);
+        assert!(over.mods.iter().any(|m| m == "MatchParentSize"), "{:?}", over.mods);
+        assert!(!over.mods.iter().any(|m| m.starts_with("FillMax")), "{:?}", over.mods);
+        let state = |mods: &[String]| -> u32 {
+            mods.iter()
+                .find_map(|m| m.strip_prefix("Semantics")?.split("state: ").nth(1)?.trim_end_matches([' ', '}']).parse().ok())
+                .unwrap_or(0)
+        };
+        assert_eq!((state(&over.mods) >> compose_rust::schema::SEMANTICS_EXPANDED_SHIFT) & 3, 2, "{:?}", over.mods);
+        let plain = emitted_nodes(|| {
+            cu::Box().content(|| DataNamedOverlay("feat/673", false, None, || {}));
+        });
+        let plain = the(&plain, "Button");
+        assert!(!plain.mods.iter().any(|m| m.starts_with("Semantics")), "no menu, no state: {:?}", plain.mods);
+        assert!(plain.props.iter().any(|p| p == "Enabled=Bool(false)"), "{:?}", plain.props);
+
+        // A named box that cannot act: the name, the button role and the disabled state, and
+        // nothing to click or press.
+        let nodes = emitted_nodes(|| NamedDisabled(crate::ui::cr::a11y::CLOSE, Modifier::new().size(32.0, 32.0), Alignment::Center, || {}));
+        let boxed = the(&nodes, "Box");
+        assert!(boxed.props.iter().any(|p| *p == format!("AccessibleName=String({:?})", crate::ui::cr::a11y::CLOSE)), "{:?}", boxed.props);
+        assert!(!boxed.props.iter().any(|p| p.starts_with("OnClick=")), "{:?}", boxed.props);
+        assert!(!boxed.mods.iter().any(|m| m.starts_with("PressFeedback")), "{:?}", boxed.mods);
+        assert!(boxed.mods.iter().any(|m| m.starts_with("Semantics") && m.contains("Button")), "{:?}", boxed.mods);
+        assert_eq!((state(&boxed.mods) >> compose_rust::schema::SEMANTICS_DISABLED_SHIFT) & 3, 2, "{:?}", boxed.mods);
+
+        // No screen keeps an overlay function of its own.
+        for (file, src) in [("vcs.rs", include_str!("vcs.rs")), ("agents.rs", include_str!("agents.rs")), ("routines.rs", include_str!("routines.rs"))] {
+            let production = src.split("#[cfg(test)]").next().unwrap();
+            assert!(!production.contains(&["fn Focus", "Overlay"].concat()), "{file}");
+        }
+    }
+
+    #[test]
+    fn fr_l34_5_the_phone_primary_circle_is_one_shared_button_with_its_look_unchanged() {
+        // #250: files.rs (보내기) and project.rs (새 팀원) each built this button by hand, so it
+        // was outside `pressable`. What is sent is what they sent, plus the press values.
+        let _guard = crate::services::test_guard();
+        let theme = ember_theme();
+        let p = theme.palette;
+        assert_eq!(H_BTN, 40.0);
+        let nodes = emitted_nodes(|| InkIconButton(IconRole::Send, || {}));
+        assert!(!nodes.iter().any(|n| n.widget == "Box"), "one toolkit button and nothing round it");
+        let button = the(&nodes, "Button");
+        assert!(button.props.iter().any(|x| x.starts_with("OnClick=")), "{:?}", button.props);
+        let want = [
+            format!("{:?}", compose_rust::schema::Modifier::Width(40.0)),
+            format!("{:?}", compose_rust::schema::Modifier::Height(40.0)),
+            format!("{:?}", compose_rust::schema::Modifier::Background(paint(p.ink))),
+            format!("{:?}", compose_rust::schema::Modifier::PressFeedback { scale: 0.975, tint_alpha: theme.press_alpha() }),
+        ];
+        for m in &want {
+            assert!(button.mods.contains(m), "{m}: {:?}", button.mods);
+        }
+        assert!(button.mods.iter().any(|m| m.starts_with("ShapeRole(Full")), "{:?}", button.mods);
+        assert!(!button.mods.iter().any(|m| m.starts_with("Border")), "no outline: {:?}", button.mods);
+        assert_eq!(button.mods.iter().filter(|m| m.starts_with("PressFeedback")).count(), 1, "{:?}", button.mods);
+        // The glyph is tinted `ink_text`, not the ringed button's `text-2`.
+        let ringed = emitted_nodes(|| IconButton(IconRole::Send, false, || {}));
+        assert_ne!(the(&ringed, "Button").props, button.props, "its colour differs from IconButton's");
+        // Both screens use it and have no button of their own left.
+        for (file, src, call) in [
+            ("files.rs", include_str!("files.rs"), "InkIconButton(IconRole::Send, open);"),
+            ("project.rs", include_str!("project.rs"), "InkIconButton(IconRole::Add, move || u.open_new_session(project.clone()));"),
+        ] {
+            let production = src.split("#[cfg(test)]").next().unwrap();
+            assert!(production.contains(call), "{file}");
+            assert!(!production.contains("cu::Button("), "{file}");
+        }
+        // The two visible buttons that stay direct send the same press values through the helper.
+        for (file, src) in [("launcher.rs", include_str!("launcher.rs")), ("routines.rs", include_str!("routines.rs"))] {
+            let production = src.split("#[cfg(test)]").next().unwrap();
+            assert_eq!(production.matches(".modifier(pressable(").count(), 1, "{file}");
+            assert!(!production.contains(".press_feedback("), "{file}");
+        }
+    }
+
+    #[test]
+    fn fr_l34_2_a_shared_pressable_carries_its_fill_and_shape_on_the_node_that_takes_the_click() {
+        // #251. The renderer draws the press tint, the hover layer and the keyboard focus ring
+        // in the shape of the node that has the click handler (`RenderNode.kt` `pressedShape`),
+        // so the fill and its corner are on that node, never on a child or a wrapper.
+        let _guard = crate::services::test_guard();
+        for (name, content) in shared_pressables() {
+            if name.ends_with("Clickable") {
+                continue; // The caller's own modifier; it has no fill here.
+            }
+            let nodes = emitted_nodes(content);
+            let node = clicked(&nodes);
+            assert!(node.mods.iter().any(|m| m.starts_with("Background")), "{name}: {:?}", node.mods);
+            assert!(node.mods.iter().any(|m| m.starts_with("Shape")), "{name}: {:?}", node.mods);
+        }
+        // A pill is a pill to the ring too, and the back square keeps its 10 dp corner.
+        let chip = emitted_nodes(|| FilterChip("전체", true, || {}));
+        assert!(clicked(&chip).mods.iter().any(|m| m.starts_with("ShapeRole(Full")), "{:?}", clicked(&chip).mods);
+        let back = emitted_nodes(|| BackButton(|| {}));
+        assert!(clicked(&back).mods.iter().any(|m| m.starts_with("Shape { top_start: 10.0")), "{:?}", clicked(&back).mods);
     }
 
     #[test]
@@ -2936,7 +3261,7 @@ mod tests {
 
     #[test]
     fn fr_212_modal_scrim_is_the_mockups() {
-        // compose-rust#384 (v0.0.10 `ModalScope::scrim`): every presentation takes the mockup's scrim.
+        // compose-rust#384 (v0.0.11 `ModalScope::scrim`): every presentation takes the mockup's scrim.
         let src = include_str!("components.rs");
         let production = &src[..src.find("#[cfg(test)]").expect("tests")];
         assert!(!production.contains(concat!("TODO(compose-rust#", "384)")));
@@ -3001,13 +3326,40 @@ mod tests {
     }
 
     #[test]
+    fn fr_l28_4_a_bottom_sheet_keeps_room_for_the_gesture_bar_at_360() {
+        // Flip 4 review 3.4: the settings sheet's last row sat on the gesture handle. The last
+        // thing a bottom sheet sends is a 24 dp spacer under its content; a dialog sends none.
+        let _guard = crate::services::test_guard();
+        crate::ui::window_size::set_opened_for_test(Some((360.0, 880.0)));
+        let phone = emitted_nodes(|| EmberSheet("시트", true, || {}, None, || {}));
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+        let desk = emitted_nodes(|| EmberSheet("시트", true, || {}, None, || {}));
+        crate::ui::window_size::set_opened_for_test(None);
+        let room = format!("Height({SHEET_PHONE_BOTTOM_ROOM:?})");
+        let body = |nodes: &[EmittedNode], host: &str| {
+            let host = the(nodes, host).id;
+            let column = nodes.iter().find(|n| n.parent == Some(host)).expect("the body column").id;
+            let mut kids: Vec<&EmittedNode> = nodes.iter().filter(|n| n.parent == Some(column)).collect();
+            kids.sort_by_key(|n| n.index);
+            kids.last().map(|n| n.mods.clone()).unwrap_or_default()
+        };
+        assert!(body(&phone, "Sheet").contains(&room), "{:?}", body(&phone, "Sheet"));
+        assert!(!body(&desk, "Dialog").contains(&room), "{:?}", body(&desk, "Dialog"));
+        assert_eq!(sheet_bottom_room(360.0, false), 24.0);
+        assert_eq!(sheet_bottom_room(360.0, true), 0.0);
+        assert_eq!(sheet_bottom_room(1440.0, false), 0.0);
+    }
+
+    #[test]
     fn fr_l32_sheet_body_height_is_one_formula() {
-        // 85 percent of the window for the sheet, minus the 60 dp header.
-        assert_eq!(sheet_body_max_height(390.0, 844.0, false, 60.0), 844.0 * 0.85 - 60.0);
-        assert_eq!(sheet_body_max_height(390.0, 700.0, false, 60.0), 700.0 * 0.85 - 60.0);
-        assert_eq!(sheet_body_max_height(390.0, 390.0, false, 60.0), 390.0 * 0.85 - 60.0);
+        // 85 percent of the window for the sheet, minus the 60 dp header and the bottom room
+        // kept for the gesture bar (FR-L28.4).
+        let r = SHEET_PHONE_BOTTOM_ROOM;
+        assert_eq!(sheet_body_max_height(390.0, 844.0, false, 60.0), 844.0 * 0.85 - 60.0 - r);
+        assert_eq!(sheet_body_max_height(390.0, 700.0, false, 60.0), 700.0 * 0.85 - 60.0 - r);
+        assert_eq!(sheet_body_max_height(390.0, 390.0, false, 60.0), 390.0 * 0.85 - 60.0 - r);
         // With a 65 dp footer as well.
-        assert_eq!(sheet_body_max_height(390.0, 844.0, false, 125.0), 844.0 * 0.85 - 125.0);
+        assert_eq!(sheet_body_max_height(390.0, 844.0, false, 125.0), 844.0 * 0.85 - 125.0 - r);
         // The real call sites at 390x844 and 390x640 keep a body well above 300 (header 60, footer 65).
         for h in [844.0, 640.0] {
             assert!(sheet_body_max_height(390.0, h, false, 60.0).min(900.0) > 300.0, "project {h}");
@@ -3049,15 +3401,24 @@ mod tests {
     fn fr_l32_every_modal_wires_dismiss_and_settings_keeps_its_guard() {
         // Escape, the scrim and the close button share one callback, so a modal without
         // on_dismiss could never close on Escape, and a guarded sheet must pass its guard.
-        for (name, src) in [
-            ("components.rs", include_str!("components.rs")),
-            ("session.rs", include_str!("session.rs")),
-            ("vcs.rs", include_str!("vcs.rs")),
-        ] {
-            let lines: Vec<&str> = src.lines().collect();
+        use std::fs;
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui/cr");
+        for entry in fs::read_dir(dir).expect("cr sources") {
+            let path = entry.expect("source entry").path();
+            if path.extension().and_then(|s| s.to_str()) != Some("rs") {
+                continue;
+            }
+            let name = path.file_name().unwrap().to_str().unwrap().to_string();
+            let src = fs::read_to_string(&path).expect("source text");
+            let production = src.split("#[cfg(test)]").next().unwrap();
+            let lines: Vec<&str> = production.lines().collect();
             for (i, l) in lines.iter().enumerate() {
                 let t = l.trim_start();
-                if (t.starts_with("cu::Dialog(") || t.starts_with("cu::Sheet(")) && !t.starts_with("//") {
+                if (t.starts_with("cu::Dialog(")
+                    || t.starts_with("cu::Sheet(")
+                    || t.starts_with("cu::Popover("))
+                    && !t.starts_with("//")
+                {
                     let near = lines[i..(i + 24).min(lines.len())].join("\n");
                     assert!(near.contains(".on_dismiss("), "{name}:{} modal without on_dismiss", i + 1);
                 }
@@ -3159,21 +3520,29 @@ mod tests {
             // Existing direct buttons are explicitly counted until their specialized controls
             // move into shared components. Any additional bypass must be reviewed.
             let allowed_buttons = match name {
-                // AppButton, IconButton and PickChip; ChoiceButton is Ember's clickable pill
-                // since review r5 (its 12 px label inset, FR-L10.2).
-                "components.rs" => 3,
-                // SegGroup moved onto ChoiceButton (#878).
-                "agents.rs" => 1,
-                "files.rs" => 1,
+                // AppButton, AppMenuButton, IconButton, InkIconButton and PickChip; ChoiceButton
+                // is Ember's clickable pill since review r5 (its 12 px label inset, FR-L10.2).
+                // The sixth is DataNamedOverlay, the one clear button that names a painted box
+                // from data for every screen (#673).
+                "components.rs" => 6,
+                // SegGroup moved onto ChoiceButton (#878); the section rows are named
+                // containers and the chips named from data use DataNamedOverlay (#673).
+                "agents.rs" => 0,
+                // The phone's round 보내기 is InkIconButton (FR-L34.5, #250).
+                "files.rs" => 0,
                 "home.rs" => 0,
+                // The row's bare 더 보기 glyph: no shared helper draws a button without a ring.
                 "launcher.rs" => 1,
-                "project.rs" => 1,
-                "routines.rs" => 2,
-                // FocusOverlay and the StashPill accessible-name overlay (FR-G6, #350).
-                "vcs.rs" => 2,
-                // The accessible-name overlay of the channel + button (#499); it keeps its
-                // visible text and `accessible_name` until #425's content slot is checked.
-                "new_channel.rs" => 1,
+                // The phone's round 새 팀원 is InkIconButton (FR-L34.5, #250).
+                "project.rs" => 0,
+                // The wide 새 루틴 pill (toolkit label style and a fixed width, which AppButton
+                // would change).
+                "routines.rs" => 1,
+                // Its fixed names are on the painted boxes; the stash pill, the bar selector
+                // and the rows named from data use DataNamedOverlay (#673).
+                "vcs.rs" => 0,
+                // The channel + ring is a named container (compose-rust#429, #673).
+                "new_channel.rs" => 0,
                 _ => 0,
             };
             assert_eq!(production.matches("cu::Button(").count(), allowed_buttons, "{name} has an unreviewed direct button");
@@ -3422,6 +3791,84 @@ mod tests {
         assert!(pop.mods.iter().any(|m| m == "Width(366.0)"), "{:?}", pop.mods);
     }
 
+    fn plain_sheet_menu() {
+        let rows = pop_sample_rows();
+        PopoverMenuWith(
+            true,
+            PopMenu { name: "IDE 고르기", kind: PopKind::Mode, head: "어느 IDE로 열까요", sub: None, rows: &rows, align: compose_rust::PopoverAlign::Start },
+            PopExtra { plain_sheet: true, ..Default::default() },
+            || {},
+            |_| {},
+            || Label("IDE 버튼", Fs::Sm, Weight::Medium, None, Some(1)),
+            None,
+        );
+    }
+
+    #[test]
+    fn fr_l10_4_plain_sheet_rows_are_named_menu_items_with_their_selected_state() {
+        // Review st, A FAIL 1: at 390 the sheet's column was a named menu, which macOS turned
+        // into one static text (`value=menu`) with no rows under it. The rows now sit in the
+        // sheet with nothing between them that names itself, each a menu item named by its title.
+        let _guard = crate::services::test_guard();
+        crate::ui::window_size::set_opened_for_test(Some((390.0, 844.0)));
+        let nodes = emitted_nodes(plain_sheet_menu);
+        crate::ui::window_size::set_opened_for_test(None);
+        let sheet = the(&nodes, "Sheet");
+        let rows: Vec<&EmittedNode> = nodes
+            .iter()
+            .filter(|n| is_under(&nodes, n, sheet.id) && n.props.iter().any(|p| p.starts_with("OnClick=")))
+            .collect();
+        assert_eq!(rows.len(), 3, "one pressable row per option");
+        let sem = |n: &EmittedNode| n.mods.iter().find(|m| m.starts_with("Semantics")).cloned();
+        let row_sem: Vec<String> = rows.iter().map(|r| sem(r).expect("row semantics")).collect();
+        assert!(row_sem.iter().all(|m| m.contains("MenuItem")), "{row_sem:?}");
+        assert_ne!(row_sem[1], row_sem[0], "the current row says it is selected");
+        assert_eq!(row_sem[0], row_sem[2], "the others do not");
+        // Each row's name is its title, the only text of the row's title line.
+        for (row, title) in rows.iter().zip(["Ember 에디터", "VS Code", "JetBrains Gateway"]) {
+            assert!(is_under(&nodes, text_node(&nodes, title), row.id), "{title} names its row");
+        }
+        // Nothing between the sheet and a row names itself or claims a role: a named node there
+        // is what swallowed the rows.
+        for row in &rows {
+            let mut at = row.parent;
+            while let Some(id) = at {
+                if id == sheet.id {
+                    break;
+                }
+                let n = nodes.iter().find(|n| n.id == id).expect("ancestor");
+                assert!(sem(n).is_none(), "ancestor {} says {:?}", n.widget, sem(n));
+                assert!(!n.props.iter().any(|p| p.starts_with("AccessibleName")), "ancestor {} is named: {:?}", n.widget, n.props);
+                at = n.parent;
+            }
+        }
+    }
+
+    #[test]
+    fn fr_l10_4_a_title_beside_a_badge_takes_two_lines() {
+        // Review st, A FAIL 2: the model menu's one row was cut at 1440 and 800.
+        let rows = pop_sample_rows();
+        assert_eq!(pop_title_lines(&rows[1]), 2, "beside a badge");
+        assert_eq!(pop_title_lines(&rows[0]), 1);
+        let src = include_str!("components.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(src.contains("Some(paint(title_c)), Some(pop_title_lines(r)))"));
+    }
+
+    #[test]
+    fn fr_l10_4_an_icon_button_is_named_by_its_text_and_a_field_by_its_label() {
+        // Review st, E: the branch menu's 만들기 had an empty name and its field was named by
+        // its placeholder.
+        let nodes = emitted_nodes(|| AppButton("만들기", Some(IconRole::Add), ButtonKind::Default, true, true, false, || {}));
+        let button = the(&nodes, "Button");
+        assert!(button.props.iter().any(|p| p.starts_with("AccessibleName") && p.contains("만들기")), "{:?}", button.props);
+        let field = emitted_nodes(|| EmberField(FieldOptions { placeholder: "feat/새-브랜치".into(), label: Some("새 브랜치 이름"), ..Default::default() }));
+        let text_field = the(&field, "TextField");
+        let named = text_field.props.iter().chain(text_field.mods.iter()).any(|p| p.contains("새 브랜치 이름"));
+        assert!(named, "props {:?} mods {:?}", text_field.props, text_field.mods);
+        let vcs = include_str!("vcs.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(vcs.contains("label: Some(BRANCH_POP_NEW_NAME)") && vcs.contains("BRANCH_POP_NEW_NAME: &str = \"새 브랜치 이름\""));
+    }
+
     #[test]
     fn fr_l28_a_name_keeps_its_width_with_the_pill_after_it_and_a_long_one_gives_way() {
         // Unmeasured: the name takes the room (the pill at the end) until the renderer reports.
@@ -3611,5 +4058,789 @@ mod tests {
             host.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("dispatch");
             assert_eq!(CLICKS.load(Ordering::SeqCst), i + 1, "the click on row {i} reached its closure");
         }
+    }
+
+    // ---- FR-L32 (#502): Escape closes every sheet and dialog, top-most first ----------------
+
+    struct ModalNode {
+        id: u32,
+        widget: String,
+        parent: Option<u32>,
+        index: u32,
+        open: bool,
+        on_dismiss: Option<u64>,
+        on_click: Option<u64>,
+        text: Option<String>,
+    }
+
+    struct ModalHost {
+        host: Host,
+        nodes: std::collections::HashMap<u32, ModalNode>,
+    }
+
+    impl ModalHost {
+        fn new(f: impl Fn() + Send + Sync + 'static) -> Self {
+            let f = std::sync::Arc::new(f);
+            let host = Host::new(move || {
+                let f = f.clone();
+                Box::new(Recomposer::new(move || f()))
+            });
+            let mut mh = ModalHost {
+                host,
+                nodes: std::collections::HashMap::new(),
+            };
+            let bytes = mh.host.rebuild().expect("rebuild").to_vec();
+            mh.apply(&bytes);
+            mh
+        }
+
+        fn apply(&mut self, bytes: &[u8]) {
+            for m in decode_batch(bytes).expect("decode") {
+                match m {
+                    Mutation::Create { node_id, widget } => {
+                        self.nodes.insert(
+                            node_id,
+                            ModalNode {
+                                id: node_id,
+                                widget: format!("{widget:?}"),
+                                parent: None,
+                                index: 0,
+                                open: false,
+                                on_dismiss: None,
+                                on_click: None,
+                                text: None,
+                            },
+                        );
+                    }
+                    Mutation::Insert { parent_id, node_id, index } => {
+                        if let Some(n) = self.nodes.get_mut(&node_id) {
+                            n.parent = Some(parent_id);
+                            n.index = index;
+                        }
+                    }
+                    Mutation::Remove { node_id } => {
+                        self.remove_subtree(node_id);
+                    }
+                    Mutation::SetProp { node_id, property: PropertyKind::Open, value: PropertyValue::Bool(b) } => {
+                        if let Some(n) = self.nodes.get_mut(&node_id) {
+                            n.open = b;
+                        }
+                    }
+                    Mutation::SetProp { node_id, property: PropertyKind::OnDismiss, value: PropertyValue::Integer(h) } => {
+                        if let Some(n) = self.nodes.get_mut(&node_id) {
+                            n.on_dismiss = Some(h as u64);
+                        }
+                    }
+                    Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
+                        if let Some(n) = self.nodes.get_mut(&node_id) {
+                            n.on_click = Some(h as u64);
+                        }
+                    }
+                    Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                        if let Some(n) = self.nodes.get_mut(&node_id) {
+                            n.text = Some(s.to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        fn remove_subtree(&mut self, root: u32) {
+            let children: Vec<u32> = self
+                .nodes
+                .values()
+                .filter(|n| n.parent == Some(root))
+                .map(|n| n.id)
+                .collect();
+            for c in children {
+                self.remove_subtree(c);
+            }
+            self.nodes.remove(&root);
+        }
+
+        fn walk(&self, parent: Option<u32>, out: &mut Vec<u32>) {
+            let mut kids: Vec<&ModalNode> = self
+                .nodes
+                .values()
+                .filter(|n| match parent {
+                    Some(p) => n.parent == Some(p),
+                    None => n.parent.is_none() || n.parent.is_some_and(|p| !self.nodes.contains_key(&p)),
+                })
+                .collect();
+            kids.sort_by_key(|n| (n.index, n.id));
+            for k in kids {
+                out.push(k.id);
+                self.walk(Some(k.id), out);
+            }
+        }
+
+        /// Open modal nodes in composition order (`OverlayFocusStack` order in the renderer).
+        fn open_modals(&self) -> Vec<(u32, String, u64)> {
+            let mut order = Vec::new();
+            self.walk(None, &mut order);
+            order
+                .into_iter()
+                .filter_map(|id| {
+                    let n = self.nodes.get(&id)?;
+                    if matches!(n.widget.as_str(), "Dialog" | "Sheet" | "Popover") && n.open {
+                        let h = n.on_dismiss.unwrap_or_else(|| panic!("open {} without OnDismiss", n.widget));
+                        Some((n.id, n.widget.clone(), h))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        }
+
+        /// Simulates pressing Escape: `OverlayFocusStack.handleEscape` takes the last (top-most)
+        /// open overlay and invokes its `on_dismiss`.
+        fn press_escape(&mut self) -> String {
+            let (node_id, widget, handler_id) = self
+                .open_modals()
+                .pop()
+                .expect("at least one open modal when pressing Escape");
+            let (bytes, _) = self
+                .host
+                .dispatch(HostEvent {
+                    node_id,
+                    handler_id,
+                    payload: EventPayload::Clicked,
+                })
+                .expect("dispatch Escape dismiss");
+            let bytes = bytes.to_vec();
+            self.apply(&bytes);
+            widget
+        }
+
+        fn rebuild(&mut self) {
+            let bytes = self.host.rebuild().expect("rebuild").to_vec();
+            self.apply(&bytes);
+        }
+
+        fn click_text(&mut self, label: &str) {
+            let mut order = Vec::new();
+            self.walk(None, &mut order);
+            let mut found = None;
+            for id in order.into_iter().filter(|id| self.nodes.get(id).and_then(|n| n.text.as_deref()) == Some(label)) {
+                let mut cur = Some(id);
+                while let Some(nid) = cur {
+                    let Some(n) = self.nodes.get(&nid) else { break };
+                    if let Some(h) = n.on_click {
+                        found = Some((nid, h));
+                        break;
+                    }
+                    cur = n.parent;
+                }
+                if found.is_some() {
+                    break;
+                }
+            }
+            let (node_id, handler_id) = found.unwrap_or_else(|| panic!("no clickable text {label}"));
+            let (bytes, _) = self
+                .host
+                .dispatch(HostEvent {
+                    node_id,
+                    handler_id,
+                    payload: EventPayload::Clicked,
+                })
+                .expect("click");
+            let bytes = bytes.to_vec();
+            self.apply(&bytes);
+        }
+    }
+
+    #[test]
+    fn fr_l32_escape_closes_the_plain_sheet_menus_and_the_vcs_pickers() {
+        // The phone menus of FR-L10.4 (#888): `PopoverMenuWith` with `plain_sheet` (session
+        // model and project menus, 저장소 and 기준 pickers) and the 브랜치 popover take part in
+        // the same Escape stack as every other menu.
+        use compose_rust::runtime::{mutable_state_of, remember};
+        let _guard = crate::services::test_guard();
+        for (w, h, expected_widget) in [(390.0, 844.0, "Sheet"), (1440.0, 900.0, "Popover")] {
+            crate::ui::window_size::set_opened_for_test(Some((w, h)));
+            let mut mh = ModalHost::new(move || {
+                let open = remember(|| mutable_state_of(true));
+                let close = open.clone();
+                let rows = pop_sample_rows();
+                PopoverMenuWith(
+                    open.get(),
+                    PopMenu { name: "메뉴", kind: PopKind::Mode, head: "모델", sub: None, rows: &rows, align: compose_rust::PopoverAlign::Start },
+                    PopExtra { plain_sheet: true, ..Default::default() },
+                    move || close.set(false),
+                    |_| {},
+                    || Label("열기", Fs::Sm, Weight::Medium, None, Some(1)),
+                    None,
+                );
+            });
+            assert_eq!(mh.open_modals().len(), 1, "plain sheet menu at {w}");
+            assert_eq!(mh.press_escape(), expected_widget);
+            assert!(mh.open_modals().is_empty());
+
+            let mut mh = ModalHost::new(|| {
+                let open = remember(|| mutable_state_of(true));
+                let projects = vec![("p1".to_string(), "demo-project".to_string())];
+                crate::ui::cr::vcs::RepoMenu(open, "demo-project", &projects, Some(0), |_| {});
+            });
+            assert_eq!(mh.open_modals().len(), 1, "저장소 at {w}");
+            assert_eq!(mh.press_escape(), expected_widget);
+            assert!(mh.open_modals().is_empty());
+
+            let mut mh = ModalHost::new(|| {
+                let open = remember(|| mutable_state_of(true));
+                let base = remember(|| mutable_state_of(None::<String>));
+                let names = vec!["main".to_string(), "develop".to_string()];
+                crate::ui::cr::vcs::BaseMenu(open, "main", &names, Some(0), base);
+            });
+            assert_eq!(mh.open_modals().len(), 1, "기준 at {w}");
+            assert_eq!(mh.press_escape(), expected_widget);
+            assert!(mh.open_modals().is_empty());
+
+            let mut mh = ModalHost::new(|| {
+                let open = remember(|| mutable_state_of(true));
+                let branches = vec!["main".to_string(), "feat/git-api".to_string()];
+                crate::ui::cr::vcs::BranchMenu(open, "feat/git-api", &branches, Some("feat/git-api"), true, None);
+            });
+            assert_eq!(mh.open_modals().len(), 1, "브랜치 at {w}");
+            assert_eq!(mh.press_escape(), "Popover");
+            assert!(mh.open_modals().is_empty());
+        }
+        crate::ui::window_size::set_opened_for_test(None);
+    }
+
+    #[test]
+    fn fr_l32_escape_closes_every_sheet_and_dialog_kind() {
+        use compose_rust::runtime::{mutable_state_of, remember};
+        let _guard = crate::services::test_guard();
+        let ui = crate::ui::coexist::shared_ui();
+
+        // 1. EmberSheet at desktop width (Dialog) and phone width (Sheet), plus Monitor full-screen (Dialog) and headerless sheet.
+        for (w, h, monitor, title, expected_widget) in [
+            (1440.0, 900.0, false, "시트", "Dialog"),
+            (390.0, 844.0, false, "시트", "Sheet"),
+            (390.0, 844.0, true, "모니터", "Dialog"),
+            (1440.0, 900.0, false, "", "Dialog"),
+        ] {
+            crate::ui::window_size::set_opened_for_test(Some((w, h)));
+            let mut mh = ModalHost::new(move || {
+                let open = remember(|| mutable_state_of(true));
+                let close = open.clone();
+                EmberSheetSized(title, open.get(), SHEET_WIDTH_DEFAULT, monitor, move || close.set(false), None, || {});
+            });
+            assert_eq!(mh.open_modals().len(), 1, "{w}x{h} monitor={monitor} title={title}");
+            assert_eq!(mh.press_escape(), expected_widget);
+            assert!(mh.open_modals().is_empty());
+        }
+
+        // 2. OptionSheet, Select / NamedSelect, and PopoverMenu (Drop Popover, Mode Popover at 1440, Mode Sheet at 390).
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+        {
+            let mut mh = ModalHost::new(|| {
+                let open = remember(|| mutable_state_of(true));
+                let close = open.clone();
+                let opts = vec!["하나".to_string(), "둘".to_string()];
+                OptionSheet(open.get(), &opts, Some(0), 200.0, move || close.set(false), |_| {});
+            });
+            assert_eq!(mh.open_modals().len(), 1);
+            assert_eq!(mh.press_escape(), "Dialog");
+            assert!(mh.open_modals().is_empty());
+        }
+        {
+            let mut mh = ModalHost::new(|| {
+                let opts = vec!["Claude Code".to_string(), "Codex".to_string()];
+                NamedSelect("하네스", &opts[0], &opts, 0, 200.0, |_| {});
+            });
+            assert!(mh.open_modals().is_empty());
+            mh.click_text("Claude Code");
+            assert_eq!(mh.open_modals().len(), 1);
+            assert_eq!(mh.press_escape(), "Dialog");
+            assert!(mh.open_modals().is_empty());
+        }
+        for (w, h, kind, expected_widget) in [
+            (1440.0, 900.0, PopKind::Drop, "Popover"),
+            (1440.0, 900.0, PopKind::Mode, "Popover"),
+            (390.0, 844.0, PopKind::Mode, "Sheet"),
+        ] {
+            crate::ui::window_size::set_opened_for_test(Some((w, h)));
+            let mut mh = ModalHost::new(move || {
+                let open = remember(|| mutable_state_of(true));
+                let close = open.clone();
+                let rows = pop_sample_rows();
+                PopoverMenu(
+                    open.get(),
+                    PopMenu { name: "메뉴", kind, head: "어느 IDE로 열까요", sub: None, rows: &rows, align: compose_rust::PopoverAlign::End },
+                    move || close.set(false),
+                    |_| {},
+                    || Label("열기", Fs::Sm, Weight::Medium, None, Some(1)),
+                    None,
+                );
+            });
+            assert_eq!(mh.open_modals().len(), 1);
+            assert_eq!(mh.press_escape(), expected_widget);
+            assert!(mh.open_modals().is_empty());
+        }
+
+        // 3. SettingsSheet ("설정"), NewSessionDialog ("새 세션"), and OwnerClaimSheet ("소유자 확인").
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+        {
+            let mut mh = ModalHost::new(|| {
+                let open = remember(|| mutable_state_of(true));
+                let close = open.clone();
+                crate::ui::cr::settings::SettingsSheet(open.get(), move || close.set(false));
+            });
+            assert_eq!(mh.open_modals().len(), 1);
+            mh.press_escape();
+            assert!(mh.open_modals().is_empty());
+        }
+        {
+            ui.open_new_session(None);
+            let mut mh = ModalHost::new(crate::ui::cr::new_session::NewSessionDialog);
+            assert_eq!(mh.open_modals().len(), 1);
+            mh.press_escape();
+            assert!(mh.open_modals().is_empty());
+            assert!(ui.new_session.get_untracked().is_none());
+        }
+        {
+            ui.owner_claim.set(crate::owner_claim::ClaimView {
+                state: crate::owner_claim::ClaimState::NeedCode { holders: 0 },
+                generation: 1,
+            });
+            ui.owner_claim_dismissed.set(None);
+            let mut mh = ModalHost::new(crate::ui::cr::owner_claim::OwnerClaimSheet);
+            assert_eq!(mh.open_modals().len(), 1);
+            mh.press_escape();
+            assert!(mh.open_modals().is_empty());
+            ui.owner_claim.set(crate::owner_claim::ClaimView::default());
+            ui.owner_claim_dismissed.set(None);
+        }
+
+        // 4. Project screen sheets: "새 프로젝트", "{name} 설정", "컴퓨터 추가" (AddComputerSheet), and computer "상태" (MonitorSheet).
+        let (boxes, chips) = crate::services::services().client.read(|s| {
+            let b = crate::ui::project::project_boxes(s);
+            let c = crate::ui::project::computer_chips(s, &b);
+            (b, c)
+        });
+        let first_proj = boxes.first().expect("demo project").id.clone();
+        let first_chip = chips.first().expect("demo computer").id.clone();
+        for kind in ["new_project", "settings", "add_computer", "monitor"] {
+            let (boxes, chips) = (boxes.clone(), chips.clone());
+            let (first_proj, first_chip) = (first_proj.clone(), first_chip.clone());
+            let mut mh = ModalHost::new(move || {
+                let st = remember(|| {
+                    let st = crate::ui::cr::project::Ui::new(&boxes, &chips);
+                    match kind {
+                        "new_project" => st.new_project.set(true),
+                        "settings" => st.settings.set(Some(first_proj.clone())),
+                        "add_computer" => st.add.open.set(true),
+                        "monitor" => st.computer.set(Some(first_chip.clone())),
+                        _ => {}
+                    }
+                    st
+                });
+                crate::ui::cr::project::Sheets(&boxes, &chips, &st, crate::ui::coexist::shared_ui());
+            });
+            assert_eq!(mh.open_modals().len(), 1, "project sheet {kind}");
+            mh.press_escape();
+            assert!(mh.open_modals().is_empty(), "project sheet {kind} closed on Escape");
+        }
+
+        // 5. Channel sheets: NewChannelSheet ("새 채널") and MembersSheet ("{name} 멤버/게스트").
+        {
+            let mut mh = ModalHost::new(|| {
+                let st = crate::ui::cr::new_channel::NewChannelState::new();
+                let init = remember(|| mutable_state_of(false));
+                if !init.get_untracked() {
+                    init.set(true);
+                    st.open.set(true);
+                }
+                let open_room = remember(|| mutable_state_of(None::<String>));
+                crate::ui::cr::new_channel::NewChannelSheet(&st, &[], None, &open_room);
+            });
+            assert_eq!(mh.open_modals().len(), 1);
+            mh.press_escape();
+            assert!(mh.open_modals().is_empty());
+        }
+        {
+            let mut mh = ModalHost::new(|| {
+                let st = crate::ui::cr::channel_owner::OwnerState::new("c1");
+                let init = remember(|| mutable_state_of(false));
+                if !init.get_untracked() {
+                    init.set(true);
+                    st.open.set(true);
+                }
+                crate::ui::cr::channel_owner::MembersSheet("c1", "전체", &st, false);
+            });
+            assert_eq!(mh.open_modals().len(), 1);
+            mh.press_escape();
+            assert!(mh.open_modals().is_empty());
+        }
+
+        // 6. Files sheets: SendSheet ("파일 보내기") and ShareSheet (headerless share sheet).
+        {
+            let mut mh = ModalHost::new(|| {
+                let st = remember(|| {
+                    let s = crate::ui::cr::files::State::new();
+                    s.sheet.set(Some(crate::ui::files::SendDraft::default()));
+                    s
+                });
+                crate::ui::cr::files::SendSheet(&st, &[], &[], true, false, 1440.0);
+            });
+            assert_eq!(mh.open_modals().len(), 1);
+            mh.press_escape();
+            assert!(mh.open_modals().is_empty());
+        }
+        {
+            let mut mh = ModalHost::new(|| {
+                let open = remember(|| mutable_state_of(true));
+                crate::ui::cr::files::ShareSheet(&open, &[], &[], true, false);
+            });
+            assert_eq!(mh.open_modals().len(), 1);
+            mh.press_escape();
+            assert!(mh.open_modals().is_empty());
+        }
+
+        // 7. Routines sheet: RoutineForm in FormLayout::Sheet ("새 루틴").
+        {
+            let mut mh = ModalHost::new(|| {
+                let open = remember(|| mutable_state_of(true));
+                let draft = remember(|| mutable_state_of(crate::ui::routines::FormDraft::new("ember")));
+                if open.get() {
+                    let close = open.clone();
+                    crate::ui::cr::routines::RoutineForm(
+                        crate::ui::routines::FormDraft::new("ember"),
+                        None,
+                        false,
+                        &[],
+                        &["ember".to_string()],
+                        crate::ui::routines::FormLayout::Sheet,
+                        520.0,
+                        &draft,
+                        |_| {},
+                        move || close.set(false),
+                    );
+                }
+            });
+            assert_eq!(mh.open_modals().len(), 1);
+            mh.press_escape();
+            assert!(mh.open_modals().is_empty());
+        }
+
+        // 8. Session sheets: NewMemberSheet ("새 팀원", Dialog at 1440 and Sheet at 390), VcsSheet ("버전 관리"), and "세션 정보" sheet.
+        for (w, h, expected_widget) in [(1440.0, 900.0, "Dialog"), (390.0, 844.0, "Sheet")] {
+            crate::ui::window_size::set_opened_for_test(Some((w, h)));
+            let fp = first_proj.clone();
+            let mut mh = ModalHost::new(move || {
+                let open = remember(|| mutable_state_of(true));
+                let close = open.clone();
+                crate::ui::cr::session::NewMemberSheet(&fp, open.get(), move || close.set(false));
+            });
+            assert_eq!(mh.open_modals().len(), 1);
+            assert_eq!(mh.press_escape(), expected_widget);
+            assert!(mh.open_modals().is_empty());
+        }
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+        {
+            let fp = first_proj.clone();
+            let mut mh = ModalHost::new(move || {
+                let open = remember(|| mutable_state_of(true));
+                let close = open.clone();
+                crate::ui::cr::vcs::VcsSheet(&fp, open.get(), move || close.set(false));
+            });
+            assert_eq!(mh.open_modals().len(), 1);
+            mh.press_escape();
+            assert!(mh.open_modals().is_empty());
+        }
+        {
+            // SingleView at compact width opens "세션 정보" sheet when EMBER_CR_SESSION_INFO=1.
+            crate::ui::window_size::set_opened_for_test(Some((390.0, 844.0)));
+            unsafe {
+                std::env::set_var("EMBER_CR_SESSION_INFO", "1");
+            }
+            let mut mh = ModalHost::new(|| {
+                crate::ui::cr::session::SingleView("demo-s1", None, || {});
+            });
+            unsafe {
+                std::env::remove_var("EMBER_CR_SESSION_INFO");
+            }
+            assert_eq!(mh.open_modals().len(), 1, "SingleView info sheet open at compact width");
+            assert_eq!(mh.press_escape(), "Sheet");
+            assert!(mh.open_modals().is_empty());
+        }
+
+        // 9. Agents sheet: AddAccountSheet ("계정 추가", guarded while Busy).
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+        {
+            use std::sync::{Arc, Mutex};
+            let state_cell: Arc<Mutex<Option<compose_rust::runtime::MutableState<crate::ui::agents::AddAccount>>>> =
+                Arc::new(Mutex::new(None));
+            let sc = state_cell.clone();
+            let mut mh = ModalHost::new(move || {
+                let add = remember(|| {
+                    let mut a = crate::ui::agents::AddAccount::closed();
+                    a.open = true;
+                    a.phase = crate::ui::agents::AddPhase::Busy;
+                    mutable_state_of(a)
+                });
+                *sc.lock().unwrap() = Some(add.clone());
+                crate::ui::cr::agents::AddAccountSheet(&add, true);
+            });
+            assert_eq!(mh.open_modals().len(), 1);
+            // Escape while Busy is ignored so an in-flight account creation is not dropped.
+            mh.press_escape();
+            assert_eq!(mh.open_modals().len(), 1, "AddAccountSheet stays open while Busy");
+            state_cell.lock().unwrap().as_ref().unwrap().update(|a| a.phase = crate::ui::agents::AddPhase::Form);
+            mh.rebuild();
+            mh.press_escape();
+            assert!(mh.open_modals().is_empty(), "AddAccountSheet closes on Escape once not Busy");
+        }
+
+        // 10. Home model picker sheet (at 390) and model picker popover (at 1440).
+        for (w, h, compact, expected_widget) in [(390.0, 844.0, true, "Sheet"), (1440.0, 900.0, false, "Popover")] {
+            crate::ui::window_size::set_opened_for_test(Some((w, h)));
+            let mut mh = ModalHost::new(move || {
+                let c = remember(|| {
+                    let c = crate::ui::cr::home::Composer::new();
+                    c.open.set(Some(crate::ui::cr::home::Pick::Model));
+                    c
+                });
+                let ui = crate::ui::coexist::shared_ui();
+                let sel = c.selection.get();
+                if compact {
+                    c.lists(ui);
+                } else {
+                    let close = c.open.clone();
+                    c.model_popover(ui, &sel, None, || {}, move || close.set(None));
+                }
+            });
+            assert_eq!(mh.open_modals().len(), 1);
+            assert_eq!(mh.press_escape(), expected_widget);
+            assert!(mh.open_modals().is_empty());
+        }
+
+        // 11. Launcher row OptionSheet and "세션 이름 변경" sheet.
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+        {
+            let row = crate::services::services()
+                .client
+                .read(|s| crate::model::recent_sessions(s, &crate::model::RowContext { account_labels: &Default::default() }, 1))
+                .into_iter()
+                .next()
+                .expect("demo session row");
+            let mut mh = ModalHost::new(move || {
+                crate::ui::cr::launcher::SessionRowWith(&row, true);
+            });
+            assert_eq!(mh.open_modals().len(), 1, "row OptionSheet starts open");
+            // Clicking "이름 변경" closes the OptionSheet and opens the "세션 이름 변경" EmberSheet.
+            mh.click_text("이름 변경");
+            assert_eq!(mh.open_modals().len(), 1, "rename sheet is now open");
+            mh.press_escape();
+            assert!(mh.open_modals().is_empty(), "Escape closes the rename sheet");
+        }
+        crate::ui::window_size::set_opened_for_test(None);
+    }
+
+    #[test]
+    fn fr_l32_escape_closes_topmost_sheet_or_dialog_first() {
+        use compose_rust::runtime::{mutable_state_of, remember};
+        use std::sync::{Arc, Mutex};
+        let _guard = crate::services::test_guard();
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+
+        // 1. Stacked sheets in shell order: "더보기" -> "설정" -> "새 세션" -> "소유자 확인".
+        // Escape closes the top-most one each time until none remain.
+        {
+            let ui = crate::ui::coexist::shared_ui();
+            ui.open_new_session(None);
+            ui.owner_claim.set(crate::owner_claim::ClaimView {
+                state: crate::owner_claim::ClaimState::NeedCode { holders: 0 },
+                generation: 1,
+            });
+            ui.owner_claim_dismissed.set(None);
+            let more_cell = Arc::new(Mutex::new(None));
+            let settings_cell = Arc::new(Mutex::new(None));
+            let (mc, sc) = (more_cell.clone(), settings_cell.clone());
+            let mut mh = ModalHost::new(move || {
+                let more = remember(|| mutable_state_of(true));
+                let settings = remember(|| mutable_state_of(true));
+                *mc.lock().unwrap() = Some(more.clone());
+                *sc.lock().unwrap() = Some(settings.clone());
+                let close_more = more.clone();
+                EmberSheet("더보기", more.get(), move || close_more.set(false), None, || {});
+                let close_settings = settings.clone();
+                crate::ui::cr::settings::SettingsSheet(settings.get(), move || close_settings.set(false));
+                crate::ui::cr::new_session::NewSessionDialog();
+                crate::ui::cr::owner_claim::OwnerClaimSheet();
+            });
+            assert_eq!(mh.open_modals().len(), 4, "all four shell modals open");
+            // 1st Escape: closes top-most ("소유자 확인").
+            mh.press_escape();
+            assert_eq!(mh.open_modals().len(), 3);
+            assert!(ui.owner_claim_dismissed.get_untracked().is_some(), "owner claim dismissed first");
+            assert!(ui.new_session.get_untracked().is_some(), "new session still open");
+            // 2nd Escape: closes "새 세션".
+            mh.press_escape();
+            assert_eq!(mh.open_modals().len(), 2);
+            assert!(ui.new_session.get_untracked().is_none(), "new session closed second");
+            assert!(settings_cell.lock().unwrap().as_ref().unwrap().get_untracked(), "settings still open");
+            // 3rd Escape: closes "설정".
+            mh.press_escape();
+            assert_eq!(mh.open_modals().len(), 1);
+            assert!(!settings_cell.lock().unwrap().as_ref().unwrap().get_untracked(), "settings closed third");
+            assert!(more_cell.lock().unwrap().as_ref().unwrap().get_untracked(), "more still open");
+            // 4th Escape: closes "더보기".
+            mh.press_escape();
+            assert!(mh.open_modals().is_empty());
+            assert!(!more_cell.lock().unwrap().as_ref().unwrap().get_untracked(), "more closed fourth");
+            ui.owner_claim.set(crate::owner_claim::ClaimView::default());
+            ui.owner_claim_dismissed.set(None);
+        }
+
+        // 2. Inner Select (OptionSheet) or branch_menu opened inside a parent sheet:
+        // first Escape closes only the inner OptionSheet / branch_menu; second Escape closes the parent sheet.
+        {
+            // Select opened inside "새 세션" (NewSessionDialog).
+            let ui = crate::ui::coexist::shared_ui();
+            ui.open_new_session(None);
+            let mut mh = ModalHost::new(crate::ui::cr::new_session::NewSessionDialog);
+            assert_eq!(mh.open_modals().len(), 1, "only NewSessionDialog open");
+            mh.click_text("claude-code");
+            assert_eq!(mh.open_modals().len(), 2, "NewSessionDialog + Select OptionSheet open");
+            mh.press_escape();
+            assert_eq!(mh.open_modals().len(), 1, "1st Escape closed only the Select OptionSheet");
+            assert!(ui.new_session.get_untracked().is_some(), "NewSessionDialog remains open");
+            mh.press_escape();
+            assert!(mh.open_modals().is_empty(), "2nd Escape closed NewSessionDialog");
+            assert!(ui.new_session.get_untracked().is_none());
+        }
+        {
+            // NamedSelect (OptionSheet) opened inside RoutineForm sheet ("새 루틴").
+            let mut mh = ModalHost::new(|| {
+                let open = remember(|| mutable_state_of(true));
+                let draft = remember(|| mutable_state_of(crate::ui::routines::FormDraft::new("ember")));
+                if open.get() {
+                    let close = open.clone();
+                    crate::ui::cr::routines::RoutineForm(
+                        crate::ui::routines::FormDraft::new("ember"),
+                        None,
+                        false,
+                        &[],
+                        &["ember".to_string()],
+                        crate::ui::routines::FormLayout::Sheet,
+                        520.0,
+                        &draft,
+                        |_| {},
+                        move || close.set(false),
+                    );
+                }
+            });
+            let shown = crate::ui::home::default_mode(crate::ui::home::Harness::ClaudeCode).label();
+            assert_eq!(mh.open_modals().len(), 1, "only RoutineForm sheet open");
+            mh.click_text(shown);
+            assert_eq!(mh.open_modals().len(), 2, "RoutineForm sheet + NamedSelect OptionSheet open");
+            mh.press_escape();
+            assert_eq!(mh.open_modals().len(), 1, "1st Escape closed only NamedSelect OptionSheet");
+            mh.press_escape();
+            assert!(mh.open_modals().is_empty(), "2nd Escape closed RoutineForm sheet");
+        }
+
+        // 3. Dirty form sheets ("새 프로젝트" and "새 채널") with unsaved-changes confirmation sheet ("변경 사항"):
+        // 1st Escape on the dirty form opens "변경 사항" on top (2 open modals);
+        // 2nd Escape dismisses the top-most "변경 사항" sheet, keeping the dirty form open.
+        {
+            let (boxes, chips) = crate::services::services().client.read(|s| {
+                let b = crate::ui::project::project_boxes(s);
+                let c = crate::ui::project::computer_chips(s, &b);
+                (b, c)
+            });
+            let mut mh = ModalHost::new(move || {
+                let st = remember(|| {
+                    let st = crate::ui::cr::project::Ui::new(&boxes, &chips);
+                    st.new_project.set(true);
+                    st.new_draft.update(|d| d.name = "작성 중인 프로젝트".to_string());
+                    st
+                });
+                crate::ui::cr::project::Sheets(&boxes, &chips, &st, crate::ui::coexist::shared_ui());
+            });
+            assert_eq!(mh.open_modals().len(), 1, "dirty 새 프로젝트 sheet open");
+            mh.press_escape();
+            assert_eq!(mh.open_modals().len(), 2, "1st Escape opens 변경 사항 confirm sheet on top");
+            mh.press_escape();
+            assert_eq!(mh.open_modals().len(), 1, "2nd Escape closes top-most 변경 사항 sheet and keeps 새 프로젝트 open");
+        }
+        {
+            let mut mh = ModalHost::new(|| {
+                let st = crate::ui::cr::new_channel::NewChannelState::new();
+                let init = remember(|| mutable_state_of(false));
+                if !init.get_untracked() {
+                    init.set(true);
+                    st.start(None);
+                    st.draft.update(|d| d.name = "작성-중".to_string());
+                }
+                let open_room = remember(|| mutable_state_of(None::<String>));
+                crate::ui::cr::new_channel::NewChannelSheet(&st, &[], None, &open_room);
+            });
+            assert_eq!(mh.open_modals().len(), 1, "dirty 새 채널 sheet open");
+            mh.press_escape();
+            assert_eq!(mh.open_modals().len(), 2, "1st Escape opens 변경 사항 confirm sheet on top");
+            mh.press_escape();
+            assert_eq!(mh.open_modals().len(), 1, "2nd Escape closes top-most 변경 사항 sheet and keeps 새 채널 open");
+        }
+        crate::ui::window_size::set_opened_for_test(None);
+    }
+
+    #[test]
+    fn fr_l32_escape_after_closing_a_sheet_by_another_route_and_owner_claim_checking() {
+        use compose_rust::runtime::{mutable_state_of, remember};
+        use std::sync::{Arc, Mutex};
+        let _guard = crate::services::test_guard();
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+
+        // 1. Closing the top sheet via its own state (e.g. close button / action) and then
+        // pressing Escape closes the remaining sheet underneath without panicking or losing track.
+        {
+            let top_cell = Arc::new(Mutex::new(None));
+            let base_cell = Arc::new(Mutex::new(None));
+            let (tc, bc) = (top_cell.clone(), base_cell.clone());
+            let mut mh = ModalHost::new(move || {
+                let base = remember(|| mutable_state_of(true));
+                let top = remember(|| mutable_state_of(true));
+                *bc.lock().unwrap() = Some(base.clone());
+                *tc.lock().unwrap() = Some(top.clone());
+                let close_base = base.clone();
+                EmberSheet("더보기", base.get(), move || close_base.set(false), None, || {});
+                let close_top = top.clone();
+                EmberSheet("세부 정보", top.get(), move || close_top.set(false), None, || {});
+            });
+            assert_eq!(mh.open_modals().len(), 2, "both sheets open");
+            // Close the top sheet by another route (state flip, not Escape).
+            top_cell.lock().unwrap().as_ref().unwrap().set(false);
+            let bytes = mh.host.render_frame(16_000_000).expect("render").to_vec();
+            mh.apply(&bytes);
+            assert_eq!(mh.open_modals().len(), 1, "only the base sheet remains");
+            // Escape now closes the base sheet cleanly.
+            mh.press_escape();
+            assert!(mh.open_modals().is_empty(), "Escape closes the remaining sheet");
+            assert!(!base_cell.lock().unwrap().as_ref().unwrap().get_untracked());
+        }
+
+        // 2. OwnerClaimSheet while a claim is in flight (`ClaimState::Checking`) still closes
+        // on Escape (dismisses the prompt so the user can continue working while it checks).
+        {
+            let ui = crate::ui::coexist::shared_ui();
+            ui.owner_claim.set(crate::owner_claim::ClaimView {
+                state: crate::owner_claim::ClaimState::Checking { holders: 0 },
+                generation: 9,
+            });
+            ui.owner_claim_dismissed.set(None);
+            let mut mh = ModalHost::new(crate::ui::cr::owner_claim::OwnerClaimSheet);
+            assert_eq!(mh.open_modals().len(), 1, "owner claim sheet is open while checking");
+            mh.press_escape();
+            assert!(mh.open_modals().is_empty(), "Escape dismisses the owner claim sheet while checking");
+            assert!(ui.owner_claim_dismissed.get_untracked().is_some());
+            ui.owner_claim.set(crate::owner_claim::ClaimView::default());
+            ui.owner_claim_dismissed.set(None);
+        }
+
+        crate::ui::window_size::set_opened_for_test(None);
     }
 }

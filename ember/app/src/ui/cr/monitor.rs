@@ -21,7 +21,7 @@ pub use crate::ui::monitor::{
     SortState,
 };
 use crate::ui::monitor::{
-    bar_fraction, bar_max, card_view, hero_parts, meter_fraction, empty_text, health_score, process_footer, ram_badge, score_tone,
+    bar_fraction, bar_max, card_view, hero_parts, meter_fraction, metric_badge, empty_text, health_score, process_footer, ram_badge, score_tone,
     CORE_BARS_GAP, CORE_BARS_H, CORE_BAR_ALPHA, CORE_BAR_RADIUS,
     score_word, status_line, storage_line, CardView, FanMode, FeedStatus, FAN_MODE_AVAILABLE, FAN_MODE_REASON, POLL_SECS,
     TOP_PROCESSES,
@@ -70,7 +70,7 @@ pub fn mon_columns(width_dp: f32) -> usize {
 /// Column widths of the process table (dp): the name takes the rest.
 const PID_W: f32 = 72.0;
 const PWR_W: f32 = 72.0;
-const CPU_W: f32 = 96.0;
+const CPU_W: f32 = 108.0;
 const MEM_W: f32 = 96.0;
 const ROW_H: f32 = 36.0;
 
@@ -118,7 +118,11 @@ pub fn MonitorSheet(chip: Option<&ComputerChip>, boxes: &[ProjectBox], on_close:
     let title = chip.map(|c| c.name.clone()).unwrap_or_else(|| "컴퓨터".to_string());
     let window = crate::ui::window_size::current_window_size();
     let columns = mon_columns(window.width_dp);
-    let body_height = super::components::sheet_body_max_height(window.width_dp, window.height_dp, true, 60.0).min(1200.0);
+    // The header (60), the 1 dp line under it and, where the sheet is the whole window, the
+    // strip above it (FR-L33).
+    let top_inset = super::components::full_screen_sheet_top_inset(window.width_dp, true, crate::ui::safe_area::safe_area());
+    let body_height = super::components::sheet_body_max_height(window.width_dp, window.height_dp, true, MON_CHROME_H + top_inset).min(1200.0);
+    let scroll_pad = mon_scroll_pad(window.width_dp);
     let state = chip.map(|c| reach_pill(c.reachability));
 
     // The state pill sits in the header, beside the close button (`.mon-state`).
@@ -132,7 +136,7 @@ pub fn MonitorSheet(chip: Option<&ComputerChip>, boxes: &[ProjectBox], on_close:
         cu::ScrollColumn()
             .modifier(Modifier::new().fill_max_width().height(body_height).background(paint(p.bg)))
             .content(|| {
-                cu::Column().space_role(SpaceRole::Md).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
+                cu::Column().space_role(SpaceRole::Md).modifier(Modifier::new().fill_max_width().padding(scroll_pad)).content(|| {
                     let Some(c) = chip else {
                         cu::Box().alignment(Alignment::Center).modifier(Modifier::new().fill_max_width().height(240.0)).content(|| {
                             Label("컴퓨터를 찾을 수 없습니다", Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
@@ -167,6 +171,17 @@ pub fn MonitorSheet(chip: Option<&ComputerChip>, boxes: &[ProjectBox], on_close:
                 });
             });
     });
+}
+
+/// What the monitor sheet draws above its scrolling body: the 60 dp header and the 1 dp line
+/// under it. The body was sized for the header alone, so it ran 1 dp past the dialog's edge
+/// (review sf A: the 1440 footer note was cut at the dialog's bottom edge).
+pub const MON_CHROME_H: f32 = 60.0 + 1.0;
+
+/// The scrolling body's padding, the room under the last line when it is scrolled into view:
+/// `.mon-scroll{padding:var(--sp5)}` (20), 16 at 560 and below (`.mon-scroll{padding:var(--sp4)}`).
+pub fn mon_scroll_pad(width_dp: f32) -> f32 {
+    if width_dp <= 560.0 { 16.0 } else { 20.0 }
 }
 
 /// `.mon-off`: a red soft banner with the notice, for a computer that is not online.
@@ -234,7 +249,10 @@ fn Grid(columns: usize, c: &ComputerChip, feed: &MonitorFeed, online: bool) {
                     match card {
                         Card::Status => StatusCard(c, feed, online, fill),
                         Card::Metric(Metric::Fans) => FanCard(fill),
-                        Card::Metric(m) => MetricCard(m, card_view(m, feed), empty_text(m, online, feed.status()), meter_fraction(m, feed), fill),
+                        Card::Metric(m) => {
+                            let badge = feed.latest().and_then(|s| metric_badge(m, s));
+                            MetricCard(m, card_view(m, feed), badge, empty_text(m, online, feed.status()), meter_fraction(m, feed), fill)
+                        }
                     }
                 });
             }
@@ -363,9 +381,17 @@ fn FanCard(fill: bool) {
     });
 }
 
-fn MetricCard(metric: Metric, view: Option<CardView>, empty: &str, meter: Option<f32>, fill: bool) {
+fn MetricCard(
+    metric: Metric,
+    view: Option<CardView>,
+    badge: Option<(String, crate::ui::components::PillTone)>,
+    empty: &str,
+    meter: Option<f32>,
+    fill: bool,
+) {
     let p = ember_theme().palette;
-    MonCard(metric_icon(metric), metric.title(), None, fill, || match view.as_ref() {
+    let header_badge = badge.as_ref().map(|(text, tone)| (text.as_str(), PillTone::from(*tone)));
+    MonCard(metric_icon(metric), metric.title(), header_badge, fill, || match view.as_ref() {
         Some(v) => {
             HeroValue(&v.headline);
             Bars(metric, &v.bars);
@@ -531,7 +557,27 @@ fn ProcessRowView(row: &ProcessRow, mut on_open: impl FnMut(String) + 'static) {
             };
             cell(PID_W, row.pid.map_or_else(|| "-".to_string(), |v| v.to_string()));
             cell(PWR_W, "-".to_string());
-            cell(CPU_W, cpu_text(row.cpu));
+            // In-cell CPU bar beside the numeric percent (FR-L21, #389): blue for member rows,
+            // muted track fill for other processes.
+            cu::Box().alignment(Alignment::CenterEnd).modifier(Modifier::new().width(CPU_W)).content(|| {
+                cu::Row().alignment(Alignment::CenterEnd).spacing(SP[1]).content(|| {
+                    if let Some(pct) = row.cpu {
+                        let f = bar_fraction(pct, 100.0);
+                        let bar_color = if mine { p.blue.strong } else { p.muted };
+                        cu::Row()
+                            .modifier(Modifier::new().width(36.0).height(4.0).background(paint(p.track)).corner_radius(2.0).clip(true))
+                            .content(move || {
+                                if f > 0.0 {
+                                    cu::Spacer().modifier(Modifier::new().weight(f).height(4.0).background(paint(bar_color)).corner_radius(2.0));
+                                }
+                                if f < 1.0 {
+                                    cu::Spacer().modifier(Modifier::new().weight(1.0 - f).height(4.0));
+                                }
+                            });
+                    }
+                    Label(&cpu_text(row.cpu), Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
+                });
+            });
             cell(MEM_W, mem_text(row.mem));
             cu::Spacer().modifier(Modifier::new().width(SP[3]));
         });
@@ -600,6 +646,108 @@ mod tests {
         for want in ["맥미니", "오프라인", "연결이 끊겼습니다", "이름 (0)", SOON, "상태"] {
             assert!(text.contains(want), "missing {want}");
         }
+    }
+
+    /// What the monitor sheet sends before its title after a window report at `width` with the
+    /// safe area `top` x `leading`.
+    fn monitor_head_after_report(width: f32, top: f32, leading: f32) -> String {
+        let text = monitor_after_report(width, 844.0, top, leading);
+        // The delta may not resend the title node; what precedes it, when it is resent.
+        match text.find("이 컴퓨터") {
+            Some(title) => text[..title].to_string(),
+            None => text,
+        }
+    }
+
+    /// Everything the monitor sheet sends after a window report of `width` x `height` with the
+    /// safe area `top` x `leading`.
+    fn monitor_after_report(width: f32, height: f32, top: f32, leading: f32) -> String {
+        use compose_rust::protocol::HostEvent;
+        use compose_rust::{EventPayload, WindowHeightClass, WindowSizeClass};
+        compose_rust::window::reset_window_size();
+        let c = ComputerChip { name: "이 컴퓨터".into(), ..chip() };
+        let mut host = Host::new(move || {
+            let c = c.clone();
+            Box::new(Recomposer::new(move || MonitorSheet(Some(&c), &[], || {})))
+        });
+        host.rebuild().expect("rebuild");
+        let payload = EventPayload::WindowSizeChanged {
+            width_dp: width,
+            height_dp: height,
+            class: WindowSizeClass::from_width_dp(width),
+            height_class: WindowHeightClass::from_height_dp(height),
+            safe_area_top: top,
+            safe_area_leading: leading,
+            safe_area_trailing: 0.0,
+        };
+        let (bytes, _) = host.dispatch(HostEvent { node_id: 0, handler_id: 0, payload }).expect("dispatch");
+        let text: String = compose_rust::protocol::decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")).collect();
+        compose_rust::window::reset_window_size();
+        text
+    }
+
+    #[test]
+    fn fr_l33_the_monitor_dialog_starts_below_the_window_buttons() {
+        // Review sf: from 561 up (and at 1440) the monitor dialog filled the window less 16 above
+        // and below, so its header sat under the traffic lights. A dialog now leaves the lights'
+        // strip above and below; centred, its top edge is below the strip.
+        use crate::ui::safe_area::{safe_area_for, Platform, SafeArea};
+        use super::super::components::dialog_max_height;
+        let lights = safe_area_for(Platform::MacOs, SafeArea { top: 66.0, leading: 98.0, trailing: 0.0 });
+        assert_eq!(dialog_max_height(900.0, lights), 768.0, "66 above and below");
+        assert_eq!(dialog_max_height(900.0, SafeArea::default()), 868.0, "16 above and below with no report");
+        assert_eq!(dialog_max_height(844.0, SafeArea { top: 8.0, leading: 40.0, trailing: 0.0 }), 812.0, "never under 16");
+        assert_eq!(dialog_max_height(844.0, SafeArea { top: 32.0, leading: 0.0, trailing: 138.0 }), 780.0, "a Windows caption report: its 32 strip above and below");
+        let _guard = crate::services::test_guard();
+        // The body is the dialog less its 60 header and the 1 dp line under it:
+        // 900 - 2 x 66 - 61 = 707 with the lights, 900 - 32 - 61 = 807 with a zero report.
+        for width in [561.0, 1440.0] {
+            let sent = monitor_after_report(width, 900.0, 66.0, 98.0);
+            assert!(sent.contains("Height(707.0)") && !sent.contains("Height(807.0)"), "the dialog below the reported strip at {width}: {sent}");
+            let sent = monitor_after_report(width, 900.0, 0.0, 0.0);
+            assert!(sent.contains("Height(807.0)") && !sent.contains("Height(707.0)"), "no change with a zero safe area at {width}: {sent}");
+        }
+    }
+
+    #[test]
+    fn fr_l33_the_full_screen_monitor_header_starts_below_the_window_buttons() {
+        // Review ba D: at 390 the computer monitor (and the project screen's computer sheet,
+        // the same `MonitorSheet`) put "이 컴퓨터" under the macOS traffic lights.
+        use crate::ui::safe_area::{safe_area_for, Platform, SafeArea};
+        use super::super::components::full_screen_sheet_top_inset;
+        // The pure rule names macOS, so it holds on every OS CI runs (as `cr/shell.rs` does).
+        let lights = safe_area_for(Platform::MacOs, SafeArea { top: 28.0, leading: 72.0, trailing: 0.0 });
+        assert_eq!(full_screen_sheet_top_inset(390.0, true, lights), 28.0);
+        assert_eq!(full_screen_sheet_top_inset(560.0, true, lights), 28.0, "full screen up to 560");
+        assert_eq!(full_screen_sheet_top_inset(561.0, true, lights), 0.0, "a dialog from 561");
+        assert_eq!(full_screen_sheet_top_inset(390.0, false, lights), 0.0, "a bottom sheet clears them");
+        assert_eq!(full_screen_sheet_top_inset(390.0, true, SafeArea::default()), 0.0, "nothing to clear");
+        let _guard = crate::services::test_guard();
+        // An odd footprint (31) so no other height in the sheet can stand in for the strip.
+        // The composed sheet reads the report as it is on every system (FR-L33).
+        let head = monitor_head_after_report(390.0, 31.0, 72.0);
+        assert!(head.contains("Height(31.0)"), "the 31 strip before the title: {head}");
+        let head = monitor_head_after_report(390.0, 0.0, 0.0);
+        assert!(!head.contains("Height(31.0)") && !head.contains("Height(28.0)"), "no strip with a zero safe area: {head}");
+    }
+
+    #[test]
+    fn fr_l21_the_monitor_body_ends_at_the_dialog_edge_with_the_mockup_padding() {
+        // Review sf A: at 1440 the footer note under the process table was cut at the dialog's
+        // bottom edge. The body is sized for the header and its line (61), so it ends at the
+        // dialog's edge, and the scroll keeps the mockup's padding under the last line.
+        assert_eq!(MON_CHROME_H, 61.0);
+        assert_eq!(mon_scroll_pad(1440.0), 20.0);
+        assert_eq!(mon_scroll_pad(561.0), 20.0);
+        assert_eq!(mon_scroll_pad(560.0), 16.0);
+        assert_eq!(mon_scroll_pad(390.0), 16.0);
+        let _guard = crate::services::test_guard();
+        let wide = monitor_after_report(1440.0, 900.0, 0.0, 0.0);
+        assert!(wide.contains("Height(807.0)") && wide.contains("Padding(20.0)"), "{wide}");
+        let phone = monitor_after_report(390.0, 844.0, 0.0, 0.0);
+        // The report only sends what changed: the phone keeps the 16 it started with, so no
+        // Padding(20.0) is sent, and the body is the window less the 61 dp chrome.
+        assert!(phone.contains("Height(783.0)") && !phone.contains("Padding(20.0)"), "{phone}");
     }
 
     #[test]
@@ -793,7 +941,7 @@ mod tests {
 
     fn cpu_card() {
         let view = CardView { headline: "23.1%".into(), lines: vec!["코어 8개".into()], bars: vec![50.0, 100.0] };
-        MetricCard(Metric::Cpu, Some(view), "", None, false);
+        MetricCard(Metric::Cpu, Some(view), None, "", None, false);
     }
 
     /// Review M1, M2: the big value is the whole number with its unit beside it in a smaller

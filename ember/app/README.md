@@ -98,8 +98,22 @@ copies the device's peer id to the server by hand:
    advertises (`EMBER_LETIFY_ADVERTISE`, or the observed public address). When it knows none,
    the line reads `6f1c...@<host>:7444 (replace <host> ...)`: put in the address or name the
    device reaches this computer by. Any port works; the transport admits only allowed device
-   keys, so binding `0.0.0.0` is fine. Without `EMBER_TRANSPORT_LISTEN` the port is random at
-   every start and no device line is printed.
+   keys, so binding `0.0.0.0` is fine. Without `EMBER_TRANSPORT_LISTEN` the direct port is
+   random at every start.
+
+   With the server's relay role on (the default on letify, TCP 7443, `EMBER_SERVER_RELAY_PORT`)
+   the line also names that relay, and without a fixed port it names only the relay (#898, not
+   yet compiled or run on a phone):
+
+   ```sh
+   EMBER_TRANSPORT=1 cargo run
+   # ember server device address: 6f1c... relay letify://6f1c...@192.168.0.10:7443
+   ```
+
+   A device with only that line reaches the server through the relay: the server waits there
+   for every device it allows. For a phone outside the network, forward TCP 7443 to the server
+   and replace the host with the public address or a DNS name. A server with no forwardable
+   port (carrier-grade NAT) is not reachable from outside.
 
 2. On the device, open 설정 and read "이 기기의 peer id" (복사 copies it). The key behind it is
    `<data dir>/device.key`, made on first use with mode 0600.
@@ -117,13 +131,25 @@ copies the device's peer id to the server by hand:
 A device the server does not admit shows "이 기기가 서버에 등록되어 있지 않거나 등록이
 해제되었습니다." at start and in 설정. With `EMBER_TRANSPORT_LISTEN` the saved address keeps
 working after the server restarts; without it the direct port changes at every start and the
-address is entered again. The peer id plus the server's relay alone does not connect a device
-(#863).
+address is entered again, unless the line names the server's relay (#898): the relay port is
+fixed. 저장 keeps the pasted line as its two parts, the address and the relay; a relay typed in
+the relay field, or `EMBER_RELAY_URL`, beats the one in the line.
 Clearing the address and saving goes back to the local server. Not over the transport yet: the
 terminal relay and the separate Ember 에디터 window, which still need an HTTP address.
 
 Not on Android yet: the Ember 에디터 window and VS Code Web (FR-W5), the share sheet (FR-F7),
-opening a URL in the system browser, a CI job for this build.
+opening a URL in the system browser, a CI job on pull requests for this build.
+
+The release workflow builds the APK (`publish-release.yml`, job "Client app (android-arm64)",
+NFR-R1, #880) with `./scripts/build-android.sh --release --cargo-args=--locked`. Options after
+`--release` go to `dx build` unchanged. dx 0.7.10 signs with a keystore only from
+`[bundle.android]` in `Dioxus.toml` (the job writes it from the `EMBER_ANDROID_*` secrets on the
+runner) and then runs `assembleRelease`, with R8 kept from removing anything by
+`android/proguard-keep.pro` (which also tells R8 to ignore errorprone's reference to
+`javax.lang.model`) and lint switched off by `android/lint.xml`, which the script copies into the
+generated module first (lint crashed on the first signed build, run 43874185801); without it, `--release` builds the Rust library optimised and the
+APK debug-signed under `outputs/apk/debug`. Every APK has `versionCode` 1 (dx writes it) and the
+crate version as `versionName`.
 
 ## Tests
 

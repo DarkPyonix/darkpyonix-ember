@@ -1506,7 +1506,8 @@ fn DiffViewAtWidth(file: &FileDiff, staging: &MutableState<Staging>, pane_width:
                                 .font_size(Fs::Xs2.size())
                                 .line_height(Fs::Xs2.line_height())
                                 .color(paint(p.text))
-                                .max_lines(1);
+                                .max_lines(1)
+                                .word_break(compose_rust::WordBreak::KeepAll);
                             cu::Spacer().modifier(Modifier::new().width(SP[2]));
                         });
                     }

@@ -912,6 +912,7 @@ pub fn launch_parts(pref: ThemePref) -> (compose_rust::LaunchBuilder, fn()) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::cr::a11y;
 
     #[test]
     fn fr_l10_choosing_a_menu_changes_the_menu_and_leaves_a_conversation() {
@@ -1452,6 +1453,7 @@ mod tests {
             let mut widgets: HashMap<u32, String> = HashMap::new();
             let mut parents: HashMap<u32, u32> = HashMap::new();
             let mut texts: HashMap<u32, String> = HashMap::new();
+            let mut names: HashMap<u32, String> = HashMap::new();
             for m in &batch {
                 match m {
                     Mutation::Create { node_id, widget } => {
@@ -1466,20 +1468,23 @@ mod tests {
                     Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
                         texts.insert(*node_id, s.to_string());
                     }
+                    Mutation::SetProp { node_id, property: PropertyKind::AccessibleName, value: PropertyValue::String(s) } => {
+                        names.insert(*node_id, s.to_string());
+                    }
                     Mutation::SetModifier { node_id, modifier, .. } => {
                         mods.entry(*node_id).or_default().push(format!("{modifier:?}"));
                     }
                     _ => {}
                 }
             }
-            (click_nodes, mods, widgets, parents, texts)
+            (click_nodes, mods, widgets, parents, texts, names)
         };
 
         // 1. Standard rail (`Sidebar(true, ...)`): 1 logo + 8 nav items + 3 footer tools = 12 buttons.
-        let (rail_clicks, rail_mods, rail_widgets, rail_parents, rail_texts) = extract_buttons(rail_probe);
-        let expected_standard: Vec<&str> = std::iter::once(super::a11y::SIDEBAR_TOGGLE)
+        let (rail_clicks, rail_mods, rail_widgets, rail_parents, rail_texts, rail_names) = extract_buttons(rail_probe);
+        let expected_standard: Vec<&str> = std::iter::once(a11y::SIDEBAR_TOGGLE)
             .chain(NavMenu::ALL.iter().map(|m| m.label()))
-            .chain([super::a11y::THEME, super::a11y::SEARCH, super::a11y::SETTINGS])
+            .chain([a11y::THEME, a11y::SEARCH, a11y::SETTINGS])
             .collect();
         assert_eq!(rail_clicks.len(), expected_standard.len(), "standard rail button count");
 
@@ -1489,9 +1494,10 @@ mod tests {
                 .iter()
                 .find(|s| s.starts_with("Semantics"))
                 .unwrap_or_else(|| panic!("rail button {want_label} (node {node_id}) has no Semantics modifier: {m:?}"));
-            assert!(
-                sem.contains(&format!("{want_label:?}")),
-                "rail button {want_label} semantics missing label: {sem}"
+            assert_eq!(
+                rail_names.get(&node_id).map(String::as_str),
+                Some(want_label),
+                "rail button {want_label} missing AccessibleName: {rail_names:?}"
             );
             assert!(
                 sem.contains("Button"),
@@ -1520,24 +1526,30 @@ mod tests {
         }
 
         // 2. Demo rail tool buttons ("플랫폼 미리보기 전환", "데모 초기화") also carry their Korean labels and tooltips.
-        let (demo_clicks, demo_mods, _, _, _) = extract_buttons(rail_with_demo_probe);
-        for want_label in [super::a11y::PLATFORM, super::a11y::DEMO_RESET] {
+        let (demo_clicks, demo_mods, _, _, _, demo_names) = extract_buttons(rail_with_demo_probe);
+        for want_label in [a11y::PLATFORM, a11y::DEMO_RESET] {
             let found = demo_clicks.iter().any(|nid| {
-                demo_mods
-                    .get(nid)
-                    .map(|ms| ms.iter().any(|s| s.starts_with("Semantics") && s.contains(&format!("{want_label:?}")) && s.contains("Button")))
-                    .unwrap_or(false)
+                demo_names.get(nid).map(String::as_str) == Some(want_label)
+                    && demo_mods
+                        .get(nid)
+                        .map(|ms| ms.iter().any(|s| s.starts_with("Semantics") && s.contains("Button")))
+                        .unwrap_or(false)
             });
-            assert!(found, "demo rail tool button {want_label} carries Semantics with its Korean label");
+            assert!(found, "demo rail tool button {want_label} carries AccessibleName and Role::Button");
         }
 
         // 3. PhoneMenu trigger button carries `a11y::MENU` ("메뉴").
-        let (pm_clicks, pm_mods, _, _, _) = extract_buttons(phone_menu_probe);
+        let (pm_clicks, pm_mods, _, _, _, pm_names) = extract_buttons(phone_menu_probe);
         let trigger = pm_clicks.first().expect("phone menu trigger button");
         let trigger_mods = pm_mods.get(trigger).expect("phone menu trigger modifiers");
+        assert_eq!(
+            pm_names.get(trigger).map(String::as_str),
+            Some(a11y::MENU),
+            "phone menu trigger carries AccessibleName 메뉴: {pm_names:?}"
+        );
         assert!(
-            trigger_mods.iter().any(|s| s.starts_with("Semantics") && s.contains(&format!("{:?}", super::a11y::MENU)) && s.contains("Button")),
-            "phone menu trigger carries Semantics with 메뉴: {trigger_mods:?}"
+            trigger_mods.iter().any(|s| s.starts_with("Semantics") && s.contains("Button")),
+            "phone menu trigger carries Role::Button: {trigger_mods:?}"
         );
     }
 }

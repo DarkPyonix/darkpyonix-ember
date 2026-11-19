@@ -2430,24 +2430,31 @@ fn ConflictsBody(paths: &[String], actions: Option<Actions>, layout: PaneLayout)
     let p = ember_theme().palette;
     // `EMBER_CR_VCS_CONFLICT=<path>` opens that file's editor directly, for captures without clicks.
     let open = remember(|| mutable_state_of(std::env::var("EMBER_CR_VCS_CONFLICT").ok().filter(|p| !p.is_empty())));
-    let state = remember(|| mutable_state_of(ConflictLoad::Loading));
+    // #878: demo services do not answer `git conflict`, and sample mode has `actions == None`, so
+    // both open the sample conflict directly instead of staying on "불러오는 중입니다".
+    let use_sample = actions.is_none() || crate::demo::active_from_env();
+    let state = remember(|| {
+        mutable_state_of(if use_sample { ConflictLoad::Ready(sample_conflict()) } else { ConflictLoad::Loading })
+    });
     let local = remember(|| mutable_state_of(0_u64));
     let busy = remember(|| mutable_state_of(false));
     // The armed pick-all button (key, arm time). It lives in the body, which the pane remounts
     // with `key(generation)` after a merge answer, so a reload starts it unarmed.
     let pick_armed = remember(|| mutable_state_of(None::<(usize, i64)>));
 
-    if let (Some(a), Some(path)) = (actions.clone(), open.get()) {
-        let st = state.clone();
-        launched_effect((a.project.clone(), path.clone(), local.get()), move || async move {
-            if crate::services::try_services().is_some() {
-                st.set(ConflictLoad::Loading);
-                let name = a.project.clone();
-                crate::services::run_shared(async move { fetch_conflict(&name, &path).await }, move |result| st.set(result));
-            } else {
-                st.set(ConflictLoad::Failed("서버에 연결되어 있지 않아 충돌 파일을 불러올 수 없습니다.".to_string()));
-            }
-        });
+    if !use_sample {
+        if let (Some(a), Some(path)) = (actions.clone(), open.get()) {
+            let st = state.clone();
+            launched_effect((a.project.clone(), path.clone(), local.get()), move || async move {
+                if crate::services::try_services().is_some() {
+                    st.set(ConflictLoad::Loading);
+                    let name = a.project.clone();
+                    crate::services::run_shared(async move { fetch_conflict(&name, &path).await }, move |result| st.set(result));
+                } else {
+                    st.set(ConflictLoad::Failed("서버에 연결되어 있지 않아 충돌 파일을 불러올 수 없습니다.".to_string()));
+                }
+            });
+        }
     }
 
     let Some(path) = open.get() else {
@@ -2470,7 +2477,7 @@ fn ConflictsBody(paths: &[String], actions: Option<Actions>, layout: PaneLayout)
                 // the explanation (the old full-width pills centred the path and touched the text).
                 cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(move || {
                     for path in paths {
-                        let (open, state, has_server) = (open.clone(), state.clone(), actions.is_some());
+                        let (open, state, has_server) = (open.clone(), state.clone(), !use_sample);
                         let target = path.clone();
                         ConflictFileRow(&path, move || {
                             state.set(if has_server { ConflictLoad::Loading } else { ConflictLoad::Ready(sample_conflict()) });
@@ -9168,5 +9175,14 @@ mod tests {
         });
         assert!(has_clearance, "compact width should include bottom clearance Spacer");
         compose_rust::window::reset_window_size();
+    }
+
+    #[test]
+    fn issue_878_conflict_body_loads_sample_in_demo_mode() {
+        let src = include_str!("vcs.rs");
+        let start = src.find("fn ConflictsBody(").expect("ConflictsBody");
+        let body = &src[start..start + 1800];
+        assert!(body.contains("actions.is_none() || crate::demo::active_from_env()"), "{body}");
+        assert!(body.contains("ConflictLoad::Ready(sample_conflict())"), "{body}");
     }
 }

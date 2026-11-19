@@ -429,10 +429,7 @@ pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<Cre
         cu::ScrollColumn().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
             cu::Column().spacing(SP[4]).modifier(Modifier::new().fill_max_width().padding(pad)).content(|| {
                 if skip.show(EST_HEAD) {
-                    // On a phone the title sits below the menu button's row.
-                    if compact {
-                        cu::Spacer().modifier(Modifier::new().height(PHONE_MENU_ROW));
-                    }
+                    // On a phone the header keeps the menu button's room beside the title (FR-L27.10).
                     HeaderGap("파일", "연결된 모든 장비 사이에서 파일을 주고받습니다. 휴대폰과 태블릿도 포함됩니다.", compact, w <= 900.0, 6.0, compact, || {
                         // The share button is named "공유 시트 열기" (compose-rust v0.0.7, #460).
                         ShareButton(compact, {
@@ -504,8 +501,6 @@ pub fn page_pad(width_dp: f32) -> f32 {
     }
 }
 
-/// The room of the shell's menu button row at the top of a phone.
-const PHONE_MENU_ROW: f32 = 19.0;
 
 /// `EMBER_CR_SCROLL=<dp|bottom|agents|tray|transfers|history>` for review captures: the toolkit
 /// could not scroll a column from code before v0.0.5 (v0.0.7: #385 fixed with
@@ -1762,6 +1757,16 @@ pub const SHARE_SHEET_WIDTH: f32 = 400.0;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fr_l27_10_the_phone_title_has_no_extra_row_above_it() {
+        let src = include_str!("files.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap()];
+        let head = &production[production.find("if skip.show(EST_HEAD) {").unwrap()..];
+        let head = &head[..head.find("HeaderGap(").unwrap()];
+        assert!(!head.contains("Spacer()"), "no row of the screen's own above the header");
+        assert!(production.contains("HeaderGap(\"파일\""));
+    }
+
     use super::*;
 
     #[test]

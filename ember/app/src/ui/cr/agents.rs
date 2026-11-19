@@ -3452,7 +3452,7 @@ mod tests {
         let head_row = nodes.iter().find(|n| Some(n.id) == head.parent).unwrap();
         assert_eq!(head_row.widget, "Row");
         assert!(head_row.mods.iter().any(|m| m == "Weight(1.0)"), "{:?}", head_row.mods);
-        assert!(head_row.mods.iter().any(|m| m.contains("min_h: 24.0")), "the minimum height on the header row: {:?}", head_row.mods);
+        assert!(head_row.mods.iter().any(|m| m.contains("min_height: 24.0")), "the minimum height on the header row: {:?}", head_row.mods);
         let outer = nodes.iter().find(|n| Some(n.id) == head_row.parent).unwrap();
         let spacers: Vec<&Node> = children(&nodes, outer).into_iter().filter(|n| n.widget == "Spacer").collect();
         assert_eq!(spacers.iter().filter(|n| n.mods.iter().any(|m| m == "Width(20.0)")).count(), 2, "20 px sides");

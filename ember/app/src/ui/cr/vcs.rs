@@ -7544,8 +7544,8 @@ mod tests {
         let rows = build_tree(&sample_snapshot().changes.iter().map(|d| d.path.clone()).collect::<Vec<_>>(), &BTreeSet::new()).len();
         assert!(nodes.iter().filter(|n| n.mods.iter().any(|m| m == "Height(34.0)")).count() >= rows);
         assert!(
-            nodes.iter().any(|n| n.widget == "ScrollColumn" && n.mods.iter().any(|m| m.contains("max_h: 280.0"))),
-            "the tree scrolls inside its cap (SizeIn max_h 280.0)"
+            nodes.iter().any(|n| n.widget == "ScrollColumn" && n.mods.iter().any(|m| m.contains("max_height: 280.0"))),
+            "the tree scrolls inside its cap (SizeIn max_height 280.0)"
         );
         let production = include_str!("vcs.rs").split("#[cfg(test)]").next().unwrap();
         let two = production.split("PaneLayout::Two => {").nth(1).unwrap().split("PaneLayout::Stacked => {").next().unwrap();
@@ -7600,7 +7600,7 @@ mod tests {
         assert_eq!(tree_cap(VCS_TREE_MAX_H, Some(585.0)), 281.0);
         let tree = nodes
             .iter()
-            .find(|n| n.widget == "ScrollColumn" && n.mods.iter().any(|m| m == "Height(280.0)"))
+            .find(|n| n.widget == "ScrollColumn" && n.mods.iter().any(|m| m.contains("max_height: 280.0")))
             .expect("the tree scrolls inside its cap");
         let row = with_text(&nodes, "f13.rs");
         assert!(up(&nodes, row).contains(&tree.id), "the last file row is inside the scrolling tree");
@@ -8503,7 +8503,7 @@ mod tests {
         let hit = &nodes[named(&nodes, "가져오기")];
         assert!(hit.props.iter().any(|x| x.starts_with("OnClick=")) && button_role(hit) && press(hit) == 1, "{:?}", hit.mods);
         assert!(hit.mods.iter().any(|m| m == "Width(44.0)") && hit.mods.iter().any(|m| m.starts_with("ShapeRole(Full")), "{:?}", hit.mods);
-        assert!(hit.mods.iter().any(|m| m == "MinTouchTarget(44.0)"), "{:?}", hit.mods);
+        assert!(hit.mods.iter().any(|m| m == "MinTouchTarget { size: 44.0 }"), "{:?}", hit.mods);
 
         // A row named by a path: one clear button with the path as text and name, exactly over
         // its box, which keeps its own size.

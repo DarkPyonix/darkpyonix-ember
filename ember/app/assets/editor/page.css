@@ -30,7 +30,7 @@ html,body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font
 @media (min-width:1101px){.ed-top .ed-find{flex:none;width:300px}}
 /* FR-L31.26 (#874): the overlays' box takes no grid row, so the status bar ends at the page's bottom.
    dioxus-compose#266 (94ade333): placeholder comment nodes no longer make layout boxes in a grid or
-   flex container, so no .ed-none stand-in is needed for a closed tool window or conditional child. */
+   flex container, so no stand-in rule is needed for a closed tool window or conditional child. */
 .ed-layers{grid-row:1;grid-column:1;width:0;height:0;min-width:0;min-height:0}
 /* FR-L31.29 (#895, design review E4): quick open hangs under the find pill. The pill's box is the
    list's containing block; the list is as wide as the old sheet and ends at the pill's right edge.

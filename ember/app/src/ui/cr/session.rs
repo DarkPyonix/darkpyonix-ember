@@ -5785,15 +5785,6 @@ mod tests {
             })
             .collect();
         assert_eq!(clicks.len(), 1, "the chevron is one clickable: {clicks:?}");
-        let open = CHEVRON_OPEN.with(|c| c.borrow().clone()).expect("state captured");
-        assert!(!open.get_untracked());
-        host.dispatch(HostEvent {
-            node_id: clicks[0].0,
-            handler_id: clicks[0].1,
-            payload: EventPayload::Clicked,
-        })
-        .expect("dispatch");
-        assert!(open.get_untracked(), "the chevron opened the chooser");
         // compose-rust#472 (v0.0.11): the 26x32 chevron carries MinTouchTarget(44.0) without
         // growing its drawn Width(26.0) / Height(32.0).
         let mods: Vec<String> = batch
@@ -5803,9 +5794,18 @@ mod tests {
                 _ => None,
             })
             .collect();
-        for want in ["Width(26.0)", "Height(32.0)", "MinTouchTarget(44.0)"] {
+        for want in ["Width(26.0)", "Height(32.0)", "MinTouchTarget { size: 44.0 }"] {
             assert!(mods.iter().any(|m| m == want), "{want}: {mods:?}");
         }
+        let open = CHEVRON_OPEN.with(|c| c.borrow().clone()).expect("state captured");
+        assert!(!open.get_untracked());
+        host.dispatch(HostEvent {
+            node_id: clicks[0].0,
+            handler_id: clicks[0].1,
+            payload: EventPayload::Clicked,
+        })
+        .expect("dispatch");
+        assert!(open.get_untracked(), "the chevron opened the chooser");
         let src = include_str!("session.rs").split("#[cfg(test)]").next().unwrap();
         assert!(!src.contains(concat!("TODO(compose-rust#", "472")));
     }

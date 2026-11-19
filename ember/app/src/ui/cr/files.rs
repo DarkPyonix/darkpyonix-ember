@@ -1809,7 +1809,7 @@ mod tests {
             // The body is a capped ScrollColumn (`SizeIn` with `max_h`), not a fixed-height one.
             let scrolls: Vec<_> = nodes.iter().filter(|n| n.0 == "ScrollColumn").collect();
             assert_eq!(scrolls.len(), 1, "{size:?}");
-            assert!(scrolls[0].2.iter().any(|m| m.starts_with("SizeIn") && m.contains("max_h:")), "{size:?}: {:?}", scrolls[0].2);
+            assert!(scrolls[0].2.iter().any(|m| m.starts_with("SizeIn") && m.contains("max_height:")), "{size:?}: {:?}", scrolls[0].2);
             assert!(!scrolls[0].2.iter().any(|m| m.starts_with("Height(")), "{size:?}: {:?}", scrolls[0].2);
             // The sheet's close button (32 px, clickable) is still there, in the file card.
             let close = nodes.iter().any(|n| n.1.iter().any(|p| p.starts_with("OnClick=")) && n.2.windows(2).any(|w| w[0] == "Width(32.0)" && w[1] == "Height(32.0)"));

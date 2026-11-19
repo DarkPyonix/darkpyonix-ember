@@ -2658,7 +2658,7 @@ mod tests {
         let mut host = Host::new(|| Box::new(Recomposer::new(new_project_sheet_open)));
         let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
         crate::ui::window_size::set_opened_for_test(None);
-        let max_h = format!("max_h: {:?}", room(1440.0, 900.0));
+        let max_h = format!("max_height: {:?}", room(1440.0, 900.0));
         assert!(
             batch.iter().any(|m| matches!(m, Mutation::SetModifier { modifier, .. } if format!("{modifier:?}").contains(&max_h))),
             "expected SizeIn with {max_h}"

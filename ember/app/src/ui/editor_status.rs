@@ -107,7 +107,7 @@ pub const PICKER_VISIBLE_ROWS: usize = 9;
 /// highlighted row keeps one row of context below it unless it is the last one (Code-OSS reveals a
 /// quick pick's active item the same way). The rows after `end` are still drawn and scroll into view.
 /// The list is windowed from before the toolkit could scroll a row into view
-/// (TODO(dioxus-compose#200, in f0e5b9f5): `MountedData::scroll_to` on the highlighted row replaces
+/// (TODO(dioxus-compose#200, in 94ade333): `MountedData::scroll_to` on the highlighted row replaces
 /// the window, after a display check).
 pub fn list_window(selected: usize, len: usize, visible: usize) -> (usize, usize) {
     let visible = visible.max(3);

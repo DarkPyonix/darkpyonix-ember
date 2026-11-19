@@ -71,7 +71,7 @@ impl ThemePref {
 }
 
 /// The scheme the OS reports, as `ui::cr::theme::system_scheme` reads it (compose-rust#97,
-/// v0.0.10), and light before the renderer's first report.
+/// v0.0.11), and light before the renderer's first report.
 pub fn system_scheme() -> Scheme {
     crate::ui::cr::theme::system_scheme()
 }

@@ -7,7 +7,7 @@
 //! in the tree's context menu, in Code-OSS's explorer order.
 //!
 //! The context menu opens on right-click (`oncontextmenu`, compose-rust#417; dioxus-compose
-//! f0e5b9f5 sends `contextmenu` on the HTML path) and, as in Code-OSS, on Shift+F10 or the
+//! 94ade333 sends `contextmenu` on the HTML path) and, as in Code-OSS, on Shift+F10 or the
 //! context-menu key on the focused tree (compose-rust#100 and #717, #832). The "+" menu holds only
 //! 새 파일 and 새 폴더; its "선택한 항목" stand-in section is gone.
 

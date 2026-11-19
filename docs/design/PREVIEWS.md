@@ -76,7 +76,7 @@ Known limits:
 
 ### `#[Preview]` entries: not built
 
-compose-rust v0.0.10 has no preview API: no `#[Preview]` macro and no preview binary. FR-54
+compose-rust v0.0.11 has no preview API: no `#[Preview]` macro and no preview binary. FR-54
 exists only as a draft (compose-rust issue #357). Until it lands, there is no preview function
 per screen state, no fixed clock and no CI artifact. When it lands, each row of the table becomes
 a `#[Preview]` entry and the script takes the app image from the preview render instead of from
@@ -152,7 +152,7 @@ MOCKUP_DIR=/path/to/design-mockup .github/scripts/preview/side-by-side.sh --only
 
 ### `#[Preview]` 항목: 만들지 않았다
 
-compose-rust v0.0.10에는 미리보기 API가 없다. `#[Preview]` 매크로도, 미리보기 바이너리도 없다.
+compose-rust v0.0.11에는 미리보기 API가 없다. `#[Preview]` 매크로도, 미리보기 바이너리도 없다.
 FR-54는 초안으로만 있다 (compose-rust 이슈 #357). 그것이 들어오기 전에는 화면 상태마다의 미리보기
 함수, 고정된 시계, CI 아티팩트가 없다. 들어오면 표의 각 행이 `#[Preview]` 항목이 되고, 스크립트는
 앱 이미지를 창 캡처 대신 미리보기 렌더에서 가져온다 (#222).

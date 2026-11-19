@@ -122,9 +122,9 @@ pub fn Clickable(
 
 /// A [`Clickable`] whose child is only an icon or a glyph, named for assistive technology with
 /// `Modifier::label` (compose-rust v0.0.7, #460, #429). `label` is `&'static str` on purpose:
-/// the toolkit keeps every distinct label for the life of the program (at most 4096), so a name
-/// built from data (a routine name, a commit subject) takes a `Button`'s `accessible_name`
-/// instead.
+/// the toolkit keeps a 128-entry LRU cache of distinct labels (`compose-rust/src/ui/mod.rs`
+/// `LabelCache`, compose-rust#456, v0.0.11), so a name built from data (a routine name, a commit
+/// subject) takes a `Button`'s `accessible_name` instead.
 pub fn NamedClickable(
     label: &'static str,
     modifier: Modifier,
@@ -142,13 +142,13 @@ pub fn NamedDisabled(label: &'static str, modifier: Modifier, alignment: Alignme
 }
 
 // TODO(compose-rust#831): a container
-// takes its name from `Modifier::label` only, which keeps every distinct name for the life of the
-// program and drops names past 4096 (`compose-rust/src/ui/mod.rs`, `MAX_LABELS`), and a `Button`
-// with content insets its children by the design system's 16 dp with no way to change it
-// (`HostButton.kt`, `labelPadding`). So a painted box whose name is built from data (a path, a
-// commit subject, a profile name) keeps a clear `Button` over it for the name, the focus and the
-// click. When a container takes an owned name, move every caller onto [`Clickable`] with that
-// name and delete this.
+// takes its name from `Modifier::label` only (`compose-rust/src/ui/mod.rs` `LabelCache`, a
+// 128-entry LRU cache in v0.0.11), and a `Button` with content insets its children by the design
+// system's 16 dp by default (`HostButton.kt` `labelPadding`; `Button::content_padding` is in
+// v0.0.11, compose-rust#789). So a painted box whose name is built from data (a path, a commit
+// subject, a profile name) keeps a clear `Button` over it for the name, the focus and the click.
+// When a container takes an owned name, move every caller onto [`Clickable`] with that name and
+// delete this.
 /// The control of a painted box whose accessible name is built from data: a clear toolkit
 /// `Button` exactly over its `Box` parent. It takes the parent's bounds without changing them
 /// (`Modifier::match_parent_size`, compose-rust#431), so the box keeps the size of what it
@@ -487,15 +487,15 @@ pub struct PopMenu<'a> {
 }
 
 /// An option menu hanging from the control that opens it (FR-L10.4, #888): the toolkit
-/// `Popover` (compose-rust v0.0.10) with `anchor` as its first child, below the control and
+/// `Popover` (compose-rust v0.0.11) with `anchor` as its first child, below the control and
 /// lined up with `menu.align`. Escape and a press outside call `on_dismiss`; the renderer moves
 /// the box inside the window and gives focus back to the control when it closes
 /// (`HostPopover.kt` `PopoverContent`). A row tap calls `on_dismiss` and then `on_choose(i)`.
 /// `footer` is drawn under a line below the rows (`.sdrop-f`). At 560 and below a mode menu is a
 /// bottom sheet with the same rows ([`pop_presentation`]).
-/// Not built: arrow keys between rows and focus on the current row when the menu opens
-/// (TODO(compose-rust#810): a `Popover` moves no focus between its rows; compose-rust#504 did
-/// it for the toolkit `Menu` only. Add the keys when #810 is in the pin).
+/// (TODO(compose-rust#810, in v0.0.11): `HostPopover.kt` moves focus between `Role::MenuItem`
+/// rows with the arrow keys and focuses the `selected(true)` row when the popover opens, and
+/// `Modifier::has_popup(true)` marks the control; waits for a display check.)
 pub fn PopoverMenu(
     open: bool,
     menu: PopMenu<'_>,
@@ -955,10 +955,6 @@ pub struct FieldOptions {
     /// also counts towards the horizontal one. A framed field defaults to [`FIELD_INSET`]
     /// ([`FIELD_INSET_MULTILINE`] when multiline) and takes this in its place.
     pub inset: Option<(f32, f32)>,
-    /// A single-line field whose hint can be a long value (a remembered path or model): Ember
-    /// draws the hint itself on one line with an ellipsis, under the field while it is empty,
-    /// because the toolkit's placeholder always wraps (FR-L10.1, #878). Ignored when multiline.
-    pub one_line_hint: bool,
     pub height: Option<f32>,
     pub corner_radius: Option<f32>,
     pub background: Option<Paint>,
@@ -1090,56 +1086,11 @@ fn BareField(o: FieldOptions) {
             if side > 0.0 {
                 cu::Spacer().modifier(Modifier::new().width(side));
             }
-            if o.one_line_hint && !multiline {
-                OneLineHintField(o);
-            } else {
-                FieldNode(o, inner);
-            }
+            FieldNode(o, inner);
             if side > 0.0 {
                 cu::Spacer().modifier(Modifier::new().width(side));
             }
         });
-}
-
-/// A single-line field with its hint drawn by Ember: a one-line `muted` label that ends in an
-/// ellipsis, under the field, while the field is empty (FR-L10.1, #878). The toolkit draws its
-/// placeholder with no line limit, so a long path wrapped onto a second line the 40 px field
-/// clipped. TODO(compose-rust#786, after v0.0.10): a one-line placeholder with an ellipsis on
-/// `TextField` lets the toolkit draw it again; this function goes then.
-fn OneLineHintField(o: FieldOptions) {
-    use compose_rust::runtime::{mutable_state_of, remember};
-    let mut o = o;
-    let p = ember_theme().palette;
-    let starts_empty = o.text.as_deref().map_or(true, str::is_empty);
-    let empty = remember(|| mutable_state_of(starts_empty));
-    let hint = std::mem::take(&mut o.placeholder);
-    let mut user = o.on_value_change.take();
-    let typed = empty.clone();
-    o.on_value_change = Some(Box::new(move |t: String| {
-        typed.set(t.is_empty());
-        if let Some(f) = user.as_mut() {
-            f(t);
-        }
-    }));
-    let show = empty.get();
-    // The desktop renderer gives a weighted child at least its narrowest width, and a one-line
-    // label reports its whole line there: the hint took 708 of the 696 px share (r5 captures,
-    // 1440 and 390), ran under the trailing 12 px inset to the frame and showed no ellipsis.
-    // A zero width makes the column's narrowest width 0, so it takes its share; the box inside
-    // fills it and clips what is left.
-    cu::Column().modifier(Modifier::new().weight(1.0).width(0.0)).content(move || {
-        cu::Box()
-            .alignment(Alignment::CenterStart)
-            .modifier(Modifier::new().fill_max_width().clip(true))
-            .content(move || {
-                if show && !hint.is_empty() {
-                    // `WrapLabel` so a path with no space ellipsises inside the box instead of
-                    // asking for its whole width.
-                    WrapLabel(&hint, FIELD_FONT, Weight::Regular, Some(paint(p.muted)), Some(1));
-                }
-                FieldNode(o, Modifier::new().fill_max_width());
-            });
-    });
 }
 
 /// The toolkit field with every option but the frame, which `modifier` carries.
@@ -1271,7 +1222,7 @@ pub fn name_then_pill_width(room: f32, natural: f32, pill: f32, gap: f32) -> Opt
 /// pill and whatever follows the row stay on screen (CSS `flex:0 1 auto;min-width:0` on the
 /// name and `flex:none` on the pill; `.detail .topbar` in the mockup). The pill never shrinks.
 ///
-/// TODO(compose-rust#778, after v0.0.10): the measuring below goes when the pin has a weight that
+/// TODO(compose-rust#778, after v0.0.11): the measuring below goes when the pin has a weight that
 /// leaves a child its own size.
 ///
 /// The toolkit has no weight that leaves a child its own size (Compose `weight(fill = false)`)
@@ -1769,9 +1720,9 @@ pub fn EmberCardSized(
         .border(1.0, paint(border))
         .corner_radius(CORNER_LG);
     // A Box rather than `Card`, whose design-system shape ignores `corner_radius`.
-    // TODO(compose-rust, unfiled: Modifier has no per-side padding): the mockup's 16/20 padding
-    // is asymmetric and `Modifier::padding` is uniform, so 16 is used on all sides unless the
-    // caller passes one. The side spacers go when the toolkit takes a padding per side.
+    // TODO(compose-rust#826): the mockup's 16/20 padding is asymmetric and `Modifier::padding`
+    // is uniform, so 16 is used on all sides unless the caller passes one. The side spacers go
+    // when the toolkit takes a padding per side.
     // The 4 dp spacers raise the uniform 16 to the mockup's 20 on the sides (`--pad-card`).
     let side = if padding.is_some() { 0.0 } else { PAD_CARD_H - PAD_CARD_V };
     cu::Box().modifier(m.padding(padding.unwrap_or(PAD_CARD_V))).content(|| {
@@ -1798,8 +1749,8 @@ pub fn InsetPanelSized(fill_max_width: bool, fill_max_height: bool, content: imp
     if fill_max_height {
         m = m.fill_max_height();
     }
-    // TODO(compose-rust, unfiled: Modifier has no per-side padding): the mockup's 12/16 padding
-    // is asymmetric; 12 on all sides and the 4 dp spacers below until the toolkit takes one per side.
+    // TODO(compose-rust#826): the mockup's 12/16 padding is asymmetric; 12 on all sides and the
+    // 4 dp spacers below until the toolkit takes one per side.
     let panel = cu::Box().modifier(m.background(paint(theme.palette.surface_2)).corner_radius(CORNER_MD).padding(PAD_ROW_V));
     let panel = if fill_max_height { panel.alignment(Alignment::CenterStart) } else { panel };
     panel
@@ -1933,7 +1884,7 @@ pub(crate) fn sheet_body_max_height(window_width_dp: f32, window_height_dp: f32,
 }
 
 /// The room a bottom sheet keeps under its last row for the phone's gesture bar or home
-/// indicator (`env(safe-area-inset-bottom)` in the mockup, FR-L28.4). compose-rust v0.0.10
+/// indicator (`env(safe-area-inset-bottom)` in the mockup, FR-L28.4). compose-rust v0.0.11
 /// reports no bottom safe area (`WindowSafeArea` has top, leading and trailing only) and its
 /// `Sheet` does not pad for the navigation bar, so a fixed phone value is used on every system.
 pub const SHEET_PHONE_BOTTOM_ROOM: f32 = 24.0;
@@ -1949,7 +1900,7 @@ pub(crate) fn sheet_bottom_room(window_width_dp: f32, monitor: bool) -> f32 {
 
 /// The 32 px round close button of a sheet header, with the mockup's line icon.
 /// Its accessible name is "닫기" (compose-rust v0.0.7, #460).
-/// compose-rust v0.0.10 registers every open `Dialog`, `Sheet` and `Popover` on
+/// compose-rust v0.0.11 registers every open `Dialog`, `Sheet` and `Popover` on
 /// `OverlayFocusStack` and delivers Escape to the top-most open modal's `on_dismiss`
 /// (FR-L32, #502; not yet verified on a display). Ember passes the same close callback
 /// (guarded where a guard exists) to the modal's `on_dismiss`, so Escape closes every sheet
@@ -2020,7 +1971,7 @@ pub fn EmberSheetSized(
 ) {
     let theme = ember_theme();
     // The mockup's `.modal` scrim, rgba(0, 0, 0, 0.3), set on every presentation (compose-rust#384,
-    // v0.0.10 `ModalScope::scrim`). The layered card shadow (#214) replaces the Material tint ring that `elevation` painted.
+    // v0.0.11 `ModalScope::scrim`). The layered card shadow (#214) replaces the Material tint ring that `elevation` painted.
     // Explicit zero padding suppresses the renderer dialog's theme padding, which otherwise
     // adds space around the frame and prevents a full-screen sheet.
     let modifier = with_shadows(Modifier::new().padding(0.0), theme.shadow_sm()).background(paint(theme.palette.surface));
@@ -2473,53 +2424,39 @@ mod tests {
     }
 
     #[test]
-    fn fr_l10_1_one_line_hint_is_an_ellipsised_label_under_an_empty_field() {
-        // #878: the 새 세션 folder hint (a long path) wrapped onto a clipped second line.
+    fn fr_l10_1_one_line_hint_is_the_toolkit_placeholder() {
+        // compose-rust#786 (v0.0.11): a single-line TextField keeps its placeholder on one line
+        // with an ellipsis in the renderer, so the placeholder is sent directly to the field and
+        // no separate label is drawn under it.
         let nodes = emitted_nodes(|| {
             EmberField(FieldOptions {
                 fill_max_width: true,
-                one_line_hint: true,
                 placeholder: "/Users/someone/work/a-very-long-folder/with/many/parts".to_string(),
                 ..Default::default()
             })
         });
         let field = the(&nodes, "TextField");
         assert!(
-            !field.props.iter().any(|p| p.starts_with("Placeholder=") && p.contains("/Users")),
-            "the toolkit placeholder is not sent: {:?}",
+            field.props.iter().any(|p| p == "Placeholder=String(\"/Users/someone/work/a-very-long-folder/with/many/parts\")"),
+            "the toolkit placeholder is sent on the field: {:?}",
             field.props
         );
-        let hint = nodes
-            .iter()
-            .find(|n| n.widget == "Text" && n.props.iter().any(|p| p.contains("/Users/someone")))
-            .expect("the hint label");
-        assert!(hint.props.iter().any(|p| p == "MaxLines=Integer(1)"), "{:?}", hint.props);
-        assert!(hint.props.iter().any(|p| p.starts_with("Overflow=")), "{:?}", hint.props);
-        // The hint and the field share one box, the hint first so the field is on top.
-        let stack = parent_of(&nodes, field);
-        assert_eq!(stack.widget, "Box");
-        assert!(stack.mods.iter().any(|m| m.starts_with("Clip")), "{:?}", stack.mods);
-        assert_eq!(hint.parent, Some(stack.id));
-        // The share of the row is taken by a column (#878: a weighted Box overran the inset).
-        let share = parent_of(&nodes, stack);
-        assert_eq!(share.widget, "Column");
-        assert!(share.mods.iter().any(|m| m == "Weight(1.0)"), "{:?}", share.mods);
-        assert!(share.mods.iter().any(|m| m == "Width(0.0)"), "no narrowest width: {:?}", share.mods);
-        assert!(hint.id < field.id, "the hint is under the field");
-        // A field that starts with text shows no hint.
-        let nodes = emitted_nodes(|| {
-            EmberField(FieldOptions { one_line_hint: true, placeholder: "힌트".into(), text: Some("값".into()), ..Default::default() })
-        });
-        assert!(!nodes.iter().any(|n| n.widget == "Text" && n.props.iter().any(|p| p.contains("힌트"))));
+        assert!(
+            !nodes.iter().any(|n| n.widget == "Text"),
+            "no stand-in hint label is drawn under the field"
+        );
+        let production = include_str!("components.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(!production.contains(&["OneLine", "HintField"].concat()));
+        assert!(!production.contains(concat!("TODO(compose-rust#", "786")));
     }
 
     #[test]
-    fn fr_l10_1_new_session_long_hints_stay_on_one_line() {
+    fn fr_l10_1_new_session_long_hints_are_the_field_placeholder() {
         let src = include_str!("new_session.rs");
         for ph in ["\"/path/to/project\"", "\"에이전트 기본값\""] {
             let at = src.find(ph).unwrap_or_else(|| panic!("{ph}"));
             let opts = &src[src[..at].rfind("EmberField(FieldOptions {").expect("field")..at];
-            assert!(opts.contains("one_line_hint: true"), "{ph}: {opts}");
+            assert!(!opts.contains("one_line_hint"), "{ph}: {opts}");
         }
     }
 
@@ -3324,7 +3261,7 @@ mod tests {
 
     #[test]
     fn fr_212_modal_scrim_is_the_mockups() {
-        // compose-rust#384 (v0.0.10 `ModalScope::scrim`): every presentation takes the mockup's scrim.
+        // compose-rust#384 (v0.0.11 `ModalScope::scrim`): every presentation takes the mockup's scrim.
         let src = include_str!("components.rs");
         let production = &src[..src.find("#[cfg(test)]").expect("tests")];
         assert!(!production.contains(concat!("TODO(compose-rust#", "384)")));

@@ -1222,10 +1222,10 @@ pub(super) fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: 
         // style rows at 390). When the window has not reported a size (390 can read 0x0) the
         // shared formula falls back to 240 dp. v0.0.7: #479 fixed (`with_report_size`);
         // fallback kept until checked on a display (the first composition still reads 0x0).
-        // FR-L32.1 (#876, #878): 취소/만들기 sit in the header as the mockup's `.sheet-acts`
-        // (`project.js` projNew), so the body leaves room for the header only and the buttons
-        // never fall below a scrolling body at 390.
-        // TODO(compose-rust#778, after v0.0.10): cap the body at this height instead of fixing it.
+        // FR-L32.1, FR-L26.1 (#876, #878, compose-rust#778, v0.0.11): 취소/만들기 sit in the header
+        // as the mockup's `.sheet-acts` (`project.js` projNew), and the body is capped at the
+        // room left by the header (`Modifier::max_height`), so the 1440 dialog shrinks to its
+        // content and a 390 sheet scrolls inside the cap.
         let new_window = crate::ui::window_size::current_window_size();
         let new_body_height = super::components::sheet_body_max_height(
             new_window.width_dp,
@@ -1234,14 +1234,7 @@ pub(super) fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: 
             super::components::SHEET_HEADER_CHROME_H,
         )
         .min(900.0);
-        // FR-L26.1 (#878): a body that fits is as tall as its content, so the 1440 dialog has no
-        // blank band above 취소/만들기; only a body taller than the room scrolls at a fixed height.
-        let notes = usize::from(d.branch.trim().is_empty())
-            + if d.is_blank() { 0 } else { errors.len() }
-            + usize::from(st.new_failure.get().is_some());
-        let new_columns = super::characters::style_picker_columns(new_window.width_dp);
         let new_stacked = new_project_fields_stacked(new_window.width_dp);
-        let new_body_fits = new_project_body_estimate(new_columns, new_stacked, notes) <= new_body_height;
         let new_scroll = cu::remember_scroll_state();
         let review_end = new_sheet_review_end();
         // `.sheet-acts`: 취소 and 만들기 (small) before the close button, 4 apart, as the project
@@ -1261,7 +1254,7 @@ pub(super) fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: 
             }
         };
         EmberSheet("새 프로젝트", st.new_project.get(), request_close.clone(), Some(&mut new_actions), || {
-            if review_end && !new_body_fits {
+            if review_end {
                 ScrollToEnd(new_scroll.clone());
             }
             let new_body = || {
@@ -1359,11 +1352,7 @@ pub(super) fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: 
                     }
                 });
             };
-            if new_body_fits {
-                cu::Column().modifier(Modifier::new().fill_max_width()).content(new_body);
-            } else {
-                cu::ScrollColumn().scroll_state(&new_scroll).modifier(Modifier::new().fill_max_width().height(new_body_height)).content(new_body);
-            }
+            cu::ScrollColumn().scroll_state(&new_scroll).modifier(Modifier::new().fill_max_width().max_height(new_body_height)).content(new_body);
         });
         // The unsaved-changes question, as the settings sheet asks it.
         let keep = {
@@ -1444,23 +1433,6 @@ pub const NEW_NAME_HINT: &str = "예: darkpyonix-docs";
 /// reported its width counts as wide.
 pub fn new_project_fields_stacked(window_width_dp: f32) -> bool {
     window_width_dp > 0.0 && window_width_dp <= 560.0
-}
-
-/// How tall the new-project body is, from its rows (FR-L26.1): 20 px padding top and bottom;
-/// the 기본 section (the 22 px title, the 18 px hint, then 이름 and the 저장소/기본 브랜치 row,
-/// or 저장소 and 기본 브랜치 as rows of their own when `stacked`, each a 12/18 label, 4 and a
-/// 40 px field, 12 apart; 8 between the section's rows); 16; the
-/// 팀 캐릭터 section (its rule, 8, the title, a two-line hint and the picker for `columns`, 8
-/// apart); each of `notes` (the branch hint, errors, the failure) at two lines and 16 above.
-/// An estimate, not a measurement: TODO(compose-rust#778, after v0.0.10) a body capped at the room would make
-/// it unnecessary.
-pub(crate) fn new_project_body_estimate(columns: usize, stacked: bool, notes: usize) -> f32 {
-    let field_row = 18.0 + 4.0 + H_BTN;
-    let note = SP[3] + 2.0 * 18.0;
-    let field_rows = if stacked { 3.0 } else { 2.0 };
-    let basic = 22.0 + SP[1] + 18.0 + SP[1] + field_rows * field_row + (field_rows - 1.0) * SP[2];
-    let style = 1.0 + SP[1] + SP[1] + SP[1] + 22.0 + SP[1] + 2.0 * 18.0 + SP[1] + super::characters::style_picker_height(columns);
-    SP[4] * 2.0 + basic + SP[3] + style + notes as f32 * note
 }
 
 /// The new-project sheet's review setting: `EMBER_CR_SHEET_SCROLL=end` scrolls its body to the
@@ -2493,16 +2465,19 @@ mod tests {
         // #876 put 취소/만들기 in a footer that fell below the body at 390; the mockup has them
         // in the header (`project.js` projNew `.sheet-acts`), so the body leaves room for the
         // header only and the buttons are always on screen (review r6 item 7).
+        // compose-rust#778 (v0.0.11): the body takes Modifier::max_height(new_body_height), so
+        // new_project_body_estimate is gone.
         let src = include_str!("project.rs");
         let production = &src[..src.find("#[cfg(test)]").unwrap()];
         let sheet = &production[production.find("let new_body_height").unwrap()..production.find("EmberSheet(\"새 프로젝트\"").unwrap()];
         assert!(sheet.contains("super::components::SHEET_HEADER_CHROME_H,\n        )"), "{sheet}");
         assert!(!sheet.contains("SHEET_FOOTER_H"), "{sheet}");
-        assert!(production.contains("TODO(compose-rust#778, after v0.0.10)"));
+        assert!(!production.contains(concat!("TODO(compose-rust#", "778")));
+        assert!(!production.contains(&["new_project_body", "_estimate"].concat()));
         let body = new_project_sheet_source();
         assert!(body.starts_with("EmberSheet(\"새 프로젝트\", st.new_project.get(), request_close.clone(), Some(&mut new_actions),"), "{body}");
         assert!(!body.contains("SheetFooter("), "{body}");
-        assert!(body.contains(".scroll_state(&new_scroll).modifier(Modifier::new().fill_max_width().height(new_body_height))"));
+        assert!(body.contains(".scroll_state(&new_scroll).modifier(Modifier::new().fill_max_width().max_height(new_body_height))"));
     }
 
     #[compose_rust::runtime::Composable]
@@ -2651,20 +2626,17 @@ mod tests {
     }
 
     #[test]
-    fn fr_l32_1_add_computer_takes_its_content_height_in_the_bottom_sheet() {
-        // #876: at 390 the sheet started at y 127 with its content ending at y 465, because the
-        // body was fixed at 85 percent less the header. Below 560 dp the body now wraps.
+    fn fr_l32_1_add_computer_caps_its_body_at_the_room() {
+        // #876, compose-rust#778 (v0.0.11): the body takes Modifier::max_height(body_h) at every
+        // size so it wraps its content when short and scrolls inside the cap when long.
         let src = include_str!("add_computer.rs");
-        let sheet = &src[src.find("pub fn AddComputerSheet(").unwrap()..];
+        let production = src.split("#[cfg(test)]").next().unwrap();
+        let sheet = &production[production.find("pub fn AddComputerSheet(").unwrap()..];
         let sheet = &sheet[..sheet.find("\n}\n").unwrap()];
-        assert!(sheet.contains("let wraps = super::components::sheet_wraps_content(w.width_dp);"));
-        let bottom = &sheet[sheet.find("if wraps || fits {").unwrap()..];
-        let bottom = &bottom[..bottom.find("} else {").unwrap()];
-        assert!(bottom.contains("cu::Column().modifier(Modifier::new().fill_max_width()).content("), "{bottom}");
-        assert!(!bottom.contains(".height("), "{bottom}");
-        assert!(!bottom.contains("ScrollColumn"), "{bottom}");
+        assert!(sheet.contains("cu::ScrollColumn().modifier(Modifier::new().fill_max_width().max_height(body_h)).content("), "{sheet}");
+        assert!(!sheet.contains(".height(body_h)"), "{sheet}");
         assert!(sheet.contains("super::components::SHEET_HEADER_CHROME_H + super::components::SHEET_FOOTER_H"));
-        assert!(sheet.contains("TODO(compose-rust#778, after v0.0.10)"));
+        assert!(!production.contains(concat!("TODO(compose-rust#", "778")));
     }
 
     #[test]
@@ -2673,31 +2645,24 @@ mod tests {
         assert!(!sheet_scroll_is_end(Some("120")));
         assert!(!sheet_scroll_is_end(None));
         let body = new_project_sheet_source();
-        assert!(body.contains("if review_end && !new_body_fits {\n                ScrollToEnd(new_scroll.clone());"), "{body}");
+        assert!(body.contains("if review_end {\n                ScrollToEnd(new_scroll.clone());"), "{body}");
     }
 
     #[test]
-    fn fr_l26_1_new_project_body_is_content_height_when_it_fits() {
-        use super::super::characters::style_picker_columns;
+    fn fr_l26_1_new_project_body_is_capped_at_the_room() {
         use super::super::components::{sheet_body_max_height, SHEET_HEADER_CHROME_H};
         let room = |w: f32, h: f32| sheet_body_max_height(w, h, false, SHEET_HEADER_CHROME_H).min(900.0);
-        // 40; 기본: 22 + 8 + 18 + 8 + 62 + 12 + 62; 16; 팀 캐릭터: 1 + 8 + 8 + 8 + 22 + 8 + 36 + 8
-        // and the picker (two rows of 162 and 8).
-        assert_eq!(new_project_body_estimate(3, false, 0), 40.0 + 192.0 + 16.0 + 99.0 + 332.0);
-        // Stacked: one more 62 px field row and its 12 px gap.
-        assert_eq!(new_project_body_estimate(3, true, 0) - new_project_body_estimate(3, false, 0), 74.0);
-        assert_eq!(new_project_body_estimate(3, false, 1) - new_project_body_estimate(3, false, 0), 52.0);
-        // 1440 x 900: three columns, the body fits with room for two notes (#878: a fixed
-        // body left about 170 px blank above the footer).
-        assert_eq!(style_picker_columns(1440.0), 3);
         assert_eq!(room(1440.0, 900.0), 900.0 - 32.0 - 61.0);
-        assert!(new_project_body_estimate(3, false, 2) <= room(1440.0, 900.0));
-        // 390 x 844: two columns of three rows do not fit the 85 percent sheet; it scrolls at a
-        // fixed height so the footer stays on screen (FR-L32.1).
-        assert_eq!(style_picker_columns(390.0), 2);
-        assert!(new_project_body_estimate(2, true, 1) > room(390.0, 844.0));
-        let body = new_project_sheet_source();
-        assert!(body.contains("if new_body_fits {\n                cu::Column().modifier(Modifier::new().fill_max_width()).content(new_body);"), "{body}");
+        let _guard = crate::services::test_guard();
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+        let mut host = Host::new(|| Box::new(Recomposer::new(new_project_sheet_open)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        crate::ui::window_size::set_opened_for_test(None);
+        let max_h = format!("max_height: {:?}", room(1440.0, 900.0));
+        assert!(
+            batch.iter().any(|m| matches!(m, Mutation::SetModifier { modifier, .. } if format!("{modifier:?}").contains(&max_h))),
+            "expected SizeIn with {max_h}"
+        );
     }
 }
 

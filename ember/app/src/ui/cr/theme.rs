@@ -21,7 +21,7 @@ use compose_rust::ui::{Modifier, Shadow};
 // Dioxus module's definitions are the single source until phase 8 moves them here.
 pub use crate::ui::theme::{Scheme, ThemePref};
 
-/// The scheme the OS reports (`compose_rust::system_color_scheme`, compose-rust#97, v0.0.10), and
+/// The scheme the OS reports (`compose_rust::system_color_scheme`, compose-rust#97, v0.0.11), and
 /// light before the renderer's first report. The read is not a subscription: a change of the
 /// system appearance shows at the next recomposition.
 pub fn system_scheme() -> Scheme {

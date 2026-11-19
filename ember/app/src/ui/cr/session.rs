@@ -554,8 +554,8 @@ pub fn split_end_radii(height: f32) -> [f32; 4] {
 /// The chevron beside a header's "IDE 열기" that opens the chooser even when a default is set
 /// (FR-L7). `on_ink` draws it inside the dark split button; otherwise as a bordered square.
 /// Its accessible name is "다른 IDE 선택" (compose-rust v0.0.7, #460), and it says whether the
-/// chooser is open. Touch target 26x32, under 44 px: FR-L34.3, #323 (waits for a toolkit hit
-/// area that does not change layout, TODO(compose-rust#472, after v0.0.10)).
+/// chooser is open. Drawn 26x32 (`height`), with a 44 dp hit area that does not grow the node
+/// (`Modifier::min_touch_target`, compose-rust#472, v0.0.11; FR-L34.3, #323).
 pub fn IdeChevron(open: MutableState<bool>, on_ink: bool) {
     IdeChevronSized(open, on_ink, 32.0);
 }
@@ -580,7 +580,7 @@ pub fn IdeChevronSized(open: MutableState<bool>, on_ink: bool, height: f32) {
     };
     NamedClickable(
         super::a11y::OTHER_IDE,
-        m.expanded(open.get()),
+        m.min_touch_target(super::vcs::ICON_TOUCH_TARGET).expanded(open.get()),
         Alignment::Center,
         move || open.set(true),
         move || NavIcon(ICON_CHEVRON_DOWN_SVG, tint, 13.0),
@@ -5794,6 +5794,20 @@ mod tests {
         })
         .expect("dispatch");
         assert!(open.get_untracked(), "the chevron opened the chooser");
+        // compose-rust#472 (v0.0.11): the 26x32 chevron carries MinTouchTarget(44.0) without
+        // growing its drawn Width(26.0) / Height(32.0).
+        let mods: Vec<String> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetModifier { node_id, modifier, .. } if *node_id == clicks[0].0 => Some(format!("{modifier:?}")),
+                _ => None,
+            })
+            .collect();
+        for want in ["Width(26.0)", "Height(32.0)", "MinTouchTarget(44.0)"] {
+            assert!(mods.iter().any(|m| m == want), "{want}: {mods:?}");
+        }
+        let src = include_str!("session.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(!src.contains(concat!("TODO(compose-rust#", "472")));
     }
 
     /// What a composed screen sends: each node's parent, string props and modifiers.

@@ -13,7 +13,7 @@
 //! #166 workarounds (revert when upstream lands):
 //! - No drag and drop: a send sheet picks the receiver, then the files. 파일 고르기 opens the
 //!   platform's file dialog (compose-rust#483) where the toolkit has one, which is macOS in
-//!   the v0.0.10 pin (see [`FILE_PICKER_AVAILABLE`]); elsewhere the files step says
+//!   the v0.0.11 pin (see [`FILE_PICKER_AVAILABLE`]); elsewhere the files step says
 //!   [`FILE_PICK_UNAVAILABLE`]. File drop (compose-rust#485) is in the pin and not wired yet.
 //! - No OS share sheet (FR-F7) and no live push of transfer progress: the screen re-reads the
 //!   service whenever the launcher state changes.
@@ -49,7 +49,7 @@ pub const AGENT_SEND_UNSUPPORTED: &str = "agent로 보내기는 아직 지원되
 pub const OFFLINE_TAG: &str = "오프라인";
 
 /// Whether 파일 고르기 can open the platform's file dialog (`compose_rust::FileDialog`,
-/// compose-rust#483). In the v0.0.10 pin only macOS shows one; Windows, Linux, iOS, Android and
+/// compose-rust#483). In the v0.0.11 pin only macOS shows one; Windows, Linux, iOS, Android and
 /// the web answer "unavailable" (TODO(compose-rust#483): the other platforms' dialogs; the issue
 /// is closed with macOS alone). Dropped files stay with compose-rust#485.
 pub const FILE_PICKER_AVAILABLE: bool = cfg!(target_os = "macos");

@@ -812,9 +812,13 @@ fn HeadedCard(head: impl FnOnce(), body: impl FnOnce()) {
             cu::Spacer().modifier(Modifier::new().height(PAD_CARD_V));
             cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
                 cu::Spacer().modifier(Modifier::new().width(PAD_CARD_H));
-                // A strut: TODO(compose-rust, unfiled: Modifier has no minimum height; #778 caps a height).
-                cu::Spacer().modifier(Modifier::new().height(CARD_HEAD_CONTENT_MIN_H));
-                cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().weight(1.0)).content(head);
+                // compose-rust#778 / #826 (v0.0.11 `Modifier::min_height`): `.card-h{min-height:56px}`
+                // less the 16 px padding above and below.
+                cu::Row()
+                    .alignment(Alignment::CenterStart)
+                    .spacing(SP[2])
+                    .modifier(Modifier::new().weight(1.0).min_height(CARD_HEAD_CONTENT_MIN_H))
+                    .content(head);
                 cu::Spacer().modifier(Modifier::new().width(PAD_CARD_H));
             });
             cu::Spacer().modifier(Modifier::new().height(PAD_CARD_V));
@@ -3444,14 +3448,15 @@ mod tests {
             .find(|n| rule_up.contains(&n.id) && n.widget == "Box" && n.mods.iter().any(|m| m.starts_with("Border")))
             .expect("the card");
         assert!(card.mods.iter().any(|m| m == "Padding(0.0)"), "{:?}", card.mods);
-        // The header row: 20 at each side, the 24 px strut, then the children 12 apart.
+        // The header row: 20 at each side, at least 24 px tall (`SizeIn` `min_h`), then the children 12 apart.
         let head_row = nodes.iter().find(|n| Some(n.id) == head.parent).unwrap();
         assert_eq!(head_row.widget, "Row");
         assert!(head_row.mods.iter().any(|m| m == "Weight(1.0)"), "{:?}", head_row.mods);
+        assert!(head_row.mods.iter().any(|m| m.contains("min_h: 24.0")), "the minimum height on the header row: {:?}", head_row.mods);
         let outer = nodes.iter().find(|n| Some(n.id) == head_row.parent).unwrap();
         let spacers: Vec<&Node> = children(&nodes, outer).into_iter().filter(|n| n.widget == "Spacer").collect();
         assert_eq!(spacers.iter().filter(|n| n.mods.iter().any(|m| m == "Width(20.0)")).count(), 2, "20 px sides");
-        assert!(spacers.iter().any(|n| n.mods.iter().any(|m| m == "Height(24.0)")), "the minimum height strut");
+        assert!(!spacers.iter().any(|n| n.mods.iter().any(|m| m == "Height(24.0)")), "no spacer strut");
         let tile = children(&nodes, head_row).into_iter().find(|n| n.widget == "Box").expect("the icon tile");
         for want in ["Width(30.0)", "Height(30.0)"] {
             assert!(tile.mods.iter().any(|m| m == want), "{want}: {:?}", tile.mods);

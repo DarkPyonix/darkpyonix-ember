@@ -374,13 +374,10 @@ pub fn MembersSheet(channel: &str, channel_name: &str, st: &OwnerState, live: bo
         let st = st.clone();
         move || st.close()
     };
-    // FR-L32.1 (#878): the sheet is as tall as its content. A weighted body asked the dialog for
-    // the whole window, so the one-line body without a server filled it. Without a server, and in
-    // the bottom sheet (which scrolls taller content itself), the body is a plain column; with a
-    // server the dialog's body scrolls at the room left by the header and footer.
-    // TODO(compose-rust#778, after v0.0.10): cap that body instead of fixing it.
+    // FR-L32.1 (#878, compose-rust#778, v0.0.11): the sheet body is capped at the room left by
+    // the header and footer (`Modifier::max_height`), so the one-line body without a server is
+    // only as tall as its line and a longer list scrolls inside the cap.
     let w = crate::ui::window_size::current_window_size();
-    let plain = !live || super::components::sheet_wraps_content(w.width_dp);
     let body_h = super::components::sheet_body_max_height(
         w.width_dp,
         w.height_dp,
@@ -389,22 +386,19 @@ pub fn MembersSheet(channel: &str, channel_name: &str, st: &OwnerState, live: bo
     )
     .min(900.0);
     EmberSheet(&format!("{channel_name} 멤버/게스트"), st.open.get(), close.clone(), None, || {
-        let body = || {
-            cu::Column().spacing(SP[3]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
-                if !live {
-                    Label("서버에 연결되어 있지 않아 초대와 게스트를 관리할 수 없습니다", Fs::Sm, Weight::Regular, Some(paint(ember_theme().palette.muted)), None);
-                    return;
-                }
-                InviteSection(channel, st);
-                InviteList(channel, st);
-                GuestList(channel, st);
+        cu::ScrollColumn()
+            .modifier(Modifier::new().fill_max_width().max_height(body_h))
+            .content(|| {
+                cu::Column().spacing(SP[3]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
+                    if !live {
+                        Label("서버에 연결되어 있지 않아 초대와 게스트를 관리할 수 없습니다", Fs::Sm, Weight::Regular, Some(paint(ember_theme().palette.muted)), None);
+                        return;
+                    }
+                    InviteSection(channel, st);
+                    InviteList(channel, st);
+                    GuestList(channel, st);
+                });
             });
-        };
-        if plain {
-            cu::Column().modifier(Modifier::new().fill_max_width()).content(body);
-        } else {
-            cu::ScrollColumn().modifier(Modifier::new().fill_max_width().height(body_h)).content(body);
-        }
         SheetFooter(|| {
             AppButton("닫기", None, ButtonKind::Default, true, true, false, close.clone());
         });
@@ -464,9 +458,9 @@ fn InviteSection(channel: &str, st: &OwnerState) {
     }
     if let Some(c) = created.filter(|_| status.can_copy()) {
         // A read-only look: the field starts with the link, enabled so it can be selected and
-        // copied with Cmd+C / Ctrl+C. TODO(compose-rust, unfiled: TextField has no read-only flag):
-        // typing into it changes only what is drawn, never the link. 복사 puts the link on the clipboard through the
-        // toolkit (compose-rust v0.0.7, #471); the link is never logged.
+        // copied with Cmd+C / Ctrl+C. TODO(compose-rust#826): `TextField` has no read-only flag,
+        // so typing into it changes only what is drawn, never the link. 복사 puts the link on the
+        // clipboard through the toolkit (compose-rust v0.0.7, #471); the link is never logged.
         EmberField(FieldOptions { fill_max_width: true, text: Some(c.link.clone()), ..Default::default() });
         let link = c.link.clone();
         AppButton(COPY_LABEL, None, ButtonKind::Default, true, true, false, move || {
@@ -645,17 +639,18 @@ mod tests {
     use compose_rust::{Host, Recomposer};
 
     #[test]
-    fn fr_l32_1_members_sheet_body_is_content_height() {
-        // #878: the one-line body without a server filled the 1440 window (y 0..900), because
-        // the scrolling body took the dialog's remaining height by weight.
+    fn fr_l32_1_members_sheet_body_is_capped_at_the_room() {
+        // #878, compose-rust#778 (v0.0.11): the body takes Modifier::max_height(body_h) instead
+        // of a weight or a fixed height, so the one-line body without a server is only as tall
+        // as its line and a longer list scrolls inside the cap.
         let src = include_str!("channel_owner.rs");
         let production = &src[..src.find("#[cfg(test)]").unwrap()];
+        assert!(!production.contains(concat!("TODO(compose-rust#", "778")));
         let sheet = &production[production.find("pub fn MembersSheet(").unwrap()..];
         let sheet = &sheet[..sheet.find("\n}\n").unwrap()];
         assert!(!sheet.contains(".weight(1.0)"), "{sheet}");
-        assert!(sheet.contains("let plain = !live || super::components::sheet_wraps_content(w.width_dp);"));
-        assert!(sheet.contains("if plain {\n            cu::Column().modifier(Modifier::new().fill_max_width()).content(body);"));
-        assert!(sheet.contains("cu::ScrollColumn().modifier(Modifier::new().fill_max_width().height(body_h)).content(body);"));
+        assert!(!sheet.contains(".height(body_h)"), "{sheet}");
+        assert!(sheet.contains(".max_height(body_h)"), "{sheet}");
         assert!(sheet.contains("super::components::SHEET_HEADER_CHROME_H + super::components::SHEET_FOOTER_H"));
     }
 

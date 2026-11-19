@@ -20,6 +20,7 @@ use ember_client::wire::{
 use super::home::{
     DEFAULT_PROJECT, Harness, Selection, default_mode, default_option,
 };
+use super::shell::NavMenu;
 
 
 /// Minutes since 1970-01-01 00:00 UTC. Local time is this plus the offset the caller passes.
@@ -538,7 +539,7 @@ pub fn form_layout(mode: PaneMode) -> FormLayout {
     }
 }
 
-/// A route out of the open routine form, or into another form (FR-L25, #511).
+/// A route out of the open routine form, or into another form (FR-L25, #511, #596).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Leave {
     /// 취소.
@@ -549,6 +550,10 @@ pub enum Leave {
     NewForm,
     /// 편집 of a routine.
     EditForm(String),
+    /// Another sidebar, rail or bottom-tab menu was tapped in the shell.
+    NavMenu(NavMenu),
+    /// The shell's 검색 tool was tapped.
+    Search,
 }
 
 /// What a route out does.

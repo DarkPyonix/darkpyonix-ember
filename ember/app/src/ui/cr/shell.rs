@@ -67,8 +67,18 @@ fn transparent() -> Paint {
 // ---------------------------------------------------------------------------------------------
 
 /// Go to a menu. Projects and a conversation are real screens; the rest only change the menu.
+/// When the 루틴 screen's form is open and dirty, leaving 루틴 for another menu asks the discard
+/// question first (FR-L25, #596).
 pub fn choose(ui: &SharedUi, menu: NavMenu) {
-    let in_conversation = matches!(ui.route.get_untracked(), Route::Conversation(_));
+    let route = ui.route.get_untracked();
+    if active_menu(&route, ui.menu.get_untracked()) == NavMenu::Routines
+        && menu != NavMenu::Routines
+        && ui.routine_form_dirty.get_untracked()
+    {
+        ui.routine_pending_leave.set(Some(crate::ui::routines::Leave::NavMenu(menu)));
+        return;
+    }
+    let in_conversation = matches!(route, Route::Conversation(_));
     match menu {
         NavMenu::Projects => ui.go(Route::Projects),
         NavMenu::Sessions => {
@@ -87,6 +97,18 @@ pub fn choose(ui: &SharedUi, menu: NavMenu) {
     }
     ui.detail_open.set(false);
     ui.set_menu(menu);
+}
+
+/// Open the global search screen, asking the discard question first when leaving a dirty routine
+/// form on 루틴 (FR-L25, #596).
+pub fn open_search(ui: &SharedUi) {
+    if active_menu(&ui.route.get_untracked(), ui.menu.get_untracked()) == NavMenu::Routines
+        && ui.routine_form_dirty.get_untracked()
+    {
+        ui.routine_pending_leave.set(Some(crate::ui::routines::Leave::Search));
+        return;
+    }
+    ui.go(Route::Search);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -415,7 +437,7 @@ pub fn Sidebar(rail: bool, active: NavMenu, counts: NavCounts, on_collapse: impl
                                 u.set_theme_pref(u.theme_pref.get_untracked().next());
                             });
                             let us = ui.clone();
-                            ToolRow(ICON_SEARCH_SVG, "검색", rail, move || us.go(Route::Search));
+                            ToolRow(ICON_SEARCH_SVG, "검색", rail, move || open_search(&us));
                             ToolRow(ICON_GEAR_SVG, "설정", rail, on_settings);
                             if demo_tools {
                                 let pl = plat_ios.clone();
@@ -567,7 +589,7 @@ pub fn PhoneMenu(open: compose_rust::runtime::MutableState<bool>, on_settings: i
                             let (u, o) = (ui.clone(), open.clone());
                             menu_item(ICON_SEARCH_SVG, "검색", move || {
                                 o.set(false);
-                                u.go(Route::Search);
+                                open_search(&u);
                             });
                             let (o, mut s) = (open.clone(), on_settings.clone());
                             menu_item(ICON_GEAR_SVG, "설정", move || {
@@ -771,7 +793,7 @@ pub fn shell() {
                     let (more, u) = (more_open.clone(), ui.clone());
                     ToolRow(ICON_SEARCH_SVG, "검색", false, move || {
                         more.set(false);
-                        u.go(Route::Search);
+                        open_search(&u);
                     });
                     let (more, settings) = (more_open.clone(), settings_open.clone());
                     ToolRow(ICON_GEAR_SVG, "설정", false, move || {

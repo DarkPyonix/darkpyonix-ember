@@ -4787,4 +4787,60 @@ mod tests {
         }
         crate::ui::window_size::set_opened_for_test(None);
     }
+
+    #[test]
+    fn fr_l32_escape_after_closing_a_sheet_by_another_route_and_owner_claim_checking() {
+        use compose_rust::runtime::{mutable_state_of, remember};
+        use std::sync::{Arc, Mutex};
+        let _guard = crate::services::test_guard();
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+
+        // 1. Closing the top sheet via its own state (e.g. close button / action) and then
+        // pressing Escape closes the remaining sheet underneath without panicking or losing track.
+        {
+            let top_cell = Arc::new(Mutex::new(None));
+            let base_cell = Arc::new(Mutex::new(None));
+            let (tc, bc) = (top_cell.clone(), base_cell.clone());
+            let mut mh = ModalHost::new(move || {
+                let base = remember(|| mutable_state_of(true));
+                let top = remember(|| mutable_state_of(true));
+                *bc.lock().unwrap() = Some(base.clone());
+                *tc.lock().unwrap() = Some(top.clone());
+                let close_base = base.clone();
+                EmberSheet("더보기", base.get(), move || close_base.set(false), None, || {});
+                let close_top = top.clone();
+                EmberSheet("세부 정보", top.get(), move || close_top.set(false), None, || {});
+            });
+            assert_eq!(mh.open_modals().len(), 2, "both sheets open");
+            // Close the top sheet by another route (state flip, not Escape).
+            top_cell.lock().unwrap().as_ref().unwrap().set(false);
+            let bytes = mh.host.render_frame(16_000_000).expect("render").to_vec();
+            mh.apply(&bytes);
+            assert_eq!(mh.open_modals().len(), 1, "only the base sheet remains");
+            // Escape now closes the base sheet cleanly.
+            mh.press_escape();
+            assert!(mh.open_modals().is_empty(), "Escape closes the remaining sheet");
+            assert!(!base_cell.lock().unwrap().as_ref().unwrap().get_untracked());
+        }
+
+        // 2. OwnerClaimSheet while a claim is in flight (`ClaimState::Checking`) still closes
+        // on Escape (dismisses the prompt so the user can continue working while it checks).
+        {
+            let ui = crate::ui::coexist::shared_ui();
+            ui.owner_claim.set(crate::owner_claim::ClaimView {
+                state: crate::owner_claim::ClaimState::Checking { holders: 0 },
+                generation: 9,
+            });
+            ui.owner_claim_dismissed.set(None);
+            let mut mh = ModalHost::new(crate::ui::cr::owner_claim::OwnerClaimSheet);
+            assert_eq!(mh.open_modals().len(), 1, "owner claim sheet is open while checking");
+            mh.press_escape();
+            assert!(mh.open_modals().is_empty(), "Escape dismisses the owner claim sheet while checking");
+            assert!(ui.owner_claim_dismissed.get_untracked().is_some());
+            ui.owner_claim.set(crate::owner_claim::ClaimView::default());
+            ui.owner_claim_dismissed.set(None);
+        }
+
+        crate::ui::window_size::set_opened_for_test(None);
+    }
 }

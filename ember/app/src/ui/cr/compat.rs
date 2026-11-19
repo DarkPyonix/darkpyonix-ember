@@ -4,7 +4,7 @@
 //! compose-rust has `Badge` and a text selection container of its own, but their looks do not
 //! match the mockup tokens yet, so these stay Ember widgets built from the same primitives as
 //! the Dioxus ones. Each says what would replace it. A split pane is the toolkit's
-//! `compose_rust::ui::SplitPane` (compose-rust#27, in the v0.0.10 pin); the fixed two-column
+//! `compose_rust::ui::SplitPane` (compose-rust#27, in the v0.0.11 pin); the fixed two-column
 //! stand-in that was here had no caller and is gone (#673).
 
 #![allow(non_snake_case)]
@@ -225,7 +225,7 @@ mod tests {
 
     #[test]
     fn no_stand_in_split_pane_is_left() {
-        // compose-rust#27 (#673): the toolkit `SplitPane` is in the v0.0.10 pin and nothing called
+        // compose-rust#27 (#673): the toolkit `SplitPane` is in the v0.0.11 pin and nothing called
         // the fixed two-column stand-in, so it is gone. A screen that needs a divider takes
         // `compose_rust::ui::SplitPane`.
         let src = include_str!("compat.rs");

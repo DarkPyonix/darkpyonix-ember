@@ -1585,9 +1585,9 @@ pub(super) fn ShareSheet(open: &MutableState<bool>, devices: &[Device], members:
     };
     let window = crate::ui::window_size::current_window_size();
     let bottom = super::components::sheet_wraps_content(window.width_dp);
-    // FR-L32.1 (#878): with no title bar the room is the whole sheet. The body takes its content
-    // height when that fits, and always in the bottom sheet, which scrolls taller content itself.
-    // TODO(compose-rust#778, after v0.0.10): cap instead of estimate.
+    // FR-L32.1 (#878, compose-rust#778, v0.0.11): with no title bar the room is the whole sheet.
+    // The body is capped at the room (`Modifier::max_height`), so it takes its content height
+    // when that fits and scrolls inside the cap when it does not.
     let room = super::components::sheet_body_max_height(window.width_dp, window.height_dp, false, 0.0);
     let rows = share_devices(devices);
     let agents = share_agents(members);
@@ -1608,7 +1608,6 @@ pub(super) fn ShareSheet(open: &MutableState<bool>, devices: &[Device], members:
     };
     // The dialog draws the mockup's grab bar; the bottom sheet has the toolkit's own.
     let grab = !bottom;
-    let plain = bottom || share_body_estimate(!rows.is_empty(), !agents.is_empty(), grab) <= room;
     // An empty title: `.fl-share` has no header. Escape and the scrim still close it.
     EmberSheetSized("", is_open, SHARE_SHEET_WIDTH, false, close.clone(), None, || {
         let body = || {
@@ -1707,11 +1706,7 @@ pub(super) fn ShareSheet(open: &MutableState<bool>, devices: &[Device], members:
             });
         };
         let surface = Modifier::new().fill_max_width().background(paint(p.surface_2));
-        if plain {
-            cu::Column().modifier(surface).content(body);
-        } else {
-            cu::ScrollColumn().modifier(surface.height(room)).content(body);
-        }
+        cu::ScrollColumn().modifier(surface.max_height(room)).content(body);
     });
 }
 
@@ -1732,26 +1727,6 @@ fn ShareRow(tiles: impl FnOnce()) {
     });
 }
 
-/// How tall the share sheet's body is (FR-L32.1): 12 above and 20 below, the dialog's 5 px grab
-/// bar when `grab`, the 68 px file card, the two 18 px section labels, each section's one row of
-/// 112 px tiles (a 20 px line when it has none), the three 46 px action rows with their
-/// separators and the three-line note, with 12 px between rows.
-pub(crate) fn share_body_estimate(devices: bool, agents: bool, grab: bool) -> f32 {
-    let tiles = |any: bool| if any { 112.0 } else { 20.0 };
-    let rows = [
-        if grab { Some(5.0) } else { None },
-        Some(68.0),
-        Some(18.0),
-        Some(tiles(devices)),
-        Some(18.0),
-        Some(tiles(agents)),
-        Some(3.0 * 46.0 + 2.0),
-        Some(54.0),
-    ];
-    let rows: Vec<f32> = rows.into_iter().flatten().collect();
-    SP[2] + rows.iter().sum::<f32>() + (rows.len() - 1) as f32 * SP[2] + SP[4]
-}
-
 /// The share sheet's width: the mockup's `min(400px, 100%)`.
 pub const SHARE_SHEET_WIDTH: f32 = 400.0;
 
@@ -1770,26 +1745,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fr_l32_1_share_sheet_estimate_and_plain_body() {
-        // #878: the 채널에 올리기 row was cut at 390 and 1440 by a body fixed at 640; review r5
-        // found the last row and the note below the window edge at 390.
-        // 12 + 5 + 68 + 18 + 112 + 18 + 112 + 140 + 54 + 7 x 12 + 20 (the agents hint line is
-        // gone, review r6).
-        assert_eq!(share_body_estimate(true, true, true), 643.0);
-        assert_eq!(share_body_estimate(true, true, false), 643.0 - 5.0 - 12.0);
-        assert_eq!(share_body_estimate(false, false, true), 643.0 - 2.0 * 92.0);
-        // With no title bar the whole sheet is the room: the dialog at 1440 x 900 and the bottom
-        // sheet at 390 x 844 both hold the body at its content height.
-        let room = |w: f32, h: f32| super::super::components::sheet_body_max_height(w, h, false, 0.0);
-        assert!(share_body_estimate(true, true, true) <= room(1440.0, 900.0), "{}", room(1440.0, 900.0));
-        assert!(share_body_estimate(true, true, false) <= room(390.0, 844.0), "{}", room(390.0, 844.0));
+    fn fr_l32_1_share_sheet_caps_its_scroll_body() {
+        // #878, compose-rust#778 (v0.0.11): the body takes Modifier::max_height(room) instead of
+        // share_body_estimate or a fixed 640 height.
         let src = include_str!("files.rs");
         let production = &src[..src.find("#[cfg(test)]").unwrap()];
+        assert!(!production.contains(&["share_body", "_estimate"].concat()));
+        assert!(!production.contains(concat!("TODO(compose-rust#", "778")));
         let sheet = &production[production.find("fn ShareSheet(").unwrap()..];
         let sheet = &sheet[..sheet.find("\n}\n").unwrap()];
         assert!(!sheet.contains(".min(640.0)"), "{sheet}");
-        assert!(sheet.contains("let plain = bottom || share_body_estimate(!rows.is_empty(), !agents.is_empty(), grab) <= room;"));
-        assert!(sheet.contains("if plain {\n            cu::Column().modifier(surface).content(body);"));
+        assert!(!sheet.contains(".height(room)"), "{sheet}");
+        assert!(sheet.contains("cu::ScrollColumn().modifier(surface.max_height(room)).content(body);"), "{sheet}");
         assert!(!sheet.contains("wrap_lines"), "the receivers no longer wrap into lines");
     }
 
@@ -1839,8 +1806,11 @@ mod tests {
             assert_eq!(nodes.iter().filter(|n| n.0 == "Divider").count(), 2, "{size:?}");
             // One sideways row for the devices; no agents, so their line says so.
             assert_eq!(nodes.iter().filter(|n| n.0 == "ScrollRow").count(), 1, "{size:?}");
-            // The content fits: no fixed-height scrolling body.
-            assert_eq!(nodes.iter().filter(|n| n.0 == "ScrollColumn").count(), 0, "{size:?}");
+            // The body is a capped ScrollColumn (`SizeIn` with `max_h`), not a fixed-height one.
+            let scrolls: Vec<_> = nodes.iter().filter(|n| n.0 == "ScrollColumn").collect();
+            assert_eq!(scrolls.len(), 1, "{size:?}");
+            assert!(scrolls[0].2.iter().any(|m| m.starts_with("SizeIn") && m.contains("max_height:")), "{size:?}: {:?}", scrolls[0].2);
+            assert!(!scrolls[0].2.iter().any(|m| m.starts_with("Height(")), "{size:?}: {:?}", scrolls[0].2);
             // The sheet's close button (32 px, clickable) is still there, in the file card.
             let close = nodes.iter().any(|n| n.1.iter().any(|p| p.starts_with("OnClick=")) && n.2.windows(2).any(|w| w[0] == "Width(32.0)" && w[1] == "Height(32.0)"));
             assert!(close, "{size:?}: close button");

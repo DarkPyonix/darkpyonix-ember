@@ -6,7 +6,7 @@
 //! what the window shows ([`LanguageState`], filled on the host's runtime from the session's
 //! updates) and draws it ([`view`]).
 //!
-//! The pinned toolkit (compose-rust v0.0.10, dioxus-compose f0e5b9f5) gives the code editor what
+//! The pinned toolkit (compose-rust v0.0.11, dioxus-compose 94ade333) gives the code editor what
 //! these need, and the window uses it:
 //! * compose-rust#553: a list opens at the caret the editor reports (`on_caret_rect`,
 //!   [`view::set_caret_rect`]) inside the editor pane ([`popup_placement`]), and falls back to the sheet over the window, like the command
@@ -530,10 +530,11 @@ pub const CODE_TOP_ROOM: f32 = 8.0;
 
 /// Whether a caret the reader just moved (#301, FR-L31.40) has to be scrolled into view: its line
 /// is not whole between the top of the code editor's box (the pane less `CODE_TOP_ROOM`) and the
-/// pane's bottom edge. The toolkit's own scroll on an arrow key keeps the caret about a line
-/// short of the bottom (compose-rust v0.0.10, measured: line 31 at y 603.92 to 625.92 in a box
-/// that ends at 591), so the window asks the editor for the nearest reveal, as Code-OSS reveals
-/// the cursor after every move. Only the vertical extent counts: the reveal scrolls rows.
+/// pane's bottom edge. Before compose-rust#841 (v0.0.11, `CodeEditorSurface.kt`), the toolkit's
+/// own scroll on an arrow key stopped about a line short of the bottom (measured: line 31 at y
+/// 603.92 to 625.92 in a box that ends at 591), so the window asks the editor for the nearest
+/// reveal, as Code-OSS reveals the cursor after every move. Only the vertical extent counts: the
+/// reveal scrolls rows.
 pub fn moved_caret_needs_reveal(caret: compose_rust::code::CodeRect, pane: PaneBox) -> bool {
     const SLACK: f32 = 0.5;
     caret.y < pane.y + CODE_TOP_ROOM - SLACK || caret.bottom() > pane.y + pane.height + SLACK

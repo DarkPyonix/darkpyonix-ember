@@ -335,10 +335,14 @@ const ICON_TICK_SVG: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="curr
 /// A stage check (`.vcs-cb`): a painted `side` px square over an invisible toolkit checkbox that
 /// fills a [`STAGE_CHECK_HIT_W`] by `hit_h` tap area. A tap calls `on_toggle`.
 fn StageCheck(check: Check, side: f32, hit_h: f32, on_toggle: impl FnMut() + 'static) {
+    StageCheckWith(Modifier::new(), check, side, hit_h, on_toggle);
+}
+
+fn StageCheckWith(modifier: Modifier, check: Check, side: f32, hit_h: f32, on_toggle: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let look = stage_check_look(check, &p);
     let mut on_toggle = on_toggle;
-    cu::Box().modifier(Modifier::new().width(STAGE_CHECK_HIT_W.max(side)).height(hit_h.max(side))).alignment(Alignment::Center).content(move || {
+    cu::Box().modifier(modifier.width(STAGE_CHECK_HIT_W.max(side)).height(hit_h.max(side))).alignment(Alignment::Center).content(move || {
         cu::Box()
             .modifier(Modifier::new().size(side, side).background(paint(look.fill)).border(STAGE_CHECK_BORDER, paint(look.border)).corner_radius(STAGE_CHECK_RADIUS))
             .alignment(Alignment::Center)
@@ -498,9 +502,9 @@ pub fn remote_button_labels() -> [&'static str; 4] {
 /// A 32 px circle icon button in a 44 dp box that takes the press. The box is the control: a
 /// named, clickable container (`NamedClickable`, compose-rust#429), round so the press tint and
 /// the focus ring are circles. It asks for 44 by 44 and takes what its row gives: a row with a
-/// height (the 원격 cell's 36, the files header's 52) keeps that height, and the box is then as
-/// tall as the row at most (FR-L19.1, #415; a press area larger than the row is
-/// TODO(compose-rust#472, after v0.0.10): a 44 by 44 hit area that does not grow the node).
+/// height (the 원격 cell's 36, the files header's 52) keeps that height, and `min_touch_target`
+/// (compose-rust#472, v0.0.11) keeps a 44 by 44 hit area without growing the node (FR-L19.1,
+/// #415).
 fn CircleIconButton(
     icon: &'static str,
     label: &'static str,
@@ -509,7 +513,10 @@ fn CircleIconButton(
     let p = ember_theme().palette;
     NamedClickable(
         label,
-        Modifier::new().size(ICON_TOUCH_TARGET, ICON_TOUCH_TARGET).shape_role(ShapeRole::Full),
+        Modifier::new()
+            .size(ICON_TOUCH_TARGET, ICON_TOUCH_TARGET)
+            .min_touch_target(ICON_TOUCH_TARGET)
+            .shape_role(ShapeRole::Full),
         Alignment::Center,
         on_click,
         move || {
@@ -784,18 +791,13 @@ pub fn branch_pop_width(window_width_dp: f32) -> f32 {
 
 /// A row of the branch popover is 40 high (`.vcs-poprow{height:40px}`).
 pub const BRANCH_POP_ROW_H: f32 = 40.0;
+/// The tallest the branch popover's list grows before scrolling (`.vcs-poplist{max-height:300px}`,
+/// compose-rust#778, v0.0.11 `Modifier::max_height`).
+pub const BRANCH_POP_LIST_MAX_H: f32 = 300.0;
 /// The gap between the control and the box. The mockup hangs the box from the cell
 /// (`.vcs-pop{top:calc(100% - 4px)}`), under the 추적 line; a `Popover` has one anchor, the
 /// control, so the box sits 4 under the control and covers that line.
 pub const BRANCH_POP_OFFSET: f32 = 4.0;
-
-/// The height of the popover's list when it must scroll (`.vcs-poplist{max-height:300px}`):
-/// `None` while `rows` rows fit in 300, so the list is as tall as its rows. The toolkit has no
-/// maximum height (TODO(compose-rust#778, after v0.0.10): cap the list at 300 instead), so the
-/// list takes a fixed 300 from the row count.
-pub fn branch_pop_list_height(rows: usize) -> Option<f32> {
-    (rows as f32 * BRANCH_POP_ROW_H > 300.0).then_some(300.0)
-}
 
 /// What the popover says when no branch matches the search (mockup `vcsPopList`).
 pub const BRANCH_POP_EMPTY: &str = "일치하는 브랜치가 없습니다";
@@ -891,7 +893,6 @@ pub(super) fn BranchMenu(open: MutableState<bool>, text: &str, branches: &[Strin
                 });
                 // `.vcs-poplist{padding:0 6px 6px}`.
                 let shown = branch_menu_rows(&branches, &query.get());
-                let list_h = branch_pop_list_height(shown.len());
                 let list_actions = actions.clone();
                 let list_open = open.clone();
                 let rows = move || {
@@ -915,14 +916,9 @@ pub(super) fn BranchMenu(open: MutableState<bool>, text: &str, branches: &[Strin
                 };
                 cu::Row().modifier(Modifier::new().fill_max_width()).content(move || {
                     cu::Spacer().modifier(Modifier::new().width(6.0));
-                    match list_h {
-                        Some(h) => {
-                            cu::ScrollColumn().modifier(Modifier::new().width(0.0).weight(1.0).height(h)).content(rows);
-                        }
-                        None => {
-                            cu::Column().modifier(Modifier::new().width(0.0).weight(1.0)).content(rows);
-                        }
-                    }
+                    cu::ScrollColumn()
+                        .modifier(Modifier::new().width(0.0).weight(1.0).max_height(BRANCH_POP_LIST_MAX_H))
+                        .content(rows);
                     cu::Spacer().modifier(Modifier::new().width(6.0));
                 });
                 cu::Spacer().modifier(Modifier::new().height(6.0));
@@ -1453,59 +1449,68 @@ fn DiffViewAtWidth(file: &FileDiff, staging: &MutableState<Staging>, pane_width:
 
             cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
 
-            // Hunk lines (each exactly 21.0 px high, spacing 0.0)
-            cu::Column().modifier(Modifier::new().fill_max_width()).spacing(0.0).content(|| {
-                for (li, l) in h.lines.iter().enumerate() {
-                    let bg = match l.kind {
-                        LineKind::Add => paint(p.green.soft),
-                        LineKind::Del => paint(p.red.soft),
-                        LineKind::Context => Paint::Literal(Color::argb(0)),
-                    };
-                    cu::Row().modifier(Modifier::new().fill_max_width().height(21.0).background(bg)).alignment(Alignment::CenterStart).content(|| {
-                        if l.is_change() {
-                            let is_line_staged = staging.get().file(&file.path).is_some_and(|s| s.is_staged(hi, li));
-                            let st_line = staging.clone();
-                            let f_line = file.clone();
-                            let line_check = if is_line_staged { Check::On } else { Check::Off };
-                            StageCheck(line_check, STAGE_LINE_CHECK_SIDE, 21.0, move || {
-                                let mut s = st_line.get();
-                                s.file_mut(&f_line.path).toggle_line(&f_line, hi, li);
-                                st_line.set(s);
-                            });
-                        } else {
-                            cu::Spacer().modifier(Modifier::new().width(STAGE_CHECK_HIT_W));
-                        }
-
-                        let old_str = l.old_no.map(|n| format!("{:>4}", n)).unwrap_or_else(|| "    ".to_string());
-                        let new_str = l.new_no.map(|n| format!("{:>4}", n)).unwrap_or_else(|| "    ".to_string());
-                        let sign_str = match l.kind {
-                            LineKind::Add => "+",
-                            LineKind::Del => "-",
-                            LineKind::Context => " ",
+            // Hunk lines (each exactly 21.0 px high, spacing 0.0) inside a horizontal ScrollRow so
+            // long lines scroll sideways while the sticky check column stays pinned at the start edge.
+            cu::ScrollRow().modifier(Modifier::new().fill_max_width()).content(|| {
+                cu::Column().modifier(Modifier::new().min_width(pane_width)).spacing(0.0).content(|| {
+                    for (li, l) in h.lines.iter().enumerate() {
+                        let bg = match l.kind {
+                            LineKind::Add => paint(p.green.soft),
+                            LineKind::Del => paint(p.red.soft),
+                            LineKind::Context => Paint::Literal(Color::argb(0)),
                         };
+                        let sticky_bg = match l.kind {
+                            LineKind::Add => paint(p.green.soft),
+                            LineKind::Del => paint(p.red.soft),
+                            LineKind::Context => paint(p.surface),
+                        };
+                        cu::Row().modifier(Modifier::new().min_width(pane_width).height(21.0).background(bg)).alignment(Alignment::CenterStart).content(|| {
+                            // compose-rust#424 (v0.0.11 `Modifier::sticky`): the line check stays
+                            // pinned at the start edge when a diff row scrolls sideways.
+                            if l.is_change() {
+                                let is_line_staged = staging.get().file(&file.path).is_some_and(|s| s.is_staged(hi, li));
+                                let st_line = staging.clone();
+                                let f_line = file.clone();
+                                let line_check = if is_line_staged { Check::On } else { Check::Off };
+                                StageCheckWith(Modifier::new().sticky().background(sticky_bg), line_check, STAGE_LINE_CHECK_SIDE, 21.0, move || {
+                                    let mut s = st_line.get();
+                                    s.file_mut(&f_line.path).toggle_line(&f_line, hi, li);
+                                    st_line.set(s);
+                                });
+                            } else {
+                                cu::Box().modifier(Modifier::new().sticky().width(STAGE_CHECK_HIT_W).height(21.0).background(sticky_bg));
+                            }
 
-                        cu::Box().modifier(Modifier::new().width(32.0)).alignment(Alignment::CenterEnd).content(|| {
-                            Label(&old_str, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                            let old_str = l.old_no.map(|n| format!("{:>4}", n)).unwrap_or_else(|| "    ".to_string());
+                            let new_str = l.new_no.map(|n| format!("{:>4}", n)).unwrap_or_else(|| "    ".to_string());
+                            let sign_str = match l.kind {
+                                LineKind::Add => "+",
+                                LineKind::Del => "-",
+                                LineKind::Context => " ",
+                            };
+
+                            cu::Box().modifier(Modifier::new().width(32.0)).alignment(Alignment::CenterEnd).content(|| {
+                                Label(&old_str, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                            });
+                            cu::Spacer().modifier(Modifier::new().width(4.0));
+                            cu::Box().modifier(Modifier::new().width(32.0)).alignment(Alignment::CenterEnd).content(|| {
+                                Label(&new_str, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                            });
+                            cu::Spacer().modifier(Modifier::new().width(4.0));
+                            cu::Box().modifier(Modifier::new().width(14.0)).alignment(Alignment::Center).content(|| {
+                                Label(sign_str, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                            });
+                            cu::Spacer().modifier(Modifier::new().width(4.0));
+                            cu::Text(&l.text)
+                                .type_role(TypeRole::Mono)
+                                .font_size(Fs::Xs2.size())
+                                .line_height(Fs::Xs2.line_height())
+                                .color(paint(p.text))
+                                .max_lines(1);
+                            cu::Spacer().modifier(Modifier::new().width(SP[2]));
                         });
-                        cu::Spacer().modifier(Modifier::new().width(4.0));
-                        cu::Box().modifier(Modifier::new().width(32.0)).alignment(Alignment::CenterEnd).content(|| {
-                            Label(&new_str, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                        });
-                        cu::Spacer().modifier(Modifier::new().width(4.0));
-                        cu::Box().modifier(Modifier::new().width(14.0)).alignment(Alignment::Center).content(|| {
-                            Label(sign_str, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                        });
-                        cu::Spacer().modifier(Modifier::new().width(4.0));
-                        cu::Text(&l.text)
-                            .type_role(TypeRole::Mono)
-                            .font_size(Fs::Xs2.size())
-                            .line_height(Fs::Xs2.line_height())
-                            .color(paint(p.text))
-                            .max_lines(1)
-                            .word_break(compose_rust::WordBreak::KeepAll)
-                            .overflow(TextOverflow::Ellipsis);
-                    });
-                }
+                    }
+                });
             });
         }
     });
@@ -1579,8 +1584,8 @@ pub fn tree_height(rows: usize) -> f32 {
 /// The tallest the tree stands in the changes card, so the commit box under it stays on screen
 /// (`.vcs-tree{max-height:360px;overflow:auto}`; review r8: at 1440 the commit button was below
 /// the fold). `pane_h` is the height the two panes have when it is known (the sheet): the tree
-/// then also leaves room for the header and the commit box, down to three rows. The toolkit has
-/// no maximum height (TODO(compose-rust#778, after v0.0.10)), so a taller tree is given this height and scrolls.
+/// then also leaves room for the header and the commit box, down to three rows. Capped with
+/// `Modifier::max_height` (compose-rust#778, v0.0.11).
 pub fn tree_cap(max: f32, pane_h: Option<f32>) -> f32 {
     match pane_h {
         Some(h) => (h - VCS_FILES_HEAD_H - VCS_COMMIT_BOX_EST_H).clamp(VCS_TREE_MIN_H, max),
@@ -1588,8 +1593,8 @@ pub fn tree_cap(max: f32, pane_h: Option<f32>) -> f32 {
     }
 }
 
-/// The height a scrolling tree is given inside `cap`: its top padding and as many whole rows as
-/// fit, so at rest the box under it starts where a row ends instead of cutting one in half
+/// The height a scrolling tree is capped at inside `cap`: its top padding and as many whole rows
+/// as fit, so at rest the box under it starts where a row ends instead of cutting one in half
 /// (review r10, the 1024 sheet). At least one row.
 pub fn tree_view_height(cap: f32) -> f32 {
     let rows = ((cap - VCS_TREE_PAD) / VCS_TREE_ROW_H).floor().max(1.0);
@@ -1613,7 +1618,8 @@ pub fn page_pane_height(window_h: f32, pad: f32) -> f32 {
     (window_h - VCS_PAGE_ABOVE_PANES - pad).max(0.0)
 }
 
-/// [`FilesTree`] no taller than `cap`: a longer tree scrolls inside that height.
+/// [`FilesTree`] capped at `tree_view_height(cap)` (`Modifier::max_height`, compose-rust#778,
+/// v0.0.11): a shorter tree is as tall as its rows and a longer one scrolls inside the cap.
 fn FilesTreeCapped(
     diffs: &[FileDiff],
     staging: &MutableState<Staging>,
@@ -1622,15 +1628,9 @@ fn FilesTreeCapped(
     on_tab: impl FnMut(PaneTab) + Clone + 'static,
     cap: f32,
 ) {
-    let paths: Vec<String> = diffs.iter().map(|d| d.path.clone()).collect();
-    let rows = build_tree(&paths, &folded.get()).len();
-    if !diffs.is_empty() && tree_height(rows) > cap {
-        cu::ScrollColumn().modifier(Modifier::new().fill_max_width().height(tree_view_height(cap))).content(|| {
-            FilesTree(diffs, staging, folded, selected, on_tab);
-        });
-    } else {
+    cu::ScrollColumn().modifier(Modifier::new().fill_max_width().max_height(tree_view_height(cap))).content(|| {
         FilesTree(diffs, staging, folded, selected, on_tab);
-    }
+    });
 }
 
 fn FilesTree(
@@ -2092,7 +2092,7 @@ fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<P
     match layout {
         PaneLayout::Two => {
             // The panes scroll on their own inside a bounded row. A row in an unbounded
-            // scroll centres its shorter children vertically (TODO(compose-rust#389, in v0.0.10):
+            // scroll centres its shorter children vertically (TODO(compose-rust#389, in v0.0.11):
             // `Row::equal_height(true)` with `fill_max_height` children is in the pin and sizes
             // the row to its tallest child. It is not used here yet for two reasons. The diff
             // pane holds wrapped code, and the toolkit sizes an `equal_height` row by intrinsic
@@ -5781,7 +5781,7 @@ mod tests {
     use super::*;
     #[test]
     fn fr_673_stale_vcs_markers_are_gone() {
-        // compose-rust#471, #460/#429 and #500 (v0.0.10): the SHA is copied, the theme button is
+        // compose-rust#471, #460/#429 and #500 (v0.0.11): the SHA is copied, the theme button is
         // named, and a filter chip is a named, selectable container without an overlay button.
         let src = include_str!("vcs.rs");
         let production = &src[..src.find("#[cfg(test)]").expect("tests")];
@@ -6116,11 +6116,12 @@ mod tests {
         assert_eq!(branch_pop_width(1440.0), 380.0);
         assert_eq!(branch_pop_width(390.0), 358.0);
         assert_eq!(branch_pop_width(0.0), 380.0);
-        assert_eq!(branch_pop_list_height(7), None);
-        assert_eq!(branch_pop_list_height(8), Some(300.0));
+        assert_eq!(BRANCH_POP_LIST_MAX_H, 300.0);
         assert_eq!((BRANCH_POP_ROW_H, BRANCH_POP_OFFSET), (40.0, 4.0));
         let src = include_str!("vcs.rs").split("#[cfg(test)]").next().unwrap();
         assert!(!src.contains("cu::Dialog(branch_menu"), "the centred branch dialog is gone");
+        assert!(!src.contains(&["branch_pop_list", "_height"].concat()));
+        assert!(src.contains(".max_height(BRANCH_POP_LIST_MAX_H)"));
     }
 
     /// The vertical and the horizontal lines between the bar's cells.
@@ -7345,6 +7346,12 @@ mod tests {
         assert!(!body[header..action].contains("cu::Column()"), "the action is not on its own row");
         assert!(action > header, "the action follows the header text, on the right");
         assert_eq!(VCS_HUNK_HEADER_H, VCS_HUNK_BUTTON_H + 12.0);
+        // compose-rust#424 (v0.0.11): the diff line check column is pinned with Modifier::sticky()
+        // inside a horizontal ScrollRow so long lines scroll sideways under the pinned check cell.
+        assert!(body.contains("cu::ScrollRow()"), "{body}");
+        assert!(body.contains("StageCheckWith(Modifier::new().sticky()"), "{body}");
+        assert!(body.contains("Modifier::new().sticky().width(STAGE_CHECK_HIT_W)"), "{body}");
+        assert!(!include_str!("../vcs.rs").contains(concat!("TODO(compose-rust#", "424")));
     }
 
     /// One node of a composition: widget, parent, modifiers and props as debug text.
@@ -7503,7 +7510,7 @@ mod tests {
         assert_eq!(tree_view_height(10.0), VCS_TREE_PAD + VCS_TREE_ROW_H, "at least one row");
         let production = include_str!("vcs.rs").split("#[cfg(test)]").next().unwrap();
         let capped = production.split("fn FilesTreeCapped(").nth(1).unwrap().split("\nfn ").next().unwrap();
-        assert!(capped.contains(".height(tree_view_height(cap))"), "the scroll box is sent the snapped height");
+        assert!(capped.contains(".max_height(tree_view_height(cap))"), "the scroll box is capped at the snapped height");
     }
 
     #[test]
@@ -7545,17 +7552,15 @@ mod tests {
         // Rows keep the height the cap counts with.
         let rows = build_tree(&sample_snapshot().changes.iter().map(|d| d.path.clone()).collect::<Vec<_>>(), &BTreeSet::new()).len();
         assert!(nodes.iter().filter(|n| n.mods.iter().any(|m| m == "Height(34.0)")).count() >= rows);
-        if tree_height(rows) > 281.0 {
-            assert!(
-                nodes.iter().any(|n| n.widget == "ScrollColumn" && n.mods.iter().any(|m| m == "Height(280.0)")),
-                "the tree scrolls inside its cap"
-            );
-        }
+        assert!(
+            nodes.iter().any(|n| n.widget == "ScrollColumn" && n.mods.iter().any(|m| m.contains("max_height: 280.0"))),
+            "the tree scrolls inside its cap (SizeIn max_height 280.0)"
+        );
         let production = include_str!("vcs.rs").split("#[cfg(test)]").next().unwrap();
         let two = production.split("PaneLayout::Two => {").nth(1).unwrap().split("PaneLayout::Stacked => {").next().unwrap();
         assert_eq!(two.matches("VcsCard(").count(), 1, "one card for the tree and the commit box: {two}");
         assert!(two.contains("FilesTreeCapped(&d_files, &st_files, &fold_files, &sel_files, on_tab_files, tree_cap(VCS_TREE_MAX_H, pane_h));"));
-        assert!(production.contains("TODO(compose-rust#778, after v0.0.10)"));
+        assert!(!production.contains(concat!("TODO(compose-rust#", "778")));
     }
 
     /// The children of `parent`, in the order they were inserted.
@@ -7604,7 +7609,7 @@ mod tests {
         assert_eq!(tree_cap(VCS_TREE_MAX_H, Some(585.0)), 281.0);
         let tree = nodes
             .iter()
-            .find(|n| n.widget == "ScrollColumn" && n.mods.iter().any(|m| m == "Height(280.0)"))
+            .find(|n| n.widget == "ScrollColumn" && n.mods.iter().any(|m| m.contains("max_height: 280.0")))
             .expect("the tree scrolls inside its cap");
         let row = with_text(&nodes, "f13.rs");
         assert!(up(&nodes, row).contains(&tree.id), "the last file row is inside the scrolling tree");
@@ -8500,12 +8505,14 @@ mod tests {
         let fill = format!("{:?}", compose_rust::schema::Modifier::Background(paint(ember_theme().palette.ink)));
         assert!(tab.mods.contains(&fill) && tab.mods.iter().any(|m| *m == format!("Height({H_CTL:?})")), "{:?}", tab.mods);
 
-        // A round icon button: the 44 dp box is the control and is round, the 32 dp circle is drawn in it.
+        // A round icon button: the 44 dp box is the control and is round, the 32 dp circle is drawn in it,
+        // and MinTouchTarget(44.0) keeps a 44 dp hit area inside a shorter row (compose-rust#472, v0.0.11).
         let nodes = nodes_of(|| CircleIconButton(ICON_FETCH_SVG, "가져오기", || {}));
         assert!(!nodes.iter().any(|n| n.widget == "Button"));
         let hit = &nodes[named(&nodes, "가져오기")];
         assert!(hit.props.iter().any(|x| x.starts_with("OnClick=")) && button_role(hit) && press(hit) == 1, "{:?}", hit.mods);
         assert!(hit.mods.iter().any(|m| m == "Width(44.0)") && hit.mods.iter().any(|m| m.starts_with("ShapeRole(Full")), "{:?}", hit.mods);
+        assert!(hit.mods.iter().any(|m| m == "MinTouchTarget { size: 44.0 }"), "{:?}", hit.mods);
 
         // A row named by a path: one clear button with the path as text and name, exactly over
         // its box, which keeps its own size.

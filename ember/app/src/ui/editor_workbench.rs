@@ -1523,16 +1523,13 @@ pub mod page {
                         } else {
                             {side_note(w, "ed-left")}
                         }
-                    } else {
-                        // FR-L31.26 (#874): an element that takes no grid cell, not a placeholder.
-                        div { class: "ed-none" }
                     }
                     section { class: "ed-main", style: if maximized { "display:none;" } else if has_left { "" } else { "margin-left:calc(var(--gap) * -1);" }, "aria-label": "편집기",
                         {crate::ui::workspace_trust::view::banner(&s)}
                         // FR-L31.36: no tab strip while no tab is open, as the mockup's empty editor
                         // (`editor.js:81`), so the empty state takes the whole panel. The ⋯ of the strip
                         // goes with it; its commands stay in quick open.
-                        if paths.is_empty() { div { class: "ed-none" } } else { {tab_strip(&s, &paths, &dirty, current.as_deref())} }
+                        if !paths.is_empty() { {tab_strip(&s, &paths, &dirty, current.as_deref())} }
                         if let Some((menu_path, x, y)) = s.tab_menu.read().clone() { {tab_context_menu(&s, &menu_path, x, y)} }
                         if let Some(path) = current.as_deref().filter(|p| !settings_shown && !is_webview_tab(p)) {
                             {breadcrumbs(&s, path)}
@@ -1584,13 +1581,9 @@ pub mod page {
                     {stripe_column(&s, sel, keymap, Strip::Right)}
                     if let Some(w) = sel.selected(Side::Bottom) {
                         {bottom_window(&s, w)}
-                    } else {
-                        div { class: "ed-none" }
                     }
-                    // FR-L31.26 (#874): the overlays are all `position:fixed`, but a closed one is a
-                    // placeholder (a comment node), which the HTML layout places as a grid item. Seven
-                    // of them made two implicit rows and 16 px of gaps under the status bar, so they sit
-                    // in one box that takes no room (`.ed-layers`); a fixed box is drawn from the root.
+                    // FR-L31.26 (#874): the overlays are all `position:fixed`, grouped in one box that
+                    // takes no room (`.ed-layers`); a fixed box is drawn from the root.
                     div { class: "ed-layers",
                         if em_shown { {menu(&s, keymap)} }
                         // FR-L31.29: the palette's scrim. A click outside the list closes it; the list
@@ -1655,15 +1648,14 @@ pub mod page {
                 button { class: "ed-pj", title: "브랜치", "aria-label": "브랜치", onclick: move |_| crate::ui::editor_scm::view::show_git(&git_s), {icon_tone("git", 16, "text")} "{branch}" {icon_tone("chev-dn", 12, "muted")} }
                 div { class: "spacer" }
                 // FR-L31.29: the pill and the quick open list it opens share one box, so the list is
-                // placed against the pill. The conditional child sits inside the box, where its
-                // placeholder takes no room (dioxus-compose#266: in the bar it would be a flex item).
+                // placed against the pill.
                 div { class: "ed-findbox",
                 button { class: "ed-find", title: "{find}", "aria-label": "{find}", onclick: move |_| run_action(&find_s, Action::Find),
                     {icon_tone("search", 16, "muted")}
                     span { class: "hide-md", "{crate::ui::editor::FIND_PILL_LABEL}" }
                     kbd { class: "ed-sc", "{find_hint}" }
                 }
-                    if *s.palette_open.read() { {palette_sheet(s, keymap)} } else { div { class: "ed-none" } }
+                    if *s.palette_open.read() { {palette_sheet(s, keymap)} }
                 }
                 div { class: "ed-runcfg",
                     button { class: "ed-pj", title: "실행 구성", "aria-label": "실행 구성", onclick: move |_| crate::ui::editor_tasks::view::open(&runcfg_s), {icon_tone("play", 16, "text")} "실행 구성" {icon_tone("chev-dn", 12, "muted")} }

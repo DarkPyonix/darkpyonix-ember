@@ -822,8 +822,9 @@ impl Composer {
     /// by itself (`keep_open`): [`Composer::tap_mode`] closes it once a mode is applied, and
     /// the first tap on 바이패스 only arms that row. At 560 and below it is a bottom sheet with
     /// the same head and rows and no title bar (`plain_sheet`, review K8).
-    /// Not built: arrow keys between the rows and focus on the current row when it opens. A
-    /// `Popover` moves no focus between its rows (compose-rust#810).
+    /// (TODO(compose-rust#810, in v0.0.11): `HostPopover.kt` moves focus between `Role::MenuItem`
+    /// rows with the arrow keys and focuses the `selected(true)` row when it opens; waits for a
+    /// display check.)
     fn mode_menu(&self, sel: &Selection, share: Option<f32>, anchor: impl FnOnce()) {
         let rows = mode_pop_rows(&mode_picker_rows_pending(sel.option.harness, sel.mode, self.mode_pending.get().map(|(m, _)| m)));
         let header = mode_header(sel.option.harness);

@@ -989,6 +989,77 @@ mod tests {
         assert!(items.iter().any(|i| matches!(i, FeedItem::Divider(_))));
         assert!(items.iter().any(|i| matches!(i, FeedItem::Bubble(b) if b.side == Side::Right)));
     }
+
+    #[test]
+    fn fr_l12_opening_and_closing_channels_and_switching_rooms_repeatedly_does_not_touch_released_owner_state() {
+        use compose_rust::protocol::{decode_batch, HostEvent};
+        use compose_rust::{EventPayload, WindowHeightClass, WindowSizeClass};
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let ui = crate::services::test_services().ui.clone();
+        ui.set_menu(crate::ui::NavMenu::Projects);
+
+        let mut host = Host::new(|| Box::new(Recomposer::new(super::super::shell::shell)));
+        let _ = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        // Set desktop 1440x900 so split view opens `RoomView` with `OwnerState` and `MembersSheet`.
+        let (bytes, _) = host
+            .dispatch(HostEvent {
+                node_id: 0,
+                handler_id: 0,
+                payload: EventPayload::WindowSizeChanged {
+                    width_dp: 1440.0,
+                    height_dp: 900.0,
+                    class: WindowSizeClass::Expanded,
+                    height_class: WindowHeightClass::Medium,
+                    safe_area_top: 0.0,
+                    safe_area_leading: 0.0,
+                    safe_area_trailing: 0.0,
+                },
+            })
+            .expect("resize to desktop");
+        let _ = decode_batch(bytes).expect("decode resize");
+
+        // Switch into 채널 and back to 프로젝트 repeatedly: leaving 채널 disposes `RoomView` and
+        // `OwnerState`, which previously panicked at `channel_owner.rs:158` inside `MembersSheet`'s
+        // `on_dispose` cleanup.
+        for round in 0..5 {
+            ui.set_menu(crate::ui::NavMenu::Channels);
+            let bytes = host.render_frame((round * 2 + 1) * 16_000_000).expect("render channels");
+            let text: String = decode_batch(bytes).expect("decode channels").iter().map(|m| format!("{m:?}")).collect();
+            assert!(text.contains("배포 논의"), "round {round} should render channels: {text}");
+
+            ui.set_menu(crate::ui::NavMenu::Projects);
+            let bytes = host.render_frame((round * 2 + 2) * 16_000_000).expect("render projects");
+            let _ = decode_batch(bytes).expect("decode projects");
+        }
+
+        // Also switch between rooms inside `ChannelsScreenWith` repeatedly and open/close the
+        // owner sheet so `OwnerState::new(room_id)` keys are replaced and disposed cleanly.
+        let active_room = compose_rust::runtime::mutable_state_of(0_usize);
+        let sheet_open = compose_rust::runtime::mutable_state_of(false);
+        let r_state = active_room;
+        let s_state = sheet_open;
+        let mut room_host = compose_rust::ComposeHost::with_content(move || {
+            let rooms = sample_rooms();
+            let idx = r_state.get();
+            if idx < rooms.len() {
+                let room = &rooms[idx];
+                let owner = super::super::channel_owner::OwnerState::new(&room.id);
+                if s_state.get() {
+                    owner.open.set(true);
+                }
+                RoomView(room, false, None, || {});
+            }
+        });
+        let _ = decode_batch(room_host.rebuild().expect("rebuild room host")).expect("decode");
+        for step in 0..6 {
+            sheet_open.set(step % 2 == 0);
+            active_room.set(step % 4); // 0, 1, 2, and 3 (unmounted)
+            let bytes = room_host.render_frame((step as u64 + 1) * 16_000_000).expect("render room switch");
+            let _ = decode_batch(bytes).expect("decode room switch");
+        }
+        compose_rust::window::reset_window_size();
+    }
 }
 
 /// Review rows CH3 to CH7 (#894) and the #603 review follow-ups (#630): what the list pane and

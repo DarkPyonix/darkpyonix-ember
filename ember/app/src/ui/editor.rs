@@ -1652,10 +1652,11 @@ pub const NARROW_WINDOW_PX: f32 = 900.0;
 
 impl Stripes {
     /// The stripes a window opened `width` px wide starts with (FR-L31.41): the default, less the
-    /// left tool window when the window is narrow, because there it would cover the code.
+    /// left tool window when the window is narrow, because there it would cover the code. A width
+    /// not known yet (0, nothing reported and no opened size) keeps the default.
     pub fn opening(width: f32) -> Stripes {
         let mut s = Stripes::default();
-        if width <= NARROW_WINDOW_PX {
+        if width > 0.0 && width <= NARROW_WINDOW_PX {
             s.left = None;
         }
         s
@@ -2149,7 +2150,7 @@ mod tests {
             assert_eq!(s.selected(Side::Bottom), Some(ToolWindow::Terminal), "{w}");
             assert_eq!(s.selected(Side::Right), None, "{w}");
         }
-        for w in [901.0, 1024.0, 1440.0] {
+        for w in [0.0, 901.0, 1024.0, 1440.0] {
             assert_eq!(Stripes::opening(w), Stripes::default(), "{w}");
         }
         assert_eq!(Stripes::default().selected(Side::Left), Some(ToolWindow::Project));

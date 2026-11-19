@@ -161,7 +161,8 @@ fn init(target: EditorTarget) {
     let bottom_max = use_hook(|| Signal::new_in_scope(false, root));
     let position = use_hook(|| Signal::new_in_scope((1, 1), root));
     let stripes = use_hook(|| {
-        let mut initial = Stripes::default();
+        // FR-L31.41: a window 900 px wide or less opens with the left tool window closed.
+        let mut initial = Stripes::opening(crate::ui::window_size::window_size_untracked().width_dp);
         // Debug capture hook: start with the 확장 window showing (FR-L31.14).
         if crate::ui::editor_extensions::capture_hook().is_some() {
             initial.toggle(crate::ui::editor::ToolWindow::Extensions);

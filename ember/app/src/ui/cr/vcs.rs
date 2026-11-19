@@ -1449,61 +1449,68 @@ fn DiffViewAtWidth(file: &FileDiff, staging: &MutableState<Staging>, pane_width:
 
             cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
 
-            // Hunk lines (each exactly 21.0 px high, spacing 0.0)
-            cu::Column().modifier(Modifier::new().fill_max_width()).spacing(0.0).content(|| {
-                for (li, l) in h.lines.iter().enumerate() {
-                    let bg = match l.kind {
-                        LineKind::Add => paint(p.green.soft),
-                        LineKind::Del => paint(p.red.soft),
-                        LineKind::Context => Paint::Literal(Color::argb(0)),
-                    };
-                    cu::Row().modifier(Modifier::new().fill_max_width().height(21.0).background(bg)).alignment(Alignment::CenterStart).content(|| {
-                        // compose-rust#424 (v0.0.11 `Modifier::sticky`): the line check stays
-                        // pinned at the start edge when a diff row scrolls sideways.
-                        if l.is_change() {
-                            let is_line_staged = staging.get().file(&file.path).is_some_and(|s| s.is_staged(hi, li));
-                            let st_line = staging.clone();
-                            let f_line = file.clone();
-                            let line_check = if is_line_staged { Check::On } else { Check::Off };
-                            StageCheckWith(Modifier::new().sticky(), line_check, STAGE_LINE_CHECK_SIDE, 21.0, move || {
-                                let mut s = st_line.get();
-                                s.file_mut(&f_line.path).toggle_line(&f_line, hi, li);
-                                st_line.set(s);
-                            });
-                        } else {
-                            cu::Spacer().modifier(Modifier::new().sticky().width(STAGE_CHECK_HIT_W));
-                        }
-
-                        let old_str = l.old_no.map(|n| format!("{:>4}", n)).unwrap_or_else(|| "    ".to_string());
-                        let new_str = l.new_no.map(|n| format!("{:>4}", n)).unwrap_or_else(|| "    ".to_string());
-                        let sign_str = match l.kind {
-                            LineKind::Add => "+",
-                            LineKind::Del => "-",
-                            LineKind::Context => " ",
+            // Hunk lines (each exactly 21.0 px high, spacing 0.0) inside a horizontal ScrollRow so
+            // long lines scroll sideways while the sticky check column stays pinned at the start edge.
+            cu::ScrollRow().modifier(Modifier::new().fill_max_width()).content(|| {
+                cu::Column().modifier(Modifier::new().min_width(pane_width)).spacing(0.0).content(|| {
+                    for (li, l) in h.lines.iter().enumerate() {
+                        let bg = match l.kind {
+                            LineKind::Add => paint(p.green.soft),
+                            LineKind::Del => paint(p.red.soft),
+                            LineKind::Context => Paint::Literal(Color::argb(0)),
                         };
+                        let sticky_bg = match l.kind {
+                            LineKind::Add => paint(p.green.soft),
+                            LineKind::Del => paint(p.red.soft),
+                            LineKind::Context => paint(p.surface),
+                        };
+                        cu::Row().modifier(Modifier::new().min_width(pane_width).height(21.0).background(bg)).alignment(Alignment::CenterStart).content(|| {
+                            // compose-rust#424 (v0.0.11 `Modifier::sticky`): the line check stays
+                            // pinned at the start edge when a diff row scrolls sideways.
+                            if l.is_change() {
+                                let is_line_staged = staging.get().file(&file.path).is_some_and(|s| s.is_staged(hi, li));
+                                let st_line = staging.clone();
+                                let f_line = file.clone();
+                                let line_check = if is_line_staged { Check::On } else { Check::Off };
+                                StageCheckWith(Modifier::new().sticky().background(sticky_bg), line_check, STAGE_LINE_CHECK_SIDE, 21.0, move || {
+                                    let mut s = st_line.get();
+                                    s.file_mut(&f_line.path).toggle_line(&f_line, hi, li);
+                                    st_line.set(s);
+                                });
+                            } else {
+                                cu::Box().modifier(Modifier::new().sticky().width(STAGE_CHECK_HIT_W).height(21.0).background(sticky_bg));
+                            }
 
-                        cu::Box().modifier(Modifier::new().width(32.0)).alignment(Alignment::CenterEnd).content(|| {
-                            Label(&old_str, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                            let old_str = l.old_no.map(|n| format!("{:>4}", n)).unwrap_or_else(|| "    ".to_string());
+                            let new_str = l.new_no.map(|n| format!("{:>4}", n)).unwrap_or_else(|| "    ".to_string());
+                            let sign_str = match l.kind {
+                                LineKind::Add => "+",
+                                LineKind::Del => "-",
+                                LineKind::Context => " ",
+                            };
+
+                            cu::Box().modifier(Modifier::new().width(32.0)).alignment(Alignment::CenterEnd).content(|| {
+                                Label(&old_str, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                            });
+                            cu::Spacer().modifier(Modifier::new().width(4.0));
+                            cu::Box().modifier(Modifier::new().width(32.0)).alignment(Alignment::CenterEnd).content(|| {
+                                Label(&new_str, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                            });
+                            cu::Spacer().modifier(Modifier::new().width(4.0));
+                            cu::Box().modifier(Modifier::new().width(14.0)).alignment(Alignment::Center).content(|| {
+                                Label(sign_str, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                            });
+                            cu::Spacer().modifier(Modifier::new().width(4.0));
+                            cu::Text(&l.text)
+                                .type_role(TypeRole::Mono)
+                                .font_size(Fs::Xs2.size())
+                                .line_height(Fs::Xs2.line_height())
+                                .color(paint(p.text))
+                                .max_lines(1);
+                            cu::Spacer().modifier(Modifier::new().width(SP[2]));
                         });
-                        cu::Spacer().modifier(Modifier::new().width(4.0));
-                        cu::Box().modifier(Modifier::new().width(32.0)).alignment(Alignment::CenterEnd).content(|| {
-                            Label(&new_str, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                        });
-                        cu::Spacer().modifier(Modifier::new().width(4.0));
-                        cu::Box().modifier(Modifier::new().width(14.0)).alignment(Alignment::Center).content(|| {
-                            Label(sign_str, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                        });
-                        cu::Spacer().modifier(Modifier::new().width(4.0));
-                        cu::Text(&l.text)
-                            .type_role(TypeRole::Mono)
-                            .font_size(Fs::Xs2.size())
-                            .line_height(Fs::Xs2.line_height())
-                            .color(paint(p.text))
-                            .max_lines(1)
-                            .word_break(compose_rust::WordBreak::KeepAll)
-                            .overflow(TextOverflow::Ellipsis);
-                    });
-                }
+                    }
+                });
             });
         }
     });
@@ -7339,7 +7346,9 @@ mod tests {
         assert!(!body[header..action].contains("cu::Column()"), "the action is not on its own row");
         assert!(action > header, "the action follows the header text, on the right");
         assert_eq!(VCS_HUNK_HEADER_H, VCS_HUNK_BUTTON_H + 12.0);
-        // compose-rust#424 (v0.0.11): the diff line check column is pinned with Modifier::sticky().
+        // compose-rust#424 (v0.0.11): the diff line check column is pinned with Modifier::sticky()
+        // inside a horizontal ScrollRow so long lines scroll sideways under the pinned check cell.
+        assert!(body.contains("cu::ScrollRow()"), "{body}");
         assert!(body.contains("StageCheckWith(Modifier::new().sticky()"), "{body}");
         assert!(body.contains("Modifier::new().sticky().width(STAGE_CHECK_HIT_W)"), "{body}");
         assert!(!include_str!("../vcs.rs").contains(concat!("TODO(compose-rust#", "424")));

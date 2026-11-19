@@ -346,9 +346,15 @@ fn editor_pane() -> Element {
     // Edits the session asks for (an accepted completion, formatting, a rename, a code action) go to
     // the widget, which applies them as the reader's own and reports them back as changes.
     for command in s.bridge.borrow_mut().take_pending_edits(&doc.uri) {
-        if let ember_editor::WidgetCommand::EditCode { request_id, base_version, range, text } = command {
-            use compose_rust::code::CodeRange;
-            handle.edit(request_id, base_version, CodeRange::of(range.start.line, range.start.col, range.end.line, range.end.col), text);
+        use compose_rust::code::CodeRange;
+        match command {
+            ember_editor::WidgetCommand::EditCode { request_id, base_version, range, text } => {
+                handle.edit(request_id, base_version, CodeRange::of(range.start.line, range.start.col, range.end.line, range.end.col), text);
+            }
+            ember_editor::WidgetCommand::InsertSnippet { base_version, range, snippet } => {
+                handle.insert_snippet(base_version, CodeRange::of(range.start.line, range.start.col, range.end.line, range.end.col), snippet);
+            }
+            ember_editor::WidgetCommand::SetText { .. } => {}
         }
     }
     let gutter_decorations = {
@@ -1312,7 +1318,7 @@ pub mod page {
         }
         let saved = updates.iter().any(|u| matches!(u, ember_editor::SessionUpdate::Saved { .. }));
         let mut saved_paths: Vec<String> = Vec::new();
-        let widget_edits = updates.iter().any(|u| matches!(u, ember_editor::SessionUpdate::Command { command: ember_editor::WidgetCommand::EditCode { .. }, .. }));
+        let widget_edits = updates.iter().any(|u| matches!(u, ember_editor::SessionUpdate::Command { command: ember_editor::WidgetCommand::EditCode { .. } | ember_editor::WidgetCommand::InsertSnippet { .. }, .. }));
         for update in updates {
             if let ember_editor::SessionUpdate::Opened { uri, .. } = &update { s.uris.borrow_mut().insert(uri.path.clone(), uri.clone()); }
             if let ember_editor::SessionUpdate::Closed { uri } = &update { s.uris.borrow_mut().remove(&uri.path); }

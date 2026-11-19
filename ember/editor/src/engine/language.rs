@@ -18,7 +18,7 @@ use super::{Effect, Pending, ReadPurpose, SessionCore, SessionUpdate, Token};
 use crate::coords::{WidgetPos, WidgetRange};
 use crate::document::decode;
 use crate::language::assist::{parse_code_actions, parse_rename_location, parse_signature_help, word_at};
-use crate::language::completion::{expand_snippet, inflate_item, parse_suggest_result};
+use crate::language::completion::{inflate_item, parse_suggest_result};
 use crate::language::edits::{apply_text_edits, parse_text_edits, reject_reason, widget_order};
 use crate::language::navigation::{merge_locations, parse_document_symbols, parse_locations};
 use crate::language::{CodeAction, CompletionItem, EditSummary, Feature, LanguageRequest, LanguageUpdate, Location, TextEdit, WorkspaceEdit};
@@ -360,11 +360,21 @@ impl SessionCore {
             item.additional_edits = full.additional_edits;
             item.command = full.command.or(item.command);
         }
-        // TODO(compose-rust#556, in v0.0.11): a snippet goes in as plain text and the caret stays after it until the editor widget's snippet session is wired.
-        let text = if item.is_snippet { expand_snippet(&item.insert_text).0 } else { item.insert_text.clone() };
-        let mut edits = vec![TextEdit { range: item.insert_range, text }];
-        edits.extend(item.additional_edits.iter().cloned());
-        self.lang_edit_widget(&uri, version, &edits);
+        if item.is_snippet {
+            self.ui(SessionUpdate::Command {
+                uri: uri.clone(),
+                command: WidgetCommand::InsertSnippet {
+                    base_version: version,
+                    range: item.insert_range,
+                    snippet: item.insert_text.clone(),
+                },
+            });
+            self.lang_edit_widget(&uri, version, &item.additional_edits);
+        } else {
+            let mut edits = vec![TextEdit { range: item.insert_range, text: item.insert_text.clone() }];
+            edits.extend(item.additional_edits.iter().cloned());
+            self.lang_edit_widget(&uri, version, &edits);
+        }
         self.lang_end_completion(None);
         self.lang_ui(LanguageUpdate::CompletionApplied { uri });
         if let Some(command) = item.command {

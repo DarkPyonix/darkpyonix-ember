@@ -277,6 +277,9 @@ pub enum WidgetCommand {
     /// rebases it over later user edits or answers with `CodeEditRejected`. The edit comes back as
     /// a normal `CodeChanged`.
     EditCode { request_id: u32, base_version: u32, range: WidgetRange, text: String },
+    /// FR-38 command 40. Replace `range` against `base_version` with a VS Code snippet and open
+    /// its tab stops in the widget's snippet session.
+    InsertSnippet { base_version: u32, range: WidgetRange, snippet: String },
 }
 
 #[cfg(test)]

@@ -17,6 +17,8 @@
 //!   [`code_key_action`]) and consumed, so F12, F2, Ctrl+Space and the rest work while typing.
 //! * compose-rust#555: Cmd (macOS) or Ctrl (elsewhere) and a click on a name goes to its
 //!   definition (`on_code_pointer` with `pointer_kinds`, [`pointer_definition`]).
+//! * compose-rust#556: snippet completions are forwarded as `WidgetCommand::InsertSnippet` and
+//!   opened in the widget's snippet session via `CodeEditorHandle::insert_snippet`.
 //!
 //! What is left, and why:
 //! * TODO(#673): a list takes the focus and is filtered in its own field. Keeping the focus in the
@@ -25,9 +27,6 @@
 //! * TODO(#673): the parameter hint stays at the bottom of the editor area (#800). It sits inside
 //!   `.ed-main`, whose place in the window the page does not know, and a box fixed to the window
 //!   at the caret is the layout #800 moved away from; anchoring it waits for a display check.
-//! * TODO(#673): a snippet is inserted as plain text. `CodeEditorHandle::insert_snippet` is in the
-//!   pin, but the session hands the window an `ember_editor::WidgetCommand::EditCode` with the
-//!   expanded text, so `ember/editor` has to carry the snippet first.
 
 use std::collections::HashMap;
 

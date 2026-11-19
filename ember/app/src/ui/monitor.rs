@@ -343,6 +343,7 @@ pub struct MonitorFeed {
     prev: Option<MetricsSample>,
     error: Option<String>,
     cpu: Vec<f32>,
+    gpu: Vec<f32>,
     memory: Vec<f32>,
     temperature: Vec<f32>,
     net_rx: Vec<f32>,
@@ -357,9 +358,17 @@ impl MonitorFeed {
         }
         let rates = self.latest.as_ref().and_then(|l| net_rates(l, &sample));
         let cpu = sample.cpu.total_percent.into_iter().collect::<Vec<_>>();
+        let gpu = sample
+            .gpu
+            .devices
+            .first()
+            .and_then(|d| d.utilization_percent)
+            .into_iter()
+            .collect::<Vec<_>>();
         let mem = sample.memory.iter().map(|m| ratio_percent(m.used_bytes, m.total_bytes)).collect::<Vec<_>>();
         let temp = hottest(&sample).map(|t| t.celsius).into_iter().collect::<Vec<_>>();
         self.cpu = fold_samples(&self.cpu, &cpu, FEED_CAP);
+        self.gpu = fold_samples(&self.gpu, &gpu, FEED_CAP);
         self.memory = fold_samples(&self.memory, &mem, FEED_CAP);
         self.temperature = fold_samples(&self.temperature, &temp, FEED_CAP);
         if let Some((rx, _)) = rates {
@@ -403,6 +412,7 @@ impl ComputerMetrics for MonitorFeed {
     fn series(&self, metric: Metric) -> Option<Vec<f32>> {
         let v = match metric {
             Metric::Cpu => &self.cpu,
+            Metric::Gpu => &self.gpu,
             Metric::Memory => &self.memory,
             Metric::Temperature => &self.temperature,
             Metric::Network => &self.net_rx,
@@ -569,7 +579,11 @@ pub fn card_view(metric: Metric, feed: &MonitorFeed) -> Option<CardView> {
                 if let (Some(u), Some(t)) = (d.memory_used_bytes, d.memory_total_bytes) {
                     lines.push(format!("{} / {}", bytes_text(u), bytes_text(t)));
                 }
-                CardView { headline: percent_text(d.utilization_percent), lines, bars: vec![] }
+                CardView {
+                    headline: percent_text(d.utilization_percent),
+                    lines,
+                    bars: feed.series(Metric::Gpu).filter(|b| b.len() >= 2).unwrap_or_default(),
+                }
             }
         }
         Metric::Fans => return None,
@@ -747,6 +761,80 @@ pub fn storage_line(s: &MetricsSample) -> Option<String> {
 }
 
 /// The RAM size badge of the status card, from the memory total.
+/// The badge shown in the top-right corner of a metric card header (`.mon-badge`, FR-L21, #389):
+/// - CPU / GPU: the sensor's rounded degree Celsius when a matching temperature is reported;
+/// - Memory: memory usage pressure percentage (`압력 N%`) with green/orange/red tone;
+/// - Temperature: `정상입니다` (< 70 °C), `따뜻합니다` (< 85 °C), or `높습니다` (>= 85 °C);
+/// - Disk: total capacity of the largest disk (`2 TB`, etc.);
+/// - Network: the primary interface name (`en0`, `eth0`, etc.).
+pub fn metric_badge(metric: Metric, s: &MetricsSample) -> Option<(String, crate::ui::components::PillTone)> {
+    use crate::ui::components::PillTone;
+    match metric {
+        Metric::Cpu => {
+            let t = s
+                .temperatures
+                .iter()
+                .find(|t| t.celsius.is_finite() && t.label.to_ascii_lowercase().contains("cpu"))
+                .or_else(|| hottest(s))?;
+            let tone = if t.celsius >= 85.0 {
+                PillTone::Red
+            } else if t.celsius >= 70.0 {
+                PillTone::Orange
+            } else {
+                PillTone::Green
+            };
+            Some((format!("{:.0}\u{00B0}C", t.celsius), tone))
+        }
+        Metric::Gpu => {
+            let t = s
+                .temperatures
+                .iter()
+                .find(|t| t.celsius.is_finite() && t.label.to_ascii_lowercase().contains("gpu"))?;
+            let tone = if t.celsius >= 85.0 {
+                PillTone::Red
+            } else if t.celsius >= 70.0 {
+                PillTone::Orange
+            } else {
+                PillTone::Green
+            };
+            Some((format!("{:.0}\u{00B0}C", t.celsius), tone))
+        }
+        Metric::Memory => {
+            let m = s.memory.as_ref().filter(|m| m.total_bytes > 0)?;
+            let pct = ratio_percent(m.used_bytes, m.total_bytes);
+            let tone = if pct >= 85.0 {
+                PillTone::Red
+            } else if pct >= 70.0 {
+                PillTone::Orange
+            } else {
+                PillTone::Green
+            };
+            Some((format!("압력 {:.0}%", pct), tone))
+        }
+        Metric::Temperature => {
+            let t = hottest(s)?;
+            let (word, tone) = if t.celsius >= 85.0 {
+                ("높습니다", PillTone::Red)
+            } else if t.celsius >= 70.0 {
+                ("따뜻합니다", PillTone::Orange)
+            } else {
+                ("정상입니다", PillTone::Green)
+            };
+            Some((word.to_string(), tone))
+        }
+        Metric::Disk => {
+            let total = s.disks.iter().map(|d| d.total_bytes).max().filter(|&b| b > 0)?;
+            Some((bytes_text(total), PillTone::Blue))
+        }
+        Metric::Network => {
+            let iface = s.network.iter().find(|n| !n.interface.is_empty())?;
+            Some((iface.interface.clone(), PillTone::Blue))
+        }
+        Metric::Fans => None,
+    }
+}
+
+/// The badge shown in the status card header: total RAM (e.g. `64.0 GB`), when reported.
 pub fn ram_badge(s: &MetricsSample) -> Option<String> {
     s.memory.as_ref().filter(|m| m.total_bytes > 0).map(|m| bytes_text(m.total_bytes))
 }
@@ -782,6 +870,57 @@ pub const FAN_MODE_REASON: &str = "이 컴퓨터의 팬 속도와 모드는 아�
 mod tests {
     use super::*;
     use ember_client::LauncherStatus;
+
+    #[test]
+    fn fr_l21_metric_badges_and_gpu_series_follow_the_sample() {
+        use crate::ui::components::PillTone;
+        use ember_client::api::{DiskMetrics, GpuMetrics, GpuReport, NetMetrics, TempMetrics};
+        let mut s1 = MetricsSample {
+            at_ms: 1000,
+            memory: Some(MemoryMetrics {
+                total_bytes: 64 * (1u64 << 30),
+                used_bytes: 32 * (1u64 << 30),
+                swap_total_bytes: 0,
+                swap_used_bytes: 0,
+            }),
+            disks: vec![DiskMetrics {
+                name: "disk0".into(),
+                mount: "/".into(),
+                total_bytes: 2 * (1u64 << 40),
+                available_bytes: 1u64 << 40,
+            }],
+            network: vec![NetMetrics { interface: "en0".into(), rx_bytes: 0, tx_bytes: 0 }],
+            temperatures: vec![
+                TempMetrics { label: "CPU die".into(), celsius: 56.0 },
+                TempMetrics { label: "GPU die".into(), celsius: 74.0 },
+            ],
+            gpu: GpuReport {
+                devices: vec![GpuMetrics {
+                    name: "Apple M4".into(),
+                    utilization_percent: Some(12.0),
+                    memory_total_bytes: None,
+                    memory_used_bytes: None,
+                }],
+                reason: None,
+            },
+            ..MetricsSample::default()
+        };
+        assert_eq!(metric_badge(Metric::Cpu, &s1), Some(("56\u{00B0}C".into(), PillTone::Green)));
+        assert_eq!(metric_badge(Metric::Gpu, &s1), Some(("74\u{00B0}C".into(), PillTone::Orange)));
+        assert_eq!(metric_badge(Metric::Memory, &s1), Some(("압력 50%".into(), PillTone::Green)));
+        assert_eq!(metric_badge(Metric::Temperature, &s1), Some(("따뜻합니다".into(), PillTone::Orange)));
+        assert_eq!(metric_badge(Metric::Disk, &s1), Some(("2.0 TB".into(), PillTone::Blue)));
+        assert_eq!(metric_badge(Metric::Network, &s1), Some(("en0".into(), PillTone::Blue)));
+        assert_eq!(metric_badge(Metric::Fans, &s1), None);
+
+        let mut feed = MonitorFeed::default();
+        feed.push(s1.clone());
+        assert!(card_view(Metric::Gpu, &feed).unwrap().bars.is_empty());
+        s1.at_ms = 4000;
+        s1.gpu.devices[0].utilization_percent = Some(28.0);
+        feed.push(s1);
+        assert_eq!(card_view(Metric::Gpu, &feed).unwrap().bars, vec![12.0, 28.0]);
+    }
 
     #[test]
     fn fr_l21_hero_number_and_unit_are_split_like_the_mockup() {

@@ -132,16 +132,9 @@ pub fn SearchScreen() {
     let results = Rc::new(results);
     let keys = results.clone();
 
-    cu::Column()
-        .space_role(SpaceRole::Md)
-        .modifier(Modifier::new().fill_max_width().fill_max_height().padding_role(SpaceRole::Md))
-        .content(|| {
+    { use ::compose_rust::ui::Column; Column!(space_role = SpaceRole::Md, modifier = Modifier::new().fill_max_width().fill_max_height().padding_role(SpaceRole::Md), {
             ConnectionBanner();
-            cu::Row()
-                .spacing(SP[1])
-                .alignment(Alignment::CenterStart)
-                .modifier(Modifier::new().fill_max_width())
-                .content(|| {
+            { use ::compose_rust::ui::Row; Row!(spacing = SP[1], alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
                     let back_ui = ui.clone();
                     AppButton(
                         "프로젝트",
@@ -153,7 +146,7 @@ pub fn SearchScreen() {
                         move || back_ui.go(crate::ui::Route::Projects),
                     );
                     Label("전체 검색", Fs::Lg, Weight::Semibold, None, Some(1));
-                });
+                }) };
             // `.searchbox` (FR-L10.1, #878): the pill with the magnifier and the 16 px inset.
             SearchField("세션 검색", H_BTN, on_change);
             if let Some(e) = &error_text {
@@ -169,26 +162,24 @@ pub fn SearchScreen() {
             }
             let note = search_note(&q, count, searching);
             Label(&note, Fs::Sm, Weight::Regular, Some(paint(ember_theme().palette.muted)), None);
-            cu::LazyColumn()
-                .modifier(Modifier::new().fill_max_width().weight(1.0))
-                .content(|scope| {
+            { use ::compose_rust::ui::LazyColumn; LazyColumn!(modifier = Modifier::new().fill_max_width().weight(1.0), content = |scope| {
                     scope.items_keyed(
                         count,
                         move |i| result_key(&keys[i]),
                         move |i| {
                             let r = &results[i];
                             let snippet = r.snippet.clone().unwrap_or_default();
-                            cu::Column().space_role(SpaceRole::Xs).modifier(Modifier::new().fill_max_width()).content(|| {
+                            { use ::compose_rust::ui::Column; Column!(space_role = SpaceRole::Xs, modifier = Modifier::new().fill_max_width(), {
                                 Txt(&r.row.project, TypeRole::Caption, muted(), None, None, None, None);
                                 SessionRowView(&r.row);
                                 if !snippet.is_empty() {
                                     Txt(&snippet, TypeRole::Body, None, Some(3), Some(TextOverflow::Ellipsis), None, None);
                                 }
-                            });
+                            }) };
                         },
                     );
-                });
-        });
+                }) };
+        }) };
 }
 
 #[cfg(test)]

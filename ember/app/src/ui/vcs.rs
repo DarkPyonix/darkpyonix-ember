@@ -14,7 +14,6 @@
 //!
 //! What the pinned toolkit cannot do yet, with the workaround used (`GAPS-WORKLIST.md`):
 //! - no clickable Row or Column: a text Button is the hit target of a row or a diff line (v0.0.7: #372 fixed, container `on_click`; workaround kept until checked on a display, with the VCS screen's own migration under #673);
-//! - no sticky column: the line check sits in the row and scrolls with it (TODO(compose-rust#424, after v0.0.10));
 //! - no SVG graph: the history is a list first (TODO(compose-rust#308): draw the graph on a `Canvas`).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -28,7 +27,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 
 use crate::demo::GitError;
-use crate::services::{run, services};
+use crate::services::services;
 use crate::ui::project::{is_default_project, ProjectBox};
 
 /// What a view shows while the server does not provide its data.

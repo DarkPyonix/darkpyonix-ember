@@ -309,7 +309,7 @@ fn fr_l31_leaving_an_empty_new_name_field_closes_it_and_a_typed_name_stays() {
 
 // FR-L31 (#832, #827 rule 2): Shift+F10 or the context-menu key on a focused tree row opens the
 // tree's context menu with the row's items, as in Code-OSS, beside right-click (compose-rust#417).
-// This pins Ember's side of the key path; compose-rust#100 and #717 are in the v0.0.10 pin, and a
+// This pins Ember's side of the key path; compose-rust#100 and #717 are in the v0.0.11 pin, and a
 // real run reaching this handler is not yet checked on a display.
 #[test]
 fn fr_l31_shift_f10_and_the_context_menu_key_on_a_tree_row_open_its_context_menu() {
@@ -659,6 +659,11 @@ fn fr_l31_26_the_status_bar_is_32_high_and_flush_with_the_page_bottom() {
         ed_rect.y + ed_rect.height,
     );
     assert!(close(ed_rect.y + ed_rect.height, 900.0), "the page fills the viewport: {ed_rect:?}");
+    let page_css = include_str!("../../assets/editor/page.css");
+    let wb = include_str!("editor_workbench.rs");
+    assert!(!page_css.contains(&[".ed", "-none"].concat()), "dioxus-compose#266: .ed-none stand-in is gone");
+    assert!(!page_css.contains(concat!("TODO(dioxus-compose#", "266")));
+    assert!(!wb.contains(&["\"ed", "-none\""].concat()), "dioxus-compose#266: no ed-none div in the workbench");
 }
 
 /// A node's laid-out box in the page, as `(x, y, width, height)`: its layout's location added up
@@ -1028,7 +1033,7 @@ fn fr_l31_36_the_editor_has_no_tab_strip_while_no_tab_is_open() {
 
 #[compose_rust::runtime::Composable]
 fn toolkit_probe() {
-    compose_rust::ui::Text("probe".to_string());
+    { use ::compose_rust::ui::Text; Text!("probe".to_string()) };
 }
 
 // FR-L33.1 (#875): the window's safe area reaches the toolkit after the page's first render. The
@@ -1064,6 +1069,7 @@ fn fr_l33_1_the_safe_area_arriving_after_the_first_render_moves_the_top_bar() {
                 safe_area_top: lights.top,
                 safe_area_leading: lights.leading,
                 safe_area_trailing: lights.trailing,
+                safe_area_bottom: 0.0,
             },
         })
         .expect("dispatch");

@@ -6,7 +6,7 @@
 //! what the window shows ([`LanguageState`], filled on the host's runtime from the session's
 //! updates) and draws it ([`view`]).
 //!
-//! The pinned toolkit (compose-rust v0.0.10, dioxus-compose f0e5b9f5) gives the code editor what
+//! The pinned toolkit (compose-rust v0.0.11, dioxus-compose 94ade333) gives the code editor what
 //! these need, and the window uses it:
 //! * compose-rust#553: a list opens at the caret the editor reports (`on_caret_rect`,
 //!   [`view::set_caret_rect`]) inside the editor pane ([`popup_placement`]), and falls back to the sheet over the window, like the command
@@ -17,6 +17,8 @@
 //!   [`code_key_action`]) and consumed, so F12, F2, Ctrl+Space and the rest work while typing.
 //! * compose-rust#555: Cmd (macOS) or Ctrl (elsewhere) and a click on a name goes to its
 //!   definition (`on_code_pointer` with `pointer_kinds`, [`pointer_definition`]).
+//! * compose-rust#556: snippet completions are forwarded as `WidgetCommand::InsertSnippet` and
+//!   opened in the widget's snippet session via `CodeEditorHandle::insert_snippet`.
 //!
 //! What is left, and why:
 //! * TODO(#673): a list takes the focus and is filtered in its own field. Keeping the focus in the
@@ -25,9 +27,6 @@
 //! * TODO(#673): the parameter hint stays at the bottom of the editor area (#800). It sits inside
 //!   `.ed-main`, whose place in the window the page does not know, and a box fixed to the window
 //!   at the caret is the layout #800 moved away from; anchoring it waits for a display check.
-//! * TODO(#673): a snippet is inserted as plain text. `CodeEditorHandle::insert_snippet` is in the
-//!   pin, but the session hands the window an `ember_editor::WidgetCommand::EditCode` with the
-//!   expanded text, so `ember/editor` has to carry the snippet first.
 
 use std::collections::HashMap;
 
@@ -530,10 +529,11 @@ pub const CODE_TOP_ROOM: f32 = 8.0;
 
 /// Whether a caret the reader just moved (#301, FR-L31.40) has to be scrolled into view: its line
 /// is not whole between the top of the code editor's box (the pane less `CODE_TOP_ROOM`) and the
-/// pane's bottom edge. The toolkit's own scroll on an arrow key keeps the caret about a line
-/// short of the bottom (compose-rust v0.0.10, measured: line 31 at y 603.92 to 625.92 in a box
-/// that ends at 591), so the window asks the editor for the nearest reveal, as Code-OSS reveals
-/// the cursor after every move. Only the vertical extent counts: the reveal scrolls rows.
+/// pane's bottom edge. Before compose-rust#841 (v0.0.11, `CodeEditorSurface.kt`), the toolkit's
+/// own scroll on an arrow key stopped about a line short of the bottom (measured: line 31 at y
+/// 603.92 to 625.92 in a box that ends at 591), so the window asks the editor for the nearest
+/// reveal, as Code-OSS reveals the cursor after every move. Only the vertical extent counts: the
+/// reveal scrolls rows.
 pub fn moved_caret_needs_reveal(caret: compose_rust::code::CodeRect, pane: PaneBox) -> bool {
     const SLACK: f32 = 0.5;
     caret.y < pane.y + CODE_TOP_ROOM - SLACK || caret.bottom() > pane.y + pane.height + SLACK

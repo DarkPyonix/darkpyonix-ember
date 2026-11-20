@@ -1646,7 +1646,22 @@ impl Default for Stripes {
     }
 }
 
+/// Width in px at and below which the mockup lays the left tool window over the editor island
+/// and opens with it closed (`editor.css` `@media (max-width:900px)`, `editor.js` `onHash`).
+pub const NARROW_WINDOW_PX: f32 = 900.0;
+
 impl Stripes {
+    /// The stripes a window opened `width` px wide starts with (FR-L31.41): the default, less the
+    /// left tool window when the window is narrow, because there it would cover the code. A width
+    /// not known yet (0, nothing reported and no opened size) keeps the default.
+    pub fn opening(width: f32) -> Stripes {
+        let mut s = Stripes::default();
+        if width > 0.0 && width <= NARROW_WINDOW_PX {
+            s.left = None;
+        }
+        s
+    }
+
     pub fn selected(&self, side: Side) -> Option<ToolWindow> {
         match side {
             Side::Left => self.left,
@@ -2125,6 +2140,29 @@ mod tests {
             let mut stripes = Stripes::default();
             assert_eq!(apply_action(action, &mut tabs, &mut stripes), is_implemented(action), "{action:?}");
         }
+    }
+
+    #[test]
+    fn fr_l31_41_a_narrow_window_opens_with_the_left_tool_window_closed() {
+        for w in [390.0, 768.0, 900.0] {
+            let s = Stripes::opening(w);
+            assert_eq!(s.selected(Side::Left), None, "{w}");
+            assert_eq!(s.selected(Side::Bottom), Some(ToolWindow::Terminal), "{w}");
+            assert_eq!(s.selected(Side::Right), None, "{w}");
+        }
+        for w in [0.0, 901.0, 1024.0, 1440.0] {
+            assert_eq!(Stripes::opening(w), Stripes::default(), "{w}");
+        }
+        assert_eq!(Stripes::default().selected(Side::Left), Some(ToolWindow::Project));
+    }
+
+    #[test]
+    fn fr_l31_41_the_window_opens_its_stripes_for_its_width() {
+        let page = include_str!("editor_workbench.rs");
+        assert!(page.contains("Stripes::opening(crate::ui::window_size::window_size_untracked().width_dp)"));
+        let lib = include_str!("../lib.rs");
+        let editor = &lib[lib.find("Separate IDE window (FR-L31)").unwrap()..lib.find("ui::cr::gallery::requested()").unwrap()];
+        assert!(editor.contains("ui::window_size::record_opened(f32::from(w), f32::from(h));"));
     }
 
     #[test]

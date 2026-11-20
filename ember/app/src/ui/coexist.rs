@@ -1,22 +1,13 @@
-//! Shared UI and live state for the `compose-rust` UI migration (#220, INTENT D9).
+//! Shared UI and live state for the `compose-rust` UI (#220, INTENT D9).
 //!
-//! Base screens move from `dioxus-compose` to `compose-rust` one PR at a time. The two toolkits
-//! run in separate windows (option C, decided after compose-rust FR-53), so they never share a
-//! runtime. What they share is state: [`SharedUi`] and [`SharedLive`] hold the route, prefs,
-//! theme and live revisions in `compose-rust` `MutableState`s outside either runtime.
-//!
-//! TRANSITIONAL: the Dioxus `SyncSignal` mirroring ([`DioxusMirrors`], [`use_shared_mirrors`])
-//! only keeps the still-Dioxus screens in step with the shared store. Delete it once every
-//! screen has moved (tracked in #226).
-
-use std::sync::{Arc, OnceLock};
+//! [`SharedUi`] and [`SharedLive`] hold the route, prefs, theme and live revisions in
+//! `compose-rust` `MutableState`s written from tokio worker threads and read by `compose-rust`
+//! composables.
 
 use compose_rust::runtime::{mutable_state_of, MutableState};
-use dioxus_compose::prelude::*;
 use ember_client::api::UsageSummary;
 use ember_client::wire::{DailyUsage, DetectedAgent};
 
-use crate::bridge::Live;
 use crate::model::{self, RowContext};
 use crate::prefs::Prefs;
 use crate::server::{Account, ChatGptAccount};
@@ -27,7 +18,7 @@ use crate::ui::theme::ThemePref;
 use crate::ui::{initial_menu, Route};
 
 // ---------------------------------------------------------------------------------------------
-// Shared live and UI state (`compose-rust` MutableState + Dioxus SyncSignal bridge)
+// Shared live and UI state (`compose-rust` MutableState)
 // ---------------------------------------------------------------------------------------------
 
 /// Live client and server state observed by `compose-rust` composables (#220).
@@ -106,23 +97,7 @@ impl SharedLive {
     }
 }
 
-/// TRANSITIONAL (delete with #226). Dioxus `SyncSignal` mirrors registered when a Dioxus `VirtualDom` mounts [`crate::ui::app`],
-/// so mutations made through [`SharedUi`] from a `compose-rust` composable immediately wake
-/// any mounted Dioxus screen as well.
-#[derive(Clone, Copy)]
-pub struct DioxusMirrors {
-    pub route: SyncSignal<Route>,
-    pub prefs: SyncSignal<Prefs>,
-    pub selected_project: SyncSignal<Option<String>>,
-    pub new_session: SyncSignal<Option<String>>,
-    pub show_archived: SyncSignal<bool>,
-    pub menu: SyncSignal<NavMenu>,
-    pub editor: SyncSignal<Option<EditorTarget>>,
-    pub theme_pref: SyncSignal<ThemePref>,
-}
-
-/// UI-wide navigation, preference and dialog state observed by `compose-rust` composables
-/// and synchronized with Dioxus [`crate::ui::Ui`] (#220).
+/// UI-wide navigation, preference and dialog state observed by `compose-rust` composables (#220).
 #[derive(Clone)]
 pub struct SharedUi {
     pub live: SharedLive,
@@ -158,7 +133,12 @@ pub struct SharedUi {
     pub owner_claim_dismissed: MutableState<Option<String>>,
     /// The update check (NFR-R2, #880), written by `self_update` from a worker.
     pub self_update: MutableState<crate::self_update::UpdateState>,
-    mirrors: Arc<OnceLock<DioxusMirrors>>,
+    /// `true` while the 루틴 screen's create or edit form is open and holds unsaved changes
+    /// (FR-L25, #596), so a shell navigation away from 루틴 asks the discard question first.
+    pub routine_form_dirty: MutableState<bool>,
+    /// A shell navigation (another menu or global search) intercepted while [`routine_form_dirty`]
+    /// is true; the 루틴 screen shows the discard confirmation sheet for it (FR-L25, #596).
+    pub routine_pending_leave: MutableState<Option<crate::ui::routines::Leave>>,
 }
 
 impl SharedUi {
@@ -182,21 +162,13 @@ impl SharedUi {
             owner_claim: mutable_state_of(Default::default()),
             owner_claim_dismissed: mutable_state_of(None),
             self_update: mutable_state_of(crate::self_update::UpdateState::NotInstalled),
-            mirrors: Arc::new(OnceLock::new()),
+            routine_form_dirty: mutable_state_of(false),
+            routine_pending_leave: mutable_state_of(None),
         }
     }
 
-    /// Register the Dioxus `SyncSignal` mirrors from the root Dioxus component.
-    pub fn register_mirrors(&self, mirrors: DioxusMirrors) {
-        let _ = self.mirrors.set(mirrors);
-    }
-
-    pub fn mirrors(&self) -> Option<DioxusMirrors> {
-        self.mirrors.get().copied()
-    }
-
     /// Navigate, opening/closing the conversation in the client as the route enters/leaves it
-    /// (FR-S6, FR-L2), and keeping both `MutableState`s and Dioxus signals in step.
+    /// (FR-S6, FR-L2).
     pub fn go(&self, to: Route) {
         let from = self.route.get_untracked();
         if from == to {
@@ -221,10 +193,7 @@ impl SharedUi {
             Route::Conversation(_) => NavMenu::Sessions,
         };
         self.set_menu(next_menu);
-        self.route.set(to.clone());
-        if let Some(mut m) = self.mirrors() {
-            m.route.set(to);
-        }
+        self.route.set(to);
     }
 
     pub fn open_conversation(&self, id: &str) {
@@ -234,33 +203,21 @@ impl SharedUi {
     pub fn set_menu(&self, menu: NavMenu) {
         let prev = self.menu.get_untracked();
         self.menu.set(menu);
-        if let Some(mut m) = self.mirrors() {
-            m.menu.set(menu);
-        }
         if menu == NavMenu::Home && prev != NavMenu::Home && try_services().is_some() {
             crate::bridge::request_github_summary();
         }
     }
 
     pub fn set_selected_project(&self, project: Option<String>) {
-        self.selected_project.set(project.clone());
-        if let Some(mut m) = self.mirrors() {
-            m.selected_project.set(project);
-        }
+        self.selected_project.set(project);
     }
 
     pub fn set_show_archived(&self, show: bool) {
         self.show_archived.set(show);
-        if let Some(mut m) = self.mirrors() {
-            m.show_archived.set(show);
-        }
     }
 
     pub fn set_theme_pref(&self, pref: ThemePref) {
         self.theme_pref.set(pref);
-        if let Some(mut m) = self.mirrors() {
-            m.theme_pref.set(pref);
-        }
         self.update_prefs(|p| p.theme = pref);
     }
 
@@ -269,9 +226,6 @@ impl SharedUi {
         let mut snapshot = self.prefs.get_untracked();
         f(&mut snapshot);
         self.prefs.set(snapshot.clone());
-        if let Some(mut m) = self.mirrors() {
-            m.prefs.set(snapshot.clone());
-        }
         if try_services().is_some() {
             save_prefs(snapshot);
         }
@@ -309,10 +263,7 @@ impl SharedUi {
         };
         #[cfg(not(test))]
         let spawn_target = target.clone();
-        self.editor.set(Some(target.clone()));
-        if let Some(mut mirrors) = self.mirrors() {
-            mirrors.editor.set(Some(target));
-        }
+        self.editor.set(Some(target));
         if crate::services::try_services().is_some() {
             #[cfg(not(test))]
             let notice = crate::ide::spawn_editor_notice(&project, &folder, move |_, _| {
@@ -339,10 +290,7 @@ impl SharedUi {
             folder: folder.clone(),
             ..Default::default()
         });
-        self.editor.set(target.clone());
-        if let Some(mut m) = self.mirrors() {
-            m.editor.set(target);
-        }
+        self.editor.set(target);
         if crate::services::try_services().is_some() {
             let notice = crate::ide::spawn_editor_notice(&project, &folder, spawner);
             crate::ui::cr::notice::post(notice.clone());
@@ -363,9 +311,6 @@ impl SharedUi {
     pub fn close_editor_with(&self, on_exit_standalone: impl FnOnce()) {
         let standalone = self.standalone_editor.get_untracked();
         self.editor.set(None);
-        if let Some(mut m) = self.mirrors() {
-            m.editor.set(None);
-        }
         if standalone {
             on_exit_standalone();
         }
@@ -380,18 +325,11 @@ impl SharedUi {
     }
 
     pub fn open_new_session(&self, project: Option<String>) {
-        let val = Some(project.unwrap_or_default());
-        self.new_session.set(val.clone());
-        if let Some(mut m) = self.mirrors() {
-            m.new_session.set(val);
-        }
+        self.new_session.set(Some(project.unwrap_or_default()));
     }
 
     pub fn close_new_session(&self) {
         self.new_session.set(None);
-        if let Some(mut m) = self.mirrors() {
-            m.new_session.set(None);
-        }
     }
 
     /// Read the live data a session row needs (subscribing the calling composable to it,
@@ -419,34 +357,6 @@ impl SharedUi {
 /// Reach the shared UI state from any `compose-rust` composable or handler.
 pub fn shared_ui() -> &'static SharedUi {
     &services().ui
-}
-
-/// Synchronize Dioxus signals into [`SharedUi`] and wire [`Live`] when [`crate::ui::app`] runs.
-pub fn use_shared_mirrors(
-    live: Live,
-    route: SyncSignal<Route>,
-    prefs: SyncSignal<Prefs>,
-    selected_project: SyncSignal<Option<String>>,
-    new_session: SyncSignal<Option<String>>,
-    show_archived: SyncSignal<bool>,
-    menu: SyncSignal<NavMenu>,
-    editor: SyncSignal<Option<EditorTarget>>,
-    theme_pref: SyncSignal<ThemePref>,
-) {
-    use_hook(move || {
-        let Some(s) = try_services() else { return };
-        s.ui.register_mirrors(DioxusMirrors {
-            route,
-            prefs,
-            selected_project,
-            new_session,
-            show_archived,
-            menu,
-            editor,
-            theme_pref,
-        });
-        let _ = live;
-    });
 }
 
 #[cfg(test)]
@@ -571,7 +481,7 @@ mod tests {
             let launcher = launcher.clone();
             Box::new(Recomposer::new(move || {
                 let rev = launcher.get();
-                cu::Text(format!("rev:{rev}"));
+                { use ::compose_rust::ui::Text; Text!(format!("rev:{rev}")) };
             }))
         });
 

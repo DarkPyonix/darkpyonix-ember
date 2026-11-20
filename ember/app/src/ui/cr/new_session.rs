@@ -275,24 +275,18 @@ fn NewSessionForm(preset: &str) {
     };
     EmberSheet("새 세션", true, close.clone(), None, || {
         // A long form on a short window scrolls inside the dialog.
-        cu::ScrollColumn().modifier(Modifier::new().fill_max_width().height(body_height)).content(|| {
-            cu::Column().space_role(SpaceRole::Md).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
+        { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().fill_max_width().height(body_height), {
+            { use ::compose_rust::ui::Column; Column!(space_role = SpaceRole::Md, modifier = Modifier::new().fill_max_width().padding(SP[4]), {
                 Field("프로젝트", || {
                     let (options, projects) = (project_options.clone(), projects.clone());
                     let (ui, project, agent, account, computer) =
                         (ui.clone(), project.clone(), agent.clone(), account.clone(), computer.clone());
-                    Select(
-                        &project_options[project_index.min(project_options.len() - 1)],
-                        &project_options,
-                        project_index,
-                        POPUP_WIDTH,
-                        move |i| {
+                    Select(&project_options[project_index.min(project_options.len() - 1)], &project_options, project_index, POPUP_WIDTH, move |i| {
                             let p = options.get(i).cloned().unwrap_or_default();
                             let p = if projects.contains(&p) { p } else { String::new() };
                             let remembered = ui.prefs.get_untracked().last_used.get(&p).cloned();
                             seed(&p, remembered, &project, &agent, &account, &computer);
-                        },
-                    );
+                        });
                 });
                 if creating_project {
                     Field("프로젝트 이름", || {
@@ -309,7 +303,6 @@ fn NewSessionForm(preset: &str) {
                     let v = cwd.clone();
                     EmberField(FieldOptions {
                         fill_max_width: true,
-                        one_line_hint: true,
                         placeholder: if default_cwd.is_empty() { "/path/to/project".to_string() } else { default_cwd.clone() },
                         on_value_change: Some(Box::new(move |t| v.set(t))),
                         ..Default::default()
@@ -319,7 +312,6 @@ fn NewSessionForm(preset: &str) {
                     let v = model_text.clone();
                     EmberField(FieldOptions {
                         fill_max_width: true,
-                        one_line_hint: true,
                         placeholder: if default_model.is_empty() { "에이전트 기본값".to_string() } else { default_model.clone() },
                         on_value_change: Some(Box::new(move |t| v.set(t))),
                         ..Default::default()
@@ -358,11 +350,11 @@ fn NewSessionForm(preset: &str) {
                         computer.set(choices.get(i).and_then(|c| c.value.clone()))
                     });
                 });
-            });
-        });
+            }) };
+        }) };
         SheetFooter(|| {
             if busy.get() {
-                cu::IndeterminateProgressIndicator().circular(true).modifier(Modifier::new().size(18.0, 18.0));
+                { use ::compose_rust::ui::IndeterminateProgressIndicator; IndeterminateProgressIndicator!(circular = true, modifier = Modifier::new().size(18.0, 18.0)) };
             }
             AppButton("취소", None, ButtonKind::Default, true, !busy.get(), false, close.clone());
             AppButton("만들기", None, ButtonKind::Primary, true, can_start, false, start);
@@ -395,10 +387,10 @@ fn seed(
 
 /// A labelled form row.
 fn Field(label: &str, content: impl FnOnce()) {
-    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+    { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
         Txt(label, TypeRole::Label, muted(), None, None, None, None);
         content();
-    });
+    }) };
 }
 
 #[cfg(test)]

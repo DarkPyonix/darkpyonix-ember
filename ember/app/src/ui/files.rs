@@ -13,7 +13,7 @@
 //! #166 workarounds (revert when upstream lands):
 //! - No drag and drop: a send sheet picks the receiver, then the files. 파일 고르기 opens the
 //!   platform's file dialog (compose-rust#483) where the toolkit has one, which is macOS in
-//!   the v0.0.10 pin (see [`FILE_PICKER_AVAILABLE`]); elsewhere the files step says
+//!   the v0.0.11 pin (see [`FILE_PICKER_AVAILABLE`]); elsewhere the files step says
 //!   [`FILE_PICK_UNAVAILABLE`]. File drop (compose-rust#485) is in the pin and not wired yet.
 //! - No OS share sheet (FR-F7) and no live push of transfer progress: the screen re-reads the
 //!   service whenever the launcher state changes.
@@ -49,9 +49,9 @@ pub const AGENT_SEND_UNSUPPORTED: &str = "agent로 보내기는 아직 지원되
 pub const OFFLINE_TAG: &str = "오프라인";
 
 /// Whether 파일 고르기 can open the platform's file dialog (`compose_rust::FileDialog`,
-/// compose-rust#483). In the v0.0.10 pin only macOS shows one; Windows, Linux, iOS, Android and
-/// the web answer "unavailable" (TODO(compose-rust#483): the other platforms' dialogs; the issue
-/// is closed with macOS alone). Dropped files stay with compose-rust#485.
+/// compose-rust#483, in v0.0.11). On desktop in v0.0.11 only macOS shows a native dialog;
+/// Windows, Linux, iOS and Android answer "unavailable". Dropped files stay with
+/// compose-rust#485.
 pub const FILE_PICKER_AVAILABLE: bool = cfg!(target_os = "macos");
 
 /// The title of the file dialog 파일 고르기 opens.
@@ -377,6 +377,20 @@ pub fn next_state(state: TransferState, action: TransferAction) -> Option<Transf
 }
 
 /// The buttons a state offers the user, in order.
+/// The name a transfer row's action button carries for assistive technology (FR-L27.3): the
+/// mockup's `aria-label`s (`files.js`), and 다시 시도 for a failed transfer, which it does not draw.
+pub fn action_button_name(action: TransferAction) -> &'static str {
+    match action {
+        TransferAction::Pause => "일시 정지",
+        TransferAction::Resume => "이어서 전송",
+        TransferAction::Cancel => "전송 취소",
+        TransferAction::Retry => "다시 시도",
+        TransferAction::Start => "시작",
+        TransferAction::Complete => "완료",
+        TransferAction::Fail => "실패",
+    }
+}
+
 pub fn user_actions(state: TransferState) -> &'static [TransferAction] {
     use TransferAction as A;
     match state {
@@ -1527,6 +1541,26 @@ pub fn chip_text_max(glyph: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fr_l27_3_every_transfer_action_has_a_korean_name() {
+        use TransferState as S;
+        for state in [S::Queued, S::Sending, S::Paused, S::Failed, S::Done, S::Cancelled] {
+            for &a in user_actions(state) {
+                let name = action_button_name(a);
+                assert!(!name.is_empty() && name.chars().any(|c| ('\u{AC00}'..='\u{D7A3}').contains(&c)), "{a:?}: {name}");
+            }
+        }
+        assert_eq!(action_button_name(TransferAction::Pause), "일시 정지");
+        assert_eq!(action_button_name(TransferAction::Resume), "이어서 전송");
+        assert_eq!(action_button_name(TransferAction::Cancel), "전송 취소");
+        assert_eq!(action_button_name(TransferAction::Retry), "다시 시도");
+        // The row draws every action as a named round button, never the toolkit's unnamed close icon.
+        let row = include_str!("cr/files.rs");
+        let production = &row[..row.find("#[cfg(test)]").unwrap()];
+        assert!(production.contains("RoundGlyph(glyph, action_button_name(action), on_act)"));
+        assert!(!production.contains("IconButton(IconRole::Close, true, on_act)"));
+    }
+
     use super::*;
     use std::sync::Mutex;
 

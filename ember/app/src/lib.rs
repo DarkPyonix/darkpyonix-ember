@@ -175,7 +175,6 @@ pub(crate) fn prepare() {
         outbox: Arc::new(Mutex::new(Outbox::default())),
         initial_prefs,
         ui: shared_ui,
-        live: OnceLock::new(),
     });
     // A device the server refuses, or a server out of reach, reads as one Korean sentence at
     // start (FR-N9); 설정 shows it again.
@@ -215,6 +214,8 @@ fn open_window() {
                 Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
             })
             .unwrap_or((1280, 820));
+        // The opened size stands in for a size the renderer has not reported yet (FR-L10.3, FR-L31.41).
+        ui::window_size::record_opened(f32::from(w), f32::from(h));
         let title: &'static str = Box::leak(format!("{} - Ember", target.project).into_boxed_str());
         services().ui.standalone_editor.set(true);
         services().ui.editor.set(Some(target));

@@ -146,7 +146,10 @@ pub const CODE_EDITOR_COLORS: compose_rust::code::CodeEditorColors = compose_rus
     .current_line_number(ColorRole::OnSurface)
     // FR-L31.28: the caret line's band is `surface-2` (`editor.css:70` `.ed-ln.cur`), which the
     // palette gives `SurfaceVariant`. A part named here is drawn opaque, not as a wash.
-    .current_line(ColorRole::SurfaceVariant);
+    .current_line(ColorRole::SurfaceVariant)
+    // compose-rust#816 (v0.0.11): extend the caret line's `surface-2` band across the line
+    // number and fold columns (`editor.css:70,72`).
+    .current_line_gutter(ColorRole::SurfaceVariant);
 
 /// The Ember palette's value for a role in one scheme (tests and the capture checks read it).
 pub fn palette_color(role: ColorRole, scheme: ColorScheme) -> Option<compose_rust::Color> {
@@ -156,11 +159,17 @@ pub fn palette_color(role: ColorRole, scheme: ColorScheme) -> Option<compose_rus
 /// The toast's elevation in dp: the mockup's `.toast` casts `--shadow-lg` (`0 10px 32px`).
 pub const TOAST_ELEVATION: u16 = 12;
 
-/// The overlay tokens the app sets: only the toast's shadow and its pill corner (`.toast`
-/// `border-radius:var(--pill)`). A message is not a node and takes no Modifier, so its shadow
-/// is an overlay token (compose-rust#446, v0.0.9); every other token is 0, the design system's.
-pub const APP_OVERLAY: OverlayTokens =
-    OverlayTokens::new().toast_elevation(TOAST_ELEVATION).toast_corner_radius(999);
+/// The overlay tokens the app sets: the toast's shadow, pill corner (`.toast`
+/// `border-radius:var(--pill)`), inverted ink fill and text (`--ink` / `--ink-text`, #873),
+/// borderless pill, padding, and 13px text (compose-rust#446, compose-rust#781/v0.0.11).
+pub const APP_OVERLAY: OverlayTokens = OverlayTokens::new()
+    .toast_elevation(TOAST_ELEVATION)
+    .toast_corner_radius(999)
+    .toast_container(LIGHT.ink, DARK.ink)
+    .toast_content(LIGHT.ink_text, DARK.ink_text)
+    .toast_border_width(0)
+    .toast_padding(16, 10)
+    .toast_type(13, 18);
 
 /// The toolkit theme the app launches with: the prose roles in Inter and Pretendard, `Mono`
 /// in JetBrains Mono.
@@ -201,7 +210,20 @@ mod tests {
         let overlay = app_theme(ColorScheme::Dark).overlay.expect("overlay tokens");
         assert_eq!(overlay.toast_elevation, TOAST_ELEVATION);
         assert_eq!(overlay.toast_corner_radius, 999);
-        let rest = OverlayTokens { toast_elevation: 0, toast_corner_radius: 0, ..*overlay };
+        let rest = OverlayTokens {
+            toast_elevation: 0,
+            toast_corner_radius: 0,
+            toast_container_light: 0,
+            toast_container_dark: 0,
+            toast_content_light: 0,
+            toast_content_dark: 0,
+            toast_border_width: None,
+            toast_padding_horizontal: 0,
+            toast_padding_vertical: 0,
+            toast_font_size: 0,
+            toast_line_height: 0,
+            ..*overlay
+        };
         assert_eq!(rest, OverlayTokens::new());
         assert!(editor_theme(ColorScheme::Light).overlay.is_some());
     }
@@ -314,11 +336,16 @@ mod tests {
     }
 
     /// FR-L31.28 (design review E2, #895): the caret line's band is the mockup's `surface-2`
-    /// (`editor.css:70`; `style.css:3` `#f7f6f2`, `:28` `#252523`), not the toolkit's accent wash.
+    /// (`editor.css:70`; `style.css:3` `#f7f6f2`, `:28` `#252523`), not the toolkit's accent wash,
+    /// and extends across the gutter (`current_line_gutter`, compose-rust#816).
     #[test]
     fn fr_l31_28_the_current_line_is_surface_2() {
         assert!(include_str!("../../assets/editor/editor.css").contains(".ed-ln.cur{background:var(--surface-2)}"));
         let role = CODE_EDITOR_COLORS.current_line.expect("the editor names its current line colour");
+        let gutter_role = CODE_EDITOR_COLORS
+            .current_line_gutter
+            .expect("the editor extends the current line band across the gutter");
+        assert_eq!(gutter_role, role);
         for (scheme, rgb) in [(ColorScheme::Light, 0xf7f6f2), (ColorScheme::Dark, 0x252523)] {
             let colour = editor_theme(scheme).palette.expect("editor palette").get(role, scheme).expect("the role has a value");
             assert_eq!(colour.to_argb() & 0x00ff_ffff, rgb, "{scheme:?}");
@@ -334,5 +361,20 @@ mod tests {
             assert_eq!(mono, mono_font());
             assert_ne!(Some(mono), theme.font(TypeRole::Body));
         }
+    }
+
+    /// #873: the toast is the mockup's inverted ink pill (dark on light theme, light on dark),
+    /// borderless, 13px text.
+    #[test]
+    fn issue_873_toast_uses_inverted_ink_pill() {
+        assert_eq!(APP_OVERLAY.toast_container_light, LIGHT.ink.to_argb());
+        assert_eq!(APP_OVERLAY.toast_container_dark, DARK.ink.to_argb());
+        assert_eq!(APP_OVERLAY.toast_content_light, LIGHT.ink_text.to_argb());
+        assert_eq!(APP_OVERLAY.toast_content_dark, DARK.ink_text.to_argb());
+        assert_eq!(APP_OVERLAY.toast_border_width, Some(0));
+        assert_eq!(APP_OVERLAY.toast_padding_horizontal, 16);
+        assert_eq!(APP_OVERLAY.toast_padding_vertical, 10);
+        assert_eq!(APP_OVERLAY.toast_font_size, 13);
+        assert_eq!(APP_OVERLAY.toast_line_height, 18);
     }
 }

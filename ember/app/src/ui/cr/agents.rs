@@ -332,18 +332,11 @@ pub fn AgentsScreenWith(
         move |s: Section| section.set(s)
     };
 
-    cu::ScrollColumn()
-        .modifier(Modifier::new().fill_max_width().fill_max_height())
-        .content(|| {
-            cu::Column()
-                .modifier(Modifier::new().fill_max_width().padding(pad))
-                .content(|| {
+    { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().fill_max_width().fill_max_height(), {
+            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width().padding(pad), {
                     // Page Header spanning full width
-                    cu::Row()
-                        .alignment(Alignment::CenterStart)
-                        .modifier(Modifier::new().fill_max_width())
-                        .content(|| {
-                            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
+                            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), {
                                 // `.head h1`: 32/400, 28 up to 900 px (review AG6).
                                 Label(
                                     "에이전트",
@@ -352,7 +345,7 @@ pub fn AgentsScreenWith(
                                     None,
                                     Some(1),
                                 );
-                                cu::Spacer().modifier(Modifier::new().height(SP[0]));
+                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[0])) };
                                 Label(
                                     "하네스와 모델, 프로필, 네트워크, 사용량을 설정합니다",
                                     Fs::Sm,
@@ -360,23 +353,20 @@ pub fn AgentsScreenWith(
                                     Some(paint(p.text_2)),
                                     None,
                                 );
-                            });
+                            }) };
                             if let (false, Some(ui)) = (compact, ui.as_ref()) {
                                 super::project::ThemeButton(ui);
                             }
-                        });
+                        }) };
 
-                    cu::Spacer().modifier(Modifier::new().height(if compact { SP[2] } else { SP[4] }));
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(if compact { SP[2] } else { SP[4] })) };
 
                     if compact {
                         // Compact: horizontal scrolling pills below the header
                         SectionNav(cur_sec, NavShape::Pills, nav_pick);
-                        cu::Spacer().modifier(Modifier::new().height(SP[3]));
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[3])) };
                         // `.ag-body{gap:var(--gap-card)}`: 16 px between cards (review AG9).
-                        cu::Column()
-                            .spacing(GAP_CARD)
-                            .modifier(Modifier::new().fill_max_width())
-                            .content(|| {
+                        { use ::compose_rust::ui::Column; Column!(spacing = GAP_CARD, modifier = Modifier::new().fill_max_width(), {
                                 match cur_sec {
                                     Section::Harness => HarnessSection(&store, &live, compact),
                                     Section::Models => ModelsSection(&store, &live, compact),
@@ -384,20 +374,14 @@ pub fn AgentsScreenWith(
                                     Section::Network => NetworkSection(&computers, live.sample, compact),
                                     Section::Usage => UsageSection(&live, &bars, &usage_load, compact),
                                 }
-                            });
+                            }) };
                     } else {
                         // Desktop: navigation on the left and the remaining width for the body
-                        cu::Row()
-                            .spacing(25.0)
-                            .modifier(Modifier::new().fill_max_width())
-                            .content(|| {
-                                cu::Column().modifier(Modifier::new().width(200.0)).content(|| {
+                        { use ::compose_rust::ui::Row; Row!(spacing = 25.0, modifier = Modifier::new().fill_max_width(), {
+                                { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().width(200.0), {
                                     SectionNav(cur_sec, NavShape::Side, nav_pick);
-                                });
-                                cu::Column()
-                                    .spacing(GAP_CARD)
-                                    .modifier(Modifier::new().weight(1.0))
-                                    .content(|| {
+                                }) };
+                                { use ::compose_rust::ui::Column; Column!(spacing = GAP_CARD, modifier = Modifier::new().weight(1.0), {
                                         match cur_sec {
                                             Section::Harness => HarnessSection(&store, &live, compact),
                                             Section::Models => ModelsSection(&store, &live, compact),
@@ -405,20 +389,18 @@ pub fn AgentsScreenWith(
                                             Section::Network => NetworkSection(&computers, live.sample, compact),
                                             Section::Usage => UsageSection(&live, &bars, &usage_load, compact),
                                         }
-                                    });
-                            });
+                                    }) };
+                            }) };
                     }
-                });
-        });
+                }) };
+        }) };
 }
 
 /// A review window (`EMBER_CR_ROUTE=agents`).
 #[compose_rust::runtime::Composable]
 pub fn preview_agents() {
     let p = ember_theme().palette;
-    cu::Box()
-        .modifier(Modifier::new().fill_max_size().background(paint(p.bg)))
-        .content(AgentsScreen);
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_size().background(paint(p.bg)), content = AgentsScreen) };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -439,7 +421,7 @@ fn SectionNav(current: Section, shape: NavShape, on_pick: impl FnMut(Section) + 
     let p = ember_theme().palette;
     match shape {
         NavShape::Side => {
-            cu::Column().spacing(4.0).modifier(Modifier::new().fill_max_width()).content(|| {
+            { use ::compose_rust::ui::Column; Column!(spacing = 4.0, modifier = Modifier::new().fill_max_width(), {
                 for x in Section::ALL {
                     let selected = x == current;
                     let (bg, fg) = if selected {
@@ -459,21 +441,21 @@ fn SectionNav(current: Section, shape: NavShape, on_pick: impl FnMut(Section) + 
                         Alignment::CenterStart,
                         move || on_pick(x),
                         move || {
-                            cu::Row().alignment(Alignment::CenterStart).content(|| {
-                                cu::Spacer().modifier(Modifier::new().width(12.0));
+                            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, {
+                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(12.0)) };
                                 super::shell::NavIcon(section_svg(x), fg.to_argb(), 18.0);
-                                cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[1])) };
                                 Label(x.label(), Fs::Md, Weight::Medium, Some(paint(fg)), Some(1));
-                                cu::Spacer().modifier(Modifier::new().weight(1.0));
-                            });
+                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
+                            }) };
                         },
                     );
                 }
-            });
+            }) };
         }
         NavShape::Pills => {
-            cu::ScrollRow().modifier(Modifier::new().fill_max_width()).content(|| {
-                cu::Row().spacing(SP[1]).content(|| {
+            { use ::compose_rust::ui::ScrollRow; ScrollRow!(modifier = Modifier::new().fill_max_width(), {
+                { use ::compose_rust::ui::Row; Row!(spacing = SP[1], {
                     for x in Section::ALL {
                         let selected = x == current;
                         let (bg, fg, border) = if selected {
@@ -493,18 +475,18 @@ fn SectionNav(current: Section, shape: NavShape, on_pick: impl FnMut(Section) + 
                             Alignment::Center,
                             move || on_pick(x),
                             move || {
-                                cu::Row().alignment(Alignment::CenterStart).content(|| {
-                                    cu::Spacer().modifier(Modifier::new().width(12.0));
+                                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, {
+                                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(12.0)) };
                                     super::shell::NavIcon(section_svg(x), fg.to_argb(), 16.0);
-                                    cu::Spacer().modifier(Modifier::new().width(6.0));
+                                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(6.0)) };
                                     Label(x.label(), Fs::Sm, Weight::Medium, Some(paint(fg)), Some(1));
-                                    cu::Spacer().modifier(Modifier::new().width(12.0));
-                                });
+                                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(12.0)) };
+                                }) };
                             },
                         );
                     }
-                });
-            });
+                }) };
+            }) };
         }
     }
 }
@@ -516,13 +498,7 @@ fn SectionNav(current: Section, shape: NavShape, on_pick: impl FnMut(Section) + 
 /// switch has no builder and is not drawn.
 fn MockSwitch(label: &str, checked: bool, enabled: bool, on_change: impl FnMut(bool) + 'static) {
     let p = ember_theme().palette;
-    cu::Switch(checked)
-        .enabled(enabled)
-        .size(36.0, 20.0)
-        .track_color(paint(switch_track(checked, enabled, p)))
-        .thumb_color(paint(p.surface))
-        .accessible_name(label)
-        .on_change(on_change);
+    { use ::compose_rust::ui::Switch; Switch!(checked, on_change, enabled = enabled, size = (36.0, 20.0), track_color = paint(switch_track(checked, enabled, p)), thumb_color = paint(p.surface), accessible_name = label) };
 }
 
 /// The track colour of [`MockSwitch`]: `line` when disabled, `ink` when on, `surface-2` when off.
@@ -551,12 +527,10 @@ fn ModelRadio(label: &str, selected: bool, mut on_click: impl FnMut() + 'static)
     let draw = list.build();
     let radio_label = label.to_string();
 
-    cu::Box()
-        .modifier(Modifier::new().size(20.0, 20.0))
-        .content(move || {
-            cu::Canvas(draw).modifier(Modifier::new().size(20.0, 20.0));
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().size(20.0, 20.0), content = move || {
+            { use ::compose_rust::ui::Canvas; Canvas!(draw, modifier = Modifier::new().size(20.0, 20.0)) };
             DataNamedOverlay(&radio_label, true, None, move || on_click());
-        });
+        }) };
 }
 
 /// A selectable chip matching the mockup's .field.ag-sel: as wide as its one-line label and the
@@ -566,22 +540,17 @@ fn ModelRadio(label: &str, selected: bool, mut on_click: impl FnMut() + 'static)
 /// carries it.
 fn SelectChip(text: &str, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
-    cu::Box()
-        .modifier(
-            Modifier::new()
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                 .height(H_CTL)
                 .background(paint(p.surface_2))
-                .shape_role(ShapeRole::Full),
-        )
-        .alignment(Alignment::Center)
-        .content(move || {
-            cu::Row().alignment(Alignment::CenterStart).content(|| {
-                cu::Spacer().modifier(Modifier::new().width(14.0));
+                .shape_role(ShapeRole::Full), alignment = Alignment::Center, content = move || {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(14.0)) };
                 Label(text, Fs::Sm, Weight::Medium, Some(paint(p.text)), Some(1));
-                cu::Spacer().modifier(Modifier::new().width(14.0));
-            });
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(14.0)) };
+            }) };
             DataNamedOverlay(text, true, None, on_click);
-        });
+        }) };
 }
 
 /// A picker pill matching mockup's .pickchip: full pill shape, icon + label, sized by its content
@@ -594,26 +563,21 @@ fn ModelPickerPill(text: &str, svg: Option<&'static str>, on_click: impl FnMut()
 /// [`ModelPickerPill`] as the control of a [`PopoverMenu`], saying whether the menu is open.
 fn MenuPickerPill(text: &str, svg: Option<&'static str>, expanded: Option<bool>, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
-    cu::Box()
-        .modifier(
-            Modifier::new()
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                 .height(H_CTL)
                 .background(paint(p.surface_2))
-                .shape_role(ShapeRole::Full),
-        )
-        .alignment(Alignment::Center)
-        .content(move || {
-            cu::Row().alignment(Alignment::CenterStart).content(|| {
-                cu::Spacer().modifier(Modifier::new().width(12.0));
+                .shape_role(ShapeRole::Full), alignment = Alignment::Center, content = move || {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(12.0)) };
                 if let Some(s) = svg {
                     super::shell::NavIcon(s, p.text_2.to_argb(), 16.0);
-                    cu::Spacer().modifier(Modifier::new().width(8.0));
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(8.0)) };
                 }
                 Label(text, Fs::Sm, Weight::Medium, Some(paint(p.text)), Some(1));
-                cu::Spacer().modifier(Modifier::new().width(12.0));
-            });
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(12.0)) };
+            }) };
             DataNamedOverlay(text, true, expanded, on_click);
-        });
+        }) };
 }
 
 /// A segmented control matching the mockup (.seg button height 32, selected = ink fill, white label).
@@ -650,17 +614,12 @@ fn BotAvatar(h: AgentHarness, size: f32) {
         AgentHarness::Antigravity => "A",
         AgentHarness::Acp => "P",
     };
-    cu::Box()
-        .modifier(
-            Modifier::new()
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                 .size(size, size)
                 .background(paint(bg))
-                .shape_role(ShapeRole::Full),
-        )
-        .alignment(Alignment::Center)
-        .content(|| {
+                .shape_role(ShapeRole::Full), alignment = Alignment::Center, {
             Label(initial, Fs::Sm, Weight::Semibold, Some(paint(Color::rgb(0xffffff))), None);
-        });
+        }) };
 }
 
 fn VendorDot(h: AgentHarness) {
@@ -671,12 +630,10 @@ fn VendorDot(h: AgentHarness) {
         AgentHarness::Antigravity => Color::rgb(0x7052bc),
         AgentHarness::Acp => Color::rgb(0x8f8b83),
     };
-    cu::Spacer().modifier(
-        Modifier::new()
+    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new()
             .size(8.0, 8.0)
             .background(paint(c))
-            .shape_role(ShapeRole::Full),
-    );
+            .shape_role(ShapeRole::Full)) };
 }
 
 /// `"17 GB"` as `("17", Some("GB"))`: the mockup draws a unit as a small grey pill beside the
@@ -719,10 +676,10 @@ fn KpiItem(label: &str, value: &str, pill: Option<(&str, PillTone)>, phone: bool
     let p = ember_theme().palette;
     let (number, unit) = kpi_split_unit(value);
     let (fs, weight) = kpi_value_type(value, phone);
-    cu::Column().content(|| {
+    { use ::compose_rust::ui::Column; Column!({
         Label(label, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
-        cu::Spacer().modifier(Modifier::new().height(SP[0]));
-        cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[0])) };
+        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], {
             Label(number, fs, weight, None, Some(1));
             if let Some(u) = unit {
                 Pill(u, PillTone::Grey, true);
@@ -730,8 +687,8 @@ fn KpiItem(label: &str, value: &str, pill: Option<(&str, PillTone)>, phone: bool
             if let Some((p_text, tone)) = pill {
                 Pill(p_text, tone, true);
             }
-        });
-    });
+        }) };
+    }) };
 }
 
 /// The KPI strip as the `.kpis` grid for this width; a short last row keeps the cell width.
@@ -764,36 +721,31 @@ pub fn grid_rows_equal_height(cols: usize) -> bool {
 /// 88 / 88 / 98 where one carries 한도 가까움; `Row::equal_height`, compose-rust#389).
 fn FixedGridRows<T>(items: &[T], cols: usize, gap: f32, equal_height: bool, cell: impl Fn(&T)) {
     let cols = cols.max(1);
-    cu::Column().spacing(gap).modifier(Modifier::new().fill_max_width()).content(|| {
+    { use ::compose_rust::ui::Column; Column!(spacing = gap, modifier = Modifier::new().fill_max_width(), {
         for chunk in items.chunks(cols) {
-            cu::Row().alignment(Alignment::TopStart).spacing(gap).equal_height(equal_height).modifier(Modifier::new().fill_max_width()).content(|| {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::TopStart, spacing = gap, intrinsic_size = equal_height, modifier = Modifier::new().fill_max_width(), {
                 for x in chunk {
                     let m = Modifier::new().weight(1.0);
-                    cu::Column().modifier(if equal_height { m.fill_max_height() } else { m }).content(|| cell(x));
+                    { use ::compose_rust::ui::Column; Column!(modifier = if equal_height { m.fill_max_height() } else { m }, content = || cell(x)) };
                 }
                 for _ in 0..grid_fillers(chunk.len(), cols) {
-                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                 }
-            });
+            }) };
         }
-    });
+    }) };
 }
 
 /// A decorative icon glyph for card headers matching mockup's .card-h .ico (30x30 bordered square).
 fn CardHeaderIcon(svg: &'static str) {
     let p = ember_theme().palette;
-    cu::Box()
-        .modifier(
-            Modifier::new()
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                 .size(30.0, 30.0)
                 .background(paint(p.surface))
                 .border(1.0, paint(p.line))
-                .corner_radius(CORNER_SM),
-        )
-        .alignment(Alignment::Center)
-        .content(|| {
+                .corner_radius(CORNER_SM), alignment = Alignment::Center, {
             super::shell::NavIcon(svg, p.text_2.to_argb(), 18.0);
-        });
+        }) };
 }
 
 /// The least a card header's content stands: `.card-h{min-height:56px}` less its 16 px above
@@ -808,51 +760,46 @@ pub const CARD_HEAD_CONTENT_MIN_H: f32 = 56.0 - 2.0 * PAD_CARD_V;
 fn HeadedCard(head: impl FnOnce(), body: impl FnOnce()) {
     let p = ember_theme().palette;
     EmberCard(false, true, None, Some(0.0), None, || {
-        cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
-            cu::Spacer().modifier(Modifier::new().height(PAD_CARD_V));
-            cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                cu::Spacer().modifier(Modifier::new().width(PAD_CARD_H));
-                // A strut: TODO(compose-rust, unfiled: Modifier has no minimum height; #778 caps a height).
-                cu::Spacer().modifier(Modifier::new().height(CARD_HEAD_CONTENT_MIN_H));
-                cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().weight(1.0)).content(head);
-                cu::Spacer().modifier(Modifier::new().width(PAD_CARD_H));
-            });
-            cu::Spacer().modifier(Modifier::new().height(PAD_CARD_V));
-            cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
-            cu::Spacer().modifier(Modifier::new().height(PAD_CARD_V));
-            cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
-                cu::Spacer().modifier(Modifier::new().width(PAD_CARD_H));
-                cu::Column().modifier(Modifier::new().weight(1.0)).content(body);
-                cu::Spacer().modifier(Modifier::new().width(PAD_CARD_H));
-            });
-            cu::Spacer().modifier(Modifier::new().height(PAD_CARD_V));
-        });
+        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), {
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(PAD_CARD_V)) };
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(PAD_CARD_H)) };
+                // compose-rust#778 / #826 (v0.0.11 `Modifier::min_height`): `.card-h{min-height:56px}`
+                // less the 16 px padding above and below.
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[2], modifier = Modifier::new().weight(1.0).min_height(CARD_HEAD_CONTENT_MIN_H), content = head) };
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(PAD_CARD_H)) };
+            }) };
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(PAD_CARD_V)) };
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().fill_max_width().height(1.0).background(paint(p.line))) };
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(PAD_CARD_V)) };
+            { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width(), {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(PAD_CARD_H)) };
+                { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), content = body) };
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(PAD_CARD_H)) };
+            }) };
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(PAD_CARD_V)) };
+        }) };
     });
 }
 
 fn FormulaChip(svg: Option<&'static str>, text: &str, dashed: bool) {
     let p = ember_theme().palette;
     let border_color = if dashed { p.muted } else { p.line };
-    cu::Box()
-        .modifier(
-            Modifier::new()
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                 .height(28.0)
                 .background(paint(p.surface))
                 .border(1.0, paint(border_color))
-                .shape_role(ShapeRole::Full),
-        )
-        .alignment(Alignment::Center)
-        .content(|| {
-            cu::Row().alignment(Alignment::CenterStart).content(|| {
-                cu::Spacer().modifier(Modifier::new().width(10.0));
+                .shape_role(ShapeRole::Full), alignment = Alignment::Center, {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(10.0)) };
                 if let Some(s) = svg {
                     super::shell::NavIcon(s, p.text_2.to_argb(), 16.0);
-                    cu::Spacer().modifier(Modifier::new().width(6.0));
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(6.0)) };
                 }
                 Label(text, Fs::Sm, Weight::Medium, Some(paint(p.text)), Some(1));
-                cu::Spacer().modifier(Modifier::new().width(10.0));
-            });
-        });
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(10.0)) };
+            }) };
+        }) };
 }
 
 /// `.ag-formula`: chips with an operator after each but the last, 8 apart, wrapping to the next
@@ -861,33 +808,29 @@ fn FormulaChip(svg: Option<&'static str>, text: &str, dashed: bool) {
 /// pushed the whole column over the section nav (review r7, agents-profiles-1024).
 fn FormulaFlow(steps: &[(Option<&'static str>, &str, bool)], ops: &[&str], op_fs: Fs) {
     let p = ember_theme().palette;
-    cu::FlowRow()
-        .horizontal_spacing(SP[1])
-        .vertical_spacing(SP[1])
-        .modifier(Modifier::new().fill_max_width())
-        .content(|| {
+    { use ::compose_rust::ui::FlowRow; FlowRow!(horizontal_spacing = SP[1], vertical_spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
             for (i, (svg, text, dashed)) in steps.iter().enumerate() {
-                cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], {
                     FormulaChip(*svg, text, *dashed);
                     if let Some(op) = ops.get(i) {
                         Label(op, op_fs, Weight::Regular, Some(paint(p.muted)), None);
                     }
-                });
+                }) };
             }
-        });
+        }) };
 }
 
 /// A card with a title row (name on the left, pills on the right) and its rows.
 fn Block(title: &str, pills: impl FnOnce(), content: impl FnOnce()) {
     EmberCard(false, true, None, None, None, || {
-        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
-            cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
                 Label(title, Fs::Lg, Weight::Semibold, None, Some(1));
-                cu::Spacer().modifier(Modifier::new().weight(1.0));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                 pills();
-            });
+            }) };
             content();
-        });
+        }) };
     });
 }
 
@@ -917,41 +860,33 @@ fn SettingRowFirst(title: &str, hint: &str, control: impl FnOnce()) {
 fn SettingRowIn(stacked: bool, first: bool, title: &str, hint: &str, control: impl FnOnce()) {
     let p = ember_theme().palette;
     let text = |m: Modifier| {
-        cu::Column().modifier(m).content(|| {
+        { use ::compose_rust::ui::Column; Column!(modifier = m, {
             Label(title, Fs::Md, Weight::Medium, None, Some(1));
             if !hint.is_empty() {
-                cu::Spacer().modifier(Modifier::new().height(SP[0]));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[0])) };
                 Label(hint, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
             }
-        });
+        }) };
     };
-    cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
+    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), {
         if !first {
-            cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
-            cu::Spacer().modifier(Modifier::new().height(SP[1]));
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().fill_max_width().height(1.0).background(paint(p.line))) };
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[1])) };
         }
         if stacked {
             // `.ag-row{gap:var(--sp2)}` once wrapped: 8 px between the text and the control.
-            cu::Column()
-                .alignment(Alignment::TopStart)
-                .spacing(SP[1])
-                .modifier(Modifier::new().fill_max_width())
-                .content(|| {
+            { use ::compose_rust::ui::Column; Column!(alignment = Alignment::TopStart, spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
                     text(Modifier::new().fill_max_width());
                     control();
-                });
+                }) };
         } else {
-            cu::Row()
-                .alignment(Alignment::CenterStart)
-                .spacing(SP[3])
-                .modifier(Modifier::new().fill_max_width())
-                .content(|| {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[3], modifier = Modifier::new().fill_max_width(), {
                     text(Modifier::new().weight(1.0));
                     control();
-                });
+                }) };
         }
-        cu::Spacer().modifier(Modifier::new().height(SP[1]));
-    });
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[1])) };
+    }) };
 }
 
 /// A line telling that a part has no server data yet.
@@ -1143,18 +1078,14 @@ fn HarnessSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: 
         }
     } else {
         for pair in harnesses.chunks(cols) {
-            cu::Row()
-                .alignment(Alignment::TopStart)
-                .spacing(SP[3])
-                .modifier(Modifier::new().fill_max_width())
-                .content(|| {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::TopStart, spacing = SP[3], modifier = Modifier::new().fill_max_width(), {
                     for h in pair {
                         let h = *h;
-                        cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), {
                             HarnessCard(h, store, &live.detected, &profiles, compact, example);
-                        });
+                        }) };
                     }
-                });
+                }) };
         }
     }
 }
@@ -1301,15 +1232,15 @@ fn HarnessCard(
     HeadedCard(
         move || {
             BotAvatar(h, 30.0);
-            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), {
                 Label(h.label(), Fs::Md, Weight::Semibold, None, Some(1));
-                cu::Spacer().modifier(Modifier::new().height(2.0));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(2.0)) };
                 let mut sub = crate::ui::agents::harness_subtitle(h.run_mode(), head_version.as_deref());
                 if example && head_version.is_some() {
                     sub.push_str(" (예시)");
                 }
                 Label(&sub, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-            });
+            }) };
             if h == AgentHarness::Antigravity {
                 Pill("확인 필요", PillTone::Orange, true);
             } else if h == AgentHarness::Gemini {
@@ -1319,13 +1250,13 @@ fn HarnessCard(
             }
         },
         || {
-            cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+            { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), {
                 // Row 1: 설치와 버전
                 SettingRowFirst(
                     "설치와 버전",
                     &path_text,
                     || {
-                        cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).content(|| {
+                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[2], {
                             match crate::ui::agents::version_text(installed, version.as_deref(), example) {
                                 Some(v) => Pill(&v, PillTone::Grey, true),
                                 None if h == AgentHarness::Gemini => Pill(crate::ui::agents::SOON, PillTone::Grey, true),
@@ -1352,7 +1283,7 @@ fn HarnessCard(
                                     }
                                 },
                             );
-                        });
+                        }) };
                     },
                 );
 
@@ -1446,29 +1377,21 @@ fn HarnessCard(
                     "세션당 메모리 한도",
                     "넘으면 그 세션만 종료되고 다른 세션은 계속됩니다.",
                     move || {
-                        cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).content(|| {
+                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[2], {
                             // The Slider takes the mockup's colours and its name (compose-rust v0.0.7, #428).
-                            cu::Slider(cur_gb)
-                                .range(1.0, 16.0)
-                                .steps(15)
-                                .track_color(paint(p.line))
-                                .active_track_color(paint(p.ink))
-                                .thumb_color(paint(p.ink))
-                                .accessible_name("세션당 메모리 한도")
-                                .modifier(Modifier::new().width(120.0))
-                                .on_change(move |v| {
+                            { use ::compose_rust::ui::Slider; Slider!(cur_gb, move |v| {
                                     let gb = v.round().clamp(1.0, 16.0) as u32;
                                     let mb = gb * 1024;
                                     edit(&store_mem, |s| s.settings_mut(h).mem_limit_mb = Some(mb));
                                     if !example {
                                         save_server_mem_limit(h, Some(mb));
                                     }
-                                });
+                                }, range = (1.0, 16.0), steps = 15, track_color = paint(p.line), active_track_color = paint(p.ink), thumb_color = paint(p.ink), accessible_name = "세션당 메모리 한도", modifier = Modifier::new().width(120.0)) };
                             Label(&format!("{} GB", cur_gb as u32), Fs::Sm, Weight::Medium, None, Some(1));
-                        });
+                        }) };
                     },
                 );
-            });
+            }) };
         },
     );
 }
@@ -1618,12 +1541,12 @@ fn ModelsSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: b
             CardHeaderIcon(super::shell::ICON_PLUS_SVG);
             Label("새 팀원 기본값", Fs::Lg, Weight::Semibold, None, Some(1));
             if example {
-                cu::Spacer().modifier(Modifier::new().weight(1.0));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                 Pill(crate::ui::agents::EXAMPLE_MARK, PillTone::Grey, true);
             }
         },
         || {
-            cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+            { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), {
                 Label(
                     "홈과 새 팀원 만들기, 루틴에서 처음 보이는 하네스와 모델입니다. 고른 계정의 플랜에서 쓸 수 없는 모델은 흐리게 표시됩니다.",
                     Fs::Sm,
@@ -1718,12 +1641,12 @@ fn ModelsSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: b
                 };
                 // Below 560 dp the chips stack so each keeps its full text.
                 if stacked {
-                    cu::Column().spacing(SP[2]).content(chips_body);
+                    { use ::compose_rust::ui::Column; Column!(spacing = SP[2], content = chips_body) };
                 } else {
-                    cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).content(chips_body);
+                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[2], content = chips_body) };
                 }
                 Label(crate::ui::agents::DEFAULTS_STORAGE_NOTE, Fs::Xs, Weight::Regular, Some(paint(ember_theme().palette.muted)), None);
-            });
+            }) };
         },
     );
 
@@ -1736,20 +1659,20 @@ fn ModelsSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: b
             ModelCard(h, store, compact, example);
         }
     } else {
-        cu::Row().spacing(GAP_CARD).modifier(Modifier::new().fill_max_width()).content(|| {
-            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+        { use ::compose_rust::ui::Row; Row!(spacing = GAP_CARD, modifier = Modifier::new().fill_max_width(), {
+            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), {
                 ModelCard(harnesses[0], store, compact, example);
-            });
-            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+            }) };
+            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), {
                 ModelCard(harnesses[1], store, compact, example);
-            });
-        });
-        cu::Row().spacing(GAP_CARD).modifier(Modifier::new().fill_max_width()).content(|| {
-            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+            }) };
+        }) };
+        { use ::compose_rust::ui::Row; Row!(spacing = GAP_CARD, modifier = Modifier::new().fill_max_width(), {
+            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), {
                 ModelCard(harnesses[2], store, compact, example);
-            });
-            cu::Spacer().modifier(Modifier::new().weight(1.0));
-        });
+            }) };
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
+        }) };
     }
 }
 
@@ -1778,18 +1701,13 @@ pub(super) fn AddAccountSheet(add: &MutableState<crate::ui::agents::AddAccount>,
             }
         }
     };
-    cu::Dialog(cur.open)
-        .modifier(
-            with_shadows(Modifier::new(), theme.shadow_lg())
+    { use ::compose_rust::ui::Dialog; Dialog!(cur.open, dismiss, modifier = with_shadows(Modifier::new(), theme.shadow_lg())
                 .width(420.0)
                 .background(paint(p.surface))
                 .border(1.0, paint(p.line))
                 .corner_radius(CORNER_MD)
-                .padding(SP[3]),
-        )
-        .on_dismiss(dismiss)
-        .content(|| {
-            cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+                .padding(SP[3]), {
+            { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), {
                 Label("계정 추가", Fs::Lg, Weight::Semibold, None, Some(1));
                 Label(crate::ui::agents::NO_LOGIN_WINDOW_NOTE, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
                 if example {
@@ -1810,18 +1728,18 @@ pub(super) fn AddAccountSheet(add: &MutableState<crate::ui::agents::AddAccount>,
                     if let Some(line) = &c.status {
                         Label(line, Fs::Sm, Weight::Medium, None, None);
                     }
-                    cu::Row().spacing(SP[2]).content(|| {
+                    { use ::compose_rust::ui::Row; Row!(spacing = SP[2], {
                         let a = add.clone();
                         let id = c.id.clone();
                         AppButton("로그인 확인", None, ButtonKind::Primary, true, !c.checking && !id.is_empty() && !example, false, move || {
                             check_login(&a, id.clone());
                         });
                         AppButton("닫기", None, ButtonKind::Default, true, true, false, close.clone());
-                    });
+                    }) };
                 } else {
                     Label("하네스", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
                     for k in add_account_kinds() {
-                        cu::Column().content(|| {
+                        { use ::compose_rust::ui::Column; Column!({
                             let a = add.clone();
                             let kind = if cur.kind == Some(k.kind) { ButtonKind::Primary } else { ButtonKind::Default };
                             AppButton(k.label, None, kind, true, k.enabled() && !busy, false, move || {
@@ -1833,7 +1751,7 @@ pub(super) fn AddAccountSheet(add: &MutableState<crate::ui::agents::AddAccount>,
                                 let ko = crate::ui::agents::account_note_ko(k.kind, note);
                                 Label(&ko, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
                             }
-                        });
+                        }) };
                     }
                     Label("이름", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
                     let a = add.clone();
@@ -1853,14 +1771,14 @@ pub(super) fn AddAccountSheet(add: &MutableState<crate::ui::agents::AddAccount>,
                         AddPhase::Failed(e) => Label(e, Fs::Sm, Weight::Regular, Some(paint(p.text)), None),
                         _ => {}
                     }
-                    cu::Row().spacing(SP[2]).content(|| {
+                    { use ::compose_rust::ui::Row; Row!(spacing = SP[2], {
                         let a = add.clone();
                         AppButton("만들기", None, ButtonKind::Primary, true, cur.can_create(), false, move || create_account(&a, example));
                         AppButton("닫기", None, ButtonKind::Default, true, !busy, false, close.clone());
-                    });
+                    }) };
                 }
-            });
-        });
+            }) };
+        }) };
 }
 
 fn create_account(add: &MutableState<crate::ui::agents::AddAccount>, example: bool) {
@@ -1944,11 +1862,11 @@ fn ModelCard(h: AgentHarness, store: &MutableState<LocalStore>, _compact: bool, 
         move || {
             VendorDot(h);
             Label(h.label(), Fs::Md, Weight::Semibold, None, Some(1));
-            cu::Spacer().modifier(Modifier::new().weight(1.0));
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
             Pill(&format!("모델 {}", specs.len()), PillTone::Grey, true);
         },
         || {
-            cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+            { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), {
                 // Row 1: 기본 추론 강도 (SegGroup with 낮음/보통/높음)
                 SettingRowFirst(
                     "기본 추론 강도",
@@ -1999,7 +1917,7 @@ fn ModelCard(h: AgentHarness, store: &MutableState<LocalStore>, _compact: bool, 
                             .unwrap_or(&[crate::ui::home::PermMode::Ask])
                             .to_vec();
                         let cur_mode = settings.mode;
-                        cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], {
                             let st = store_mode.clone();
                             ModelPickerPill(cur_mode.label(), Some(super::shell::ICON_GEAR_SVG), move || {
                                 let next = cycle(&modes, Some(&cur_mode)).unwrap_or(crate::ui::home::PermMode::Ask);
@@ -2019,7 +1937,7 @@ fn ModelCard(h: AgentHarness, store: &MutableState<LocalStore>, _compact: bool, 
                             if settings.mode.is_bypass() {
                                 Pill("주의", PillTone::Orange, true);
                             }
-                        });
+                        }) };
                     },
                 );
 
@@ -2028,21 +1946,21 @@ fn ModelCard(h: AgentHarness, store: &MutableState<LocalStore>, _compact: bool, 
                 // over it on one line; below 560 dp the header hides and the plans go under the note
                 // (`agents.css` `@media (max-width:560px)`).
                 let phone = model_table_phone(crate::ui::window_size::current_window_size().width_dp);
-                cu::Spacer().modifier(Modifier::new().height(SP[1]));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[1])) };
                 if !phone {
-                    cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
-                        cu::Box().modifier(Modifier::new().width(28.0)).content(|| {
+                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[2], modifier = Modifier::new().fill_max_width(), {
+                        { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().width(28.0), {
                             Label("기본", Fs::Xs2, Weight::Medium, Some(paint(p.muted)), Some(1));
-                        });
-                        cu::Column().modifier(Modifier::new().weight(1.0).width(0.0)).content(|| {
+                        }) };
+                        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0).width(0.0), {
                             Label("모델", Fs::Xs2, Weight::Medium, Some(paint(p.muted)), Some(1));
-                        });
+                        }) };
                         Label(MODEL_PLANS_HEADER, Fs::Xs2, Weight::Medium, Some(paint(p.muted)), Some(1));
                         // The mockup's header span wraps in its 36 px cell: 목록에 over 표시, left aligned.
-                        cu::Box().modifier(Modifier::new().width(MODEL_SWITCH_COL)).alignment(Alignment::CenterStart).content(|| {
+                        { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().width(MODEL_SWITCH_COL), alignment = Alignment::CenterStart, {
                             Label(MODEL_SWITCH_HEADER, Fs::Xs2, Weight::Medium, Some(paint(p.muted)), Some(2));
-                        });
-                    });
+                        }) };
+                    }) };
                 }
 
                 for m in specs {
@@ -2050,7 +1968,7 @@ fn ModelCard(h: AgentHarness, store: &MutableState<LocalStore>, _compact: bool, 
                     let m_id = m.id.to_string();
                     let store_m = store.clone();
                     let plans = || {
-                        cu::Row().alignment(Alignment::CenterStart).spacing(SP[0]).content(|| {
+                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[0], {
                             for (p_name, ok) in m.plans {
                                 Pill(
                                     &format!("{}{p_name}", if *ok { "✓ " } else { "✕ " }),
@@ -2058,10 +1976,10 @@ fn ModelCard(h: AgentHarness, store: &MutableState<LocalStore>, _compact: bool, 
                                     true,
                                 );
                             }
-                        });
+                        }) };
                     };
-                    cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[1])).content(|| {
-                        cu::Box().modifier(Modifier::new().width(28.0)).content(|| {
+                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[2], modifier = Modifier::new().fill_max_width().padding(SP[1]), {
+                        { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().width(28.0), {
                             let m_id = m_id.clone();
                             ModelRadio(&format!("{} 기본 모델로 선택", m.name), is_def, move || {
                                 let m_id = m_id.clone();
@@ -2080,31 +1998,31 @@ fn ModelCard(h: AgentHarness, store: &MutableState<LocalStore>, _compact: bool, 
                                 }
                                 post_notice("기본 모델을 바꿨습니다");
                             });
-                        });
-                        cu::Column().modifier(Modifier::new().weight(1.0).width(0.0)).content(|| {
+                        }) };
+                        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0).width(0.0), {
                             // `.ag-mn b`: the name, then the blue 기본 badge right after it. The
                             // mockup's name and note wrap in their `minmax(0,1fr)` column instead of
                             // ending in "..." (#886: at 1280 `GPT-5 Cod...`, `가장 깊게 생각...`), and
                             // the badge keeps its own width (it was squeezed to a blob beside a name
                             // measured first).
                             if is_def {
-                                cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
                                     NameThenPillLines(m.name, Fs::Md, Weight::Medium, None, false, MODEL_TEXT_LINES, SP[1], || Pill("기본", PillTone::Blue, true));
-                                });
+                                }) };
                             } else {
                                 Label(m.name, Fs::Md, Weight::Medium, None, Some(MODEL_TEXT_LINES));
                             }
-                            cu::Spacer().modifier(Modifier::new().height(2.0));
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(2.0)) };
                             Label(m.note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(MODEL_TEXT_LINES));
                             if phone {
-                                cu::Spacer().modifier(Modifier::new().height(SP[0]));
+                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[0])) };
                                 plans();
                             }
-                        });
+                        }) };
                         if !phone {
                             plans();
                         }
-                        cu::Box().modifier(Modifier::new().width(MODEL_SWITCH_COL)).alignment(Alignment::CenterEnd).content(|| {
+                        { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().width(MODEL_SWITCH_COL), alignment = Alignment::CenterEnd, {
                             let m_name = m.name.to_string();
                             MockSwitch(&format!("{m_name} 활성화"), true, true, move |v| {
                                 let msg = if v {
@@ -2114,10 +2032,10 @@ fn ModelCard(h: AgentHarness, store: &MutableState<LocalStore>, _compact: bool, 
                                 };
                                 post_notice(&msg);
                             });
-                        });
-                    });
+                        }) };
+                    }) };
                 }
-            });
+            }) };
         },
     );
 }
@@ -2154,38 +2072,38 @@ pub fn account_plan(label: &str) -> Option<&'static str> {
 /// desktop renderer gives a one-line label its whole width first, which squeezed the pill after
 /// it to its two 4 px insets, an empty grey circle on "Claude Max (work)" (review AG16, r6).
 fn AccountNameLine(x: &AccountInfo) {
-    cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
         VendorDot(x.harness);
-        cu::Column().modifier(Modifier::new().weight(1.0).width(0.0)).content(|| {
+        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0).width(0.0), {
             Label(&x.label, Fs::Md, Weight::Semibold, None, Some(1));
-        });
+        }) };
         if let Some(plan) = account_plan(&x.label) {
             Pill(plan, PillTone::Grey, true);
         }
-    });
+    }) };
 }
 
 /// `.inset.ag-acc`; with `fill_height` it takes its cell's height (an `equal_height` grid row).
 fn AccountTile(x: &AccountInfo, extra: Option<&str>, sample: bool, fill_height: bool) {
     let p = ember_theme().palette;
     InsetPanelSized(true, fill_height, || {
-        cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
-            cu::Box().modifier(Modifier::new().size(72.0, 72.0)).alignment(Alignment::Center).content(|| {
+        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[2], modifier = Modifier::new().fill_max_width(), {
+            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().size(72.0, 72.0), alignment = Alignment::Center, {
                 let ring = draw_ring(x.left_percent, 72.0, 6.0, p);
-                cu::Canvas(ring).modifier(Modifier::new().size(72.0, 72.0));
+                { use ::compose_rust::ui::Canvas; Canvas!(ring, modifier = Modifier::new().size(72.0, 72.0)) };
                 match x.left_percent {
                     Some(pct) => Label(&format!("{pct}%"), Fs::Sm, Weight::Semibold, None, None),
                     None => Label("모름", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None),
                 }
-            });
-            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+            }) };
+            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), {
                 AccountNameLine(x);
-                cu::Spacer().modifier(Modifier::new().height(SP[0]));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[0])) };
                 let reset_str = crate::ui::agents::account_reset_line(x.harness.label(), sample);
                 Label(&reset_str, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                cu::Spacer().modifier(Modifier::new().height(SP[0]));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[0])) };
                 if let Some(left) = x.left_percent {
-                    cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], {
                         Label("5h", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
                         let bar_color = if left < 20 { p.orange.strong } else { p.green.strong };
                         let bar_draw = DrawList::builder()
@@ -2193,18 +2111,18 @@ fn AccountTile(x: &AccountInfo, extra: Option<&str>, sample: bool, fill_height: 
                             .round_rect(paint(p.track), 0.0, 0.0, 115.0, 6.0, 3.0, 0.0)
                             .round_rect(paint(bar_color), 0.0, 0.0, 115.0 * (left as f32) / 100.0, 6.0, 3.0, 0.0)
                             .build();
-                        cu::Canvas(bar_draw).modifier(Modifier::new().size(115.0, 6.0));
+                        { use ::compose_rust::ui::Canvas; Canvas!(bar_draw, modifier = Modifier::new().size(115.0, 6.0)) };
                         Label(&format!("{left}%"), Fs::Xs, Weight::Medium, None, None);
-                    });
+                    }) };
                 } else {
                     Label("5시간 한도를 알려 주지 않습니다", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
                 }
                 if let Some(pill_txt) = extra {
-                    cu::Spacer().modifier(Modifier::new().height(SP[0]));
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[0])) };
                     Pill(pill_txt, PillTone::Orange, true);
                 }
-            });
-        });
+            }) };
+        }) };
     });
 }
 
@@ -2251,7 +2169,7 @@ fn ProfilesSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact:
         || {
             CardHeaderIcon(ICON_USER_SVG);
             Label("계정", Fs::Lg, Weight::Semibold, None, Some(1));
-            cu::Spacer().modifier(Modifier::new().weight(1.0));
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
             let open_add = add.clone();
             AppButton("계정 추가", Some(IconRole::Add), ButtonKind::Default, true, true, false, move || {
                 open_add.set(crate::ui::agents::AddAccount { open: true, ..crate::ui::agents::AddAccount::closed() });
@@ -2259,7 +2177,7 @@ fn ProfilesSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact:
             AddAccountSheet(&add, live.sample || live.demo);
         },
         || {
-            cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+            { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), {
                 // `.ag-accs`: tiles of at least `ACCOUNT_TILE_MIN`, 12 apart, one column up to 560 dp;
                 // a short last row keeps the cell width.
                 let cols = tile_columns(crate::ui::window_size::current_window_size().width_dp, ACCOUNT_TILE_MIN);
@@ -2269,7 +2187,7 @@ fn ProfilesSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact:
                     let extra = if a.limited { Some("한도 가까움") } else { None };
                     AccountTile(a, extra, live.sample, equal);
                 });
-            });
+            }) };
         },
     );
 
@@ -2280,7 +2198,7 @@ fn ProfilesSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact:
             Label("하네스별 기본 프로필", Fs::Lg, Weight::Semibold, None, Some(1));
         },
         || {
-            cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+            { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), {
                 for h in [AgentHarness::ClaudeCode, AgentHarness::Codex, AgentHarness::Gemini] {
                     let p_id = effective_default(h, store.get().settings(h).default_profile.as_deref(), &profiles);
                     let p_name = p_id.as_ref()
@@ -2298,14 +2216,14 @@ fn ProfilesSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact:
                         },
                     );
                 }
-            });
+            }) };
         },
     );
 
     // 4. Section Title & Add Profile Button
-    cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
         Label(&format!("프로필 {}개", profiles.len()), Fs::Lg, Weight::Semibold, None, Some(1));
-        cu::Spacer().modifier(Modifier::new().weight(1.0));
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
         let store = store.clone();
         let first = first.clone();
         let seed = seed.clone();
@@ -2325,7 +2243,7 @@ fn ProfilesSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact:
                 }
             },
         );
-    });
+    }) };
 
     // 5. Grid of Profile Cards (`.ag-grid2`: two a row from 1280 dp, one below)
     if grid2_columns(compact_window_width(compact)) < 2 {
@@ -2336,17 +2254,17 @@ fn ProfilesSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact:
     } else {
         let chunks: Vec<_> = profiles.chunks(2).map(|c| c.to_vec()).collect();
         for chunk in chunks {
-            cu::Row().spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(|| {
+            { use ::compose_rust::ui::Row; Row!(spacing = SP[3], modifier = Modifier::new().fill_max_width(), {
                 for p in chunk {
                     let can_delete = can_delete_profile(&p.id, &defaults);
                     let all = profiles.clone();
                     let live_c = live.clone();
                     let store_c = store.clone();
-                    cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
+                    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), content = move || {
                         ProfileCard(p, all, can_delete, &live_c, &store_c, compact);
-                    });
+                    }) };
                 }
-            });
+            }) };
         }
     }
 }
@@ -2396,7 +2314,7 @@ fn ProfileCard(
         move || {
             VendorDot(head_harness);
             Label(&head_name, Fs::Lg, Weight::Semibold, None, Some(1));
-            cu::Spacer().modifier(Modifier::new().weight(1.0));
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
             Pill(head_harness.label(), PillTone::Blue, true);
             Pill(if head_fixed { "고정" } else { "자동 전환" }, PillTone::Grey, true);
             let seed = head_seed;
@@ -2409,15 +2327,15 @@ fn ProfileCard(
             });
         },
         || {
-            cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+            { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), {
                 // Name Field: stacked on compact width (solves review finding 5)
                 let ed_name = ed.clone();
                 let name_ph = p.name.clone();
                 if compact {
-                    cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
+                    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), {
                         Label("이름", Fs::Md, Weight::Medium, None, Some(1));
                         Label("비워 두면 이름이 바뀌지 않습니다.", Fs::Xs, Weight::Regular, Some(paint(theme.palette.muted)), None);
-                        cu::Spacer().modifier(Modifier::new().height(SP[1]));
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[1])) };
                         EmberField(FieldOptions {
                             fill_max_width: true,
                             placeholder: name_ph,
@@ -2429,13 +2347,13 @@ fn ProfileCard(
                             })),
                             ..Default::default()
                         });
-                    });
+                    }) };
                 } else {
                     SettingRow(
                         "이름",
                         "비워 두면 이름이 바뀌지 않습니다.",
                         move || {
-                            cu::Box().modifier(Modifier::new().width(240.0)).content(|| {
+                            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().width(240.0), {
                                 EmberField(FieldOptions {
                                     fill_max_width: true,
                                     placeholder: name_ph,
@@ -2447,7 +2365,7 @@ fn ProfileCard(
                                     })),
                                     ..Default::default()
                                 });
-                            });
+                            }) };
                         },
                     );
                 }
@@ -2508,24 +2426,20 @@ fn ProfileCard(
                         let ed_down = ed.clone();
                         let ed_rm = ed.clone();
                         let is_limited = live.accounts.iter().any(|a| a.id == aid && a.limited);
-                        cu::Row()
-                            .alignment(Alignment::CenterStart)
-                            .spacing(SP[1])
-                            .modifier(Modifier::new().fill_max_width().height(H_CTL))
-                            .content(|| {
+                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width().height(H_CTL), {
                                 Label(&(i + 1).to_string(), Fs::Sm, Weight::Medium, Some(paint(theme.palette.muted)), Some(1));
-                                cu::Spacer().modifier(Modifier::new().width(SP[0]));
+                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[0])) };
                                 let acct_info = live.accounts.iter().find(|a| a.id == aid);
                                 let left_pct = acct_info.and_then(|a| a.left_percent);
                                 let ring = draw_ring(left_pct, 32.0, 4.0, theme.palette);
-                                cu::Canvas(ring).modifier(Modifier::new().size(32.0, 32.0));
-                                cu::Spacer().modifier(Modifier::new().width(SP[0]));
+                                { use ::compose_rust::ui::Canvas; Canvas!(ring, modifier = Modifier::new().size(32.0, 32.0)) };
+                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[0])) };
                                 Label(&account_label(&live.accounts, &aid), Fs::Md, Weight::Regular, None, Some(1));
                                 if is_limited {
-                                    cu::Spacer().modifier(Modifier::new().width(SP[0]));
+                                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[0])) };
                                     Pill("한도 도달", PillTone::Orange, true);
                                 }
-                                cu::Spacer().modifier(Modifier::new().weight(1.0));
+                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                                 AppButton("위로", None, ButtonKind::Default, true, i > 0, false, move || {
                                     ed_up.apply(move |p| { move_account(&mut p.accounts, i, -1); });
                                 });
@@ -2535,10 +2449,10 @@ fn ProfileCard(
                                 AppButton("빼기", None, ButtonKind::Default, true, len > 1, false, move || {
                                     ed_rm.apply(move |p| { remove_account(&mut p.accounts, i); });
                                 });
-                            });
+                            }) };
                     }
                     if !rest.is_empty() {
-                        cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], {
                             for a in rest {
                                 let ed = ed.clone();
                                 let aid = a.id.clone();
@@ -2547,7 +2461,7 @@ fn ProfileCard(
                                     ed.apply(move |p| { add_account(&mut p.accounts, &aid); });
                                 });
                             }
-                        });
+                        }) };
                     }
 
                     // Threshold stepping
@@ -2557,14 +2471,14 @@ fn ProfileCard(
                         "전환 사용률",
                         &threshold_label(p.threshold),
                         move || {
-                            cu::Row().spacing(SP[1]).content(|| {
+                            { use ::compose_rust::ui::Row; Row!(spacing = SP[1], {
                                 AppButton("낮추기", None, ButtonKind::Default, true, true, false, move || {
                                     ed_dec.apply(|p| p.threshold = step_threshold(p.threshold, -1));
                                 });
                                 AppButton("높이기", None, ButtonKind::Default, true, true, false, move || {
                                     ed_inc.apply(|p| p.threshold = step_threshold(p.threshold, 1));
                                 });
-                            });
+                            }) };
                         },
                     );
 
@@ -2623,10 +2537,10 @@ fn ProfileCard(
 
                 if has_proxy {
                     let ed_purl = ed.clone();
-                    cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
-                        cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                    { use ::compose_rust::ui::Row; Row!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), {
+                        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), {
                             Label("프록시 주소", Fs::Xs, Weight::Regular, Some(paint(theme.palette.muted)), None);
-                            cu::Spacer().modifier(Modifier::new().height(SP[0]));
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[0])) };
                             EmberField(FieldOptions {
                                 fill_max_width: true,
                                 placeholder: proxy_hint,
@@ -2636,15 +2550,15 @@ fn ProfileCard(
                                 })),
                                 ..Default::default()
                             });
-                        });
-                    });
+                        }) };
+                    }) };
                 }
 
                 // Inset preview
                 InsetPanel(true, || {
                     Label(&preview, Fs::Sm, Weight::Regular, None, None);
                 });
-            });
+            }) };
         },
     );
 }
@@ -2661,11 +2575,11 @@ fn NetworkSection(computers: &[(String, Reachability)], sample: bool, _compact: 
         || {
             CardHeaderIcon(ICON_GLOBE_SVG);
             Label("API 트래픽 내보내기", Fs::Lg, Weight::Semibold, None, Some(1));
-            cu::Spacer().modifier(Modifier::new().weight(1.0));
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
             Pill("검증 전 (#130)", PillTone::Orange, true);
         },
         || {
-            cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+            { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), {
                 SettingRowFirst(
                     "작업 중인 컴퓨터로 내보내기",
                     "에이전트의 API 요청이 그 세션이 일하는 컴퓨터에서 나가므로 공급자는 그 컴퓨터의 IP를 봅니다.",
@@ -2674,7 +2588,7 @@ fn NetworkSection(computers: &[(String, Reachability)], sample: bool, _compact: 
                     },
                 );
 
-                cu::Spacer().modifier(Modifier::new().height(SP[1]));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[1])) };
 
                 // 4-step chain of formula chips; it wraps like `.ag-formula`.
                 FormulaFlow(
@@ -2688,7 +2602,7 @@ fn NetworkSection(computers: &[(String, Reachability)], sample: bool, _compact: 
                     Fs::Md,
                 );
 
-                cu::Spacer().modifier(Modifier::new().height(SP[1]));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[1])) };
                 Label(
                     "컴퓨터를 바꾸면 새 연결부터 새 컴퓨터를 따르고, 이미 열린 연결은 원래 컴퓨터를 씁니다.",
                     Fs::Sm,
@@ -2696,7 +2610,7 @@ fn NetworkSection(computers: &[(String, Reachability)], sample: bool, _compact: 
                     Some(paint(p.text_2)),
                     None,
                 );
-            });
+            }) };
         },
     );
 
@@ -2707,7 +2621,7 @@ fn NetworkSection(computers: &[(String, Reachability)], sample: bool, _compact: 
             Label("컴퓨터별 상태", Fs::Lg, Weight::Semibold, None, Some(1));
         },
         || {
-            cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+            { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), {
                 if computers.is_empty() {
                     Pending("컴퓨터 목록은");
                 } else {
@@ -2716,7 +2630,7 @@ fn NetworkSection(computers: &[(String, Reachability)], sample: bool, _compact: 
                     let cols = tile_columns(crate::ui::window_size::current_window_size().width_dp, COMPUTER_TILE_MIN);
                     FixedGrid(computers, cols, SP[2], |(name, r)| ComputerTile(name, *r, sample));
                 }
-            });
+            }) };
         },
     );
 }
@@ -2736,34 +2650,30 @@ fn ComputerTile(name: &str, r: Reachability, sample: bool) {
     let ip_known = facts.ip.clone();
 
     InsetPanel(true, || {
-        cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-            cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
-                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[2], modifier = Modifier::new().fill_max_width(), {
+                { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), {
                     Label(name, Fs::Md, Weight::Semibold, None, Some(1));
                     Label(&os_str, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                });
+                }) };
                 Pill(status_text, tone.into(), true);
-            });
-            cu::Spacer().modifier(Modifier::new().height(SP[0]));
+            }) };
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[0])) };
             Label(&ip_str, Fs::Sm, Weight::Regular, Some(paint(p.text)), Some(1));
-            cu::Spacer().modifier(Modifier::new().height(SP[0]));
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[0])) };
             // `.ag-cstat`: the two counts, then IP 확인 at the end. The counts sit in a zero-width
             // weighted column and wrap there, so the button keeps its own width: a long value
             // (아직 정보가 없습니다 twice) pushed the button out of a 290 dp tile (review r7).
             let pairs = [(sessions_num.as_str(), " 세션"), (tunnels_num.as_str(), " 열린 연결")];
             let counts = || {
-                cu::FlowRow()
-                    .horizontal_spacing(SP[3])
-                    .vertical_spacing(SP[0])
-                    .modifier(Modifier::new().fill_max_width())
-                    .content(|| {
+                { use ::compose_rust::ui::FlowRow; FlowRow!(horizontal_spacing = SP[3], vertical_spacing = SP[0], modifier = Modifier::new().fill_max_width(), {
                         for (num, unit) in pairs {
-                            cu::Row().alignment(Alignment::CenterStart).content(|| {
+                            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, {
                                 Label(num, Fs::Sm, Weight::Medium, None, Some(1));
                                 Label(unit, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                            });
+                            }) };
                         }
-                    });
+                    }) };
             };
             let ip_check = move || {
                 AppButton("IP 확인", None, ButtonKind::Default, true, r == Reachability::Online && ip_known.is_some(), false, move || {
@@ -2773,25 +2683,25 @@ fn ComputerTile(name: &str, r: Reachability, sample: bool) {
                 });
             };
             if counts_beside_ip_check(crate::ui::window_size::current_window_size().width_dp, &pairs) {
-                cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-                    cu::Column().modifier(Modifier::new().weight(1.0).width(0.0)).content(counts);
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
+                    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0).width(0.0), content = counts) };
                     ip_check();
-                });
+                }) };
             } else {
                 // A count that is a sentence (아직 정보가 없습니다 열린 연결) is wider than the room
                 // beside the button in a narrow tile, and a one-line label cannot wrap: the
                 // counts take the tile's width and the button the line under them, at the end.
                 counts();
-                cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                     ip_check();
-                });
+                }) };
             }
             if let Some(note) = &note {
-                cu::Spacer().modifier(Modifier::new().height(SP[0]));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[0])) };
                 Label(note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
             }
-        });
+        }) };
     });
 }
 
@@ -2818,7 +2728,7 @@ fn UsageSection(
 
     // Hero Card: 오늘 토큰, the harnesses and the daily bars
     EmberCard(false, true, None, None, None, || {
-        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), {
             let figures = || {
                 Label("오늘 토큰", Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
                 Label(&m.today, Fs::Xl3, Weight::Semibold, None, Some(1));
@@ -2826,36 +2736,36 @@ fn UsageSection(
                 if let Some(n) = &m.notice {
                     Label(n, Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
                 }
-                cu::Spacer().modifier(Modifier::new().height(SP[2]));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[2])) };
                 for (kind, value) in &m.harness {
-                    cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).content(|| {
+                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[2], {
                         VendorDot(AgentHarness::of_kind(kind).unwrap_or(AgentHarness::Acp));
                         Label(&format!("{} {}", usage::agent_label(kind), value), Fs::Xs, Weight::Regular, None, Some(1));
-                    });
+                    }) };
                 }
             };
             let day_bars = || {
-                cu::Box().modifier(Modifier::new().width(USAGE_BARS_W).height(150.0)).content(|| {
+                { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().width(USAGE_BARS_W).height(150.0), {
                     let bars_draw = draw_usage_bars(p, &m.bars);
-                    cu::Canvas(bars_draw).modifier(Modifier::new().size(USAGE_BARS_W, 150.0));
-                });
+                    { use ::compose_rust::ui::Canvas; Canvas!(bars_draw, modifier = Modifier::new().size(USAGE_BARS_W, 150.0)) };
+                }) };
             };
             if compact {
-                cu::Column().modifier(Modifier::new().fill_max_width()).content(figures);
+                { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), content = figures) };
             } else if usage_hero_side_by_side(width_dp) {
-                cu::Row().alignment(Alignment::CenterEnd).spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(|| {
-                    cu::Column().modifier(Modifier::new().width(USAGE_FIGURES_W)).content(figures);
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterEnd, spacing = SP[4], modifier = Modifier::new().fill_max_width(), {
+                    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().width(USAGE_FIGURES_W), content = figures) };
                     day_bars();
-                });
+                }) };
             } else {
                 // `.ag-hero{flex-wrap:wrap}`: the bars go under the figures when both do not fit;
                 // side by side they were 780 dp in a 623 dp card at 1024 (review r7).
-                cu::Column().spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(|| {
-                    cu::Column().modifier(Modifier::new().fill_max_width()).content(figures);
+                { use ::compose_rust::ui::Column; Column!(spacing = SP[4], modifier = Modifier::new().fill_max_width(), {
+                    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), content = figures) };
                     day_bars();
-                });
+                }) };
             }
-        });
+        }) };
     });
 
     // `.ag-grid2`: 토큰 종류 and 하네스별 토큰과 비용 side by side from 1280 dp, stacked below.
@@ -2865,39 +2775,39 @@ fn UsageSection(
         TokenKindsCard(&m, split_w);
         HarnessCostCard(&m, bars);
     } else {
-        cu::Row().spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(|| {
-            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+        { use ::compose_rust::ui::Row; Row!(spacing = SP[3], modifier = Modifier::new().fill_max_width(), {
+            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), {
                 TokenKindsCard(&m, split_w);
-            });
-            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+            }) };
+            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), {
                 HarnessCostCard(&m, bars);
-            });
-        });
+            }) };
+        }) };
     }
 
     // Section Title & Accounts subscription cards: `.ag-h2` (15/600, 8 px margin on top), then
     // the card 16 below it.
-    cu::Column().content(|| {
-        cu::Spacer().modifier(Modifier::new().height(SP[1]));
+    { use ::compose_rust::ui::Column; Column!({
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[1])) };
         Label("계정별 남은 구독량", Fs::Lg, Weight::Semibold, None, Some(1));
-    });
+    }) };
 
     EmberCard(false, true, None, None, None, || {
-        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), {
             for a in &live.accounts {
-                cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width().height(H_CTL)).content(|| {
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[2], modifier = Modifier::new().fill_max_width().height(H_CTL), {
                     VendorDot(a.harness);
                     Label(&a.label, Fs::Md, Weight::Regular, None, Some(1));
                     Pill(a.harness.label(), PillTone::Grey, true);
-                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                     if a.limited {
                         Pill("한도 도달", PillTone::Orange, true);
                     } else {
                         Pill("사용 가능", PillTone::Green, true);
                     }
-                });
+                }) };
             }
-        });
+        }) };
     });
 }
 
@@ -2911,26 +2821,26 @@ fn TokenKindsCard(m: &usage::SectionModel, split_w: f32) {
             Label("토큰 종류", Fs::Lg, Weight::Semibold, None, Some(1));
         },
         move || {
-            cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+            { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), content = move || {
                 let bar_w = split_w;
                 let split_draw = draw_split_bar(p, bar_w, m.input_n, m.output_n);
-                cu::Canvas(split_draw).modifier(Modifier::new().size(bar_w, 14.0));
-                cu::Spacer().modifier(Modifier::new().height(SP[1]));
-                cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
+                { use ::compose_rust::ui::Canvas; Canvas!(split_draw, modifier = Modifier::new().size(bar_w, 14.0)) };
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[1])) };
+                { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width(), {
                     for (name, value, share) in [
                         ("입력", m.input.as_str(), m.input_share.as_str()),
                         ("출력", m.output.as_str(), m.output_share.as_str()),
                         ("캐시 읽기", usage::UNKNOWN, ""),
                         ("캐시 쓰기", usage::UNKNOWN, ""),
                     ] {
-                        cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), {
                             Label(name, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                             Label(value, Fs::Lg, Weight::Semibold, None, Some(1));
                             Label(share, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                        });
+                        }) };
                     }
-                });
-                cu::Spacer().modifier(Modifier::new().height(SP[1]));
+                }) };
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[1])) };
                 Label(
                     "하네스가 알려 준 실제 토큰 수입니다. 알려 주지 않은 값은 추정하지 않고 알 수 없음으로 표시합니다. 캐시 토큰은 서버가 아직 모으지 않습니다.",
                     Fs::Xs,
@@ -2938,7 +2848,7 @@ fn TokenKindsCard(m: &usage::SectionModel, split_w: f32) {
                     Some(paint(p.muted)),
                     None,
                 );
-            });
+            }) };
         },
     );
 }
@@ -2951,30 +2861,30 @@ fn HarnessCostCard(m: &usage::SectionModel, bars: &[crate::ui::home::HarnessBar]
             Label("하네스별 토큰과 비용", Fs::Lg, Weight::Semibold, None, Some(1));
         },
         || {
-            cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+            { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), {
                 for (kind, value) in &m.harness {
-                    cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width().height(28.0)).content(|| {
+                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width().height(28.0), {
                         VendorDot(AgentHarness::of_kind(kind).unwrap_or(AgentHarness::Acp));
-                        cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[1])) };
                         Label(&usage::agent_label(kind), Fs::Sm, Weight::Medium, None, Some(1));
-                        cu::Spacer().modifier(Modifier::new().weight(1.0));
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                         Label(value, Fs::Sm, Weight::Medium, None, Some(1));
-                    });
+                    }) };
                 }
-                cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width().height(28.0)).content(|| {
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width().height(28.0), {
                     Label("비용", Fs::Sm, Weight::Medium, None, Some(1));
-                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                     Label(usage::UNKNOWN, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
-                });
+                }) };
                 Label("가격표가 정해지지 않아 비용은 계산하지 않습니다.", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
                 for b in bars {
-                    cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width().height(28.0)).content(|| {
+                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width().height(28.0), {
                         Label(&b.label, Fs::Sm, Weight::Regular, None, Some(1));
-                        cu::Spacer().modifier(Modifier::new().weight(1.0));
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                         Label(&format!("세션 {}개", b.sessions), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                    });
+                    }) };
                 }
-            });
+            }) };
         },
     );
 }
@@ -3293,13 +3203,13 @@ mod tests {
         // spacers on top of the 20 px column gap left 58 px between cards (mockup 16-18).
         let production = include_str!("agents.rs").split("#[cfg(test)]").next().unwrap();
         let screen = production.split("pub fn AgentsScreenWith(").nth(1).unwrap().split("\nfn ").next().unwrap();
-        assert_eq!(screen.matches(".spacing(GAP_CARD)").count(), 2, "both layouts: {screen}");
-        assert!(!screen.contains(".spacing(20.0)"));
+        assert_eq!(screen.matches("spacing = GAP_CARD").count(), 2, "both layouts: {screen}");
+        assert!(!screen.contains("spacing = 20.0"));
         assert_eq!(GAP_CARD, 16.0);
         for f in ["fn ProfilesSection(", "fn NetworkSection(", "fn UsageSection("] {
             let body = production.split(f).nth(1).unwrap().split("\nfn ").next().unwrap();
             assert!(!body.contains(".chunks(3)"), "{f}");
-            assert!(!body.contains("cu::Spacer().modifier(Modifier::new().height(SP[3]));"), "{f}: no spacer between cards");
+            assert!(!body.contains("Spacer!(modifier = Modifier::new().height(SP[3]))"), "{f}: no spacer between cards");
         }
         for f in ["fn ProfilesSection(", "fn NetworkSection("] {
             let body = production.split(f).nth(1).unwrap().split("\nfn ").next().unwrap();
@@ -3444,14 +3354,15 @@ mod tests {
             .find(|n| rule_up.contains(&n.id) && n.widget == "Box" && n.mods.iter().any(|m| m.starts_with("Border")))
             .expect("the card");
         assert!(card.mods.iter().any(|m| m == "Padding(0.0)"), "{:?}", card.mods);
-        // The header row: 20 at each side, the 24 px strut, then the children 12 apart.
+        // The header row: 20 at each side, at least 24 px tall (`SizeIn` `min_h`), then the children 12 apart.
         let head_row = nodes.iter().find(|n| Some(n.id) == head.parent).unwrap();
         assert_eq!(head_row.widget, "Row");
         assert!(head_row.mods.iter().any(|m| m == "Weight(1.0)"), "{:?}", head_row.mods);
+        assert!(head_row.mods.iter().any(|m| m.contains("min_height: 24.0")), "the minimum height on the header row: {:?}", head_row.mods);
         let outer = nodes.iter().find(|n| Some(n.id) == head_row.parent).unwrap();
         let spacers: Vec<&Node> = children(&nodes, outer).into_iter().filter(|n| n.widget == "Spacer").collect();
         assert_eq!(spacers.iter().filter(|n| n.mods.iter().any(|m| m == "Width(20.0)")).count(), 2, "20 px sides");
-        assert!(spacers.iter().any(|n| n.mods.iter().any(|m| m == "Height(24.0)")), "the minimum height strut");
+        assert!(!spacers.iter().any(|n| n.mods.iter().any(|m| m == "Height(24.0)")), "no spacer strut");
         let tile = children(&nodes, head_row).into_iter().find(|n| n.widget == "Box").expect("the icon tile");
         for want in ["Width(30.0)", "Height(30.0)"] {
             assert!(tile.mods.iter().any(|m| m == want), "{want}: {:?}", tile.mods);
@@ -3486,10 +3397,10 @@ mod tests {
 
     fn row_props(equal: bool) -> Vec<String> {
         fn on() {
-            cu::Row().alignment(Alignment::TopStart).spacing(12.0).equal_height(true).content(|| {});
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::TopStart, spacing = 12.0, intrinsic_size = true, {}) };
         }
         fn off() {
-            cu::Row().alignment(Alignment::TopStart).spacing(12.0).equal_height(false).content(|| {});
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::TopStart, spacing = 12.0, intrinsic_size = false, {}) };
         }
         let nodes = nodes_of(if equal { on as fn() } else { off as fn() });
         nodes.iter().find(|n| n.widget == "Row").expect("row").props.clone()
@@ -3815,6 +3726,7 @@ mod tests {
                 safe_area_top: 0.0,
                 safe_area_leading: 0.0,
                 safe_area_trailing: 0.0,
+                safe_area_bottom: 0.0,
             },
         };
         let (bytes, _) = host.dispatch(event).expect("dispatch");
@@ -4334,7 +4246,7 @@ mod tests {
     #[test]
     fn no_empty_button_in_agents_file() {
         let src = include_str!("agents.rs");
-        let needle = ["cu::Button(", "\"\")"].concat();
+        let needle = ["Button!(", "\"\","].concat();
         let in_tests = src.split("mod tests").nth(1).unwrap_or("");
         assert!(!src.replace(in_tests, "").contains(&needle), "an empty Button has no screen reader name");
     }
@@ -4348,8 +4260,9 @@ mod tests {
         assert_eq!(switch_track(true, false, &p), p.line);
         let src = include_str!("agents.rs").split("mod tests").next().unwrap();
         let switch = src.split("fn MockSwitch(").nth(1).unwrap().split("fn switch_track(").next().unwrap();
-        assert!(switch.contains("cu::Switch(checked)") && switch.contains(".size(36.0, 20.0)"));
-        assert!(switch.contains(".accessible_name(label)"));
+        assert!(switch.contains("Switch!(checked, on_change") && switch.contains("size = (36.0, 20.0)"));
+        assert!(switch.contains("accessible_name = label"));
+
         assert!(!switch.contains("Canvas"), "the switch is the toolkit's, not a painted stand-in");
     }
 
@@ -4397,6 +4310,7 @@ mod tests {
                 safe_area_top: 0.0,
                 safe_area_leading: 0.0,
                 safe_area_trailing: 0.0,
+                safe_area_bottom: 0.0,
             },
         };
         let (bytes, _) = host.dispatch(event).expect("dispatch");

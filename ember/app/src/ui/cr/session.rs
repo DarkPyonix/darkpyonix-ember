@@ -24,7 +24,8 @@ use compose_rust::runtime::{
 // Ember's reading: a desktop window that has not reported its size yet reads its opened size
 // (FR-L10.3).
 use crate::ui::window_size::current_window_size;
-use compose_rust::ui::{self as cu, Modifier, Side};
+use compose_rust::ui as cu;
+use compose_rust::ui::{Modifier, Side};
 use compose_rust::{Alignment, AssetKind, Color, IconRole, ShapeRole, Snap, SpaceRole, TypeRole};
 
 use ember_client::LauncherStatus;
@@ -53,7 +54,7 @@ use super::characters::{CharState, Character};
 use super::compat::Spinner;
 use super::home::{CardHead, Dot as HomeDot};
 use super::components::{
-    AppButton, BackButton, ButtonKind, Clickable, CloseButton, NamedClickable, NameThenPill, EmberCard, EmberCardSized, TrackBar, EmberField, EmberSheet,
+    AppButton, BackButton, ButtonKind, Clickable, CloseButton, NamedClickable, NamedClickableOn, NameThenPill, EmberCard, EmberCardSized, TrackBar, EmberField, EmberSheet,
     FieldOptions, IconButton, Label, OptionSheet, PickChip, Pill, PillTone, PopExtra, PopKind, PopMenu, PopRow, PopoverMenu, PopoverMenuWith, SearchField, Select, SheetFooter, Txt,
     SEARCH_FIELD_H_COMPACT,
 };
@@ -227,12 +228,10 @@ pub fn StopCircleButton(on_click: impl FnMut() + 'static) {
         Alignment::Center,
         on_click,
         || {
-            cu::Box().modifier(
-                Modifier::new()
+            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                     .size(10.0, 10.0)
                     .background(paint(Color::rgb(0xffffff)))
-                    .corner_radius(2.0),
-            );
+                    .corner_radius(2.0)) };
         },
     );
 }
@@ -241,12 +240,13 @@ pub fn StopCircleButton(on_click: impl FnMut() + 'static) {
 pub fn SendCircleButton(size: f32, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     // Named "보내기" for assistive technology (compose-rust v0.0.7, #429).
-    NamedClickable(
+    NamedClickableOn(
         super::a11y::SEND,
         Modifier::new()
             .size(size, size)
             .background(paint(p.ink))
             .shape_role(ShapeRole::Full),
+        Some(p.ink),
         Alignment::Center,
         on_click,
         || NavIcon(ICON_SEND_SVG, p.ink_text.to_argb(), 15.0),
@@ -333,17 +333,12 @@ pub fn ModelChip(session: &str, compact_label: bool) {
                 Alignment::Center,
                 move || mm.set(!mm.get_untracked()),
                 move || {
-                    cu::Row()
-                        .alignment(Alignment::CenterStart)
-                        .spacing(6.0)
-                        .content(|| {
-                            cu::Spacer().modifier(Modifier::new().width(4.0));
-                            cu::Box().modifier(
-                                Modifier::new()
+                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = 6.0, {
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(4.0)) };
+                            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                                     .size(8.0, 8.0)
                                     .background(paint(dot_col))
-                                    .corner_radius(4.0),
-                            );
+                                    .corner_radius(4.0)) };
                             Label(
                                 &shown_text,
                                 Fs::Xs,
@@ -352,8 +347,8 @@ pub fn ModelChip(session: &str, compact_label: bool) {
                                 Some(1),
                             );
                             NavIcon(ICON_CHEVRON_DOWN_SVG, p.muted.to_argb(), 12.0);
-                            cu::Spacer().modifier(Modifier::new().width(4.0));
-                        });
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(4.0)) };
+                        }) };
                 },
             );
         },
@@ -460,11 +455,8 @@ pub fn ModeChip(session: &str, _compact_label: bool) {
                 Alignment::Center,
                 move || md.set(!md.get_untracked()),
                 move || {
-                    cu::Row()
-                        .alignment(Alignment::CenterStart)
-                        .spacing(5.0)
-                        .content(|| {
-                            cu::Spacer().modifier(Modifier::new().width(4.0));
+                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = 5.0, {
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(4.0)) };
                             NavIcon(ICON_SHIELD_SVG, fg.to_argb(), 13.0);
                             Label(
                                 mode_text,
@@ -474,8 +466,8 @@ pub fn ModeChip(session: &str, _compact_label: bool) {
                                 Some(1),
                             );
                             NavIcon(ICON_CHEVRON_DOWN_SVG, p.muted.to_argb(), 12.0);
-                            cu::Spacer().modifier(Modifier::new().width(4.0));
-                        });
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(4.0)) };
+                        }) };
                 },
             );
         },
@@ -486,13 +478,10 @@ pub fn ModeChip(session: &str, _compact_label: bool) {
 /// The model and mode chips of a composer (FR-L15, FR-L16).
 pub fn ComposerChips(session: &str) {
     let sid = session.to_string();
-    cu::Row()
-        .alignment(Alignment::CenterStart)
-        .spacing(6.0)
-        .content(move || {
+    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = 6.0, content = move || {
             ModelChip(&sid, false);
             ModeChip(&sid, false);
-        });
+        }) };
 }
 
 /// What the main part of an "IDE 열기" button does (FR-L7): launch the remembered IDE directly,
@@ -554,8 +543,8 @@ pub fn split_end_radii(height: f32) -> [f32; 4] {
 /// The chevron beside a header's "IDE 열기" that opens the chooser even when a default is set
 /// (FR-L7). `on_ink` draws it inside the dark split button; otherwise as a bordered square.
 /// Its accessible name is "다른 IDE 선택" (compose-rust v0.0.7, #460), and it says whether the
-/// chooser is open. Touch target 26x32, under 44 px: FR-L34.3, #323 (waits for a toolkit hit
-/// area that does not change layout, TODO(compose-rust#472, after v0.0.10)).
+/// chooser is open. Drawn 26x32 (`height`), with a 44 dp hit area that does not grow the node
+/// (`Modifier::min_touch_target`, compose-rust#472, v0.0.11; FR-L34.3, #323).
 pub fn IdeChevron(open: MutableState<bool>, on_ink: bool) {
     IdeChevronSized(open, on_ink, 32.0);
 }
@@ -580,7 +569,7 @@ pub fn IdeChevronSized(open: MutableState<bool>, on_ink: bool, height: f32) {
     };
     NamedClickable(
         super::a11y::OTHER_IDE,
-        m.expanded(open.get()),
+        m.min_touch_target(super::vcs::ICON_TOUCH_TARGET).expanded(open.get()),
         Alignment::Center,
         move || open.set(true),
         move || NavIcon(ICON_CHEVRON_DOWN_SVG, tint, 13.0),
@@ -721,10 +710,7 @@ pub fn IdeMenu(session: &str) {
             let launch_main = ide.get();
             if is_phone {
                 let o_chev = open.clone();
-                cu::Row()
-                    .alignment(Alignment::Center)
-                    .spacing(4.0)
-                    .content(move || {
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::Center, spacing = 4.0, content = move || {
                         IdeChevron(o_chev, false);
                         Clickable(
                             Modifier::new()
@@ -740,18 +726,13 @@ pub fn IdeMenu(session: &str) {
                             },
                             || NavIcon(ICON_CODE_SVG, split.ink.to_argb(), 15.0),
                         );
-                    });
+                    }) };
             } else {
-                cu::Row()
-                    .alignment(Alignment::Center)
-                    .modifier(
-                        Modifier::new()
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::Center, modifier = Modifier::new()
                             .height(32.0)
                             .background(paint(split.fill))
                             .border(1.0, paint(split.border))
-                            .shape_role(ShapeRole::Full),
-                    )
-                    .content(move || {
+                            .shape_role(ShapeRole::Full), content = move || {
                         Clickable(
                             // The leading half of the 32 dp pill (FR-L34.2, #251).
                             Modifier::new().fill_max_height().corner_radii(split_start_radii(32.0)),
@@ -762,11 +743,8 @@ pub fn IdeMenu(session: &str) {
                                 })
                             },
                             move || {
-                                cu::Row()
-                                    .alignment(Alignment::CenterStart)
-                                    .spacing(6.0)
-                                    .content(|| {
-                                        cu::Spacer().modifier(Modifier::new().width(6.0));
+                                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = 6.0, {
+                                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(6.0)) };
                                         NavIcon(ICON_CODE_SVG, split.ink.to_argb(), 15.0);
                                         Label(
                                             "IDE 열기",
@@ -786,17 +764,15 @@ pub fn IdeMenu(session: &str) {
                                                 );
                                             }
                                         }
-                                        cu::Spacer().modifier(Modifier::new().width(4.0));
-                                    });
+                                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(4.0)) };
+                                    }) };
                             },
                         );
-                        cu::Box().modifier(
-                            Modifier::new()
+                        { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                                 .size(1.0, 18.0)
-                                .background(paint(split.divider)),
-                        );
+                                .background(paint(split.divider))) };
                         IdeChevron(o, true);
-                    });
+                    }) };
             }
 
         },
@@ -818,12 +794,10 @@ fn status_dot_color(s: LauncherStatus, p: &Palette) -> Color {
 fn StatusDot(s: LauncherStatus) {
     let p = ember_theme().palette;
     let col = status_dot_color(s, p);
-    cu::Box().modifier(
-        Modifier::new()
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
             .size(8.0, 8.0)
             .background(paint(col))
-            .corner_radius(4.0),
-    );
+            .corner_radius(4.0)) };
 }
 
 /// The side list: search, then a section per project (FR-L18).
@@ -842,27 +816,17 @@ pub fn SideList(
     let sections_vec = sections.to_vec();
     let closed_secs = remember(|| mutable_state_of(HashSet::<String>::new()));
 
-    cu::Column()
-        .modifier(
-            Modifier::new()
+    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new()
                 .fill_max_width()
                 .fill_max_height()
-                .background(paint(p.surface_2)),
-        )
-        .content(move || {
+                .background(paint(p.surface_2)), content = move || {
             // .st-top header (height 60dp, bottom 1px line)
-            cu::Row()
-                .alignment(Alignment::CenterStart)
-                .space_role(SpaceRole::Sm)
-                .modifier(
-                    Modifier::new()
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, space_role = SpaceRole::Sm, modifier = Modifier::new()
                         .fill_max_width()
                         .height(SHEET_HEADER_H)
-                        .padding(SP[2]),
-                )
-                .content(move || {
+                        .padding(SP[2]), content = move || {
                     Label("세션", Fs::Lg, Weight::Semibold, Some(paint(p.text)), Some(1));
-                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                     if let Some(mut collapse_cb) = on_collapse {
                         Clickable(
                             Modifier::new()
@@ -873,18 +837,13 @@ pub fn SideList(
                             || NavIcon(ICON_SIDEBAR_CLOSE_SVG, p.muted.to_argb(), 16.0),
                         );
                     }
-                });
-            cu::Separator(Some(paint(p.line)));
+                }) };
+            { use ::compose_rust::ui::Separator; Separator!(Some(paint(p.line))) };
 
-            cu::Column()
-                .space_role(SpaceRole::Sm)
-                .modifier(
-                    Modifier::new()
+            { use ::compose_rust::ui::Column; Column!(space_role = SpaceRole::Sm, modifier = Modifier::new()
                         .fill_max_width()
                         .weight(1.0)
-                        .padding(SP[2]),
-                )
-                .content(move || {
+                        .padding(SP[2]), content = move || {
                     SearchField("세션 검색", SEARCH_FIELD_H_COMPACT, on_query);
 
                     if is_multi {
@@ -897,13 +856,8 @@ pub fn SideList(
                         );
                     }
 
-                    cu::ScrollColumn()
-                        .modifier(Modifier::new().fill_max_width().weight(1.0))
-                        .content(move || {
-                            cu::Column()
-                                .space_role(SpaceRole::Sm)
-                                .modifier(Modifier::new().fill_max_width())
-                                .content(move || {
+                    { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().fill_max_width().weight(1.0), content = move || {
+                            { use ::compose_rust::ui::Column; Column!(space_role = SpaceRole::Sm, modifier = Modifier::new().fill_max_width(), content = move || {
                                     for s in sections_vec.iter() {
                                         let sec_proj = s.project.clone();
                                         let sec_name = s.name.clone();
@@ -920,10 +874,7 @@ pub fn SideList(
                                             .count();
                                         let sec_len = sec_members.len();
 
-                                        cu::Column()
-                                            .space_role(SpaceRole::Xs)
-                                            .modifier(Modifier::new().fill_max_width())
-                                            .content(move || {
+                                        { use ::compose_rust::ui::Column; Column!(space_role = SpaceRole::Xs, modifier = Modifier::new().fill_max_width(), content = move || {
                                                 Clickable(
                                                     Modifier::new()
                                                         .fill_max_width()
@@ -937,11 +888,7 @@ pub fn SideList(
                                                         });
                                                     },
                                                     move || {
-                                                        cu::Row()
-                                                            .alignment(Alignment::CenterStart)
-                                                            .space_role(SpaceRole::Xs)
-                                                            .modifier(Modifier::new().fill_max_width())
-                                                            .content(|| {
+                                                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, space_role = SpaceRole::Xs, modifier = Modifier::new().fill_max_width(), {
                                                                 NavIcon(
                                                                     if is_closed {
                                                                         ICON_CHEVRON_RIGHT_SVG
@@ -969,12 +916,11 @@ pub fn SideList(
                                                                     Some(paint(p.muted)),
                                                                     Some(1),
                                                                 );
-                                                                cu::Spacer()
-                                                                    .modifier(Modifier::new().weight(1.0));
+                                                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                                                                 if wait_in_sec > 0 {
                                                                     RedBadge(wait_in_sec);
                                                                 }
-                                                            });
+                                                            }) };
                                                     },
                                                 );
 
@@ -1007,11 +953,7 @@ pub fn SideList(
                                                             Alignment::CenterStart,
                                                             move || cb(proj_click.clone(), id_click.clone()),
                                                             move || {
-                                                                cu::Row()
-                                                                    .alignment(Alignment::CenterStart)
-                                                                    .space_role(SpaceRole::Sm)
-                                                                    .modifier(Modifier::new().fill_max_width())
-                                                                    .content(move || {
+                                                                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, space_role = SpaceRole::Sm, modifier = Modifier::new().fill_max_width(), content = move || {
                                                                         Character(
                                                                             &m_agent,
                                                                             m_leader,
@@ -1021,9 +963,7 @@ pub fn SideList(
                                                                             CharState::from_status(m_status),
                                                                             None,
                                                                         );
-                                                                        cu::Column()
-                                                                            .modifier(Modifier::new().weight(1.0))
-                                                                            .content(move || {
+                                                                        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), content = move || {
                                                                                 Label(
                                                                                     &m_acc,
                                                                                     Fs::Sm,
@@ -1038,23 +978,23 @@ pub fn SideList(
                                                                                     Some(paint(p.muted)),
                                                                                     Some(1),
                                                                                 );
-                                                                            });
+                                                                            }) };
                                                                         if m_status == LauncherStatus::Running {
                                                                             Spinner(12.0);
                                                                         } else {
                                                                             StatusDot(m_status);
                                                                         }
-                                                                    });
+                                                                    }) };
                                                             },
                                                         );
                                                     }
                                                 }
-                                            });
+                                            }) };
                                     }
-                                });
-                        });
-                });
-        });
+                                }) };
+                        }) };
+                }) };
+        }) };
 }
 
 /// Collapsed 64 dp avatar rail (`.srail`) shown at tablet widths (`560 < width <= 900`) or when
@@ -1069,43 +1009,27 @@ pub fn SideListRail(
     let active_id = active.map(str::to_string);
     let sections_vec = sections.to_vec();
 
-    cu::Column()
-        .alignment(Alignment::TopCenter)
-        .modifier(
-            Modifier::new()
+    { use ::compose_rust::ui::Column; Column!(alignment = Alignment::TopCenter, modifier = Modifier::new()
                 .width(64.0)
                 .fill_max_height()
-                .background(paint(p.surface_2)),
-        )
-        .content(move || {
-            cu::Box()
-                .alignment(Alignment::Center)
-                .modifier(Modifier::new().fill_max_width().height(SHEET_HEADER_H))
-                .content(move || {
+                .background(paint(p.surface_2)), content = move || {
+            { use ::compose_rust::ui::Box; Box!(alignment = Alignment::Center, modifier = Modifier::new().fill_max_width().height(SHEET_HEADER_H), content = move || {
                     Clickable(
                         Modifier::new().size(36.0, 36.0).corner_radius(CORNER_SM),
                         Alignment::Center,
                         on_expand,
                         || NavIcon(ICON_SIDEBAR_OPEN_SVG, p.muted.to_argb(), 16.0),
                     );
-                });
-            cu::Separator(Some(paint(p.line)));
+                }) };
+            { use ::compose_rust::ui::Separator; Separator!(Some(paint(p.line))) };
 
-            cu::ScrollColumn()
-                .modifier(Modifier::new().fill_max_width().weight(1.0))
-                .content(move || {
-                    cu::Column()
-                        .alignment(Alignment::TopCenter)
-                        .spacing(SP[1])
-                        .modifier(Modifier::new().fill_max_width().padding(SP[1]))
-                        .content(move || {
+            { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().fill_max_width().weight(1.0), content = move || {
+                    { use ::compose_rust::ui::Column; Column!(alignment = Alignment::TopCenter, spacing = SP[1], modifier = Modifier::new().fill_max_width().padding(SP[1]), content = move || {
                             for (sec_idx, s) in sections_vec.iter().enumerate() {
                                 if sec_idx > 0 {
-                                    cu::Box().modifier(
-                                        Modifier::new()
+                                    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                                             .size(28.0, 1.0)
-                                            .background(paint(p.line)),
-                                    );
+                                            .background(paint(p.line))) };
                                 }
                                 for m in s.members.iter() {
                                     let is_active =
@@ -1132,10 +1056,7 @@ pub fn SideListRail(
                                         Alignment::Center,
                                         move || cb(proj_click.clone(), id_click.clone()),
                                         move || {
-                                            cu::Box()
-                                                .alignment(Alignment::BottomEnd)
-                                                .modifier(Modifier::new().size(30.0, 30.0))
-                                                .content(move || {
+                                            { use ::compose_rust::ui::Box; Box!(alignment = Alignment::BottomEnd, modifier = Modifier::new().size(30.0, 30.0), content = move || {
                                                     Character(
                                                         &m_agent,
                                                         m_leader,
@@ -1146,14 +1067,14 @@ pub fn SideListRail(
                                                         None,
                                                     );
                                                     StatusDot(m_status);
-                                                });
+                                                }) };
                                         },
                                     );
                                 }
                             }
-                        });
-                });
-        });
+                        }) };
+                }) };
+        }) };
 }
 
 /// How close to the end still counts as "at the end", in dp: about one line of the transcript.
@@ -1229,14 +1150,9 @@ pub fn PaneTranscript(session: &str, agent: &str) {
     let scroll = cu::remember_scroll_state();
     FollowNewest(scroll.clone(), sid.clone());
 
-    cu::Box()
-        .modifier(Modifier::new().fill_max_width().weight(1.0))
-        .content(move || {
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().weight(1.0), content = move || {
             if count == 0 {
-                cu::Box()
-                    .alignment(Alignment::Center)
-                    .modifier(Modifier::new().fill_max_width().fill_max_height())
-                    .content(|| {
+                { use ::compose_rust::ui::Box; Box!(alignment = Alignment::Center, modifier = Modifier::new().fill_max_width().fill_max_height(), {
                         Label(
                             NO_CONVERSATION,
                             Fs::Sm,
@@ -1244,7 +1160,7 @@ pub fn PaneTranscript(session: &str, agent: &str) {
                             Some(paint(p.muted)),
                             None,
                         );
-                    });
+                    }) };
             } else {
                 let avail_h = window.height_dp
                     - 28.0
@@ -1261,22 +1177,16 @@ pub fn PaneTranscript(session: &str, agent: &str) {
                 let exp_c = expanded.clone();
                 let ans_c = answering.clone();
                 let computer_c = computer_name.clone();
-                cu::ScrollColumn()
-                    .scroll_state(&scroll)
-                    .modifier(Modifier::new().fill_max_width().fill_max_height())
-                    .content(move || {
-                        cu::Column()
-                            .spacing(SP[1])
-                            .modifier(Modifier::new().fill_max_width().padding(SP[1]))
-                            .content(move || {
+                { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(scroll_state = &scroll, modifier = Modifier::new().fill_max_width().fill_max_height(), content = move || {
+                        { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width().padding(SP[1]), content = move || {
                                 for item in items_c.iter() {
                                     TranscriptRow(&sid_c, &agent_c, item, &exp_c, &ans_c, computer_c.as_deref(), true);
                                 }
-                                cu::Spacer().modifier(Modifier::new().height(12.0));
-                            });
-                    });
+                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(12.0)) };
+                            }) };
+                    }) };
             }
-        });
+        }) };
 }
 
 /// The Terminal side of a pane: the member's terminal, read-only, in the mockup's `.term` colours
@@ -1352,12 +1262,9 @@ pub fn PaneTerminal(member: &Member, project: &str) {
     };
     let note = |text: &str| {
         let text = text.to_string();
-        cu::Box()
-            .alignment(Alignment::Center)
-            .modifier(Modifier::new().fill_max_width().weight(1.0))
-            .content(move || {
+        { use ::compose_rust::ui::Box; Box!(alignment = Alignment::Center, modifier = Modifier::new().fill_max_width().weight(1.0), content = move || {
                 Label(&text, Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
-            });
+            }) };
     };
     // Follow the newest line with the toolkit's scroll state (compose-rust#385), as `PaneTranscript` does.
     let scroll = cu::remember_scroll_state();
@@ -1368,23 +1275,14 @@ pub fn PaneTerminal(member: &Member, project: &str) {
         TermView::Note(text) => note(text),
         TermView::Failed(text) => note(text),
         TermView::Lines { rows, notice } => {
-            cu::Box()
-                .modifier(
-                    Modifier::new()
+            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                         .fill_max_width()
                         .weight(1.0)
                         .background(paint(p.surface_2))
                         .border(1.0, paint(p.line))
-                        .corner_radius(CORNER_SM),
-                )
-                .content(move || {
-                    cu::ScrollColumn()
-                        .scroll_state(&scroll)
-                        .modifier(Modifier::new().fill_max_width().fill_max_height())
-                        .content(move || {
-                            cu::Column()
-                                .modifier(Modifier::new().fill_max_width().padding(SP[2]))
-                                .content(move || {
+                        .corner_radius(CORNER_SM), content = move || {
+                    { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(scroll_state = &scroll, modifier = Modifier::new().fill_max_width().fill_max_height(), content = move || {
+                            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width().padding(SP[2]), content = move || {
                                     for (role, line) in rows.iter() {
                                         let (color, weight) = match role {
                                             TermRole::Banner | TermRole::Warn => (p.orange.strong, None),
@@ -1403,9 +1301,9 @@ pub fn PaneTerminal(member: &Member, project: &str) {
                                     if let Some(n) = &notice {
                                         Txt(n, TypeRole::Mono, Some(paint(p.muted)), None, None, None, None);
                                     }
-                                });
-                        });
-                });
+                                }) };
+                        }) };
+                }) };
         }
     }
 }
@@ -1445,24 +1343,15 @@ pub fn PaneComposer(session: &str, busy: bool) {
     };
 
     let _gen = generation.get();
-    cu::Column()
-        .spacing(SP[0])
-        .modifier(Modifier::new().fill_max_width())
-        .content(move || {
-            cu::Separator(Some(paint(p.line)));
+    { use ::compose_rust::ui::Column; Column!(spacing = SP[0], modifier = Modifier::new().fill_max_width(), content = move || {
+            { use ::compose_rust::ui::Separator; Separator!(Some(paint(p.line))) };
             if queued > 0 {
-                cu::Row()
-                    .modifier(Modifier::new().fill_max_width().padding(SP[0]))
-                    .content(|| {
+                { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width().padding(SP[0]), {
                         Pill(&format!("{queued}개 대기 중입니다"), PillTone::Blue, true);
-                    });
+                    }) };
             }
             // 1-row .pane-c footer: [ModelChip] [ModeChip] [Input] [Stop/Send circle]
-            cu::Row()
-                .alignment(Alignment::CenterStart)
-                .spacing(SP[1])
-                .modifier(Modifier::new().fill_max_width().padding(SP[0]))
-                .content(|| {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width().padding(SP[0]), {
                     if !hide_chips {
                         ModelChip(&sid, short_model);
                         ModeChip(&sid, short_model);
@@ -1512,8 +1401,8 @@ pub fn PaneComposer(session: &str, busy: bool) {
                             send_btn(draft_btn.get_untracked());
                         });
                     }
-                });
-        });
+                }) };
+        }) };
 }
 
 /// Width of one pane in the multi view: the window less the nav, the page padding on both sides
@@ -1538,17 +1427,12 @@ pub fn pane_header_uses_icon_toggle(pane_w: f32) -> bool {
 /// Compact segmented switcher inside a pane header (`.ph-seg`).
 fn MiniSeg(cur: PaneToggle, on_pick: impl Fn(PaneToggle) + Clone + 'static) {
     let p = ember_theme().palette;
-    cu::Row()
-        .alignment(Alignment::Center)
-        .modifier(
-            Modifier::new()
+    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::Center, modifier = Modifier::new()
                 .height(26.0)
                 .background(paint(p.surface))
                 .border(1.0, paint(p.line))
                 .corner_radius(13.0)
-                .padding(2.0),
-        )
-        .content(move || {
+                .padding(2.0), content = move || {
             for t in PaneToggle::ALL {
                 let selected = cur == t;
                 let (bg, fg) = if selected {
@@ -1562,8 +1446,8 @@ fn MiniSeg(cur: PaneToggle, on_pick: impl Fn(PaneToggle) + Clone + 'static) {
                     Alignment::Center,
                     move || cb(t),
                     move || {
-                        cu::Row().alignment(Alignment::Center).content(|| {
-                            cu::Spacer().modifier(Modifier::new().width(8.0));
+                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::Center, {
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(8.0)) };
                             Label(
                                 t.label(),
                                 Fs::Xs,
@@ -1571,12 +1455,12 @@ fn MiniSeg(cur: PaneToggle, on_pick: impl Fn(PaneToggle) + Clone + 'static) {
                                 Some(paint(fg)),
                                 Some(1),
                             );
-                            cu::Spacer().modifier(Modifier::new().width(8.0));
-                        });
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(8.0)) };
+                        }) };
                     },
                 );
             }
-        });
+        }) };
 }
 
 /// One pane of the multi view: header, transcript with approvals, composer.
@@ -1634,28 +1518,17 @@ pub fn Pane(
     let can_left = can_move(&order_owned, &id, PaneMove::Left);
     let can_right = can_move(&order_owned, &id, PaneMove::Right);
 
-    cu::Box()
-        .modifier(Modifier::new().fill_max_width().fill_max_height())
-        .content(move || {
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().fill_max_height(), content = move || {
             let cur_toggle = toggle.get();
-            cu::Column()
-                .space_role(SpaceRole::Xs)
-                .modifier(
-                    Modifier::new()
+            { use ::compose_rust::ui::Column; Column!(space_role = SpaceRole::Xs, modifier = Modifier::new()
                         .fill_max_width()
                         .fill_max_height()
                         .background(paint(p.surface))
                         .border(1.0, paint(p.line))
                         .corner_radius(CORNER_LG)
-                        .padding(SP[1]),
-                )
-                .content(|| {
+                        .padding(SP[1]), {
                     // Header row (.pane-h)
-                    cu::Row()
-                        .alignment(Alignment::CenterStart)
-                        .space_role(SpaceRole::Xs)
-                        .modifier(Modifier::new().fill_max_width())
-                        .content(|| {
+                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, space_role = SpaceRole::Xs, modifier = Modifier::new().fill_max_width(), {
                             let m_open = menu.clone();
                             Clickable(
                                 Modifier::new().size(18.0, 28.0),
@@ -1672,9 +1545,7 @@ pub fn Pane(
                                 CharState::from_status(member_owned.status),
                                 None,
                             );
-                            cu::Column()
-                                .modifier(Modifier::new().weight(1.0))
-                                .content(|| {
+                            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), {
                                     Label(
                                         &member_owned.accessible_name(),
                                         Fs::Sm,
@@ -1689,7 +1560,7 @@ pub fn Pane(
                                         Some(paint(p.muted)),
                                         Some(1),
                                     );
-                                });
+                                }) };
                             if narrow_pane {
                                 StatusDot(member_owned.status);
                             } else {
@@ -1742,8 +1613,8 @@ pub fn Pane(
                                 },
                                 || NavIcon(ICON_CLOSE_SVG, p.muted.to_argb(), 14.0),
                             );
-                        });
-                    cu::Separator(Some(paint(p.line)));
+                        }) };
+                    { use ::compose_rust::ui::Separator; Separator!(Some(paint(p.line))) };
 
                     if cur_toggle == PaneToggle::Conversation {
                         PaneTranscript(&id, &member_owned.agent);
@@ -1751,7 +1622,7 @@ pub fn Pane(
                     } else {
                         PaneTerminal(&member_owned, &proj_owned);
                     }
-                });
+                }) };
 
             // Reorder OptionSheet
             let mut move_opts = Vec::new();
@@ -1787,7 +1658,7 @@ pub fn Pane(
                     }
                 },
             );
-        });
+        }) };
 }
 /// The corners of a pane tab's click area (`[top_start, top_end, bottom_end, bottom_start]`),
 /// so the hover layer, the press tint and the keyboard focus ring follow the tab and not a
@@ -1825,32 +1696,29 @@ fn PaneTabChip(
         tab_mod = tab_mod.border(1.0, paint(p.line));
     }
     let tab_name = name.to_string();
-    cu::Row().alignment(Alignment::Center).modifier(tab_mod).content(move || {
+    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::Center, modifier = tab_mod, content = move || {
         Clickable(
             Modifier::new().fill_max_height().corner_radii(pane_tab_click_radii(closable)),
             Alignment::Center,
             on_select,
             move || {
-                cu::Row().alignment(Alignment::CenterStart).spacing(6.0).content(|| {
-                    cu::Spacer().modifier(Modifier::new().width(10.0));
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = 6.0, {
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(10.0)) };
                     Label(&tab_name, Fs::Sm, wt, Some(paint(fg)), Some(1));
-                    cu::Box()
-                        .alignment(Alignment::Center)
-                        .modifier(Modifier::new().size(20.0, 18.0).background(paint(p.surface_2)).corner_radius(9.0))
-                        .content(|| {
+                    { use ::compose_rust::ui::Box; Box!(alignment = Alignment::Center, modifier = Modifier::new().size(20.0, 18.0).background(paint(p.surface_2)).corner_radius(9.0), {
                             Label(&count.to_string(), Fs::Xs2, Weight::Medium, Some(paint(p.muted)), Some(1));
-                        });
-                    cu::Spacer().modifier(Modifier::new().width(if closable { 2.0 } else { 10.0 }));
-                });
+                        }) };
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(if closable { 2.0 } else { 10.0 })) };
+                }) };
             },
         );
         if closable {
             Clickable(Modifier::new().size(24.0, 24.0).shape_role(ShapeRole::Full), Alignment::Center, on_close, || {
                 NavIcon(ICON_CLOSE_SVG, p.muted.to_argb(), 11.0)
             });
-            cu::Spacer().modifier(Modifier::new().width(4.0));
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(4.0)) };
         }
-    });
+    }) };
 }
 
 /// Panes of the project's active tab, with the tab strip (FR-L18).
@@ -1883,31 +1751,15 @@ pub fn MultiView(
     let n = vis.len();
     let show_help = window.width_dp >= 1280.0;
 
-    cu::Box()
-        .modifier(Modifier::new().fill_max_width().fill_max_height())
-        .content(move || {
-            cu::Column()
-                .space_role(SpaceRole::Sm)
-                .modifier(
-                    Modifier::new()
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().fill_max_height(), content = move || {
+            { use ::compose_rust::ui::Column; Column!(space_role = SpaceRole::Sm, modifier = Modifier::new()
                         .fill_max_width()
                         .fill_max_height()
-                        .padding_role(SpaceRole::Sm),
-                )
-                .content(|| {
+                        .padding_role(SpaceRole::Sm), {
                     // Tab strip (.stabs)
-                    cu::Row()
-                        .alignment(Alignment::CenterStart)
-                        .space_role(SpaceRole::Xs)
-                        .modifier(Modifier::new().fill_max_width())
-                        .content(|| {
-                            cu::ScrollRow()
-                                .modifier(Modifier::new().weight(1.0))
-                                .content(|| {
-                                    cu::Row()
-                                        .alignment(Alignment::CenterStart)
-                                        .spacing(6.0)
-                                        .content(|| {
+                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, space_role = SpaceRole::Xs, modifier = Modifier::new().fill_max_width(), {
+                            { use ::compose_rust::ui::ScrollRow; ScrollRow!(modifier = Modifier::new().weight(1.0), {
+                                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = 6.0, {
                                             let multi_tabs = panes.tabs.len() > 1;
                                             for (i, t) in panes.tabs.iter().enumerate() {
                                                 let pg = page.clone();
@@ -1963,8 +1815,8 @@ pub fn MultiView(
                                                     move || am.set(true),
                                                 );
                                             }
-                                        });
-                                });
+                                        }) };
+                                }) };
                             if show_help {
                                 Label(
                                     "칸 머리를 끌어 옮길 수 있습니다. 가운데에 놓으면 바꾸고, 가장자리에 놓으면 나눕니다",
@@ -1974,17 +1826,11 @@ pub fn MultiView(
                                     Some(1),
                                 );
                             }
-                        });
+                        }) };
 
                     if n == 0 {
-                        cu::Box()
-                            .alignment(Alignment::Center)
-                            .modifier(Modifier::new().fill_max_width().weight(1.0))
-                            .content(|| {
-                                cu::Column()
-                                    .alignment(Alignment::Center)
-                                    .space_role(SpaceRole::Sm)
-                                    .content(|| {
+                        { use ::compose_rust::ui::Box; Box!(alignment = Alignment::Center, modifier = Modifier::new().fill_max_width().weight(1.0), {
+                                { use ::compose_rust::ui::Column; Column!(alignment = Alignment::Center, space_role = SpaceRole::Sm, {
                                         Label(NO_MEMBERS, Fs::Lg, Weight::Medium, None, Some(1));
                                         Label(
                                             PICK_FROM_LIST,
@@ -1993,8 +1839,8 @@ pub fn MultiView(
                                             Some(paint(p.muted)),
                                             Some(1),
                                         );
-                                    });
-                            });
+                                    }) };
+                            }) };
                     } else if layout.paged {
                         // Sideways strip, one pane per screen width (mockup `.mv` at 560 px,
                         // `scroll-snap-type:x mandatory`), instead of a previous / next pager.
@@ -2002,10 +1848,7 @@ pub fn MultiView(
                         // so `Snap::ItemStart` (compose-rust#547) brings a swipe to rest on one
                         // whole pane. Half a gap on each side of a slot keeps panes a gap apart.
                         let pane_w = swipe_pane_width(window.width_dp);
-                        cu::ScrollRow()
-                            .snap(Snap::ItemStart)
-                            .modifier(Modifier::new().fill_max_width().weight(1.0))
-                            .content(|| {
+                        { use ::compose_rust::ui::ScrollRow; ScrollRow!(snap = Snap::ItemStart, modifier = Modifier::new().fill_max_width().weight(1.0), {
                                 for sid in &vis {
                                     if let Some(m) = members_vec.iter().find(|m| &m.session_id == sid)
                                     {
@@ -2014,24 +1857,16 @@ pub fn MultiView(
                                         let all_s = all.clone();
                                         let vis_s = vis.clone();
                                         let enl = on_enlarge.clone();
-                                        cu::Row()
-                                            .modifier(Modifier::new().width(pane_w).fill_max_height())
-                                            .content(move || {
-                                                cu::Spacer()
-                                                    .modifier(Modifier::new().width(SWIPE_GAP / 2.0));
-                                                cu::Box()
-                                                    .modifier(
-                                                        Modifier::new().weight(1.0).fill_max_height(),
-                                                    )
-                                                    .content(move || {
+                                        { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().width(pane_w).fill_max_height(), content = move || {
+                                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SWIPE_GAP / 2.0)) };
+                                                { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().weight(1.0).fill_max_height(), content = move || {
                                                         Pane(&pr, &m, &all_s, &vis_s, enl.clone());
-                                                    });
-                                                cu::Spacer()
-                                                    .modifier(Modifier::new().width(SWIPE_GAP / 2.0));
-                                            });
+                                                    }) };
+                                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SWIPE_GAP / 2.0)) };
+                                            }) };
                                     }
                                 }
-                            });
+                            }) };
                     } else {
                         let rows_idx = pane_rows(n, layout.per_row);
                         let proj_grid = proj_owned.clone();
@@ -2041,10 +1876,7 @@ pub fn MultiView(
                         let enl_grid = on_enlarge.clone();
                         if rows_idx.len() <= 2 {
                             // Full-height flex grid filling the remaining vertical space (.sgrid-multi)
-                            cu::Column()
-                                .spacing(SP[2])
-                                .modifier(Modifier::new().fill_max_width().weight(1.0))
-                                .content(move || {
+                            { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width().weight(1.0), content = move || {
                                     for row in rows_idx.iter() {
                                         let row_c = row.clone();
                                         let pr = proj_grid.clone();
@@ -2052,10 +1884,7 @@ pub fn MultiView(
                                         let al = all_grid.clone();
                                         let vs = vis_grid.clone();
                                         let enl = enl_grid.clone();
-                                        cu::Row()
-                                            .spacing(SP[2])
-                                            .modifier(Modifier::new().fill_max_width().weight(1.0))
-                                            .content(move || {
+                                        { use ::compose_rust::ui::Row; Row!(spacing = SP[2], modifier = Modifier::new().fill_max_width().weight(1.0), content = move || {
                                                 for idx in row_c.iter().copied() {
                                                     let pr_p = pr.clone();
                                                     let al_p = al.clone();
@@ -2065,35 +1894,25 @@ pub fn MultiView(
                                                         .iter()
                                                         .find(|m| m.session_id == vs[idx])
                                                         .cloned();
-                                                    cu::Box()
-                                                        .modifier(
-                                                            Modifier::new()
+                                                    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                                                                 .weight(1.0)
-                                                                .fill_max_height(),
-                                                        )
-                                                        .content(move || {
+                                                                .fill_max_height(), content = move || {
                                                             if let Some(m) = m_opt {
                                                                 Pane(
                                                                     &pr_p, &m, &al_p, &vs_p, enl_p,
                                                                 );
                                                             }
-                                                        });
+                                                        }) };
                                                 }
                                                 for _ in 0..(layout.per_row - row_c.len()) {
-                                                    cu::Spacer()
-                                                        .modifier(Modifier::new().weight(1.0));
+                                                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                                                 }
-                                            });
+                                            }) };
                                     }
-                                });
+                                }) };
                         } else {
-                            cu::ScrollColumn()
-                                .modifier(Modifier::new().fill_max_width().weight(1.0))
-                                .content(move || {
-                                    cu::Column()
-                                        .space_role(SpaceRole::Sm)
-                                        .modifier(Modifier::new().fill_max_width())
-                                        .content(move || {
+                            { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().fill_max_width().weight(1.0), content = move || {
+                                    { use ::compose_rust::ui::Column; Column!(space_role = SpaceRole::Sm, modifier = Modifier::new().fill_max_width(), content = move || {
                                             for row in rows_idx.iter() {
                                                 let row_c = row.clone();
                                                 let pr = proj_grid.clone();
@@ -2101,10 +1920,7 @@ pub fn MultiView(
                                                 let al = all_grid.clone();
                                                 let vs = vis_grid.clone();
                                                 let enl = enl_grid.clone();
-                                                cu::Row()
-                                                    .space_role(SpaceRole::Sm)
-                                                    .modifier(Modifier::new().fill_max_width())
-                                                    .content(move || {
+                                                { use ::compose_rust::ui::Row; Row!(space_role = SpaceRole::Sm, modifier = Modifier::new().fill_max_width(), content = move || {
                                                         for idx in row_c.iter().copied() {
                                                             let pr_p = pr.clone();
                                                             let al_p = al.clone();
@@ -2114,32 +1930,27 @@ pub fn MultiView(
                                                                 .iter()
                                                                 .find(|m| m.session_id == vs[idx])
                                                                 .cloned();
-                                                            cu::Box()
-                                                                .modifier(
-                                                                    Modifier::new()
+                                                            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                                                                         .weight(1.0)
-                                                                        .height(PANE_H),
-                                                                )
-                                                                .content(move || {
+                                                                        .height(PANE_H), content = move || {
                                                                     if let Some(m) = m_opt {
                                                                         Pane(
                                                                             &pr_p, &m, &al_p,
                                                                             &vs_p, enl_p,
                                                                         );
                                                                     }
-                                                                });
+                                                                }) };
                                                         }
                                                         for _ in 0..(layout.per_row - row_c.len()) {
-                                                            cu::Spacer()
-                                                                .modifier(Modifier::new().weight(1.0));
+                                                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                                                         }
-                                                    });
+                                                    }) };
                                             }
-                                        });
-                                });
+                                        }) };
+                                }) };
                         }
                     }
-                });
+                }) };
 
             // Add-member OptionSheet
             if !hidden.is_empty() {
@@ -2165,7 +1976,7 @@ pub fn MultiView(
                     },
                 );
             }
-        });
+        }) };
 }
 
 fn env_row_icon(key: &str) -> &'static str {
@@ -2238,19 +2049,12 @@ pub fn InfoPanel(session: &str) {
     let mode_str = mode_chip_label(approve_all);
     let comp_str = comp_now.unwrap_or_else(|| "mac-mini".to_string());
 
-    cu::ScrollColumn()
-        .modifier(
-            Modifier::new()
+    { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new()
                 .fill_max_width()
                 .fill_max_height()
                 .background(paint(p.bg))
-                .padding_role(SpaceRole::Sm),
-        )
-        .content(move || {
-            cu::Column()
-                .space_role(SpaceRole::Sm)
-                .modifier(Modifier::new().fill_max_width())
-                .content(move || {
+                .padding_role(SpaceRole::Sm), content = move || {
+            { use ::compose_rust::ui::Column; Column!(space_role = SpaceRole::Sm, modifier = Modifier::new().fill_max_width(), content = move || {
                     for (idx, card) in InfoCard::ALL.into_iter().enumerate() {
                         let rows_c = rows.clone();
                         let is_off = collapsed.get().contains(&idx);
@@ -2271,10 +2075,7 @@ pub fn InfoPanel(session: &str) {
                         };
 
                         EmberCard(false, true, None, Some(SP[2]), None, move || {
-                            cu::Column()
-                                .spacing(6.0)
-                                .modifier(Modifier::new().fill_max_width())
-                                .content(move || {
+                            { use ::compose_rust::ui::Column; Column!(spacing = 6.0, modifier = Modifier::new().fill_max_width(), content = move || {
                                     Clickable(
                                         Modifier::new().fill_max_width(),
                                         Alignment::CenterStart,
@@ -2286,11 +2087,7 @@ pub fn InfoPanel(session: &str) {
                                             });
                                         },
                                         move || {
-                                            cu::Row()
-                                                .alignment(Alignment::CenterStart)
-                                                .spacing(6.0)
-                                                .modifier(Modifier::new().fill_max_width())
-                                                .content(|| {
+                                            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = 6.0, modifier = Modifier::new().fill_max_width(), {
                                                     Label(
                                                         title_text,
                                                         Fs::Sm,
@@ -2307,8 +2104,7 @@ pub fn InfoPanel(session: &str) {
                                                         p.muted.to_argb(),
                                                         12.0,
                                                     );
-                                                    cu::Spacer()
-                                                        .modifier(Modifier::new().weight(1.0));
+                                                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                                                     if !right_summary.is_empty() {
                                                         Label(
                                                             right_summary,
@@ -2318,67 +2114,43 @@ pub fn InfoPanel(session: &str) {
                                                             Some(1),
                                                         );
                                                     }
-                                                });
+                                                }) };
                                         },
                                     );
                                     if !is_off {
-                                        cu::Spacer().modifier(Modifier::new().height(2.0));
+                                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(2.0)) };
                                         match card {
                                             InfoCard::Environment if is_demo => {
-                                                cu::Row()
-                                                    .alignment(Alignment::CenterStart)
-                                                    .spacing(SP[1])
-                                                    .modifier(Modifier::new().fill_max_width().padding(4.0))
-                                                    .content(move || {
+                                                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width().padding(4.0), content = move || {
                                                         NavIcon(ICON_PC_SVG, p.muted.to_argb(), 16.0);
                                                         Label(&comp_c, Fs::Sm, Weight::Regular, Some(paint(p.text)), Some(1));
                                                         Label("· macOS 26", Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
-                                                        cu::Spacer().modifier(Modifier::new().weight(1.0));
+                                                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                                                         Label("192.168.0.10", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                                                    });
-                                                cu::Row()
-                                                    .alignment(Alignment::CenterStart)
-                                                    .spacing(SP[1])
-                                                    .modifier(Modifier::new().fill_max_width().padding(4.0))
-                                                    .content(|| {
+                                                    }) };
+                                                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width().padding(4.0), {
                                                         NavIcon(ICON_FOLDER_SVG, p.muted.to_argb(), 16.0);
                                                         Label("DarkPyonix/darkpyonix-ember", Fs::Sm, Weight::Regular, Some(paint(p.text)), Some(1));
-                                                    });
-                                                cu::Row()
-                                                    .alignment(Alignment::CenterStart)
-                                                    .spacing(SP[1])
-                                                    .modifier(Modifier::new().fill_max_width().padding(4.0))
-                                                    .content(|| {
+                                                    }) };
+                                                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width().padding(4.0), {
                                                         NavIcon(ICON_GIT_SVG, p.muted.to_argb(), 16.0);
                                                         Label("feat/shim-wiring", Fs::Sm, Weight::Regular, Some(paint(p.text)), Some(1));
-                                                        cu::Spacer().modifier(Modifier::new().weight(1.0));
+                                                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                                                         Pill("worktree", PillTone::Grey, true);
-                                                    });
-                                                cu::Row()
-                                                    .alignment(Alignment::CenterStart)
-                                                    .spacing(SP[1])
-                                                    .modifier(Modifier::new().fill_max_width().padding(4.0))
-                                                    .content(move || {
+                                                    }) };
+                                                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width().padding(4.0), content = move || {
                                                         Character(&ag_c, false, 18.0, "에이전트", "demo", CharState::Run, None);
                                                         Label(&md_c, Fs::Sm, Weight::Regular, Some(paint(p.text)), Some(1));
-                                                    });
-                                                cu::Row()
-                                                    .alignment(Alignment::CenterStart)
-                                                    .spacing(SP[1])
-                                                    .modifier(Modifier::new().fill_max_width().padding(4.0))
-                                                    .content(move || {
+                                                    }) };
+                                                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width().padding(4.0), content = move || {
                                                         NavIcon(ICON_SHIELD_SVG, p.muted.to_argb(), 16.0);
                                                         Label(&format!("{mode_str} · Claude 개인"), Fs::Sm, Weight::Regular, Some(paint(p.text)), Some(1));
-                                                    });
+                                                    }) };
                                             }
                                             InfoCard::Environment => {
                                                 for (k, v) in rows_c.iter() {
                                                     let ico = env_row_icon(k);
-                                                    cu::Row()
-                                                        .alignment(Alignment::CenterStart)
-                                                        .spacing(SP[1])
-                                                        .modifier(Modifier::new().fill_max_width().padding(4.0))
-                                                        .content(move || {
+                                                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width().padding(4.0), content = move || {
                                                             NavIcon(ico, p.muted.to_argb(), 16.0);
                                                             Label(
                                                                 k,
@@ -2387,10 +2159,7 @@ pub fn InfoPanel(session: &str) {
                                                                 Some(paint(p.muted)),
                                                                 Some(1),
                                                             );
-                                                            cu::Column()
-                                                                .alignment(Alignment::CenterEnd)
-                                                                .modifier(Modifier::new().weight(1.0))
-                                                                .content(|| {
+                                                            { use ::compose_rust::ui::Column; Column!(alignment = Alignment::CenterEnd, modifier = Modifier::new().weight(1.0), {
                                                                     Label(
                                                                         v,
                                                                         Fs::Sm,
@@ -2398,34 +2167,26 @@ pub fn InfoPanel(session: &str) {
                                                                         None,
                                                                         Some(1),
                                                                     );
-                                                                });
-                                                        });
+                                                                }) };
+                                                        }) };
                                                 }
                                             }
                                             InfoCard::Context if is_demo => {
-                                                cu::Row()
-                                                    .alignment(Alignment::CenterStart)
-                                                    .modifier(Modifier::new().fill_max_width())
-                                                    .content(|| {
+                                                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
                                                         Label("31.2% 사용됨", Fs::Sm, Weight::Semibold, Some(paint(p.text)), Some(1));
-                                                        cu::Spacer().modifier(Modifier::new().weight(1.0));
+                                                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                                                         Label("312.0k / 1M", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                                                    });
-                                                cu::Row()
-                                                    .spacing(1.0)
-                                                    .modifier(
-                                                        Modifier::new()
+                                                    }) };
+                                                { use ::compose_rust::ui::Row; Row!(spacing = 1.0, modifier = Modifier::new()
                                                             .fill_max_width()
                                                             .height(6.0)
                                                             .background(paint(p.surface_2))
-                                                            .corner_radius(3.0),
-                                                    )
-                                                    .content(|| {
-                                                        cu::Box().modifier(Modifier::new().weight(24.4).fill_max_height().background(paint(p.blue.strong)));
-                                                        cu::Box().modifier(Modifier::new().weight(2.8).fill_max_height().background(paint(p.sky.strong)));
-                                                        cu::Box().modifier(Modifier::new().weight(4.0).fill_max_height().background(paint(p.orange.strong)));
-                                                        cu::Box().modifier(Modifier::new().weight(68.8).fill_max_height());
-                                                    });
+                                                            .corner_radius(3.0), {
+                                                        { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().weight(24.4).fill_max_height().background(paint(p.blue.strong))) };
+                                                        { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().weight(2.8).fill_max_height().background(paint(p.sky.strong))) };
+                                                        { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().weight(4.0).fill_max_height().background(paint(p.orange.strong))) };
+                                                        { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().weight(68.8).fill_max_height()) };
+                                                    }) };
                                                 for (col, lbl, tok, pct) in [
                                                     (p.blue.strong, "메시지", "244.0k", "24.4%"),
                                                     (p.sky.strong, "시스템 도구", "18.0k", "1.8%"),
@@ -2433,17 +2194,13 @@ pub fn InfoPanel(session: &str) {
                                                     (p.orange.strong, "자동 압축 버퍼", "33.0k", "3.3%"),
                                                     (p.line, "남은 공간", "688.0k", "68.8%"),
                                                 ] {
-                                                    cu::Row()
-                                                        .alignment(Alignment::CenterStart)
-                                                        .spacing(6.0)
-                                                        .modifier(Modifier::new().fill_max_width().padding(2.0))
-                                                        .content(move || {
-                                                            cu::Box().modifier(Modifier::new().size(10.0, 10.0).background(paint(col)).corner_radius(3.0));
+                                                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = 6.0, modifier = Modifier::new().fill_max_width().padding(2.0), content = move || {
+                                                            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().size(10.0, 10.0).background(paint(col)).corner_radius(3.0)) };
                                                             Label(lbl, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));
-                                                            cu::Spacer().modifier(Modifier::new().weight(1.0));
+                                                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                                                             Label(tok, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                                                             Label(pct, Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(1));
-                                                        });
+                                                        }) };
                                                 }
                                             }
                                             InfoCard::Outputs if is_demo => {
@@ -2451,48 +2208,36 @@ pub fn InfoPanel(session: &str) {
                                                     (ICON_GIT_SVG, "#139 Wire shim into proxy", "PR"),
                                                     (ICON_GLOBE_SVG, "http://192.168.0.10:3000", "웹 페이지"),
                                                 ] {
-                                                    cu::Row()
-                                                        .alignment(Alignment::CenterStart)
-                                                        .spacing(SP[1])
-                                                        .modifier(Modifier::new().fill_max_width().padding(4.0))
-                                                        .content(move || {
+                                                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width().padding(4.0), content = move || {
                                                             NavIcon(ico, p.muted.to_argb(), 15.0);
-                                                            cu::Box().modifier(Modifier::new().weight(1.0)).content(move || {
+                                                            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().weight(1.0), content = move || {
                                                                 Label(lbl, Fs::Sm, Weight::Regular, Some(paint(p.text)), Some(1));
-                                                            });
+                                                            }) };
                                                             Label(kind, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                                                        });
+                                                        }) };
                                                 }
                                             }
                                             InfoCard::Changes if is_demo => {
-                                                cu::Row()
-                                                    .alignment(Alignment::CenterStart)
-                                                    .spacing(6.0)
-                                                    .modifier(Modifier::new().fill_max_width().padding(2.0))
-                                                    .content(|| {
+                                                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = 6.0, modifier = Modifier::new().fill_max_width().padding(2.0), {
                                                         NavIcon(ICON_EDIT_SVG, p.muted.to_argb(), 15.0);
                                                         Label("+23", Fs::Sm, Weight::Medium, Some(paint(p.green.strong)), Some(1));
                                                         Label("-6", Fs::Sm, Weight::Medium, Some(paint(p.red.strong)), Some(1));
                                                         Label("· 파일 3개", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                                                        cu::Spacer().modifier(Modifier::new().weight(1.0));
+                                                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                                                         Pill("PR #139 보기", PillTone::Grey, true);
-                                                    });
+                                                    }) };
                                                 for (f_path, add_s, del_s) in [
                                                     ("ember/proxy/src/shim.rs", "+14", "-3"),
                                                     ("ember/proxy/src/router.rs", "+6", "-2"),
                                                     ("docs/SPEC.md", "+3", "-1"),
                                                 ] {
-                                                    cu::Row()
-                                                        .alignment(Alignment::CenterStart)
-                                                        .spacing(6.0)
-                                                        .modifier(Modifier::new().fill_max_width().padding(2.0))
-                                                        .content(move || {
-                                                            cu::Box().modifier(Modifier::new().weight(1.0)).content(move || {
+                                                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = 6.0, modifier = Modifier::new().fill_max_width().padding(2.0), content = move || {
+                                                            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().weight(1.0), content = move || {
                                                                 Label(f_path, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));
-                                                            });
+                                                            }) };
                                                             Label(add_s, Fs::Xs, Weight::Medium, Some(paint(p.green.strong)), Some(1));
                                                             Label(del_s, Fs::Xs, Weight::Medium, Some(paint(p.red.strong)), Some(1));
-                                                        });
+                                                        }) };
                                                 }
                                             }
                                             _ => {
@@ -2506,11 +2251,11 @@ pub fn InfoPanel(session: &str) {
                                             }
                                         }
                                     }
-                                });
+                                }) };
                         });
                     }
-                });
-        });
+                }) };
+        }) };
 }
 
 /// One member's conversation with the right panel (inline on expanded, a sheet elsewhere).
@@ -2543,9 +2288,7 @@ pub fn SingleView(session: &str, focus: Option<String>, on_back: impl Fn() + Clo
         })
     };
 
-    cu::Box()
-        .modifier(Modifier::new().fill_max_width().fill_max_height())
-        .content(move || {
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().fill_max_height(), content = move || {
             let sid_row = sid.clone();
             let sid_p = sid.clone();
             let sid_sh = sid.clone();
@@ -2555,31 +2298,18 @@ pub fn SingleView(session: &str, focus: Option<String>, on_back: impl Fn() + Clo
             let back_cb = on_back.clone();
             let m_opt = member_info.clone();
 
-            cu::Row()
-                .modifier(Modifier::new().fill_max_width().fill_max_height())
-                .content(move || {
-                    cu::Column()
-                        .modifier(Modifier::new().weight(1.0).fill_max_height())
-                        .content(move || {
+            { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width().fill_max_height(), content = move || {
+                    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0).fill_max_height(), content = move || {
                             // `.topbar` in `.detail` (`grid-template-rows:56px`): 56 high, 20 in
                             // from each side, nothing above or below. The 52 dp row with 12 dp
                             // padding all round left 28 dp, so the 32 dp back square drew 32x28
                             // at x 12 (review r7, conversation-single-390).
-                            cu::Row()
-                                .alignment(Alignment::CenterStart)
-                                .modifier(
-                                    Modifier::new()
+                            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new()
                                         .fill_max_width()
                                         .height(super::theme::TOPBAR_H)
-                                        .background(paint(p.surface)),
-                                )
-                                .content(move || {
-                                    cu::Spacer().modifier(Modifier::new().width(super::theme::TOPBAR_PAD_X));
-                                    cu::Row()
-                                        .alignment(Alignment::CenterStart)
-                                        .space_role(SpaceRole::Sm)
-                                        .modifier(Modifier::new().weight(1.0))
-                                        .content(move || {
+                                        .background(paint(p.surface)), content = move || {
+                                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(super::theme::TOPBAR_PAD_X)) };
+                                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, space_role = SpaceRole::Sm, modifier = Modifier::new().weight(1.0), content = move || {
                                     let b_cb = back_cb.clone();
                                     BackButton(move || b_cb());
                                     if let Some((proj_id, m)) = m_opt {
@@ -2607,7 +2337,7 @@ pub fn SingleView(session: &str, focus: Option<String>, on_back: impl Fn() + Clo
                                             || Pill(st_txt, st_tone.into(), true),
                                         );
                                     } else {
-                                        cu::Spacer().modifier(Modifier::new().weight(1.0));
+                                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                                     }
                                     let io = info_btn.clone();
                                     let pv = pv_btn.clone();
@@ -2618,30 +2348,24 @@ pub fn SingleView(session: &str, focus: Option<String>, on_back: impl Fn() + Clo
                                             io.set(true);
                                         }
                                     });
-                                        });
-                                    cu::Spacer().modifier(Modifier::new().width(super::theme::TOPBAR_PAD_X));
-                                });
-                            cu::Separator(Some(paint(p.line)));
-                            cu::Box()
-                                .modifier(Modifier::new().weight(1.0).fill_max_width())
-                                .content(move || {
+                                        }) };
+                                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(super::theme::TOPBAR_PAD_X)) };
+                                }) };
+                            { use ::compose_rust::ui::Separator; Separator!(Some(paint(p.line))) };
+                            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().weight(1.0).fill_max_width(), content = move || {
                                     ConversationView(&sid_row, true);
-                                });
-                        });
+                                }) };
+                        }) };
                     if show_inline {
-                        cu::Spacer().modifier(
-                            Modifier::new()
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new()
                                 .width(1.0)
                                 .fill_max_height()
-                                .background(paint(p.line)),
-                        );
-                        cu::Column()
-                            .modifier(Modifier::new().width(INFO_PANEL_W).fill_max_height())
-                            .content(move || {
+                                .background(paint(p.line))) };
+                        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().width(INFO_PANEL_W).fill_max_height(), content = move || {
                                 InfoPanel(&sid_p);
-                            });
+                            }) };
                     }
-                });
+                }) };
 
             if !wide {
                 let io_d = info_open.clone();
@@ -2651,15 +2375,13 @@ pub fn SingleView(session: &str, focus: Option<String>, on_back: impl Fn() + Clo
                     move || io_d.set(false),
                     None,
                     move || {
-                        cu::Box()
-                            .modifier(Modifier::new().fill_max_width().height(PANE_H))
-                            .content(move || {
+                        { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().height(PANE_H), content = move || {
                                 InfoPanel(&sid_sh);
-                            });
+                            }) };
                     },
                 );
             }
-        });
+        }) };
 }
 
 fn KpiCard(title: &str, value: &str, sub: &str, tone: Option<Color>) {
@@ -2668,26 +2390,19 @@ fn KpiCard(title: &str, value: &str, sub: &str, tone: Option<Color>) {
     let v = value.to_string();
     let s = sub.to_string();
     let v_col = tone.unwrap_or(p.text);
-    cu::Box()
-        .modifier(
-            Modifier::new()
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                 .weight(1.0)
                 .height(100.0)
                 .background(paint(p.surface))
                 .border(1.0, paint(p.line))
                 .corner_radius(CORNER_LG)
-                .padding(SP[2]),
-        )
-        .content(move || {
-            cu::Column()
-                .spacing(4.0)
-                .modifier(Modifier::new().fill_max_width())
-                .content(move || {
+                .padding(SP[2]), content = move || {
+            { use ::compose_rust::ui::Column; Column!(spacing = 4.0, modifier = Modifier::new().fill_max_width(), content = move || {
                     Label(&t, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));
                     Label(&v, Fs::Xl2, Weight::Regular, Some(paint(v_col)), Some(1));
                     Label(&s, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                });
-        });
+                }) };
+        }) };
 }
 
 fn KanbanColView(
@@ -2710,15 +2425,8 @@ fn KanbanColView(
     if let Some(wg) = weight_opt {
         m = m.weight(wg);
     }
-    cu::Column()
-        .space_role(SpaceRole::Xs)
-        .modifier(m)
-        .content(move || {
-            cu::Row()
-                .alignment(Alignment::CenterStart)
-                .space_role(SpaceRole::Sm)
-                .modifier(Modifier::new().fill_max_width())
-                .content(|| {
+    { use ::compose_rust::ui::Column; Column!(space_role = SpaceRole::Xs, modifier = m, content = move || {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, space_role = SpaceRole::Sm, modifier = Modifier::new().fill_max_width(), {
                     Label(
                         col_lbl,
                         Fs::Sm,
@@ -2726,9 +2434,9 @@ fn KanbanColView(
                         Some(paint(p.text_2)),
                         Some(1),
                     );
-                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                     Pill(&ms.len().to_string(), PillTone::Grey, true);
-                });
+                }) };
             if ms.is_empty() {
                 Label(
                     "없음",
@@ -2757,15 +2465,8 @@ fn KanbanColView(
                         Alignment::CenterStart,
                         move || op_click(id_click.clone()),
                         move || {
-                            cu::Column()
-                                .space_role(SpaceRole::Xs)
-                                .modifier(Modifier::new().fill_max_width())
-                                .content(move || {
-                                    cu::Row()
-                                        .alignment(Alignment::CenterStart)
-                                        .space_role(SpaceRole::Xs)
-                                        .modifier(Modifier::new().fill_max_width())
-                                        .content(move || {
+                            { use ::compose_rust::ui::Column; Column!(space_role = SpaceRole::Xs, modifier = Modifier::new().fill_max_width(), content = move || {
+                                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, space_role = SpaceRole::Xs, modifier = Modifier::new().fill_max_width(), content = move || {
                                             Character(
                                                 &m_agent,
                                                 m_leader,
@@ -2775,9 +2476,7 @@ fn KanbanColView(
                                                 CharState::from_status(m_status),
                                                 None,
                                             );
-                                            cu::Box()
-                                                .modifier(Modifier::new().weight(1.0))
-                                                .content(move || {
+                                            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().weight(1.0), content = move || {
                                                     Label(
                                                         &m_acc,
                                                         Fs::Sm,
@@ -2785,9 +2484,9 @@ fn KanbanColView(
                                                         Some(paint(p.text)),
                                                         Some(1),
                                                     );
-                                                });
+                                                }) };
                                             StatusDot(m_status);
-                                        });
+                                        }) };
                                     Label(
                                         &m_task,
                                         Fs::Xs,
@@ -2802,12 +2501,12 @@ fn KanbanColView(
                                         Some(paint(p.muted)),
                                         Some(1),
                                     );
-                                });
+                                }) };
                         },
                     );
                 });
             }
-        });
+        }) };
 }
 
 #[derive(Clone, Copy)]
@@ -3079,28 +2778,15 @@ fn TimelineCard(project: &str) {
     );
     let hand_swatch_id = compose_rust::asset(AssetKind::Svg, leak_doc(hand_swatch_svg));
 
-    cu::Box()
-        .modifier(
-            Modifier::new()
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                 .fill_max_width()
                 .background(paint(p.surface))
                 .border(1.0, paint(p.line))
-                .corner_radius(CORNER_LG),
-        )
-        .content(move || {
-            cu::Column()
-                .modifier(Modifier::new().fill_max_width())
-                .content(move || {
+                .corner_radius(CORNER_LG), content = move || {
+            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), content = move || {
                     // 1. Header (.tl-head: ~73dp high)
-                    cu::Row()
-                        .alignment(Alignment::CenterStart)
-                        .spacing(SP[2])
-                        .modifier(Modifier::new().fill_max_width().height(72.0).padding(SP[3]))
-                        .content(|| {
-                            cu::Column()
-                                .spacing(4.0)
-                                .modifier(Modifier::new().weight(1.0))
-                                .content(|| {
+                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[2], modifier = Modifier::new().fill_max_width().height(72.0).padding(SP[3]), {
+                            { use ::compose_rust::ui::Column; Column!(spacing = 4.0, modifier = Modifier::new().weight(1.0), {
                                     Label(
                                         TIMELINE_TITLE,
                                         Fs::Lg,
@@ -3108,10 +2794,7 @@ fn TimelineCard(project: &str) {
                                         Some(paint(p.text)),
                                         Some(1),
                                     );
-                                    cu::Row()
-                                        .alignment(Alignment::CenterStart)
-                                        .spacing(6.0)
-                                        .content(|| {
+                                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = 6.0, {
                                             NavIcon(ICON_CHECK_SVG, p.green.strong.to_argb(), 15.0);
                                             Label(
                                                 timeline_summary(services().demo.is_some()),
@@ -3120,37 +2803,24 @@ fn TimelineCard(project: &str) {
                                                 Some(paint(p.muted)),
                                                 Some(1),
                                             );
-                                        });
-                                });
-                        });
-                    cu::Separator(Some(paint(p.line)));
+                                        }) };
+                                }) };
+                        }) };
+                    { use ::compose_rust::ui::Separator; Separator!(Some(paint(p.line))) };
 
                     // 2. Body (.tl-body): left labels column + right SVG Gantt plot + time axis
-                    cu::Column()
-                        .modifier(Modifier::new().fill_max_width())
-                        .content(move || {
-                            cu::Row()
-                                .alignment(Alignment::TopStart)
-                                .modifier(Modifier::new().fill_max_width().height(280.0))
-                                .content(move || {
+                    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), content = move || {
+                            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::TopStart, modifier = Modifier::new().fill_max_width().height(280.0), content = move || {
                                     // Left labels column (.tl-labs)
-                                    cu::Column()
-                                        .modifier(Modifier::new().width(label_w).fill_max_height())
-                                        .content(move || {
+                                    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().width(label_w).fill_max_height(), content = move || {
                                             for (lane_idx, lane) in DEMO_TL_LANES.iter().enumerate()
                                             {
                                                 let pr_l = proj_owned.clone();
                                                 let (strong_col, _) = (lane.tone)(p);
-                                                cu::Row()
-                                                    .alignment(Alignment::CenterStart)
-                                                    .spacing(8.0)
-                                                    .modifier(
-                                                        Modifier::new()
+                                                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = 8.0, modifier = Modifier::new()
                                                             .fill_max_width()
                                                             .height(55.0)
-                                                            .padding(SP[1]),
-                                                    )
-                                                    .content(move || {
+                                                            .padding(SP[1]), content = move || {
                                                         Character(
                                                             lane.agent,
                                                             lane.leader,
@@ -3161,20 +2831,9 @@ fn TimelineCard(project: &str) {
                                                             None,
                                                         );
                                                         if !is_phone {
-                                                            cu::Column()
-                                                                .spacing(2.0)
-                                                                .modifier(
-                                                                    Modifier::new().weight(1.0),
-                                                                )
-                                                                .content(move || {
-                                                                    cu::Row()
-                                                                        .alignment(
-                                                                            Alignment::CenterStart,
-                                                                        )
-                                                                        .spacing(5.0)
-                                                                        .content(move || {
-                                                                            cu::Box().modifier(
-                                                                                Modifier::new()
+                                                            { use ::compose_rust::ui::Column; Column!(spacing = 2.0, modifier = Modifier::new().weight(1.0), content = move || {
+                                                                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = 5.0, content = move || {
+                                                                            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                                                                                     .size(8.0, 8.0)
                                                                                     .background(
                                                                                         paint(
@@ -3183,8 +2842,7 @@ fn TimelineCard(project: &str) {
                                                                                     )
                                                                                     .corner_radius(
                                                                                         4.0,
-                                                                                    ),
-                                                                            );
+                                                                                    )) };
                                                                             Label(
                                                                                 lane.name,
                                                                                 Fs::Sm,
@@ -3199,7 +2857,7 @@ fn TimelineCard(project: &str) {
                                                                                     true,
                                                                                 );
                                                                             }
-                                                                        });
+                                                                        }) };
                                                                     Label(
                                                                         lane.sub,
                                                                         Fs::Xs,
@@ -3207,61 +2865,41 @@ fn TimelineCard(project: &str) {
                                                                         Some(paint(p.muted)),
                                                                         Some(1),
                                                                     );
-                                                                });
+                                                                }) };
                                                         }
-                                                    });
+                                                    }) };
                                                 if lane_idx + 1 < DEMO_TL_LANES.len() {
-                                                    cu::Separator(Some(paint(p.line)));
+                                                    { use ::compose_rust::ui::Separator; Separator!(Some(paint(p.line))) };
                                                 }
                                             }
-                                        });
+                                        }) };
                                     // Vertical separator between label and plot
-                                    cu::Box().modifier(
-                                        Modifier::new()
+                                    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                                             .width(1.0)
                                             .fill_max_height()
-                                            .background(paint(p.line)),
-                                    );
+                                            .background(paint(p.line))) };
                                     // Right Gantt plot area (.tl-lanes + .tl-h + .tl-grid)
-                                    cu::Box()
-                                        .alignment(Alignment::CenterStart)
-                                        .modifier(
-                                            Modifier::new()
+                                    { use ::compose_rust::ui::Box; Box!(alignment = Alignment::CenterStart, modifier = Modifier::new()
                                                 .weight(1.0)
                                                 .fill_max_height()
-                                                .padding(SP[0]),
-                                        )
-                                        .content(move || {
-                                            cu::Image(plot_id)
-                                                .modifier(Modifier::new().size(plot_w, 280.0));
-                                        });
-                                });
-                            cu::Separator(Some(paint(p.line)));
+                                                .padding(SP[0]), content = move || {
+                                            { use ::compose_rust::ui::Image; Image!(plot_id, modifier = Modifier::new().size(plot_w, 280.0)) };
+                                        }) };
+                                }) };
+                            { use ::compose_rust::ui::Separator; Separator!(Some(paint(p.line))) };
                             // Time axis row (.tl-axis)
-                            cu::Row()
-                                .alignment(Alignment::CenterStart)
-                                .modifier(Modifier::new().fill_max_width().height(26.0))
-                                .content(move || {
-                                    cu::Spacer().modifier(Modifier::new().width(label_w));
-                                    cu::Box().modifier(
-                                        Modifier::new()
+                            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width().height(26.0), content = move || {
+                                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(label_w)) };
+                                    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                                             .width(1.0)
                                             .fill_max_height()
-                                            .background(paint(p.line)),
-                                    );
-                                    cu::Row()
-                                        .alignment(Alignment::CenterStart)
-                                        .modifier(
-                                            Modifier::new()
+                                            .background(paint(p.line))) };
+                                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new()
                                                 .weight(1.0)
                                                 .fill_max_height()
-                                                .padding(SP[0]),
-                                        )
-                                        .content(|| {
+                                                .padding(SP[0]), {
                                             for tick in ["0s", "5s", "10s", "15s"] {
-                                                cu::Box()
-                                                    .modifier(Modifier::new().weight(1.0))
-                                                    .content(move || {
+                                                { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().weight(1.0), content = move || {
                                                         Label(
                                                             tick,
                                                             Fs::Xs2,
@@ -3269,7 +2907,7 @@ fn TimelineCard(project: &str) {
                                                             Some(paint(p.muted)),
                                                             Some(1),
                                                         );
-                                                    });
+                                                    }) };
                                             }
                                             Label(
                                                 "16.4s",
@@ -3278,25 +2916,19 @@ fn TimelineCard(project: &str) {
                                                 Some(paint(p.muted)),
                                                 Some(1),
                                             );
-                                        });
-                                });
-                        });
-                    cu::Separator(Some(paint(p.line)));
+                                        }) };
+                                }) };
+                        }) };
+                    { use ::compose_rust::ui::Separator; Separator!(Some(paint(p.line))) };
 
                     // 3. Footer (.tl-foot: ~72dp high): play (40x40), restart (32x32), speed 1x/2x, time, legend
                     let cur_spd = speed.get();
                     let spd_st = speed.clone();
-                    cu::Row()
-                        .alignment(Alignment::CenterStart)
-                        .spacing(SP[2])
-                        .modifier(
-                            Modifier::new()
+                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[2], modifier = Modifier::new()
                                 .fill_max_width()
                                 .height(72.0)
                                 .background(paint(p.surface_2))
-                                .padding(SP[3]),
-                        )
-                        .content(move || {
+                                .padding(SP[3]), content = move || {
                             Clickable(
                                 Modifier::new()
                                     .size(40.0, 40.0)
@@ -3317,17 +2949,12 @@ fn TimelineCard(project: &str) {
                                 || NavIcon(ICON_REPEAT_SVG, p.text_2.to_argb(), 15.0),
                             );
                             // 1x / 2x mini segmented control
-                            cu::Row()
-                                .alignment(Alignment::Center)
-                                .modifier(
-                                    Modifier::new()
+                            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::Center, modifier = Modifier::new()
                                         .height(26.0)
                                         .background(paint(p.surface))
                                         .border(1.0, paint(p.line))
                                         .corner_radius(13.0)
-                                        .padding(2.0),
-                                )
-                                .content(move || {
+                                        .padding(2.0), content = move || {
                                     for (s_val, s_lbl) in [(1_u8, "1x"), (2_u8, "2x")] {
                                         let sel = cur_spd == s_val;
                                         let (bg, fg) = if sel {
@@ -3344,11 +2971,8 @@ fn TimelineCard(project: &str) {
                                             Alignment::Center,
                                             move || sp_c.set(s_val),
                                             move || {
-                                                cu::Row()
-                                                    .alignment(Alignment::Center)
-                                                    .content(|| {
-                                                        cu::Spacer()
-                                                            .modifier(Modifier::new().width(8.0));
+                                                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::Center, {
+                                                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(8.0)) };
                                                         Label(
                                                             s_lbl,
                                                             Fs::Xs,
@@ -3356,13 +2980,12 @@ fn TimelineCard(project: &str) {
                                                             Some(paint(fg)),
                                                             Some(1),
                                                         );
-                                                        cu::Spacer()
-                                                            .modifier(Modifier::new().width(8.0));
-                                                    });
+                                                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(8.0)) };
+                                                    }) };
                                             },
                                         );
                                     }
-                                });
+                                }) };
                             Label(
                                 "16.4s",
                                 Fs::Xs,
@@ -3370,25 +2993,17 @@ fn TimelineCard(project: &str) {
                                 Some(paint(p.muted)),
                                 Some(1),
                             );
-                            cu::Spacer().modifier(Modifier::new().weight(1.0));
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                             if !is_phone {
                                 // 5-item legend (.tl-legend)
-                                cu::Row()
-                                    .alignment(Alignment::CenterStart)
-                                    .spacing(SP[3])
-                                    .content(move || {
+                                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[3], content = move || {
                                         // 1. 생각
-                                        cu::Row()
-                                            .alignment(Alignment::CenterStart)
-                                            .spacing(6.0)
-                                            .content(|| {
-                                                cu::Box().modifier(
-                                                    Modifier::new()
+                                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = 6.0, {
+                                                { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                                                         .size(18.0, 10.0)
                                                         .background(paint(p.blue.soft))
                                                         .border(1.0, paint(p.blue.strong))
-                                                        .corner_radius(3.0),
-                                                );
+                                                        .corner_radius(3.0)) };
                                                 Label(
                                                     "생각",
                                                     Fs::Xs,
@@ -3396,18 +3011,13 @@ fn TimelineCard(project: &str) {
                                                     Some(paint(p.text_2)),
                                                     Some(1),
                                                 );
-                                            });
+                                            }) };
                                         // 2. 도구 호출
-                                        cu::Row()
-                                            .alignment(Alignment::CenterStart)
-                                            .spacing(6.0)
-                                            .content(|| {
-                                                cu::Box().modifier(
-                                                    Modifier::new()
+                                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = 6.0, {
+                                                { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                                                         .size(18.0, 10.0)
                                                         .background(paint(p.blue.strong))
-                                                        .corner_radius(3.0),
-                                                );
+                                                        .corner_radius(3.0)) };
                                                 Label(
                                                     "도구 호출",
                                                     Fs::Xs,
@@ -3415,14 +3025,10 @@ fn TimelineCard(project: &str) {
                                                     Some(paint(p.text_2)),
                                                     Some(1),
                                                 );
-                                            });
+                                            }) };
                                         // 3. 대기 (hatched)
-                                        cu::Row()
-                                            .alignment(Alignment::CenterStart)
-                                            .spacing(6.0)
-                                            .content(move || {
-                                                cu::Image(wait_swatch_id)
-                                                    .modifier(Modifier::new().size(18.0, 10.0));
+                                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = 6.0, content = move || {
+                                                { use ::compose_rust::ui::Image; Image!(wait_swatch_id, modifier = Modifier::new().size(18.0, 10.0)) };
                                                 Label(
                                                     "대기",
                                                     Fs::Xs,
@@ -3430,14 +3036,10 @@ fn TimelineCard(project: &str) {
                                                     Some(paint(p.text_2)),
                                                     Some(1),
                                                 );
-                                            });
+                                            }) };
                                         // 4. 핸드오프 (L-shaped)
-                                        cu::Row()
-                                            .alignment(Alignment::CenterStart)
-                                            .spacing(6.0)
-                                            .content(move || {
-                                                cu::Image(hand_swatch_id)
-                                                    .modifier(Modifier::new().size(10.0, 10.0));
+                                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = 6.0, content = move || {
+                                                { use ::compose_rust::ui::Image; Image!(hand_swatch_id, modifier = Modifier::new().size(10.0, 10.0)) };
                                                 Label(
                                                     "핸드오프",
                                                     Fs::Xs,
@@ -3445,19 +3047,14 @@ fn TimelineCard(project: &str) {
                                                     Some(paint(p.text_2)),
                                                     Some(1),
                                                 );
-                                            });
+                                            }) };
                                         // 5. 실패 (12x12 circle)
-                                        cu::Row()
-                                            .alignment(Alignment::CenterStart)
-                                            .spacing(6.0)
-                                            .content(|| {
-                                                cu::Box().modifier(
-                                                    Modifier::new()
+                                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = 6.0, {
+                                                { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                                                         .size(12.0, 12.0)
                                                         .background(paint(p.red.soft))
                                                         .border(1.0, paint(p.red.strong))
-                                                        .corner_radius(6.0),
-                                                );
+                                                        .corner_radius(6.0)) };
                                                 Label(
                                                     "실패",
                                                     Fs::Xs,
@@ -3465,12 +3062,12 @@ fn TimelineCard(project: &str) {
                                                     Some(paint(p.text_2)),
                                                     Some(1),
                                                 );
-                                            });
-                                    });
+                                            }) };
+                                    }) };
                             }
-                        });
-                });
-        });
+                        }) };
+                }) };
+        }) };
 }
 
 fn tone_pill(t: StatusTone) -> PillTone {
@@ -3519,25 +3116,25 @@ fn StatusCardShell(
     let (fill, weight) = if weighted { (false, Some(1.0)) } else { (true, None) };
     // A weighted card sits in a multi-column row, which is `equal_height`; it fills that height.
     EmberCardSized(false, fill, weighted, weight, Some(0.0), None, move || {
-        cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
-            cu::Spacer().modifier(Modifier::new().height(13.0));
-            cu::Row().modifier(Modifier::new().fill_max_width()).content(move || {
-                cu::Spacer().modifier(Modifier::new().width(SP[4]));
-                cu::Box().modifier(Modifier::new().weight(1.0)).content(move || {
+        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), content = move || {
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(13.0)) };
+            { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width(), content = move || {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[4])) };
+                { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().weight(1.0), content = move || {
                     CardHead(ico, &title, trailing);
-                });
-                cu::Spacer().modifier(Modifier::new().width(SP[4]));
-            });
-            cu::Spacer().modifier(Modifier::new().height(13.0));
-            cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
-            cu::Spacer().modifier(Modifier::new().height(SP[3]));
-            cu::Row().modifier(Modifier::new().fill_max_width()).content(move || {
-                cu::Spacer().modifier(Modifier::new().width(SP[4]));
-                cu::Column().modifier(Modifier::new().weight(1.0)).content(body);
-                cu::Spacer().modifier(Modifier::new().width(SP[4]));
-            });
-            cu::Spacer().modifier(Modifier::new().height(SP[3]));
-        });
+                }) };
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[4])) };
+            }) };
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(13.0)) };
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().fill_max_width().height(1.0).background(paint(p.line))) };
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[3])) };
+            { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width(), content = move || {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[4])) };
+                { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), content = body) };
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[4])) };
+            }) };
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[3])) };
+        }) };
     });
 }
 
@@ -3555,33 +3152,28 @@ fn EmptyText(text: &str) {
 fn PrRowView(row: PrRow, first: bool) {
     let p = ember_theme().palette;
     // The divider sits between rows with 12 dp above and below, clear of the right column.
-    cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
+    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), content = move || {
         if !first {
-            cu::Spacer().modifier(Modifier::new().height(SP[2]));
-            cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
-            cu::Spacer().modifier(Modifier::new().height(SP[2]));
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[2])) };
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().fill_max_width().height(1.0).background(paint(p.line))) };
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[2])) };
         }
-        cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(move || {
-            cu::Box()
-                .alignment(Alignment::Center)
-                .modifier(
-                    Modifier::new()
+        { use ::compose_rust::ui::Row; Row!(spacing = SP[2], alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), content = move || {
+            { use ::compose_rust::ui::Box; Box!(alignment = Alignment::Center, modifier = Modifier::new()
                         .size(36.0, 36.0)
                         .background(paint(p.surface_2))
                         .border(1.0, paint(p.line))
-                        .corner_radius(CORNER_SM),
-                )
-                .content(|| NavIcon(ICON_GIT_SVG, p.text_2.to_argb(), 18.0));
-            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                        .corner_radius(CORNER_SM), content = || NavIcon(ICON_GIT_SVG, p.text_2.to_argb(), 18.0)) };
+            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), {
                 Label(&row.headline(), Fs::Md, Weight::Medium, None, Some(1));
                 Label(&row.sub_line(), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-            });
-            cu::Column().spacing(SP[0]).content(|| {
+            }) };
+            { use ::compose_rust::ui::Column; Column!(spacing = SP[0], {
                 Pill(row.ci.label(), tone_pill(row.ci.tone()), false);
                 Label(&row.review, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-            });
-        });
-    });
+            }) };
+        }) };
+    }) };
 }
 
 /// `.tnode`: an avatar for a member, a spinner or a status dot for a thread, then name and task.
@@ -3595,8 +3187,8 @@ const TREE_CHILD_PAD: f32 = 12.0;
 
 fn TreeNodeView(node: SubNode, project: String) {
     let p = ember_theme().palette;
-    cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
-        cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), content = move || {
+        { use ::compose_rust::ui::Row; Row!(spacing = SP[1], alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
             match &node.member {
                 Some(m) => Character(
                     &m.agent,
@@ -3619,40 +3211,36 @@ fn TreeNodeView(node: SubNode, project: String) {
                 Label(node.status.label(), Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));
             }
             Label(&node.task, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-        });
+        }) };
         if !node.children.is_empty() {
-            cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
-                cu::Spacer().modifier(Modifier::new().width(TREE_GUIDE_INSET));
-                cu::Row()
-                    .modifier(
-                        Modifier::new()
+            { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width(), {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(TREE_GUIDE_INSET)) };
+                { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new()
                             .weight(1.0)
-                            .border_side(Side::Start, 1.0, paint(p.line)),
-                    )
-                    .content(|| {
-                        cu::Spacer().modifier(Modifier::new().width(TREE_CHILD_PAD));
-                        cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                            .border_side(Side::Start, 1.0, paint(p.line)), {
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(TREE_CHILD_PAD)) };
+                        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), {
                             for c in node.children.iter() {
                                 TreeNodeView(c.clone(), project.clone());
                             }
-                        });
-                    });
-            });
+                        }) };
+                    }) };
+            }) };
         }
-    });
+    }) };
 }
 
 /// `.sl-row`: a lead, a fixed-width name, a track and a value.
 fn UsageRow(lead: impl FnOnce(), name: &str, name_w: f32, pct: f32, fill: Color, value: &str) {
     let p = ember_theme().palette;
-    cu::Row().spacing(10.0).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+    { use ::compose_rust::ui::Row; Row!(spacing = 10.0, alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
         lead();
-        cu::Box().modifier(Modifier::new().width(name_w)).content(|| {
+        { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().width(name_w), {
             Label(name, Fs::Sm, Weight::Regular, None, Some(1));
-        });
-        cu::Box().modifier(Modifier::new().weight(1.0)).content(|| TrackBar(pct, 6.0, fill));
+        }) };
+        { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().weight(1.0), content = || TrackBar(pct, 6.0, fill)) };
         Label(value, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-    });
+    }) };
 }
 
 fn PrCard(weighted: bool, d: StatusCardsData) {
@@ -3688,7 +3276,7 @@ fn LoadCard(weighted: bool, d: StatusCardsData) {
     let p = ember_theme().palette;
     let name_w = if d.compact { 90.0 } else { 118.0 };
     StatusCardShell(weighted, ICON_CPU_SVG, LOAD_CARD_TITLE, || {}, move || {
-        cu::Column().spacing(SP[0]).modifier(Modifier::new().fill_max_width()).content(|| {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[0], modifier = Modifier::new().fill_max_width(), {
             Label(TOKENS_CAPTION, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
             if d.tokens.is_empty() {
                 EmptyText(TOKENS_EMPTY);
@@ -3716,7 +3304,7 @@ fn LoadCard(weighted: bool, d: StatusCardsData) {
                     &token_value_text(t.k),
                 );
             }
-            cu::Spacer().modifier(Modifier::new().height(SP[1]));
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[1])) };
             Label(COMPUTERS_CAPTION, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
             if d.computers.is_empty() {
                 EmptyText(COMPUTERS_EMPTY);
@@ -3738,12 +3326,12 @@ fn LoadCard(weighted: bool, d: StatusCardsData) {
             }
             // The real session counts, not in the mockup, kept under the computers.
             if !d.counts.is_empty() {
-                cu::Spacer().modifier(Modifier::new().height(SP[1]));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[1])) };
             }
             for r in d.counts.iter() {
                 Label(r, Fs::Sm, Weight::Regular, None, Some(1));
             }
-        });
+        }) };
     });
 }
 
@@ -3763,28 +3351,28 @@ fn StatusCardsGrid(width_dp: f32, d: StatusCardsData) {
     let (d1, d2, d3) = (d.clone(), d.clone(), d);
     match status_grid_columns(width_dp) {
         3 => {
-            cu::Row().alignment(Alignment::TopStart).spacing(SP[4]).equal_height(status_cards_equal_height(3)).modifier(Modifier::new().fill_max_width()).content(move || {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::TopStart, spacing = SP[4], intrinsic_size = status_cards_equal_height(3), modifier = Modifier::new().fill_max_width(), content = move || {
                 PrCard(true, d1);
                 SubagentCard(true, d2);
                 LoadCard(true, d3);
-            });
+            }) };
         }
         2 => {
-            cu::Column().spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(move || {
-                cu::Row().alignment(Alignment::TopStart).spacing(SP[4]).equal_height(status_cards_equal_height(2)).modifier(Modifier::new().fill_max_width()).content(move || {
+            { use ::compose_rust::ui::Column; Column!(spacing = SP[4], modifier = Modifier::new().fill_max_width(), content = move || {
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::TopStart, spacing = SP[4], intrinsic_size = status_cards_equal_height(2), modifier = Modifier::new().fill_max_width(), content = move || {
                     PrCard(true, d1);
                     SubagentCard(true, d2);
-                });
+                }) };
                 LoadCard(false, d3);
-            });
+            }) };
         }
         _ => {
             let w = status_card_width(width_dp, 1, SP[4]);
-            cu::Column().spacing(SP[4]).modifier(Modifier::new().width(w)).content(move || {
+            { use ::compose_rust::ui::Column; Column!(spacing = SP[4], modifier = Modifier::new().width(w), content = move || {
                 PrCard(false, d1);
                 SubagentCard(false, d2);
                 LoadCard(false, d3);
-            });
+            }) };
         }
     }
 }
@@ -3879,17 +3467,10 @@ pub fn StatusView(
     };
     let wide_kanban = window.width_dp >= 1280.0;
 
-    cu::ScrollColumn()
-        .modifier(Modifier::new().fill_max_width().fill_max_height())
-        .content(move || {
-            cu::Column()
-                .space_role(SpaceRole::Md)
-                .modifier(
-                    Modifier::new()
+    { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().fill_max_width().fill_max_height(), content = move || {
+            { use ::compose_rust::ui::Column; Column!(space_role = SpaceRole::Md, modifier = Modifier::new()
                         .fill_max_width()
-                        .padding(status_page_pad(window.width_dp)),
-                )
-                .content(move || {
+                        .padding(status_page_pad(window.width_dp)), content = move || {
                     // Review captures: `EMBER_CR_SCROLL=cards` leaves out the blocks above the cards.
                     if status_blocks_above_cards(std::env::var("EMBER_CR_SCROLL").ok().as_deref()) {
                         // 1. 6 KPI cards grid (.skpis)
@@ -3898,14 +3479,11 @@ pub fn StatusView(
                             .map(|c| c.to_vec())
                             .collect();
                         for row in kpi_rows {
-                            cu::Row()
-                                .space_role(SpaceRole::Sm)
-                                .modifier(Modifier::new().fill_max_width())
-                                .content(move || {
+                            { use ::compose_rust::ui::Row; Row!(space_role = SpaceRole::Sm, modifier = Modifier::new().fill_max_width(), content = move || {
                                     for (t, v, s, tone) in row {
                                         KpiCard(&t, &v, &s, tone);
                                     }
-                                });
+                                }) };
                         }
 
                         // 2. Agent-to-agent communication timeline card (.tlcard)
@@ -3916,18 +3494,11 @@ pub fn StatusView(
                         let proj_k = proj_owned.clone();
                         let open_k = on_open.clone();
                         EmberCard(false, true, None, None, None, move || {
-                            cu::Column()
-                                .space_role(SpaceRole::Sm)
-                                .modifier(Modifier::new().fill_max_width())
-                                .content(move || {
-                                    cu::Row()
-                                        .alignment(Alignment::CenterStart)
-                                        .space_role(SpaceRole::Sm)
-                                        .modifier(Modifier::new().fill_max_width())
-                                        .content(|| {
+                            { use ::compose_rust::ui::Column; Column!(space_role = SpaceRole::Sm, modifier = Modifier::new().fill_max_width(), content = move || {
+                                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, space_role = SpaceRole::Sm, modifier = Modifier::new().fill_max_width(), {
                                             NavIcon(ICON_GRID_SVG, p.text_2.to_argb(), 16.0);
                                             Label("칸반", Fs::Md, Weight::Semibold, None, Some(1));
-                                            cu::Spacer().modifier(Modifier::new().weight(1.0));
+                                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                                             Label(
                                                 &format!("팀원 {total_cnt}"),
                                                 Fs::Xs,
@@ -3935,14 +3506,10 @@ pub fn StatusView(
                                                 Some(paint(p.muted)),
                                                 Some(1),
                                             );
-                                        });
+                                        }) };
 
                                     if wide_kanban {
-                                        cu::Row()
-                                            .alignment(Alignment::TopStart)
-                                            .space_role(SpaceRole::Sm)
-                                            .modifier(Modifier::new().fill_max_width())
-                                            .content(move || {
+                                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::TopStart, space_role = SpaceRole::Sm, modifier = Modifier::new().fill_max_width(), content = move || {
                                                 for (col, ms) in cols_c.iter() {
                                                     KanbanColView(
                                                         col.label(),
@@ -3953,15 +3520,10 @@ pub fn StatusView(
                                                         open_k.clone(),
                                                     );
                                                 }
-                                            });
+                                            }) };
                                     } else {
-                                        cu::ScrollRow()
-                                            .modifier(Modifier::new().fill_max_width())
-                                            .content(move || {
-                                                cu::Row()
-                                                    .alignment(Alignment::TopStart)
-                                                    .space_role(SpaceRole::Sm)
-                                                    .content(move || {
+                                        { use ::compose_rust::ui::ScrollRow; ScrollRow!(modifier = Modifier::new().fill_max_width(), content = move || {
+                                                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::TopStart, space_role = SpaceRole::Sm, content = move || {
                                                         for (col, ms) in cols_c.iter() {
                                                             KanbanColView(
                                                                 col.label(),
@@ -3972,10 +3534,10 @@ pub fn StatusView(
                                                                 open_k.clone(),
                                                             );
                                                         }
-                                                    });
-                                            });
+                                                    }) };
+                                            }) };
                                     }
-                                });
+                                }) };
                         });
                     }
 
@@ -3996,9 +3558,9 @@ pub fn StatusView(
                         },
                     );
 
-                    cu::Spacer().modifier(Modifier::new().height(24.0));
-                });
-        });
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(24.0)) };
+                }) };
+        }) };
 }
 
 fn view_icon_svg(v: SessionView) -> &'static str {
@@ -4026,10 +3588,7 @@ fn ViewSeg(
     if full_width {
         m = m.fill_max_width();
     }
-    cu::Row()
-        .alignment(Alignment::Center)
-        .modifier(m)
-        .content(move || {
+    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::Center, modifier = m, content = move || {
             for v in SessionView::ALL {
                 let selected = cur == v;
                 let (bg, fg) = if selected {
@@ -4050,11 +3609,8 @@ fn ViewSeg(
                     Alignment::Center,
                     move || cb(v),
                     move || {
-                        cu::Row()
-                            .alignment(Alignment::Center)
-                            .spacing(5.0)
-                            .content(|| {
-                                cu::Spacer().modifier(Modifier::new().width(10.0));
+                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::Center, spacing = 5.0, {
+                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(10.0)) };
                                 NavIcon(view_icon_svg(v), fg.to_argb(), 14.0);
                                 if !hide_label {
                                     Label(
@@ -4069,12 +3625,12 @@ fn ViewSeg(
                                         Some(1),
                                     );
                                 }
-                                cu::Spacer().modifier(Modifier::new().width(10.0));
-                            });
+                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(10.0)) };
+                            }) };
                     },
                 );
             }
-        });
+        }) };
 }
 
 /// The head of the session project menu: what is chosen now.
@@ -4238,13 +3794,10 @@ fn ToolbarBtn(
         Some(open) => m.expanded(open),
         None => m,
     };
-    NamedClickable(label, m, Alignment::Center, on_click, move || cu::Tooltip(tip).content(move || {
+    NamedClickable(label, m, Alignment::Center, on_click, move || { use ::compose_rust::ui::Tooltip; Tooltip!(tip, content = move || {
         if show_label || chevron {
-            cu::Row()
-                .alignment(Alignment::CenterStart)
-                .spacing(5.0)
-                .content(|| {
-                    cu::Spacer().modifier(Modifier::new().width(8.0));
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = 5.0, {
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(8.0)) };
                     NavIcon(icon_svg, p.text_2.to_argb(), 14.0);
                     if show_label {
                         Label(
@@ -4258,12 +3811,12 @@ fn ToolbarBtn(
                     if chevron {
                         NavIcon(ICON_CHEVRON_DOWN_SVG, p.muted.to_argb(), 12.0);
                     }
-                    cu::Spacer().modifier(Modifier::new().width(8.0));
-                });
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(8.0)) };
+                }) };
         } else {
             NavIcon(icon_svg, p.text_2.to_argb(), 15.0);
         }
-    }));
+    }) });
 }
 
 /// New member sheet (`#snew` in mockup `session.js` lines 386-395).
@@ -4366,17 +3919,12 @@ pub(super) fn NewMemberSheet(
     let is_compact = current_window_size().is_compact();
     let body = move || {
         let mut cl_h = close_hdr.clone();
-        cu::Column()
-            .modifier(Modifier::new().fill_max_width())
-            .content(|| {
+        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), {
                 // Header (.sheet-h): title + project name on the left, close button on the right
-                cu::Row()
-                    .alignment(Alignment::CenterStart)
-                    .modifier(Modifier::new().fill_max_width().height(SHEET_HEADER_H))
-                    .content(move || {
-                        cu::Spacer().modifier(Modifier::new().width(SP[4]));
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width().height(SHEET_HEADER_H), content = move || {
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[4])) };
                         Label("새 팀원", Fs::Xl, Weight::Semibold, None, Some(1));
-                        cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
                         Label(
                             &proj_disp,
                             Fs::Md,
@@ -4384,21 +3932,15 @@ pub(super) fn NewMemberSheet(
                             Some(paint(p.muted)),
                             Some(1),
                         );
-                        cu::Spacer().modifier(Modifier::new().weight(1.0));
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                         CloseButton(move || cl_h());
-                        cu::Spacer().modifier(Modifier::new().width(SP[4]));
-                    });
-                cu::Separator(Some(paint(p.line)));
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[4])) };
+                    }) };
+                { use ::compose_rust::ui::Separator; Separator!(Some(paint(p.line))) };
 
-                cu::Column()
-                    .spacing(16.0)
-                    .modifier(Modifier::new().fill_max_width().padding(SP[4]))
-                    .content(|| {
+                { use ::compose_rust::ui::Column; Column!(spacing = 16.0, modifier = Modifier::new().fill_max_width().padding(SP[4]), {
                         // 1. 역할 이름 (.field: 40dp, 1px line border, surface fill)
-                        cu::Column()
-                            .spacing(8.0)
-                            .modifier(Modifier::new().fill_max_width())
-                            .content(|| {
+                        { use ::compose_rust::ui::Column; Column!(spacing = 8.0, modifier = Modifier::new().fill_max_width(), {
                                 Label(
                                     "역할 이름",
                                     Fs::Sm,
@@ -4407,18 +3949,13 @@ pub(super) fn NewMemberSheet(
                                     Some(1),
                                 );
                                 let val_r = role_name.get();
-                                cu::Box()
-                                    .alignment(Alignment::CenterStart)
-                                    .modifier(
-                                        Modifier::new()
+                                { use ::compose_rust::ui::Box; Box!(alignment = Alignment::CenterStart, modifier = Modifier::new()
                                             .fill_max_width()
                                             .height(H_BTN)
                                             .background(paint(p.surface))
                                             .border(1.0, paint(p.line))
                                             .corner_radius(CORNER_SM)
-                                            .padding(SP[2]),
-                                    )
-                                    .content(move || {
+                                            .padding(SP[2]), content = move || {
                                         if val_r.is_empty() {
                                             Label(
                                                 "예: 구현, 리뷰, 문서",
@@ -4436,14 +3973,11 @@ pub(super) fn NewMemberSheet(
                                                 Some(1),
                                             );
                                         }
-                                    });
-                            });
+                                    }) };
+                            }) };
 
                         // 2. 첫 지시 (선택) (textarea.field: 118dp, 1px line border, surface fill)
-                        cu::Column()
-                            .spacing(8.0)
-                            .modifier(Modifier::new().fill_max_width())
-                            .content(|| {
+                        { use ::compose_rust::ui::Column; Column!(spacing = 8.0, modifier = Modifier::new().fill_max_width(), {
                                 Label(
                                     "첫 지시 (선택)",
                                     Fs::Sm,
@@ -4452,18 +3986,13 @@ pub(super) fn NewMemberSheet(
                                     Some(1),
                                 );
                                 let val_p = prompt_txt.get();
-                                cu::Box()
-                                    .alignment(Alignment::TopStart)
-                                    .modifier(
-                                        Modifier::new()
+                                { use ::compose_rust::ui::Box; Box!(alignment = Alignment::TopStart, modifier = Modifier::new()
                                             .fill_max_width()
                                             .height(118.0)
                                             .background(paint(p.surface))
                                             .border(1.0, paint(p.line))
                                             .corner_radius(CORNER_SM)
-                                            .padding(SP[2]),
-                                    )
-                                    .content(move || {
+                                            .padding(SP[2]), content = move || {
                                         if val_p.is_empty() {
                                             Label(
                                                 "이 팀원이 할 일을 적으세요",
@@ -4481,14 +4010,11 @@ pub(super) fn NewMemberSheet(
                                                 Some(4),
                                             );
                                         }
-                                    });
-                            });
+                                    }) };
+                            }) };
 
                         // 3. 하네스, 모델, 권한 모드 (.snew-picks: 40dp height, CORNER_SM)
-                        cu::Column()
-                            .spacing(8.0)
-                            .modifier(Modifier::new().fill_max_width())
-                            .content(|| {
+                        { use ::compose_rust::ui::Column; Column!(spacing = 8.0, modifier = Modifier::new().fill_max_width(), {
                                 Label(
                                     "하네스, 모델, 권한 모드",
                                     Fs::Sm,
@@ -4496,11 +4022,7 @@ pub(super) fn NewMemberSheet(
                                     Some(paint(p.text_2)),
                                     Some(1),
                                 );
-                                cu::Row()
-                                    .alignment(Alignment::CenterStart)
-                                    .spacing(SP[1])
-                                    .modifier(Modifier::new().fill_max_width())
-                                    .content(|| {
+                                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
                                         Clickable(
                                             Modifier::new()
                                                 .height(H_BTN)
@@ -4510,18 +4032,12 @@ pub(super) fn NewMemberSheet(
                                             Alignment::CenterStart,
                                             || notice::post("데모에서는 기본 모델을 사용합니다"),
                                             || {
-                                                cu::Row()
-                                                    .alignment(Alignment::CenterStart)
-                                                    .spacing(6.0)
-                                                    .content(|| {
-                                                        cu::Spacer()
-                                                            .modifier(Modifier::new().width(10.0));
-                                                        cu::Box().modifier(
-                                                            Modifier::new()
+                                                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = 6.0, {
+                                                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(10.0)) };
+                                                        { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                                                                 .size(8.0, 8.0)
                                                                 .background(paint(p.orange.strong))
-                                                                .corner_radius(4.0),
-                                                        );
+                                                                .corner_radius(4.0)) };
                                                         Label(
                                                             "Claude Code · Opus 5.5 · 높음",
                                                             Fs::Sm,
@@ -4534,9 +4050,8 @@ pub(super) fn NewMemberSheet(
                                                             p.muted.to_argb(),
                                                             12.0,
                                                         );
-                                                        cu::Spacer()
-                                                            .modifier(Modifier::new().width(10.0));
-                                                    });
+                                                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(10.0)) };
+                                                    }) };
                                             },
                                         );
                                         Clickable(
@@ -4548,12 +4063,8 @@ pub(super) fn NewMemberSheet(
                                             Alignment::CenterStart,
                                             || notice::post("권한 모드는 세션에서도 바꿀 수 있습니다"),
                                             || {
-                                                cu::Row()
-                                                    .alignment(Alignment::CenterStart)
-                                                    .spacing(6.0)
-                                                    .content(|| {
-                                                        cu::Spacer()
-                                                            .modifier(Modifier::new().width(10.0));
+                                                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = 6.0, {
+                                                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(10.0)) };
                                                         NavIcon(
                                                             ICON_SHIELD_SVG,
                                                             p.text_2.to_argb(),
@@ -4571,12 +4082,11 @@ pub(super) fn NewMemberSheet(
                                                             p.muted.to_argb(),
                                                             12.0,
                                                         );
-                                                        cu::Spacer()
-                                                            .modifier(Modifier::new().width(10.0));
-                                                    });
+                                                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(10.0)) };
+                                                    }) };
                                             },
                                         );
-                                    });
+                                    }) };
                                 Label(
                                     "프로필 Claude 개인",
                                     Fs::Xs,
@@ -4584,13 +4094,10 @@ pub(super) fn NewMemberSheet(
                                     Some(paint(p.muted)),
                                     Some(1),
                                 );
-                            });
+                            }) };
 
                         // 4. 컴퓨터
-                        cu::Column()
-                            .spacing(8.0)
-                            .modifier(Modifier::new().fill_max_width())
-                            .content(|| {
+                        { use ::compose_rust::ui::Column; Column!(spacing = 8.0, modifier = Modifier::new().fill_max_width(), {
                                 Label(
                                     "컴퓨터",
                                     Fs::Sm,
@@ -4599,15 +4106,9 @@ pub(super) fn NewMemberSheet(
                                     Some(1),
                                 );
                                 let ci = comp_idx.clone();
-                                Select(
-                                    &comp_opts[c_idx.min(comp_opts.len() - 1)],
-                                    &comp_opts,
-                                    c_idx,
-                                    440.0,
-                                    move |i| ci.set(i),
-                                );
-                            });
-                    });
+                                Select(&comp_opts[c_idx.min(comp_opts.len() - 1)], &comp_opts, c_idx, 440.0, move |i| ci.set(i));
+                            }) };
+                    }) };
                 SheetFooter(move || {
                     let mut cl = close_f.clone();
                     Clickable(
@@ -4619,8 +4120,8 @@ pub(super) fn NewMemberSheet(
                         Alignment::Center,
                         move || cl(),
                         || {
-                            cu::Row().alignment(Alignment::Center).content(|| {
-                                cu::Spacer().modifier(Modifier::new().width(12.0));
+                            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::Center, {
+                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(12.0)) };
                                 Label(
                                     "취소",
                                     Fs::Sm,
@@ -4628,8 +4129,8 @@ pub(super) fn NewMemberSheet(
                                     Some(paint(p.text)),
                                     Some(1),
                                 );
-                                cu::Spacer().modifier(Modifier::new().width(12.0));
-                            });
+                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(12.0)) };
+                            }) };
                         },
                     );
                     let mut cr = create_cb.clone();
@@ -4646,8 +4147,8 @@ pub(super) fn NewMemberSheet(
                             }
                         },
                         || {
-                            cu::Row().alignment(Alignment::Center).content(|| {
-                                cu::Spacer().modifier(Modifier::new().width(12.0));
+                            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::Center, {
+                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(12.0)) };
                                 Label(
                                     "만들기",
                                     Fs::Sm,
@@ -4655,24 +4156,18 @@ pub(super) fn NewMemberSheet(
                                     Some(paint(p.ink_text)),
                                     Some(1),
                                 );
-                                cu::Spacer().modifier(Modifier::new().width(12.0));
-                            });
+                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(12.0)) };
+                            }) };
                         },
                     );
                 });
-            });
+            }) };
     };
 
     if is_compact {
-        cu::Sheet(true)
-            .modifier(modifier.fill_max_width())
-            .on_dismiss(close_guarded)
-            .content(body);
+        { use ::compose_rust::ui::Sheet; Sheet!(true, close_guarded, modifier = modifier.fill_max_width(), content = body) };
     } else {
-        cu::Dialog(true)
-            .modifier(modifier.width(758.0))
-            .on_dismiss(close_guarded)
-            .content(body);
+        { use ::compose_rust::ui::Dialog; Dialog!(true, close_guarded, modifier = modifier.width(758.0), content = body) };
     }
 }
 
@@ -4740,14 +4235,8 @@ pub fn SessionScreen(focus: Option<String>) {
     };
 
     let Some(current) = resolve_project(None, project.get().as_deref(), &boxes) else {
-        cu::Box()
-            .alignment(Alignment::Center)
-            .modifier(Modifier::new().fill_max_width().fill_max_height())
-            .content(|| {
-                cu::Column()
-                    .alignment(Alignment::Center)
-                    .space_role(SpaceRole::Sm)
-                    .content(|| {
+        { use ::compose_rust::ui::Box; Box!(alignment = Alignment::Center, modifier = Modifier::new().fill_max_width().fill_max_height(), {
+                { use ::compose_rust::ui::Column; Column!(alignment = Alignment::Center, space_role = SpaceRole::Sm, {
                         Label(NO_PROJECT, Fs::Xl, Weight::Medium, None, Some(1));
                         let u = ui.clone();
                         AppButton(
@@ -4759,8 +4248,8 @@ pub fn SessionScreen(focus: Option<String>) {
                             false,
                             move || u.open_new_session(None),
                         );
-                    });
-            });
+                    }) };
+            }) };
         return;
     };
 
@@ -4939,10 +4428,7 @@ pub fn SessionScreen(focus: Option<String>) {
     }
     let sub_line = sub_parts.join(" · ");
 
-    cu::Box()
-        .alignment(Alignment::TopStart)
-        .modifier(Modifier::new().fill_max_width().fill_max_height())
-        .content(move || {
+    { use ::compose_rust::ui::Box; Box!(alignment = Alignment::TopStart, modifier = Modifier::new().fill_max_width().fill_max_height(), content = move || {
             let sections_col = sections.clone();
             let current_col = current.clone();
             let target_col = target.clone();
@@ -4951,18 +4437,12 @@ pub fn SessionScreen(focus: Option<String>) {
             let rc_col = rail_collapsed.clone();
             let dr_rail = drawer.clone();
 
-            cu::Row()
-                .modifier(Modifier::new().fill_max_width().fill_max_height())
-                .content(|| {
+            { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width().fill_max_height(), {
                     if show_column {
-                        cu::Column()
-                            .modifier(
-                                Modifier::new()
+                        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new()
                                     .width(SIDE_LIST_W)
                                     .fill_max_height()
-                                    .background(paint(p.surface_2)),
-                            )
-                            .content(move || {
+                                    .background(paint(p.surface_2)), content = move || {
                                 let q_st = query_col.clone();
                                 let rc_btn = rc_col.clone();
                                 SideList(
@@ -4974,13 +4454,11 @@ pub fn SessionScreen(focus: Option<String>) {
                                     move |q| q_st.set(q),
                                     open_col.clone(),
                                 );
-                            });
-                        cu::Spacer().modifier(
-                            Modifier::new()
+                            }) };
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new()
                                 .width(1.0)
                                 .fill_max_height()
-                                .background(paint(p.line)),
-                        );
+                                .background(paint(p.line))) };
                     } else if show_rail {
                         let sec_r = sections_col.clone();
                         let tgt_r = target_col.clone();
@@ -4999,17 +4477,13 @@ pub fn SessionScreen(focus: Option<String>) {
                             },
                             op_r,
                         );
-                        cu::Spacer().modifier(
-                            Modifier::new()
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new()
                                 .width(1.0)
                                 .fill_max_height()
-                                .background(paint(p.line)),
-                        );
+                                .background(paint(p.line))) };
                     }
 
-                    cu::Column()
-                        .modifier(Modifier::new().weight(1.0).fill_max_height())
-                        .content(|| {
+                    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0).fill_max_height(), {
                             // Top toolbar (.sesshead)
                             // The version control, web page and IDE controls. At 560 and below the
                             // mockup's header wraps (`.sesshead{flex-wrap:wrap;padding-right:60px}`):
@@ -5036,20 +4510,14 @@ pub fn SessionScreen(focus: Option<String>) {
                                     );
                                 }
                             };
-                            cu::Row()
-                                .alignment(Alignment::CenterStart)
-                                .spacing(6.0)
-                                .modifier(
-                                    Modifier::new()
+                            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = 6.0, modifier = Modifier::new()
                                         .fill_max_width()
                                         .height(if is_phone { PHONE_HEAD_ROW_H } else { 60.0 })
                                         .background(paint(p.surface))
                                         // Phone: 8 around the 32 dp controls (one padding for all
                                         // sides; the mockup's start is 12) and 60 at the end with
                                         // the menu room.
-                                        .padding(if is_phone { SP[1] } else { SP[2] }),
-                                )
-                                .content(|| {
+                                        .padding(if is_phone { SP[1] } else { SP[2] }), {
                                     if is_phone {
                                         let dr = drawer.clone();
                                         NamedClickable(
@@ -5080,13 +4548,8 @@ pub fn SessionScreen(focus: Option<String>) {
                                         Alignment::CenterStart,
                                         move || pm.set(!pm.get_untracked()),
                                         move || {
-                                            cu::Column()
-                                                .spacing(1.0)
-                                                .content(move || {
-                                                    cu::Row()
-                                                        .alignment(Alignment::CenterStart)
-                                                        .spacing(4.0)
-                                                        .content(|| {
+                                            { use ::compose_rust::ui::Column; Column!(spacing = 1.0, content = move || {
+                                                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = 4.0, {
                                                             Label(
                                                                 &p_name,
                                                                 if is_phone {
@@ -5103,7 +4566,7 @@ pub fn SessionScreen(focus: Option<String>) {
                                                                 p.muted.to_argb(),
                                                                 13.0,
                                                             );
-                                                        });
+                                                        }) };
                                                     Label(
                                                         &s_line,
                                                         Fs::Xs2,
@@ -5111,7 +4574,7 @@ pub fn SessionScreen(focus: Option<String>) {
                                                         Some(paint(p.muted)),
                                                         Some(1),
                                                     );
-                                                });
+                                                }) };
                                         },
                                     );
                                     };
@@ -5123,7 +4586,7 @@ pub fn SessionScreen(focus: Option<String>) {
                                         ProjectSwitchMenu(&project_menu, &boxes, &current, &project, &ui, control);
                                     }
                                     if !is_phone {
-                                        cu::Spacer().modifier(Modifier::new().weight(1.0));
+                                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                                     }
                                     if !chips_below {
                                         let sv = set_view.clone();
@@ -5137,50 +4600,35 @@ pub fn SessionScreen(focus: Option<String>) {
                                     }
                                     if is_phone {
                                         // Keep the first row clear of the shell's floating menu button.
-                                        cu::Spacer().modifier(
-                                            Modifier::new().width(super::project::PHONE_MENU_ROOM),
-                                        );
+                                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(super::project::PHONE_MENU_ROOM)) };
                                     } else {
                                         trailing();
                                     }
-                                });
+                                }) };
                             if is_phone {
                                 // The wrapped second row: version control, web pages, IDE.
-                                cu::Row()
-                                    .alignment(Alignment::CenterStart)
-                                    .spacing(6.0)
-                                    .modifier(
-                                        Modifier::new()
+                                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = 6.0, modifier = Modifier::new()
                                             .fill_max_width()
                                             .background(paint(p.surface))
-                                            .padding(SP[1]),
-                                    )
-                                    .content(|| {
+                                            .padding(SP[1]), {
                                         trailing();
-                                    });
+                                    }) };
                             }
 
                             if chips_below {
-                                cu::Row()
-                                    .alignment(Alignment::CenterStart)
-                                    .modifier(
-                                        Modifier::new()
+                                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new()
                                             .fill_max_width()
                                             .background(paint(p.surface))
-                                            .padding(SP[1]),
-                                    )
-                                    .content(|| {
+                                            .padding(SP[1]), {
                                         let sv = set_view.clone();
                                         ViewSeg(view_now, hide_view_lbl, true, move |v| sv(v));
-                                    });
+                                    }) };
                             }
 
-                            cu::Separator(Some(paint(p.line)));
+                            { use ::compose_rust::ui::Separator; Separator!(Some(paint(p.line))) };
 
                             // Body view
-                            cu::Box()
-                                .modifier(Modifier::new().weight(1.0).fill_max_width())
-                                .content(|| match view_now {
+                            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().weight(1.0).fill_max_width(), content = || match view_now {
                                     SessionView::Multi => {
                                         MultiView(
                                             &current,
@@ -5192,14 +4640,9 @@ pub fn SessionScreen(focus: Option<String>) {
                                     SessionView::Single => match target.clone() {
                                         Some(t) => SingleView(&t, focus.clone(), to_multi.clone()),
                                         None => {
-                                            cu::Box()
-                                                .alignment(Alignment::Center)
-                                                .modifier(
-                                                    Modifier::new()
+                                            { use ::compose_rust::ui::Box; Box!(alignment = Alignment::Center, modifier = Modifier::new()
                                                         .fill_max_width()
-                                                        .fill_max_height(),
-                                                )
-                                                .content(|| {
+                                                        .fill_max_height(), {
                                                     Label(
                                                         NO_SESSION,
                                                         Fs::Md,
@@ -5207,15 +4650,15 @@ pub fn SessionScreen(focus: Option<String>) {
                                                         Some(paint(p.muted)),
                                                         None,
                                                     );
-                                                });
+                                                }) };
                                         }
                                     },
                                     SessionView::Status => {
                                         StatusView(&current, &members, to_single.clone());
                                     }
-                                });
-                        });
-                });
+                                }) };
+                        }) };
+                }) };
 
             // Left drawer with a scrim on compact/tablet (#582). The toolkit's Sheet picks its
             // own edge and Dialog centres, so this is an in-tree overlay stacked in the screen's
@@ -5247,18 +4690,12 @@ pub fn SessionScreen(focus: Option<String>) {
                     move || dr_s.set(false),
                     || {},
                 );
-                cu::Row()
-                    .modifier(
-                        with_shadows(Modifier::new(), theme.shadow_sm())
+                { use ::compose_rust::ui::Row; Row!(modifier = with_shadows(Modifier::new(), theme.shadow_sm())
                             .width(w)
                             .fill_max_height()
                             .role(compose_rust::ui::Role::Navigation)
-                            .label(super::a11y::SESSION_MENU),
-                    )
-                    .content(move || {
-                        cu::Box()
-                            .modifier(Modifier::new().weight(1.0).fill_max_height())
-                            .content(move || {
+                            .label(super::a11y::SESSION_MENU), content = move || {
+                        { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().weight(1.0).fill_max_height(), content = move || {
                                 SideList(
                                     &sec_d,
                                     &cur_d,
@@ -5268,11 +4705,9 @@ pub fn SessionScreen(focus: Option<String>) {
                                     move |q| q_d.set(q),
                                     op_d.clone(),
                                 );
-                            });
-                        cu::Spacer().modifier(
-                            Modifier::new().width(1.0).fill_max_height().background(paint(pal.line)),
-                        );
-                    });
+                            }) };
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(1.0).fill_max_height().background(paint(pal.line))) };
+                    }) };
             }
 
             // New member sheet (#snew)
@@ -5292,7 +4727,7 @@ pub fn SessionScreen(focus: Option<String>) {
                 ProjectSwitchMenu(&project_menu, &boxes, &current, &project, &ui, || {});
             }
 
-        });
+        }) };
 }
 
 #[cfg(test)]
@@ -5492,12 +4927,12 @@ mod tests {
         let mv = mv.split("\npub fn ").next().unwrap();
         let paged = mv.split("} else if layout.paged {").nth(1).unwrap();
         let paged = paged.split("let rows_idx = pane_rows(").next().unwrap();
-        assert!(paged.contains("cu::ScrollRow()"));
+        assert!(paged.contains("ScrollRow!("));
         assert!(paged.contains(".width(pane_w)"));
         // compose-rust#547: the strip snaps to whole panes, so no peek stand-in is left.
-        assert!(paged.contains(".snap(Snap::ItemStart)"));
+        assert!(paged.contains("snap = Snap::ItemStart"));
         assert!(!paged.contains("TODO(compose-rust#547)"));
-        assert!(!paged.contains(".spacing(SWIPE_GAP)"));
+        assert!(!paged.contains("spacing = SWIPE_GAP"));
         assert!(mv.contains("multi_pane_layout(window.width_dp, window.class)"));
         assert!(!paged.contains("\"이전\""));
         assert!(!paged.contains("\"다음\""));
@@ -5542,8 +4977,9 @@ mod tests {
         assert!(super::status_cards_equal_height(super::status_grid_columns(900.0)));
         assert!(super::status_cards_equal_height(super::status_grid_columns(1280.0)));
         let src = include_str!("session.rs").split("mod tests {").next().unwrap();
-        assert!(src.contains(".equal_height(status_cards_equal_height(3))"));
-        assert!(src.contains(".equal_height(status_cards_equal_height(2))"));
+        assert!(src.contains("intrinsic_size = status_cards_equal_height(3)"));
+        assert!(src.contains("intrinsic_size = status_cards_equal_height(2)"));
+
     }
 
     #[test]
@@ -5567,7 +5003,8 @@ mod tests {
         let term = term.split("\npub fn ").next().unwrap();
         assert!(term.contains("let scroll = cu::remember_scroll_state();"));
         assert!(term.contains("FollowNewest(scroll.clone(), format!(\"{sid}:terminal\"));"));
-        assert!(term.contains("cu::ScrollColumn()\n                        .scroll_state(&scroll)"));
+        assert!(term.contains("ScrollColumn!(scroll_state = &scroll,"));
+
     }
 
     #[test]
@@ -5785,6 +5222,18 @@ mod tests {
             })
             .collect();
         assert_eq!(clicks.len(), 1, "the chevron is one clickable: {clicks:?}");
+        // compose-rust#472 (v0.0.11): the 26x32 chevron carries MinTouchTarget(44.0) without
+        // growing its drawn Width(26.0) / Height(32.0).
+        let mods: Vec<String> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetModifier { node_id, modifier, .. } if *node_id == clicks[0].0 => Some(format!("{modifier:?}")),
+                _ => None,
+            })
+            .collect();
+        for want in ["Width(26.0)", "Height(32.0)", "MinTouchTarget { size: 44.0 }"] {
+            assert!(mods.iter().any(|m| m == want), "{want}: {mods:?}");
+        }
         let open = CHEVRON_OPEN.with(|c| c.borrow().clone()).expect("state captured");
         assert!(!open.get_untracked());
         host.dispatch(HostEvent {
@@ -5794,6 +5243,8 @@ mod tests {
         })
         .expect("dispatch");
         assert!(open.get_untracked(), "the chevron opened the chooser");
+        let src = include_str!("session.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(!src.contains(concat!("TODO(compose-rust#", "472")));
     }
 
     /// What a composed screen sends: each node's parent, string props and modifiers.
@@ -5916,6 +5367,7 @@ mod tests {
                 safe_area_top: 0.0,
                 safe_area_leading: 0.0,
                 safe_area_trailing: 0.0,
+                safe_area_bottom: 0.0,
             },
         };
         let (bytes, _) = host.dispatch(resize.clone()).expect("dispatch");

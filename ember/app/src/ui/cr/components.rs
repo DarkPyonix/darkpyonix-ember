@@ -13,7 +13,7 @@
 #![allow(non_snake_case)]
 
 use compose_rust::ui as cu;
-use compose_rust::ui::{Modifier, Role};
+use compose_rust::ui::{HoverStyle, Modifier, PressStyle, Role};
 use compose_rust::{
     Alignment, ButtonVariant, Color, ColorRole, IconRole,
     KeyEvent, OverflowWrap, Paint, ShapeRole, TextAlign, TextOverflow, TypeRole, WordBreak,
@@ -99,8 +99,85 @@ fn with_height(m: Modifier, height: Option<f32>) -> Modifier {
 /// follows Ember's scheme. The renderer draws the tint and the keyboard focus ring in the shape
 /// the same node carries (`pressedShape`), so a pressable puts its `corner_radius`,
 /// `corner_radii` or `shape_role` on the node that takes the click (FR-L34.2, #251).
+///
+/// Since compose-rust v0.0.12 the rest of the mockup's press, hover and focus also travels on
+/// the same node (FR-L34.1, FR-L34.2): the press-in curve `cubic-bezier(.2,0,0,1)`
+/// ([`PRESS_EASING`]), a hover layer that turns `surface` into `--hover` ([`hover_layer`]), and
+/// the keyboard ring 2 px of `c-blue` 2 px outside the outline (`:focus-visible`,
+/// `outline-offset:2px`). An `ink` fill takes [`pressable_on`] instead.
 pub fn pressable(modifier: Modifier) -> Modifier {
-    modifier.press_feedback(PRESS_SCALE, ember_theme().press_alpha())
+    let theme = ember_theme();
+    let p = theme.palette;
+    let [x1, y1, x2, y2] = PRESS_EASING;
+    modifier
+        .press_feedback(PRESS_SCALE, theme.press_alpha())
+        .press_style(PressStyle::default().press_easing(x1, y1, x2, y2))
+        .hover_style(HoverStyle::fill(paint(p.text), hover_layer(p.surface, p.hover, p.text)))
+        .focus_ring(paint(p.blue.strong), FOCUS_RING_W, FOCUS_RING_OFFSET)
+}
+
+/// [`pressable`] for a node whose fill is `fill`. On `ink` (`.btn.primary`, a chosen `.seg`
+/// button or `.chip`, `.sendround`) the press tint is the light `ink_text`, as the mockup tints
+/// in the element's own text colour, and hover lays no layer but fades the node to 0.88
+/// (`.btn.primary:hover{opacity:.88}`). Any other fill is [`pressable`].
+pub fn pressable_on(modifier: Modifier, fill: Color) -> Modifier {
+    let kind = if fill == ember_theme().palette.ink { Press::Ink } else { Press::Surface };
+    pressable_as(modifier, kind)
+}
+
+/// What a pressable is to the mockup's `:hover` and press rules.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Press {
+    /// `.btn`, `.icon-btn`, `.chip`, `.pickchip`, `.nav` and the rows of a menu: `--hover`.
+    Surface,
+    /// `.btn.primary`, `.sendround` and the chosen `.seg` button or `.chip`: an `ink_text`
+    /// tint and 0.88 opacity under the pointer.
+    Ink,
+    /// `.list-row`: `surface-2` under the pointer.
+    Row,
+    /// `.cs-card`: the border turns `c-grey` under the pointer and nothing is laid over it.
+    Card,
+}
+
+/// [`pressable`] for a pressable of the given [`Press`] kind.
+pub fn pressable_as(modifier: Modifier, kind: Press) -> Modifier {
+    let p = ember_theme().palette;
+    let [x1, y1, x2, y2] = PRESS_EASING;
+    let base = pressable(modifier);
+    match kind {
+        Press::Surface => base,
+        Press::Ink => base
+            .press_style(PressStyle::tint(paint(p.ink_text)).press_easing(x1, y1, x2, y2))
+            .hover_style(HoverStyle::fill(paint(p.ink), 0.0).content_alpha(INK_HOVER_ALPHA)),
+        Press::Row => base.hover_style(HoverStyle::fill(paint(p.text), hover_layer(p.surface, p.surface_2, p.text))),
+        Press::Card => base.hover_style(HoverStyle::fill(paint(p.text), 0.0).border(paint(p.grey.strong))),
+    }
+}
+
+/// The mockup's press-in curve (`core.js` `pressStart`, `cubic-bezier(.2,0,0,1)`).
+pub const PRESS_EASING: [f32; 4] = [0.2, 0.0, 0.0, 1.0];
+/// The keyboard focus ring's width and its distance outside the outline, in dp
+/// (`:focus-visible{outline:2px solid var(--c-blue);outline-offset:2px}`).
+pub const FOCUS_RING_W: f32 = 2.0;
+pub const FOCUS_RING_OFFSET: f32 = 2.0;
+/// What an `ink` pressable's opacity becomes under the pointer (`.btn.primary:hover`).
+pub const INK_HOVER_ALPHA: f32 = 0.88;
+
+/// The alpha at which `ink` laid over `base` comes closest to `target`: the mean over the
+/// three channels of the alpha each one needs. The toolkit draws a hover layer over the node,
+/// where the mockup swaps the background to `--hover`; this is the layer that lands on
+/// `--hover` over `surface`.
+pub fn hover_layer(base: Color, target: Color, ink: Color) -> f32 {
+    let ch = |c: Color, s: u32| ((c.to_argb() >> s) & 0xff) as f32;
+    let (mut sum, mut n) = (0.0f32, 0.0f32);
+    for s in [16, 8, 0] {
+        let span = ch(ink, s) - ch(base, s);
+        if span.abs() >= 1.0 {
+            sum += (ch(target, s) - ch(base, s)) / span;
+            n += 1.0;
+        }
+    }
+    if n == 0.0 { 0.0 } else { (sum / n).clamp(0.0, 1.0) }
 }
 
 /// A container that reacts to a click.
@@ -117,14 +194,41 @@ pub fn Clickable(
     mut on_click: impl FnMut() + 'static,
     content: impl FnOnce(),
 ) {
-    cu::Box().modifier(pressable(modifier)).alignment(alignment).on_click(move || on_click()).content(content);
+    ClickableOn(modifier, None, alignment, on_click, content);
+}
+
+/// A [`Clickable`] whose fill is `fill`, so an `ink` one presses and hovers as
+/// [`pressable_on`] says.
+pub fn ClickableOn(
+    modifier: Modifier,
+    fill: Option<Color>,
+    alignment: Alignment,
+    mut on_click: impl FnMut() + 'static,
+    content: impl FnOnce(),
+) {
+    let modifier = match fill {
+        Some(fill) => pressable_on(modifier, fill),
+        None => pressable(modifier),
+    };
+    { use ::compose_rust::ui::Box; Box!(modifier = modifier, alignment = alignment, on_click = Some(move || on_click()), content = content) };
+}
+
+/// A [`Clickable`] of the given [`Press`] kind (a `.list-row`, a `.cs-card`).
+pub fn ClickableAs(
+    modifier: Modifier,
+    kind: Press,
+    alignment: Alignment,
+    mut on_click: impl FnMut() + 'static,
+    content: impl FnOnce(),
+) {
+    { use ::compose_rust::ui::Box; Box!(modifier = pressable_as(modifier, kind), alignment = alignment, on_click = Some(move || on_click()), content = content) };
 }
 
 /// A [`Clickable`] whose child is only an icon or a glyph, named for assistive technology with
 /// `Modifier::label` (compose-rust v0.0.7, #460, #429). `label` is `&'static str` on purpose:
-/// the toolkit keeps every distinct label for the life of the program (at most 4096), so a name
-/// built from data (a routine name, a commit subject) takes a `Button`'s `accessible_name`
-/// instead.
+/// the toolkit keeps a 128-entry LRU cache of distinct labels (`compose-rust/src/ui/mod.rs`
+/// `LabelCache`, compose-rust#456, v0.0.11), so a name built from data (a routine name, a commit
+/// subject) takes a `Button`'s `accessible_name` instead.
 pub fn NamedClickable(
     label: &'static str,
     modifier: Modifier,
@@ -132,23 +236,35 @@ pub fn NamedClickable(
     on_click: impl FnMut() + 'static,
     content: impl FnOnce(),
 ) {
-    Clickable(modifier.label(label).role(Role::Button).click_action(true), alignment, on_click, content);
+    NamedClickableOn(label, modifier, None, alignment, on_click, content);
+}
+
+/// A [`NamedClickable`] whose fill is `fill`, as [`ClickableOn`].
+pub fn NamedClickableOn(
+    label: &'static str,
+    modifier: Modifier,
+    fill: Option<Color>,
+    alignment: Alignment,
+    on_click: impl FnMut() + 'static,
+    content: impl FnOnce(),
+) {
+    ClickableOn(modifier.label(label).role(Role::Button).click_action(true), fill, alignment, on_click, content);
 }
 
 /// A [`NamedClickable`] that cannot act now: the same painted box, named and a disabled button
 /// to assistive technology, with no click handler and so no press feedback.
 pub fn NamedDisabled(label: &'static str, modifier: Modifier, alignment: Alignment, content: impl FnOnce()) {
-    cu::Box().modifier(modifier.label(label).role(Role::Button).disabled(true)).alignment(alignment).content(content);
+    { use ::compose_rust::ui::Box; Box!(modifier = modifier.label(label).role(Role::Button).disabled(true), alignment = alignment, content = content) };
 }
 
 // TODO(compose-rust#831): a container
-// takes its name from `Modifier::label` only, which keeps every distinct name for the life of the
-// program and drops names past 4096 (`compose-rust/src/ui/mod.rs`, `MAX_LABELS`), and a `Button`
-// with content insets its children by the design system's 16 dp with no way to change it
-// (`HostButton.kt`, `labelPadding`). So a painted box whose name is built from data (a path, a
-// commit subject, a profile name) keeps a clear `Button` over it for the name, the focus and the
-// click. When a container takes an owned name, move every caller onto [`Clickable`] with that
-// name and delete this.
+// takes its name from `Modifier::label` only (`compose-rust/src/ui/mod.rs` `LabelCache`, a
+// 128-entry LRU cache in v0.0.11), and a `Button` with content insets its children by the design
+// system's 16 dp by default (`HostButton.kt` `labelPadding`; `Button::content_padding` is in
+// v0.0.11, compose-rust#789). So a painted box whose name is built from data (a path, a commit
+// subject, a profile name) keeps a clear `Button` over it for the name, the focus and the click.
+// When a container takes an owned name, move every caller onto [`Clickable`] with that name and
+// delete this.
 /// The control of a painted box whose accessible name is built from data: a clear toolkit
 /// `Button` exactly over its `Box` parent. It takes the parent's bounds without changing them
 /// (`Modifier::match_parent_size`, compose-rust#431), so the box keeps the size of what it
@@ -160,13 +276,7 @@ pub fn DataNamedOverlay(name: &str, enabled: bool, expanded: Option<bool>, on_cl
         Some(open) => m.expanded(open),
         None => m,
     };
-    cu::Button(name)
-        .accessible_name(name)
-        .enabled(enabled)
-        .variant(ButtonVariant::Text)
-        .color(Paint::Literal(Color::argb(0)))
-        .modifier(m)
-        .on_click(on_click);
+    { use ::compose_rust::ui::Button; Button!(name, on_click, accessible_name = name, enabled = enabled, variant = ButtonVariant::Text, color = Paint::Literal(Color::argb(0)), modifier = m) };
 }
 
 /// The label of a copy button. The button puts text the screen already holds on the clipboard
@@ -197,10 +307,10 @@ pub fn MenuRow(label: &str, width: f32, chosen: bool, on_click: impl FnMut() + '
         Alignment::CenterStart,
         on_click,
         || {
-            cu::Row().alignment(Alignment::CenterStart).content(|| {
-                cu::Spacer().modifier(Modifier::new().width(SP[2]));
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
                 Label(label, Fs::Sm, Weight::Regular, Some(paint(p.text)), Some(1));
-            });
+            }) };
         },
     );
 }
@@ -221,18 +331,13 @@ pub fn OptionSheet(
 ) {
     let theme = ember_theme();
     let p = theme.palette;
-    cu::Dialog(open)
-        .modifier(
-            with_shadows(Modifier::new(), theme.shadow_lg())
+    { use ::compose_rust::ui::Dialog; Dialog!(open, on_dismiss.clone(), modifier = with_shadows(Modifier::new(), theme.shadow_lg())
                 .width(width + 2.0 * SP[0])
                 .background(paint(p.surface))
                 .border(1.0, paint(p.line))
                 .corner_radius(CORNER_MD)
-                .padding(SP[0]),
-        )
-        .on_dismiss(on_dismiss.clone())
-        .content(|| {
-            cu::Column().content(|| {
+                .padding(SP[0]), {
+            { use ::compose_rust::ui::Column; Column!({
                 for (i, label) in options.iter().enumerate() {
                     let (mut dismiss, mut choose) = (on_dismiss.clone(), on_choose.clone());
                     MenuRow(label, width, chosen == Some(i), move || {
@@ -240,8 +345,8 @@ pub fn OptionSheet(
                         choose(i);
                     });
                 }
-            });
-        });
+            }) };
+        }) };
 }
 
 /// A closed select: a 40 px field showing the chosen option and an arrow, opening an
@@ -301,24 +406,24 @@ fn select_field(
         None => trigger,
     };
     // One node, so the popup's `Dialog` is not a separate child that a parent's spacing counts.
-    cu::Box().modifier(Modifier::new().fill_max_width()).content(|| {
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width(), {
     Clickable(
         trigger,
         Alignment::CenterStart,
         move || toggle.set(!toggle.get_untracked()),
         || {
-            cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                cu::Spacer().modifier(Modifier::new().width(SP[2]));
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
                 Label(shown, Fs::Md, Weight::Regular, Some(paint(p.text)), Some(1));
-                cu::Spacer().modifier(Modifier::new().weight(1.0));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                 super::shell::NavIcon(super::shell::ICON_CHEVRON_DOWN_SVG, p.muted.to_argb(), 16.0);
-                cu::Spacer().modifier(Modifier::new().width(SP[2]));
-            });
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
+            }) };
         },
     );
     let dismiss = open.clone();
     OptionSheet(open.get(), options, Some(chosen), popup_width, move || dismiss.set(false), on_choose);
-    });
+    }) };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -487,15 +592,15 @@ pub struct PopMenu<'a> {
 }
 
 /// An option menu hanging from the control that opens it (FR-L10.4, #888): the toolkit
-/// `Popover` (compose-rust v0.0.10) with `anchor` as its first child, below the control and
+/// `Popover` (compose-rust v0.0.11) with `anchor` as its first child, below the control and
 /// lined up with `menu.align`. Escape and a press outside call `on_dismiss`; the renderer moves
 /// the box inside the window and gives focus back to the control when it closes
 /// (`HostPopover.kt` `PopoverContent`). A row tap calls `on_dismiss` and then `on_choose(i)`.
 /// `footer` is drawn under a line below the rows (`.sdrop-f`). At 560 and below a mode menu is a
 /// bottom sheet with the same rows ([`pop_presentation`]).
-/// Not built: arrow keys between rows and focus on the current row when the menu opens
-/// (TODO(compose-rust#810): a `Popover` moves no focus between its rows; compose-rust#504 did
-/// it for the toolkit `Menu` only. Add the keys when #810 is in the pin).
+/// (TODO(compose-rust#810, in v0.0.11): `HostPopover.kt` moves focus between `Role::MenuItem`
+/// rows with the arrow keys and focuses the `selected(true)` row when the popover opens, and
+/// `Modifier::has_popup(true)` marks the control; waits for a display check.)
 pub fn PopoverMenu(
     open: bool,
     menu: PopMenu<'_>,
@@ -545,7 +650,7 @@ pub fn PopoverMenuWith(
     match pop_presentation(menu.kind, window.width_dp) {
         PopPresentation::Sheet => {
             // One node, so the sheet is not a separate child that the caller's row spaces.
-            cu::Box().content(|| {
+            { use ::compose_rust::ui::Box; Box!({
                 anchor();
                 let title = if extra.plain_sheet { "" } else if menu.head.is_empty() { menu.name } else { menu.head };
                 EmberSheet(title, open, on_dismiss.clone(), None, || {
@@ -553,30 +658,25 @@ pub fn PopoverMenuWith(
                         PopPlainSheetBody(&menu, &m, &extra, on_dismiss, on_choose);
                         return;
                     }
-                    cu::Column().modifier(Modifier::new().fill_max_width().padding(SP[1])).content(|| {
+                    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width().padding(SP[1]), {
                         if let Some(sub) = menu.sub {
-                            cu::Row().modifier(Modifier::new().fill_max_width().padding(SP[1])).content(|| {
+                            { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width().padding(SP[1]), {
                                 Label(sub, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                            });
+                            }) };
                         }
                         PopRows(&menu, &m, &extra, on_dismiss, on_choose);
                         if let Some(f) = footer {
                             PopFooter(f);
                         }
-                    });
+                    }) };
                 });
-            });
+            }) };
         }
         PopPresentation::Popover => {
             let width = pop_width(menu.kind, window.width_dp);
             let shift = pop_phone_shift(menu.kind, window.width_dp);
             let placed = if shift != 0.0 { Modifier::new().offset(shift, 0.0) } else { Modifier::new() };
-            cu::Popover(open)
-                .placement(compose_rust::PopoverPlacement::Bottom)
-                .align(menu.align)
-                .offset(extra.offset.unwrap_or(m.offset))
-                .on_dismiss(on_dismiss.clone())
-                .modifier(pop_anchor_weight(extra.anchor_weight,
+            { use ::compose_rust::ui::Popover; Popover!(open, on_dismiss.clone(), placement = compose_rust::PopoverPlacement::Bottom, align = menu.align, offset = extra.offset.unwrap_or(m.offset), modifier = pop_anchor_weight(extra.anchor_weight,
                     // `elevation(0)`: the box casts its own shadow, so the toolkit's menu
                     // elevation is turned off. Without it the renderer casts a second shadow
                     // from the inner surface, which shows through the box as a grey band.
@@ -589,27 +689,25 @@ pub fn PopoverMenuWith(
                         .padding(m.box_pad)
                         .role(Role::Menu)
                         .label(menu.name),
-                ))
-                .anchor(anchor)
-                .content(|| {
-                    cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
+                ), anchor = Some(anchor), {
+                    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), {
                         if !menu.head.is_empty() {
                             PopHead(menu.kind, menu.head, menu.sub, &m);
                         }
-                        cu::Spacer().modifier(Modifier::new().height(m.list_pad.0));
-                        cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
-                            cu::Spacer().modifier(Modifier::new().width(m.list_pad.1));
-                            cu::Column().modifier(Modifier::new().width(0.0).weight(1.0)).content(|| {
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(m.list_pad.0)) };
+                        { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width(), {
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(m.list_pad.1)) };
+                            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().width(0.0).weight(1.0), {
                                 PopRows(&menu, &m, &extra, on_dismiss, on_choose);
-                            });
-                            cu::Spacer().modifier(Modifier::new().width(m.list_pad.1));
-                        });
-                        cu::Spacer().modifier(Modifier::new().height(m.list_pad.2));
+                            }) };
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(m.list_pad.1)) };
+                        }) };
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(m.list_pad.2)) };
                         if let Some(f) = footer {
                             PopFooter(f);
                         }
-                    });
-                });
+                    }) };
+                }) };
         }
     }
 }
@@ -618,10 +716,10 @@ pub fn PopoverMenuWith(
 /// 12 `muted` subtitle) for a drop menu.
 fn PopHead(kind: PopKind, head: &str, sub: Option<&str>, m: &PopMetrics) {
     let p = ember_theme().palette;
-    cu::Spacer().modifier(Modifier::new().height(m.head_pad.0));
-    cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
-        cu::Spacer().modifier(Modifier::new().width(m.head_pad.1));
-        cu::Column().modifier(Modifier::new().width(0.0).weight(1.0)).content(|| match kind {
+    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(m.head_pad.0)) };
+    { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width(), {
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(m.head_pad.1)) };
+        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().width(0.0).weight(1.0), content = || match kind {
             PopKind::Mode => Label(head, Fs::Xs, Weight::Semibold, Some(paint(p.muted)), Some(1)),
             PopKind::Drop => {
                 Label(head, Fs::Md, Weight::Semibold, Some(paint(p.text)), Some(1));
@@ -629,10 +727,10 @@ fn PopHead(kind: PopKind, head: &str, sub: Option<&str>, m: &PopMetrics) {
                     Label(sub, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 }
             }
-        });
-        cu::Spacer().modifier(Modifier::new().width(m.head_pad.1));
-    });
-    cu::Spacer().modifier(Modifier::new().height(m.head_pad.2));
+        }) };
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(m.head_pad.1)) };
+    }) };
+    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(m.head_pad.2)) };
 }
 
 fn PopRows(
@@ -656,10 +754,7 @@ fn PopRows(
         match extra.on_hover.clone() {
             // The row's own box is a button; the pointer subscription sits on a box around it,
             // which hears the pointer come over the row and takes nothing from the press.
-            Some(hover) => cu::Box()
-                .modifier(Modifier::new().fill_max_width())
-                .on_pointer(compose_rust::PointerKinds::ENTER, move |_| hover(i))
-                .content(row),
+            Some(hover) => { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width(), on_pointer = Some((compose_rust::PointerKinds::ENTER, move |_: compose_rust::PointerEvent| hover(i))), content = row) },
             None => row(),
         }
     }
@@ -686,20 +781,20 @@ fn PopPlainSheetBody(
     on_dismiss: impl FnMut() + Clone + 'static,
     on_choose: impl FnMut(usize) + Clone + 'static,
 ) {
-    cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
+    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), {
         if !menu.head.is_empty() {
             PopHead(menu.kind, menu.head, menu.sub, m);
         }
-        cu::Spacer().modifier(Modifier::new().height(m.list_pad.0));
-        cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
-            cu::Spacer().modifier(Modifier::new().width(m.list_pad.1));
-            cu::Column().modifier(Modifier::new().width(0.0).weight(1.0)).content(|| {
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(m.list_pad.0)) };
+        { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width(), {
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(m.list_pad.1)) };
+            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().width(0.0).weight(1.0), {
                 PopRows(menu, m, extra, on_dismiss, on_choose);
-            });
-            cu::Spacer().modifier(Modifier::new().width(m.list_pad.1));
-        });
-        cu::Spacer().modifier(Modifier::new().height(m.list_pad.2));
-    });
+            }) };
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(m.list_pad.1)) };
+        }) };
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(m.list_pad.2)) };
+    }) };
 }
 
 /// One row (`.md-row`, `.sdrop-i`): a menu item to assistive technology, named by its text,
@@ -720,48 +815,48 @@ fn PopRowView(r: &PopRow, kind: PopKind, m: &PopMetrics, on_click: impl FnMut() 
         Alignment::CenterStart,
         on_click,
         || {
-            cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
                 // The side padding, and the row's minimum height.
-                cu::Spacer().modifier(Modifier::new().width(m.row_pad.1).height(m.row_min_h));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(m.row_pad.1).height(m.row_min_h)) };
                 if r.spinner {
                     super::compat::Spinner(12.0);
-                    cu::Spacer().modifier(Modifier::new().width(m.row_gap));
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(m.row_gap)) };
                 } else if let Some(svg) = r.icon {
                     super::shell::NavIcon(svg, icon_c.to_argb(), 16.0);
-                    cu::Spacer().modifier(Modifier::new().width(m.row_gap));
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(m.row_gap)) };
                 }
                 // Zero wide and weighted, so a long description wraps instead of widening the row.
-                cu::Column().spacing(2.0).modifier(Modifier::new().width(0.0).weight(1.0)).content(|| {
-                    cu::Spacer().modifier(Modifier::new().height(m.row_pad.0 - 2.0));
-                    cu::Row().spacing(6.0).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                { use ::compose_rust::ui::Column; Column!(spacing = 2.0, modifier = Modifier::new().width(0.0).weight(1.0), {
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(m.row_pad.0 - 2.0)) };
+                    { use ::compose_rust::ui::Row; Row!(spacing = 6.0, alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
                         // With a badge the title is zero wide and weighted, so the badge keeps its
                         // own width at the row's end (the session model menu's one row squeezed
                         // 준비 중 to 준비... before), and the title wraps to a second line rather
                         // than being cut (review st, A FAIL 2: "실행 중인 세션의 모델은 바꿀 수..."
                         // in the 340 wide menu).
                         let title_mod = if r.badge.is_some() { Modifier::new().width(0.0).weight(1.0) } else { Modifier::new() };
-                        cu::Box().modifier(title_mod).content(|| {
+                        { use ::compose_rust::ui::Box; Box!(modifier = title_mod, {
                             if r.mono {
                                 MonoLabel(&r.title, Fs::Xs, Weight::Regular, Some(paint(title_c)));
                             } else {
                                 Label(&r.title, Fs::Md, Weight::Semibold, Some(paint(title_c)), Some(pop_title_lines(r)));
                             }
-                        });
+                        }) };
                         if let Some((text, tone)) = &r.badge {
                             Pill(text, *tone, true);
                         }
-                    });
+                    }) };
                     if let Some(d) = &r.description {
                         Label(d, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
                     }
-                    cu::Spacer().modifier(Modifier::new().height(m.row_pad.0 - 2.0));
-                });
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(m.row_pad.0 - 2.0)) };
+                }) };
                 if r.chosen {
-                    cu::Spacer().modifier(Modifier::new().width(m.row_gap));
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(m.row_gap)) };
                     super::shell::NavIcon(ICON_CHECK_SVG, p.text.to_argb(), 16.0);
                 }
-                cu::Spacer().modifier(Modifier::new().width(m.row_pad.1));
-            });
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(m.row_pad.1)) };
+            }) };
         },
     );
 }
@@ -775,28 +870,24 @@ pub fn pop_title_lines(r: &PopRow) -> u32 {
 /// `.sdrop-f`: 4 above, a line, then the caller's controls padded 10.
 fn PopFooter(footer: &mut dyn FnMut()) {
     let p = ember_theme().palette;
-    cu::Spacer().modifier(Modifier::new().height(4.0));
-    cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
-    cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width().padding(10.0)).content(|| footer());
+    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(4.0)) };
+    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().fill_max_width().height(1.0).background(paint(p.line))) };
+    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width().padding(10.0), content = || footer()) };
 }
 
 /// The footer every sheet and dialog shares: a line, then actions right-aligned (`.snew-foot`).
 pub fn SheetFooter(content: impl FnOnce()) {
     let p = ember_theme().palette;
-    cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().fill_max_width().height(1.0).background(paint(p.line))) };
     // `.snew-foot`: 12 above, 20 below, 20 at the right, 6 between the buttons.
-    cu::Spacer().modifier(Modifier::new().height(SP[2]));
-    cu::Row()
-        .spacing(6.0)
-        .alignment(Alignment::CenterStart)
-        .modifier(Modifier::new().fill_max_width().height(H_CTL))
-        .content(|| {
-            cu::Spacer().modifier(Modifier::new().weight(1.0));
+    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[2])) };
+    { use ::compose_rust::ui::Row; Row!(spacing = 6.0, alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width().height(H_CTL), {
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
             content();
             // The row's 6 px gap sits before this spacer too.
-            cu::Spacer().modifier(Modifier::new().width(SP[4] - 6.0));
-        });
-    cu::Spacer().modifier(Modifier::new().height(SP[4]));
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[4] - 6.0)) };
+        }) };
+    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[4])) };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -838,54 +929,52 @@ fn scale_text(
 ) {
     let theme = ember_theme();
     let color = color.unwrap_or_else(|| paint(theme.palette.text));
-    let mut t = cu::Text(text)
-        .word_break(WordBreak::KeepAll)
-        .font_size(fs.size())
-        .line_height(fs.line_height())
-        .font_weight(weight.value())
-        .letter_spacing(fs.letter_spacing())
-        .color(color);
-    if wrap_anywhere {
-        t = t.overflow_wrap(OverflowWrap::Anywhere);
-    }
-    if let Some(n) = max_lines {
-        t = t.max_lines(n).overflow(TextOverflow::Ellipsis);
-    }
-    if let Some(a) = align {
-        t = t.text_align(a);
-    }
-    drop(t);
+    let overflow_wrap = if wrap_anywhere { Some(OverflowWrap::Anywhere) } else { None };
+    let overflow = max_lines.map(|_| TextOverflow::Ellipsis);
+    { use ::compose_rust::ui::Text; Text!(
+        text,
+        word_break = WordBreak::KeepAll,
+        font_size = fs.size(),
+        line_height = fs.line_height(),
+        font_weight = weight.value(),
+        letter_spacing = fs.letter_spacing(),
+        color = color,
+        overflow_wrap = overflow_wrap,
+        max_lines = max_lines,
+        overflow = overflow,
+        text_align = align,
+    ) };
 }
 
 /// A short mono string at a scale size (the one-time code): selectable text, never broken.
 pub fn MonoLabel(text: &str, fs: Fs, weight: Weight, color: Option<Paint>) {
     let theme = ember_theme();
     let color = color.unwrap_or_else(|| paint(theme.palette.text));
-    drop(
-        cu::Text(text)
-            .type_role(TypeRole::Mono)
-            .font_size(fs.size())
-            .line_height(fs.line_height())
-            .font_weight(weight.value())
-            .color(color),
-    );
+    { use ::compose_rust::ui::Text; Text!(
+        text,
+        type_role = TypeRole::Mono,
+        font_size = fs.size(),
+        line_height = fs.line_height(),
+        font_weight = weight.value(),
+        color = color,
+    ) };
 }
 
 /// One line in the mono face, cut with an ellipsis (the visible name of [`NameThenPillFace`]).
 fn MonoLine(text: &str, fs: Fs, weight: Weight, color: Option<Paint>) {
     let color = color.unwrap_or_else(|| paint(ember_theme().palette.text));
-    drop(
-        cu::Text(text)
-            .word_break(WordBreak::KeepAll)
-            .type_role(TypeRole::Mono)
-            .font_size(fs.size())
-            .line_height(fs.line_height())
-            .font_weight(weight.value())
-            .letter_spacing(fs.letter_spacing())
-            .color(color)
-            .max_lines(1)
-            .overflow(TextOverflow::Ellipsis),
-    );
+    { use ::compose_rust::ui::Text; Text!(
+        text,
+        word_break = WordBreak::KeepAll,
+        type_role = TypeRole::Mono,
+        font_size = fs.size(),
+        line_height = fs.line_height(),
+        font_weight = weight.value(),
+        letter_spacing = fs.letter_spacing(),
+        color = color,
+        max_lines = 1u32,
+        overflow = TextOverflow::Ellipsis,
+    ) };
 }
 
 /// Text for screens that still name a toolkit type role: the role maps to a step of the scale,
@@ -906,28 +995,23 @@ pub fn Txt(
         None if type_role == TypeRole::Caption => paint(theme.palette.muted),
         None => paint(theme.palette.text),
     };
-    let mut t = cu::Text(text).word_break(WordBreak::KeepAll);
-    if mono {
-        // The theme's monospace face: the bundled JetBrains Mono stack (`ui::fonts::mono_font`).
-        t = t.type_role(TypeRole::Mono);
-    }
-    let mut t = t
-        .font_size(fs.size())
-        .line_height(fs.line_height())
-        .font_weight(font_weight.value())
-        .letter_spacing(fs.letter_spacing())
-        .color(color)
-        .modifier(with_weight(Modifier::new(), weight));
-    if let Some(n) = max_lines {
-        t = t.max_lines(n).overflow(TextOverflow::Ellipsis);
-    }
-    if let Some(o) = overflow {
-        t = t.overflow(o);
-    }
-    if let Some(a) = text_align {
-        t = t.text_align(a);
-    }
-    drop(t);
+    // The theme's monospace face: the bundled JetBrains Mono stack (`ui::fonts::mono_font`).
+    let mono_role = if mono { Some(TypeRole::Mono) } else { None };
+    let overflow = overflow.or(max_lines.map(|_| TextOverflow::Ellipsis));
+    { use ::compose_rust::ui::Text; Text!(
+        text,
+        word_break = WordBreak::KeepAll,
+        type_role = mono_role,
+        font_size = fs.size(),
+        line_height = fs.line_height(),
+        font_weight = font_weight.value(),
+        letter_spacing = fs.letter_spacing(),
+        color = color,
+        modifier = with_weight(Modifier::new(), weight),
+        max_lines = max_lines,
+        overflow = overflow,
+        text_align = text_align,
+    ) };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -955,10 +1039,6 @@ pub struct FieldOptions {
     /// also counts towards the horizontal one. A framed field defaults to [`FIELD_INSET`]
     /// ([`FIELD_INSET_MULTILINE`] when multiline) and takes this in its place.
     pub inset: Option<(f32, f32)>,
-    /// A single-line field whose hint can be a long value (a remembered path or model): Ember
-    /// draws the hint itself on one line with an ellipsis, under the field while it is empty,
-    /// because the toolkit's placeholder always wraps (FR-L10.1, #878). Ignored when multiline.
-    pub one_line_hint: bool,
     pub height: Option<f32>,
     pub corner_radius: Option<f32>,
     pub background: Option<Paint>,
@@ -1049,10 +1129,7 @@ pub fn EmberField(o: FieldOptions) {
     let frame = if border_w > 0.0 { frame.border(border_w, border_color.unwrap_or_else(|| paint(p.line))) } else { frame };
     let inset = o.inset.take().unwrap_or(if multiline { FIELD_INSET_MULTILINE } else { FIELD_INSET });
     let inner = FieldOptions { bare: true, inset: Some(inset), height, weight: None, fill_max_width: true, ..o };
-    cu::Row()
-        .alignment(if multiline { Alignment::TopStart } else { Alignment::CenterStart })
-        .modifier(frame)
-        .content(move || BareField(inner));
+    { use ::compose_rust::ui::Row; Row!(alignment = if multiline { Alignment::TopStart } else { Alignment::CenterStart }, modifier = frame, content = move || BareField(inner)) };
 }
 
 /// A field inside a container that draws the frame (FR-L10.2, #844).
@@ -1083,63 +1160,15 @@ fn BareField(o: FieldOptions) {
     } else {
         Modifier::new().weight(1.0)
     };
-    cu::Row()
-        .alignment(if multiline { Alignment::TopStart } else { Alignment::CenterStart })
-        .modifier(wrap)
-        .content(move || {
+    { use ::compose_rust::ui::Row; Row!(alignment = if multiline { Alignment::TopStart } else { Alignment::CenterStart }, modifier = wrap, content = move || {
             if side > 0.0 {
-                cu::Spacer().modifier(Modifier::new().width(side));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(side)) };
             }
-            if o.one_line_hint && !multiline {
-                OneLineHintField(o);
-            } else {
-                FieldNode(o, inner);
-            }
+            FieldNode(o, inner);
             if side > 0.0 {
-                cu::Spacer().modifier(Modifier::new().width(side));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(side)) };
             }
-        });
-}
-
-/// A single-line field with its hint drawn by Ember: a one-line `muted` label that ends in an
-/// ellipsis, under the field, while the field is empty (FR-L10.1, #878). The toolkit draws its
-/// placeholder with no line limit, so a long path wrapped onto a second line the 40 px field
-/// clipped. TODO(compose-rust#786, after v0.0.10): a one-line placeholder with an ellipsis on
-/// `TextField` lets the toolkit draw it again; this function goes then.
-fn OneLineHintField(o: FieldOptions) {
-    use compose_rust::runtime::{mutable_state_of, remember};
-    let mut o = o;
-    let p = ember_theme().palette;
-    let starts_empty = o.text.as_deref().map_or(true, str::is_empty);
-    let empty = remember(|| mutable_state_of(starts_empty));
-    let hint = std::mem::take(&mut o.placeholder);
-    let mut user = o.on_value_change.take();
-    let typed = empty.clone();
-    o.on_value_change = Some(Box::new(move |t: String| {
-        typed.set(t.is_empty());
-        if let Some(f) = user.as_mut() {
-            f(t);
-        }
-    }));
-    let show = empty.get();
-    // The desktop renderer gives a weighted child at least its narrowest width, and a one-line
-    // label reports its whole line there: the hint took 708 of the 696 px share (r5 captures,
-    // 1440 and 390), ran under the trailing 12 px inset to the frame and showed no ellipsis.
-    // A zero width makes the column's narrowest width 0, so it takes its share; the box inside
-    // fills it and clips what is left.
-    cu::Column().modifier(Modifier::new().weight(1.0).width(0.0)).content(move || {
-        cu::Box()
-            .alignment(Alignment::CenterStart)
-            .modifier(Modifier::new().fill_max_width().clip(true))
-            .content(move || {
-                if show && !hint.is_empty() {
-                    // `WrapLabel` so a path with no space ellipsises inside the box instead of
-                    // asking for its whole width.
-                    WrapLabel(&hint, FIELD_FONT, Weight::Regular, Some(paint(p.muted)), Some(1));
-                }
-                FieldNode(o, Modifier::new().fill_max_width());
-            });
-    });
+        }) };
 }
 
 /// The toolkit field with every option but the frame, which `modifier` carries.
@@ -1150,50 +1179,37 @@ fn FieldNode(o: FieldOptions, modifier: Modifier) {
         Some(name) => modifier.label(name),
         None => modifier,
     };
-    let mut f = cu::TextField()
-        .modifier(modifier)
-        .word_break(WordBreak::KeepAll)
-        .overflow_wrap(OverflowWrap::Anywhere)
-        .placeholder(o.placeholder)
-        .multiline(o.multiline)
-        .enabled(o.enabled.unwrap_or(true));
-    if let Some(t) = o.text {
-        f = f.text(t);
-    }
     // FR-L10.2 (#844): the text and the placeholder take Ember's scale step, 14 px
     // (style.css `.field`) or the named role's step ([`field_fs`]). The role alone is not
     // enough: the toolkit sizes it from the Cupertino ladder (`Label` 15 sp at -0.24, `Body` 17
     // at -0.41), so the 13 px compact search drew 15 and a 14 px field kept Body's -0.41
     // tracking. Size, line height and tracking are always sent; the role stays for its face.
     let fs = field_fs(o.type_role);
-    if let Some(r) = o.type_role {
-        f = f.type_role(r);
-    }
-    f = f.font_size(fs.size()).line_height(o.line_height.unwrap_or(fs.line_height())).letter_spacing(fs.letter_spacing());
+    // The function takes the change handler as a required argument; a field without one gets a
+    // handler that does nothing.
+    let on_value_change: Box<dyn FnMut(String)> = o.on_value_change.unwrap_or_else(|| Box::new(|_| {}));
     // The node's transparent fill alone still left the toolkit's frame drawn inside the
     // composer (H2, SE10, CH1); `bare` drops it.
-    if o.bare {
-        f = f.bare();
-    }
-    if let Some(h) = o.on_value_change {
-        f = f.on_value_change(h);
-    }
-    if let Some(h) = o.on_submit {
-        f = f.on_submit(h);
-    }
-    if let Some(h) = o.on_focus_gained {
-        f = f.on_focus_gained(h);
-    }
-    if let Some(h) = o.on_focus_lost {
-        f = f.on_focus_lost(h);
-    }
-    if let Some(h) = o.on_key_down {
-        f = f.on_key_down(h);
-    }
-    if let Some(h) = &o.focus {
-        f = f.focus_handle(h);
-    }
-    drop(f);
+    { use ::compose_rust::ui::TextField; TextField!(
+        o.text.unwrap_or_default(),
+        on_value_change,
+        modifier = modifier,
+        word_break = WordBreak::KeepAll,
+        overflow_wrap = OverflowWrap::Anywhere,
+        placeholder = o.placeholder,
+        multiline = o.multiline,
+        enabled = o.enabled.unwrap_or(true),
+        type_role = o.type_role,
+        font_size = fs.size(),
+        line_height = o.line_height.unwrap_or(fs.line_height()),
+        letter_spacing = fs.letter_spacing(),
+        bare = o.bare,
+        on_submit = o.on_submit,
+        on_focus_gained = o.on_focus_gained,
+        on_focus_lost = o.on_focus_lost,
+        on_key_down = o.on_key_down,
+        focus_handle = o.focus.as_ref(),
+    ) };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1271,7 +1287,7 @@ pub fn name_then_pill_width(room: f32, natural: f32, pill: f32, gap: f32) -> Opt
 /// pill and whatever follows the row stay on screen (CSS `flex:0 1 auto;min-width:0` on the
 /// name and `flex:none` on the pill; `.detail .topbar` in the mockup). The pill never shrinks.
 ///
-/// TODO(compose-rust#778, after v0.0.10): the measuring below goes when the pin has a weight that
+/// TODO(compose-rust#778, after v0.0.11): the measuring below goes when the pin has a weight that
 /// leaves a child its own size.
 ///
 /// The toolkit has no weight that leaves a child its own size (Compose `weight(fill = false)`)
@@ -1308,48 +1324,46 @@ pub fn NameThenPillLines(name: &str, fs: Fs, weight: Weight, color: Option<Paint
         pill_size.measured().width_dp,
         gap,
     );
-    cu::Box()
-        .alignment(Alignment::CenterStart)
-        .modifier(Modifier::new().weight(1.0).width(0.0).observe_size_every_dp(room.token()))
-        .content(|| {
-            cu::Row().content(|| {
-                cu::Box().modifier(Modifier::new().observe_size_every_dp(natural.token())).content(|| {
+    { use ::compose_rust::ui::Box; Box!(alignment = Alignment::CenterStart, modifier = Modifier::new().weight(1.0).width(0.0).observe_size_every_dp(room.token()), {
+            { use ::compose_rust::ui::Row; Row!({
+                { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().observe_size_every_dp(natural.token()), {
                     // The measuring copy: the name's own font, clear ink, out of the
                     // accessibility tree (a `hidden` container still exposes its text).
-                    let copy = cu::Text(name).word_break(WordBreak::KeepAll);
-                    let copy = if mono { copy.type_role(TypeRole::Mono) } else { copy };
-                    drop(
-                        copy
-                            .font_size(fs.size())
-                            .line_height(fs.line_height())
-                            .font_weight(weight.value())
-                            .letter_spacing(fs.letter_spacing())
-                            .color(Paint::Literal(Color::argb(0)))
-                            .max_lines(1)
-                            .modifier(Modifier::new().hidden(true)),
-                    );
-                });
-            });
-            cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                    let mono_role = if mono { Some(TypeRole::Mono) } else { None };
+                    { use ::compose_rust::ui::Text; Text!(
+                        name,
+                        word_break = WordBreak::KeepAll,
+                        type_role = mono_role,
+                        font_size = fs.size(),
+                        line_height = fs.line_height(),
+                        font_weight = weight.value(),
+                        letter_spacing = fs.letter_spacing(),
+                        color = Paint::Literal(Color::argb(0)),
+                        max_lines = 1u32,
+                        modifier = Modifier::new().hidden(true),
+                    ) };
+                }) };
+            }) };
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
                 let name_box = match width {
                     Some(w) => Modifier::new().width(w),
                     None => Modifier::new().weight(1.0).width(0.0),
                 };
-                cu::Box().alignment(Alignment::CenterStart).modifier(name_box).content(|| {
+                { use ::compose_rust::ui::Box; Box!(alignment = Alignment::CenterStart, modifier = name_box, {
                     if mono {
                         MonoLine(name, fs, weight, color);
                     } else {
                         Label(name, fs, weight, color, Some(lines));
                     }
-                });
-                cu::Spacer().modifier(Modifier::new().width(gap));
+                }) };
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(gap)) };
                 // No weight and no width: the pill is as wide as its content, always.
-                cu::Box().modifier(Modifier::new().observe_size_every_dp(pill_size.token())).content(pill);
+                { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().observe_size_every_dp(pill_size.token()), content = pill) };
                 if width.is_some() {
-                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                 }
-            });
-        });
+            }) };
+        }) };
 }
 
 /// A status or count pill. Pills carry status and counts, never actions.
@@ -1358,14 +1372,11 @@ pub fn Pill(text: &str, tone: PillTone, small: bool) {
     let (fg, bg) = pill_colors(tone, theme.palette);
     let (height, fs, weight) = pill_metrics(small);
     // A Row carries the fill so the height is the pill's own (24 or 20), not its content's.
-    cu::Row()
-        .alignment(Alignment::CenterStart)
-        .modifier(Modifier::new().height(height).background(paint(bg)).shape_role(ShapeRole::Full))
-        .content(|| {
-            cu::Spacer().modifier(Modifier::new().width(SP[1]));
+    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().height(height).background(paint(bg)).shape_role(ShapeRole::Full), {
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[1])) };
             Label(text, fs, weight, Some(paint(fg)), Some(1));
-            cu::Spacer().modifier(Modifier::new().width(SP[1]));
-        });
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[1])) };
+        }) };
 }
 
 /// A single-line bar: `pct` (0 to 100) of the track in `fill`. Drawn here rather than with the
@@ -1375,14 +1386,12 @@ pub fn Pill(text: &str, tone: PillTone, small: bool) {
 pub fn TrackBar(pct: f32, height: f32, fill: Color) {
     let p = ember_theme().palette;
     let pct = pct.clamp(0.0, 100.0);
-    cu::Row()
-        .modifier(Modifier::new().fill_max_width().height(height).background(paint(p.track)).shape_role(ShapeRole::Full))
-        .content(move || {
+    { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width().height(height).background(paint(p.track)).shape_role(ShapeRole::Full), content = move || {
             if pct > 0.0 {
-                cu::Spacer().modifier(Modifier::new().weight(pct).height(height).background(paint(fill)).shape_role(ShapeRole::Full));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(pct).height(height).background(paint(fill)).shape_role(ShapeRole::Full)) };
             }
-            cu::Spacer().modifier(Modifier::new().weight((100.0 - pct) + 0.001));
-        });
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight((100.0 - pct) + 0.001)) };
+        }) };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1471,29 +1480,31 @@ pub fn AppButton(
 ) {
     let theme = ember_theme();
     let s = button_style_for(kind, small, enabled, theme.palette);
-    let mut b = cu::Button(text)
-        .enabled(enabled)
-        .variant(ButtonVariant::Text)
-        .color(paint(s.text))
+    // With an icon the renderer draws the text beside the glyph and the button itself had no
+    // name (review st, E: the branch menu's 만들기 was `AXButton desc=` with a separate text).
+    let accessible_name = icon.map(|_| text);
+    { use ::compose_rust::ui::Button; Button!(
+        text,
+        on_click,
+        enabled = enabled,
+        variant = ButtonVariant::Text,
+        color = paint(s.text),
         // FR-L10.2 (#844): the mockup's `.btn` 14/500 (`.btn.sm` 13/500), not the toolkit's
         // label style (about 17/600). compose-rust v0.0.7 sends both only when they are set.
-        .font_size(s.fs.size())
-        .font_weight(s.weight.value())
-        .modifier(pressable(
+        font_size = s.fs.size(),
+        font_weight = s.weight.value(),
+        modifier = pressable_on(
             Modifier::new()
                 .fill_max_width_if(fill_max_width)
                 .height(s.height)
                 .background(paint(s.fill))
                 .border(1.0, paint(s.border))
                 .shape_role(ShapeRole::Full),
-        ))
-        .on_click(on_click);
-    // With an icon the renderer draws the text beside the glyph and the button itself had no
-    // name (review st, E: the branch menu's 만들기 was `AXButton desc=` with a separate text).
-    if let Some(i) = icon {
-        b = b.icon(i).accessible_name(text);
-    }
-    drop(b);
+            s.fill,
+        ),
+        icon = icon,
+        accessible_name = accessible_name,
+    ) };
 }
 
 /// An [`AppButton`] that opens a menu: the same pill, and it says whether the menu is open
@@ -1509,24 +1520,25 @@ pub fn AppMenuButton(
 ) {
     let theme = ember_theme();
     let s = button_style_for(kind, small, enabled, theme.palette);
-    drop(
-        cu::Button(text)
-            .enabled(enabled)
-            .variant(ButtonVariant::Text)
-            .color(paint(s.text))
-            .font_size(s.fs.size())
-            .font_weight(s.weight.value())
-            .modifier(pressable(
-                Modifier::new()
-                    .fill_max_width_if(fill_max_width)
-                    .height(s.height)
-                    .background(paint(s.fill))
-                    .border(1.0, paint(s.border))
-                    .shape_role(ShapeRole::Full)
-                    .expanded(expanded),
-            ))
-            .on_click(on_click),
-    );
+    { use ::compose_rust::ui::Button; Button!(
+        text,
+        on_click,
+        enabled = enabled,
+        variant = ButtonVariant::Text,
+        color = paint(s.text),
+        font_size = s.fs.size(),
+        font_weight = s.weight.value(),
+        modifier = pressable_on(
+            Modifier::new()
+                .fill_max_width_if(fill_max_width)
+                .height(s.height)
+                .background(paint(s.fill))
+                .border(1.0, paint(s.border))
+                .shape_role(ShapeRole::Full)
+                .expanded(expanded),
+            s.fill,
+        ),
+    ) };
 }
 
 /// A pill that is one choice of several, the mockup's `.seg button`: the chosen one is `ink`,
@@ -1560,18 +1572,18 @@ pub fn ChoiceButton(
         .shape_role(ShapeRole::Full);
     // The same 14/500 (13/500 small) label as AppButton (FR-L10.2, #844), on one line.
     let label = move || {
-        cu::Row().alignment(Alignment::CenterStart).content(|| {
-            cu::Spacer().modifier(Modifier::new().width(CHOICE_PAD_X));
+        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, {
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(CHOICE_PAD_X)) };
             Label(text, s.fs, s.weight, Some(paint(s.text)), Some(1));
-            cu::Spacer().modifier(Modifier::new().width(CHOICE_PAD_X));
-        });
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(CHOICE_PAD_X)) };
+        }) };
     };
     if enabled {
-        Clickable(frame, Alignment::Center, on_click, label);
+        ClickableOn(frame, Some(s.fill), Alignment::Center, on_click, label);
     } else {
         let frame = frame.disabled(true);
         let frame = if chosen { frame } else { frame.alpha(CHOICE_DISABLED_ALPHA) };
-        cu::Box().modifier(frame).alignment(Alignment::Center).content(label);
+        { use ::compose_rust::ui::Box; Box!(modifier = frame, alignment = Alignment::Center, content = label) };
     }
 }
 
@@ -1586,18 +1598,14 @@ pub const CHOICE_DISABLED_ALPHA: f32 = 0.45;
 /// instead of being squeezed (settings-sheet-390, review r5). The toolkit's `FlowRow` measures
 /// each choice at its own width.
 pub fn ChoiceRow(content: impl FnOnce()) {
-    cu::FlowRow()
-        .horizontal_spacing(SP[1])
-        .vertical_spacing(SP[1])
-        .modifier(Modifier::new().fill_max_width())
-        .content(content);
+    { use ::compose_rust::ui::FlowRow; FlowRow!(horizontal_spacing = SP[1], vertical_spacing = SP[1], modifier = Modifier::new().fill_max_width(), content = content) };
 }
 
 /// A [`ChoiceRow`] as wide as its choices, for a group at the end of a setting row: a full-width
 /// one took the whole row and drew its choices over the setting's title and hint
 /// (agents-models, review r6). It still starts a new line when the choices do not fit.
 pub fn ChoiceRowFit(content: impl FnOnce()) {
-    cu::FlowRow().horizontal_spacing(SP[1]).vertical_spacing(SP[1]).content(content);
+    { use ::compose_rust::ui::FlowRow; FlowRow!(horizontal_spacing = SP[1], vertical_spacing = SP[1], content = content) };
 }
 
 /// A [`ChoiceButton`]'s look, the mockup's `.seg button` (FR-L10.2, #878): the chosen one is
@@ -1633,12 +1641,7 @@ pub fn IconButton(icon: IconRole, small: bool, on_click: impl FnMut() + 'static)
     // mockup's 1.5 px SVG line icons; workaround kept until checked on a display (moving every
     // caller to an SVG and a Korean `accessible_name` changes this signature). The toolkit glyph
     // is tinted `--text-2`, and the small button shows it small.
-    cu::Button("")
-        .icon(icon)
-        .color(paint(theme.palette.text_2))
-        .variant(ButtonVariant::Text)
-        .modifier(pressable(ring))
-        .on_click(on_click);
+    { use ::compose_rust::ui::Button; Button!("", on_click, icon = icon, color = paint(theme.palette.text_2), variant = ButtonVariant::Text, modifier = pressable(ring)) };
 }
 
 /// The phone's form of a primary button: a 40 px `ink` circle with the toolkit glyph in
@@ -1647,12 +1650,7 @@ pub fn IconButton(icon: IconRole, small: bool, on_click: impl FnMut() + 'static)
 /// built the same button by hand, outside [`pressable`] (FR-L34.5, #250).
 pub fn InkIconButton(icon: IconRole, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
-    cu::Button("")
-        .icon(icon)
-        .variant(ButtonVariant::Text)
-        .color(paint(p.ink_text))
-        .modifier(pressable(Modifier::new().size(H_BTN, H_BTN).background(paint(p.ink)).shape_role(ShapeRole::Full)))
-        .on_click(on_click);
+    { use ::compose_rust::ui::Button; Button!("", on_click, icon = icon, variant = ButtonVariant::Text, color = paint(p.ink_text), modifier = pressable_on(Modifier::new().size(H_BTN, H_BTN).background(paint(p.ink)).shape_role(ShapeRole::Full), p.ink)) };
 }
 
 /// The corner of [`BackButton`]: the mockup's `.icon-btn.sm.backbtn` is `border-radius:50%`
@@ -1701,20 +1699,19 @@ pub fn PickChip(
     let theme = ember_theme();
     let (height, fill) = pickchip_style(selected, theme.palette);
     let text = if icon_only && icon.is_some() { "" } else { text };
-    let mut b = cu::Button(text)
-        .variant(ButtonVariant::Text)
-        .color(paint(theme.palette.text_2))
-        .modifier(pressable(
+    { use ::compose_rust::ui::Button; Button!(
+        text,
+        on_click,
+        variant = ButtonVariant::Text,
+        color = paint(theme.palette.text_2),
+        modifier = pressable(
             Modifier::new()
                 .height(height)
                 .background(paint(fill))
                 .shape_role(ShapeRole::Full),
-        ))
-        .on_click(on_click);
-    if let Some(i) = icon {
-        b = b.icon(i);
-    }
-    drop(b);
+        ),
+        icon = icon,
+    ) };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1769,19 +1766,19 @@ pub fn EmberCardSized(
         .border(1.0, paint(border))
         .corner_radius(CORNER_LG);
     // A Box rather than `Card`, whose design-system shape ignores `corner_radius`.
-    // TODO(compose-rust, unfiled: Modifier has no per-side padding): the mockup's 16/20 padding
-    // is asymmetric and `Modifier::padding` is uniform, so 16 is used on all sides unless the
-    // caller passes one. The side spacers go when the toolkit takes a padding per side.
+    // TODO(compose-rust#826): the mockup's 16/20 padding is asymmetric and `Modifier::padding`
+    // is uniform, so 16 is used on all sides unless the caller passes one. The side spacers go
+    // when the toolkit takes a padding per side.
     // The 4 dp spacers raise the uniform 16 to the mockup's 20 on the sides (`--pad-card`).
     let side = if padding.is_some() { 0.0 } else { PAD_CARD_H - PAD_CARD_V };
-    cu::Box().modifier(m.padding(padding.unwrap_or(PAD_CARD_V))).content(|| {
+    { use ::compose_rust::ui::Box; Box!(modifier = m.padding(padding.unwrap_or(PAD_CARD_V)), {
         // The row fills the card, so the card does not shrink to its content (FR-L18).
-        cu::Row().modifier(Modifier::new().fill_max_width_if(fill_max_width || weight.is_some())).content(|| {
-            cu::Spacer().modifier(Modifier::new().width(side));
-            cu::Column().modifier(Modifier::new().weight(1.0)).content(content);
-            cu::Spacer().modifier(Modifier::new().width(side));
-        });
-    });
+        { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width_if(fill_max_width || weight.is_some()), {
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(side)) };
+            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), content = content) };
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(side)) };
+        }) };
+    }) };
 }
 
 /// The inset panel one level below a card: `surface-2`, `corner-md`.
@@ -1798,25 +1795,27 @@ pub fn InsetPanelSized(fill_max_width: bool, fill_max_height: bool, content: imp
     if fill_max_height {
         m = m.fill_max_height();
     }
-    // TODO(compose-rust, unfiled: Modifier has no per-side padding): the mockup's 12/16 padding
-    // is asymmetric; 12 on all sides and the 4 dp spacers below until the toolkit takes one per side.
-    let panel = cu::Box().modifier(m.background(paint(theme.palette.surface_2)).corner_radius(CORNER_MD).padding(PAD_ROW_V));
-    let panel = if fill_max_height { panel.alignment(Alignment::CenterStart) } else { panel };
-    panel
-        .content(|| {
+    // TODO(compose-rust#826): the mockup's 12/16 padding is asymmetric; 12 on all sides and the
+    // 4 dp spacers below until the toolkit takes one per side.
+    let alignment = if fill_max_height { Some(Alignment::CenterStart) } else { None };
+    { use ::compose_rust::ui::Box; Box!(
+        modifier = m.background(paint(theme.palette.surface_2)).corner_radius(CORNER_MD).padding(PAD_ROW_V),
+        alignment = alignment,
+        content = || {
             // 4 dp more on each side makes the mockup's 12 16 (`.inset`).
             // The Row and the Column take the panel's width (a Column with no weight shrinks to
             // its widest word, which broke the routine prompt into one word per line, #492).
-            cu::Row().modifier(Modifier::new().fill_max_width_if(fill_max_width)).content(|| {
-                cu::Spacer().modifier(Modifier::new().width(SP[0]));
+            { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width_if(fill_max_width), {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[0])) };
                 if fill_max_width {
-                    cu::Column().modifier(Modifier::new().weight(1.0)).content(content);
+                    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), content = content) };
                 } else {
-                    cu::Column().content(content);
+                    { use ::compose_rust::ui::Column; Column!(content = content) };
                 }
-                cu::Spacer().modifier(Modifier::new().width(SP[0]));
-            });
-        });
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[0])) };
+            }) };
+        },
+    ) };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1933,7 +1932,7 @@ pub(crate) fn sheet_body_max_height(window_width_dp: f32, window_height_dp: f32,
 }
 
 /// The room a bottom sheet keeps under its last row for the phone's gesture bar or home
-/// indicator (`env(safe-area-inset-bottom)` in the mockup, FR-L28.4). compose-rust v0.0.10
+/// indicator (`env(safe-area-inset-bottom)` in the mockup, FR-L28.4). compose-rust v0.0.11
 /// reports no bottom safe area (`WindowSafeArea` has top, leading and trailing only) and its
 /// `Sheet` does not pad for the navigation bar, so a fixed phone value is used on every system.
 pub const SHEET_PHONE_BOTTOM_ROOM: f32 = 24.0;
@@ -1949,7 +1948,7 @@ pub(crate) fn sheet_bottom_room(window_width_dp: f32, monitor: bool) -> f32 {
 
 /// The 32 px round close button of a sheet header, with the mockup's line icon.
 /// Its accessible name is "닫기" (compose-rust v0.0.7, #460).
-/// compose-rust v0.0.10 registers every open `Dialog`, `Sheet` and `Popover` on
+/// compose-rust v0.0.11 registers every open `Dialog`, `Sheet` and `Popover` on
 /// `OverlayFocusStack` and delivers Escape to the top-most open modal's `on_dismiss`
 /// (FR-L32, #502; not yet verified on a display). Ember passes the same close callback
 /// (guarded where a guard exists) to the modal's `on_dismiss`, so Escape closes every sheet
@@ -1976,21 +1975,18 @@ pub fn SheetHeader(
     on_close: impl FnMut() + 'static,
     actions: Option<&mut dyn FnMut()>,
 ) {
-    cu::Row()
-        .alignment(Alignment::CenterStart)
-        .modifier(Modifier::new().fill_max_width().height(SHEET_HEADER_H))
-        .content(|| {
-            cu::Spacer().modifier(Modifier::new().width(SP[4]));
-            cu::Box().modifier(Modifier::new().weight(1.0)).content(|| {
+    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width().height(SHEET_HEADER_H), {
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[4])) };
+            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().weight(1.0), {
                 Label(title, Fs::Xl, Weight::Semibold, None, Some(1));
-            });
-            cu::Spacer().modifier(Modifier::new().width(SP[2]));
+            }) };
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
             if let Some(actions) = actions {
                 actions();
             }
             CloseButton(on_close);
-            cu::Spacer().modifier(Modifier::new().width(SP[4]));
-        });
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[4])) };
+        }) };
 }
 
 /// A responsive modal with the shared header and a scrim (#212).
@@ -2020,7 +2016,7 @@ pub fn EmberSheetSized(
 ) {
     let theme = ember_theme();
     // The mockup's `.modal` scrim, rgba(0, 0, 0, 0.3), set on every presentation (compose-rust#384,
-    // v0.0.10 `ModalScope::scrim`). The layered card shadow (#214) replaces the Material tint ring that `elevation` painted.
+    // v0.0.11 `ModalScope::scrim`). The layered card shadow (#214) replaces the Material tint ring that `elevation` painted.
     // Explicit zero padding suppresses the renderer dialog's theme padding, which otherwise
     // adds space around the frame and prevents a full-screen sheet.
     let modifier = with_shadows(Modifier::new().padding(0.0), theme.shadow_sm()).background(paint(theme.palette.surface));
@@ -2036,44 +2032,31 @@ pub fn EmberSheetSized(
     // An empty title draws no header: the share sheet is the mockup's `.fl-share`, which has
     // none and puts its close button in its first card (FR-L27.7).
     let body = move || {
-        cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
+        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), {
             if !title.is_empty() {
                 if top_inset > 0.0 {
                     // FR-L33: the full-screen sheet's header starts below the traffic lights
                     // (review ba D: "이 컴퓨터" sat under them at 390).
-                    cu::Spacer().modifier(Modifier::new().fill_max_width().height(top_inset).background(paint(strip_bg)));
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().fill_max_width().height(top_inset).background(paint(strip_bg))) };
                 }
                 SheetHeader(title, dismiss, actions);
-                cu::Separator(Some(paint(theme.palette.line)));
+                { use ::compose_rust::ui::Separator; Separator!(Some(paint(theme.palette.line))) };
             }
             content();
             if bottom_room > 0.0 {
                 // FR-L28.4: the last row stays above the gesture bar.
-                cu::Spacer().modifier(Modifier::new().fill_max_width().height(bottom_room));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().fill_max_width().height(bottom_room)) };
             }
-        });
+        }) };
     };
     if presentation == SheetPresentation::Bottom {
         // compose-rust#445 (v0.0.9): the sheet is as tall as its content up to 85 percent of the
         // window, and taller content scrolls inside it, so a short sheet wraps its content.
-        cu::Sheet(open)
-            .modifier(framed.fill_max_width().corner_radii([CORNER_XL, CORNER_XL, 0.0, 0.0]))
-            .max_height_fraction(SHEET_BOTTOM_MAX_FRACTION)
-            .scrim(Paint::Literal(MODAL_SCRIM))
-            .on_dismiss(on_dismiss)
-            .content(body);
+        { use ::compose_rust::ui::Sheet; Sheet!(open, on_dismiss, modifier = framed.fill_max_width().corner_radii([CORNER_XL, CORNER_XL, 0.0, 0.0]), max_height_fraction = SHEET_BOTTOM_MAX_FRACTION, scrim = Paint::Literal(MODAL_SCRIM), content = body) };
     } else if presentation == SheetPresentation::FullScreen {
-        cu::Dialog(open)
-            .modifier(modifier.width(window.width_dp).height(window.height_dp))
-            .scrim(Paint::Literal(MODAL_SCRIM))
-            .on_dismiss(on_dismiss)
-            .content(body);
+        { use ::compose_rust::ui::Dialog; Dialog!(open, on_dismiss, modifier = modifier.width(window.width_dp).height(window.height_dp), scrim = Paint::Literal(MODAL_SCRIM), content = body) };
     } else {
-        cu::Dialog(open)
-            .modifier(framed.corner_radius(CORNER_XL).width(sheet_width(window.width_dp, width)))
-            .scrim(Paint::Literal(MODAL_SCRIM))
-            .on_dismiss(on_dismiss)
-            .content(body);
+        { use ::compose_rust::ui::Dialog; Dialog!(open, on_dismiss, modifier = framed.corner_radius(CORNER_XL).width(sheet_width(window.width_dp, width)), scrim = Paint::Literal(MODAL_SCRIM), content = body) };
     }
 }
 
@@ -2085,16 +2068,17 @@ pub const MODAL_SCRIM: Color = Color::argb(0x4D00_0000);
 pub fn FilterChip(text: &str, selected: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let (bg, ink) = if selected { (p.ink, p.ink_text) } else { (p.surface_2, p.text_2) };
-    Clickable(
+    ClickableOn(
         Modifier::new().height(H_CTL).background(paint(bg)).shape_role(ShapeRole::Full).selected(selected),
+        Some(bg),
         Alignment::Center,
         on_click,
         || {
-            cu::Row().alignment(Alignment::CenterStart).content(|| {
-                cu::Spacer().modifier(Modifier::new().width(SP[2]));
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
                 Label(text, Fs::Sm, Weight::Medium, Some(paint(ink)), Some(1));
-                cu::Spacer().modifier(Modifier::new().width(SP[2]));
-            });
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
+            }) };
         },
     );
 }
@@ -2167,21 +2151,16 @@ pub fn SearchFieldFocus(placeholder: &str, height: f32, focus: Option<cu::FocusH
     let p = ember_theme().palette;
     let placeholder = placeholder.to_string();
     let on_change = std::rc::Rc::new(std::cell::RefCell::new(Some(on_change)));
-    cu::Row()
-        .alignment(Alignment::CenterStart)
-        .modifier(
-            Modifier::new()
+    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new()
                 .fill_max_width()
                 .height(height)
                 .background(paint(p.surface))
                 .border(1.0, paint(p.line))
-                .shape_role(ShapeRole::Full),
-        )
-        .content(move || {
-            cu::Spacer().modifier(Modifier::new().width(search_field_padding(height)));
+                .shape_role(ShapeRole::Full), content = move || {
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(search_field_padding(height))) };
             super::shell::NavIcon(super::shell::ICON_SEARCH_SVG, p.muted.to_argb(), SEARCH_ICON_SIZE);
             if search_field_spacer() > 0.0 {
-                cu::Spacer().modifier(Modifier::new().width(search_field_spacer()));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(search_field_spacer())) };
             }
             // The field takes the row's remaining width by weight, so it never overruns it, and
             // the bare field's own row centres the placeholder in the box's height (#844).
@@ -2198,8 +2177,8 @@ pub fn SearchFieldFocus(placeholder: &str, height: f32, focus: Option<cu::FocusH
                 ..Default::default()
             });
             // `.searchbox` padding 0 16: typed text stops short of the round end.
-            cu::Spacer().modifier(Modifier::new().width(search_field_padding(height)));
-        });
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(search_field_padding(height))) };
+        }) };
 }
 
 #[cfg(test)]
@@ -2370,7 +2349,7 @@ mod tests {
         assert!(frame.mods.iter().any(|m| m.starts_with("Background")), "{:?}", frame.mods);
         assert!(frame.mods.iter().any(|m| m.starts_with("Border")), "{:?}", frame.mods);
         assert!(frame.mods.iter().any(|m| m.starts_with("Shape")), "{:?}", frame.mods);
-        let centre = row_alignment(|| cu::Row().alignment(Alignment::CenterStart).content(|| {}));
+        let centre = row_alignment(|| { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, {}) });
         assert!(has_props(frame, &centre), "{:?} has {centre:?}", frame.props);
         assert_eq!(FIELD_INSET, (12.0, 0.0));
     }
@@ -2473,53 +2452,39 @@ mod tests {
     }
 
     #[test]
-    fn fr_l10_1_one_line_hint_is_an_ellipsised_label_under_an_empty_field() {
-        // #878: the 새 세션 folder hint (a long path) wrapped onto a clipped second line.
+    fn fr_l10_1_one_line_hint_is_the_toolkit_placeholder() {
+        // compose-rust#786 (v0.0.11): a single-line TextField keeps its placeholder on one line
+        // with an ellipsis in the renderer, so the placeholder is sent directly to the field and
+        // no separate label is drawn under it.
         let nodes = emitted_nodes(|| {
             EmberField(FieldOptions {
                 fill_max_width: true,
-                one_line_hint: true,
                 placeholder: "/Users/someone/work/a-very-long-folder/with/many/parts".to_string(),
                 ..Default::default()
             })
         });
         let field = the(&nodes, "TextField");
         assert!(
-            !field.props.iter().any(|p| p.starts_with("Placeholder=") && p.contains("/Users")),
-            "the toolkit placeholder is not sent: {:?}",
+            field.props.iter().any(|p| p == "Placeholder=String(\"/Users/someone/work/a-very-long-folder/with/many/parts\")"),
+            "the toolkit placeholder is sent on the field: {:?}",
             field.props
         );
-        let hint = nodes
-            .iter()
-            .find(|n| n.widget == "Text" && n.props.iter().any(|p| p.contains("/Users/someone")))
-            .expect("the hint label");
-        assert!(hint.props.iter().any(|p| p == "MaxLines=Integer(1)"), "{:?}", hint.props);
-        assert!(hint.props.iter().any(|p| p.starts_with("Overflow=")), "{:?}", hint.props);
-        // The hint and the field share one box, the hint first so the field is on top.
-        let stack = parent_of(&nodes, field);
-        assert_eq!(stack.widget, "Box");
-        assert!(stack.mods.iter().any(|m| m.starts_with("Clip")), "{:?}", stack.mods);
-        assert_eq!(hint.parent, Some(stack.id));
-        // The share of the row is taken by a column (#878: a weighted Box overran the inset).
-        let share = parent_of(&nodes, stack);
-        assert_eq!(share.widget, "Column");
-        assert!(share.mods.iter().any(|m| m == "Weight(1.0)"), "{:?}", share.mods);
-        assert!(share.mods.iter().any(|m| m == "Width(0.0)"), "no narrowest width: {:?}", share.mods);
-        assert!(hint.id < field.id, "the hint is under the field");
-        // A field that starts with text shows no hint.
-        let nodes = emitted_nodes(|| {
-            EmberField(FieldOptions { one_line_hint: true, placeholder: "힌트".into(), text: Some("값".into()), ..Default::default() })
-        });
-        assert!(!nodes.iter().any(|n| n.widget == "Text" && n.props.iter().any(|p| p.contains("힌트"))));
+        assert!(
+            !nodes.iter().any(|n| n.widget == "Text"),
+            "no stand-in hint label is drawn under the field"
+        );
+        let production = include_str!("components.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(!production.contains(&["OneLine", "HintField"].concat()));
+        assert!(!production.contains(concat!("TODO(compose-rust#", "786")));
     }
 
     #[test]
-    fn fr_l10_1_new_session_long_hints_stay_on_one_line() {
+    fn fr_l10_1_new_session_long_hints_are_the_field_placeholder() {
         let src = include_str!("new_session.rs");
         for ph in ["\"/path/to/project\"", "\"에이전트 기본값\""] {
             let at = src.find(ph).unwrap_or_else(|| panic!("{ph}"));
             let opts = &src[src[..at].rfind("EmberField(FieldOptions {").expect("field")..at];
-            assert!(opts.contains("one_line_hint: true"), "{ph}: {opts}");
+            assert!(!opts.contains("one_line_hint"), "{ph}: {opts}");
         }
     }
 
@@ -2537,7 +2502,7 @@ mod tests {
         assert!(spacers.len() == 2 && spacers.iter().all(|s| s.mods.iter().any(|m| m == "Width(2.0)")));
         let frame = parent_of(&nodes, inset_row);
         assert!(frame.mods.iter().any(|m| m == "Height(120.0)"), "{:?}", frame.mods);
-        let top = row_alignment(|| cu::Row().alignment(Alignment::TopStart).content(|| {}));
+        let top = row_alignment(|| { use ::compose_rust::ui::Row; Row!(alignment = Alignment::TopStart, {}) });
         assert!(has_props(frame, &top), "{:?} has {top:?}", frame.props);
         assert_eq!(FIELD_INSET_MULTILINE, (12.0, 10.0));
     }
@@ -2556,7 +2521,7 @@ mod tests {
         assert_eq!(row.widget, "Row");
         assert!(row.mods.iter().any(|m| m == "Height(40.0)"), "{:?}", row.mods);
         assert!(row.mods.iter().any(|m| m == "Weight(1.0)"), "{:?}", row.mods);
-        let centre = row_alignment(|| cu::Row().alignment(Alignment::CenterStart).content(|| {}));
+        let centre = row_alignment(|| { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, {}) });
         assert!(has_props(row, &centre), "{:?} has {centre:?}", row.props);
         // No inset was asked for: no spacer beside the field.
         assert!(!nodes.iter().any(|n| n.widget == "Spacer"));
@@ -2590,7 +2555,7 @@ mod tests {
         let row = parent_of(&nodes, field);
         assert!(row.mods.iter().any(|m| m == "Height(84.0)"), "{:?}", row.mods);
         assert!(row.mods.iter().any(|m| m == "Padding(2.0)"), "{:?}", row.mods);
-        let top = row_alignment(|| cu::Row().alignment(Alignment::TopStart).content(|| {}));
+        let top = row_alignment(|| { use ::compose_rust::ui::Row; Row!(alignment = Alignment::TopStart, {}) });
         assert!(has_props(row, &top), "{:?} has {top:?}", row.props);
         assert!(!nodes.iter().any(|n| n.widget == "Spacer"), "the 2 px all round is the padding alone");
     }
@@ -2602,7 +2567,7 @@ mod tests {
         assert!(!field.mods.iter().any(|m| m.starts_with("Height") || m.starts_with("Offset")), "{:?}", field.mods);
         let row = parent_of(&nodes, field);
         assert!(row.mods.iter().any(|m| m == "Height(36.0)"), "{:?}", row.mods);
-        let centre = row_alignment(|| cu::Row().alignment(Alignment::CenterStart).content(|| {}));
+        let centre = row_alignment(|| { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, {}) });
         assert!(has_props(row, &centre), "{:?} has {centre:?}", row.props);
         assert!(nodes.iter().any(|n| n.widget == "Spacer" && n.mods.iter().any(|m| m == "Width(8.0)")), "the 8 px gap");
         assert!(!nodes.iter().any(|n| n.mods.iter().any(|m| m.starts_with("Offset"))), "nothing is pulled over the magnifier");
@@ -2956,7 +2921,7 @@ mod tests {
         // open state of a menu when it has one. `FillMaxSize` widened a box without a width.
         let _guard = crate::services::test_guard();
         let nodes = emitted_nodes(|| {
-            cu::Box().content(|| DataNamedOverlay("feat/673", true, Some(true), || {}));
+            { use ::compose_rust::ui::Box; Box!(content = || DataNamedOverlay("feat/673", true, Some(true), || {})) };
         });
         let over = the(&nodes, "Button");
         for want in ["Text=String(\"feat/673\")", "AccessibleName=String(\"feat/673\")"] {
@@ -2972,7 +2937,7 @@ mod tests {
         };
         assert_eq!((state(&over.mods) >> compose_rust::schema::SEMANTICS_EXPANDED_SHIFT) & 3, 2, "{:?}", over.mods);
         let plain = emitted_nodes(|| {
-            cu::Box().content(|| DataNamedOverlay("feat/673", false, None, || {}));
+            { use ::compose_rust::ui::Box; Box!(content = || DataNamedOverlay("feat/673", false, None, || {})) };
         });
         let plain = the(&plain, "Button");
         assert!(!plain.mods.iter().any(|m| m.starts_with("Semantics")), "no menu, no state: {:?}", plain.mods);
@@ -3029,13 +2994,98 @@ mod tests {
         ] {
             let production = src.split("#[cfg(test)]").next().unwrap();
             assert!(production.contains(call), "{file}");
-            assert!(!production.contains("cu::Button("), "{file}");
+            assert!(!production.contains("ui::Button; Button!("), "{file}");
         }
         // The two visible buttons that stay direct send the same press values through the helper.
         for (file, src) in [("launcher.rs", include_str!("launcher.rs")), ("routines.rs", include_str!("routines.rs"))] {
             let production = src.split("#[cfg(test)]").next().unwrap();
-            assert_eq!(production.matches(".modifier(pressable(").count(), 1, "{file}");
+            let direct = production.matches("modifier = pressable(").count() + production.matches("modifier = pressable_on(").count();
+            assert_eq!(direct, 1, "{file}");
             assert!(!production.contains(".press_feedback("), "{file}");
+        }
+    }
+
+    #[test]
+    fn fr_l34_1_every_shared_pressable_sends_the_mockup_curve_hover_and_ring() {
+        // #250, #251, compose-rust v0.0.12: the press-in curve `cubic-bezier(.2,0,0,1)`, a hover
+        // style, and the keyboard ring 2 px of `c-blue` 2 px outside (`outline-offset:2px`),
+        // each once on the node that takes the click.
+        use compose_rust::schema::Modifier as M;
+        let _guard = crate::services::test_guard();
+        let p = ember_theme().palette;
+        let ring = format!("{:?}", M::FocusRing { paint: paint(p.blue.strong), width_dp: 2.0, offset_dp: 2.0 });
+        for (name, content) in shared_pressables() {
+            let nodes = emitted_nodes(content);
+            let node = clicked(&nodes);
+            assert_eq!(node.mods.iter().filter(|m| **m == ring).count(), 1, "{name}: {:?}", node.mods);
+            let press: Vec<_> = node.mods.iter().filter(|m| m.starts_with("PressStyle")).collect();
+            assert_eq!(press.len(), 1, "{name}: {:?}", node.mods);
+            assert!(press[0].contains("press_easing: Some([0.2, 0.0, 0.0, 1.0])"), "{name}: {}", press[0]);
+            assert_eq!(node.mods.iter().filter(|m| m.starts_with("HoverStyle")).count(), 1, "{name}: {:?}", node.mods);
+        }
+    }
+
+    #[test]
+    fn fr_l34_1_an_ink_pressable_tints_in_its_light_text_and_fades_on_hover() {
+        // #250 (b): on `ink` the tint is the element's own light text colour, not `OnSurface`;
+        // `.btn.primary:hover{opacity:.88}` lays no layer. A `surface` pressable keeps the
+        // node's content colour and lays the `--hover` layer.
+        use compose_rust::schema::Modifier as M;
+        let _guard = crate::services::test_guard();
+        let p = ember_theme().palette;
+        let ink_press = format!("{:?}", M::PressStyle { tint: Some(paint(p.ink_text)), press_easing: Some(PRESS_EASING) });
+        let ink_hover = format!("{:?}", M::HoverStyle { fill: Some(paint(p.ink)), fill_alpha: 0.0, border: None, content_alpha: 0.88 });
+        let inked: [(&str, fn()); 5] = [
+            ("FilterChip selected", || FilterChip("전체", true, || {})),
+            ("ChoiceButton chosen", || ChoiceButton("선택", Choice::Toggle, true, false, true, || {})),
+            ("AppButton primary", || AppButton("저장", None, ButtonKind::Primary, false, true, false, || {})),
+            ("InkIconButton", || InkIconButton(IconRole::Add, || {})),
+            ("SendCircleButton", || crate::ui::cr::session::SendCircleButton(36.0, || {})),
+        ];
+        for (name, content) in inked {
+            let nodes = emitted_nodes(content);
+            let node = clicked(&nodes);
+            assert!(node.mods.contains(&ink_press), "{name}: {:?}", node.mods);
+            assert!(node.mods.contains(&ink_hover), "{name}: {:?}", node.mods);
+        }
+        let plain = emitted_nodes(|| FilterChip("전체", false, || {}));
+        let node = clicked(&plain);
+        let plain_press = format!("{:?}", M::PressStyle { tint: None, press_easing: Some(PRESS_EASING) });
+        assert!(node.mods.contains(&plain_press), "{:?}", node.mods);
+        let layer = hover_layer(p.surface, p.hover, p.text);
+        let plain_hover = format!("{:?}", M::HoverStyle { fill: Some(paint(p.text)), fill_alpha: layer, border: None, content_alpha: 1.0 });
+        assert!(node.mods.contains(&plain_hover), "{:?}", node.mods);
+    }
+
+    #[test]
+    fn fr_l34_1_a_list_row_hovers_to_surface_2_and_a_style_card_to_a_grey_border() {
+        // `.list-row:hover{background:var(--surface-2)}`, `.cs-card:hover{border-color:var(--c-grey)}`.
+        use compose_rust::schema::Modifier as M;
+        let _guard = crate::services::test_guard();
+        let p = ember_theme().palette;
+        let row = emitted_nodes(|| ClickableAs(Modifier::new().size(40.0, 40.0), Press::Row, Alignment::Center, || {}, || {}));
+        let want = format!("{:?}", M::HoverStyle { fill: Some(paint(p.text)), fill_alpha: hover_layer(p.surface, p.surface_2, p.text), border: None, content_alpha: 1.0 });
+        assert!(clicked(&row).mods.contains(&want), "{:?}", clicked(&row).mods);
+        let card = emitted_nodes(|| ClickableAs(Modifier::new().size(40.0, 40.0), Press::Card, Alignment::Center, || {}, || {}));
+        let want = format!("{:?}", M::HoverStyle { fill: Some(paint(p.text)), fill_alpha: 0.0, border: Some(paint(p.grey.strong)), content_alpha: 1.0 });
+        assert!(clicked(&card).mods.contains(&want), "{:?}", clicked(&card).mods);
+        // The launcher's conversation row and the character style card use them.
+        assert!(include_str!("launcher.rs").contains("super::components::Press::Row"));
+        assert!(include_str!("characters.rs").contains("super::components::Press::Card"));
+    }
+
+    #[test]
+    fn fr_l34_1_the_hover_layer_turns_surface_into_the_mockup_hover() {
+        // `--hover` is a background in the mockup; the toolkit lays a layer over the node, so
+        // `text` at this alpha over `surface` lands on `--hover` within a step in each scheme.
+        for p in [&LIGHT, &DARK] {
+            let a = hover_layer(p.surface, p.hover, p.text);
+            assert!(a > 0.0 && a < 0.2, "{a}");
+            for s in [16, 8, 0] {
+                let ch = |c: Color| ((c.to_argb() >> s) & 0xff) as f32;
+                let mixed = ch(p.surface) * (1.0 - a) + ch(p.text) * a;
+                assert!((mixed - ch(p.hover)).abs() <= 4.0, "channel {s}: {mixed} vs {}", ch(p.hover));
+            }
         }
     }
 
@@ -3168,7 +3218,7 @@ mod tests {
         let seg = &seg[..seg.find("\n}\n").unwrap()];
         assert!(seg.contains("ChoiceButton(label, Choice::Radio, selected, true, true,"), "{seg}");
         assert!(seg.contains("ChoiceRowFit(|| {"), "`.seg` gap 8, wrapping: {seg}");
-        assert!(!seg.contains("cu::Button("), "{seg}");
+        assert!(!seg.contains("ui::Button; Button!("), "{seg}");
     }
 
     #[test]
@@ -3324,14 +3374,14 @@ mod tests {
 
     #[test]
     fn fr_212_modal_scrim_is_the_mockups() {
-        // compose-rust#384 (v0.0.10 `ModalScope::scrim`): every presentation takes the mockup's scrim.
+        // compose-rust#384 (v0.0.11 `ModalScope::scrim`): every presentation takes the mockup's scrim.
         let src = include_str!("components.rs");
         let production = &src[..src.find("#[cfg(test)]").expect("tests")];
         assert!(!production.contains(concat!("TODO(compose-rust#", "384)")));
         assert_eq!(MODAL_SCRIM, Color::argb(0x4D00_0000));
         let sheet = &production[production.find("pub fn EmberSheetSized").expect("sheet")..];
         let sheet = &sheet[..sheet.find("\n}\n").expect("end")];
-        assert_eq!(sheet.matches(".scrim(Paint::Literal(MODAL_SCRIM))").count(), 3, "bottom sheet, full screen and dialog");
+        assert_eq!(sheet.matches("scrim = Paint::Literal(MODAL_SCRIM)").count(), 3, "bottom sheet, full screen and dialog");
     }
 
     #[test]
@@ -3382,7 +3432,7 @@ mod tests {
         let sized = production.split("pub fn EmberSheetSized(").nth(1).unwrap();
         let bottom = sized.split("if presentation == SheetPresentation::Bottom {").nth(1).unwrap();
         let bottom = bottom.split("} else if presentation == SheetPresentation::FullScreen {").next().unwrap();
-        assert!(bottom.contains(".max_height_fraction(SHEET_BOTTOM_MAX_FRACTION)"));
+        assert!(bottom.contains("max_height_fraction = SHEET_BOTTOM_MAX_FRACTION"));
         assert!(!bottom.contains(".height("));
         assert!(!production.contains(concat!("TODO(compose-rust#", "445)")));
         assert_eq!(SHEET_BOTTOM_MAX_FRACTION, 0.85);
@@ -3464,6 +3514,10 @@ mod tests {
     fn fr_l32_every_modal_wires_dismiss_and_settings_keeps_its_guard() {
         // Escape, the scrim and the close button share one callback, so a modal without
         // on_dismiss could never close on Escape, and a guarded sheet must pass its guard.
+        // `Dialog`, `Sheet` and `Popover` take the dismiss handler as their second positional
+        // argument, so a call without one does not compile; this checks that the modals are
+        // still built through those calls and that each passes a handler.
+        let mut modals = 0;
         use std::fs;
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui/cr");
         for entry in fs::read_dir(dir).expect("cr sources") {
@@ -3477,16 +3531,24 @@ mod tests {
             let lines: Vec<&str> = production.lines().collect();
             for (i, l) in lines.iter().enumerate() {
                 let t = l.trim_start();
-                if (t.starts_with("cu::Dialog(")
-                    || t.starts_with("cu::Sheet(")
-                    || t.starts_with("cu::Popover("))
-                    && !t.starts_with("//")
-                {
-                    let near = lines[i..(i + 24).min(lines.len())].join("\n");
-                    assert!(near.contains(".on_dismiss("), "{name}:{} modal without on_dismiss", i + 1);
+                let call = ["ui::Dialog; Dialog!(", "ui::Sheet; Sheet!(", "ui::Popover; Popover!("]
+                    .iter()
+                    .find_map(|c| t.find(c).map(|at| &t[at + c.len()..]));
+                if let Some(args) = call {
+                    if t.starts_with("//") {
+                        continue;
+                    }
+                    modals += 1;
+                    let near = [args].into_iter().chain(lines[i + 1..(i + 4).min(lines.len())].iter().copied()).collect::<Vec<_>>().join("\n");
+                    let near = near.trim_start();
+                    // `open, on_dismiss, ..`: something follows the first argument's comma.
+                    let after_open = near.split_once(',').map(|(_, rest)| rest.trim_start()).unwrap_or("");
+                    assert!(!after_open.is_empty() && !after_open.starts_with("modifier ="), "{name}:{} modal without on_dismiss", i + 1);
                 }
             }
         }
+        assert!(modals > 0, "no modal call found");
+
         assert!(include_str!("project.rs").contains("EmberSheet(&format!(\"{} 설정\", b.name), true, request_close,"));
     }
 
@@ -3578,7 +3640,7 @@ mod tests {
             let production = source.split("#[cfg(test)]").next().unwrap();
             assert!(!production.contains("WordBreak::BreakAll"), "{name} enables word breaking");
             if name != "components.rs" && name != "vcs.rs" {
-                assert!(!production.contains("cu::Text("), "{name} bypasses the shared text builder");
+                assert!(!production.contains("ui::Text; Text!("), "{name} bypasses the shared text builder");
             }
             // Existing direct buttons are explicitly counted until their specialized controls
             // move into shared components. Any additional bypass must be reviewed.
@@ -3608,12 +3670,12 @@ mod tests {
                 "new_channel.rs" => 0,
                 _ => 0,
             };
-            assert_eq!(production.matches("cu::Button(").count(), allowed_buttons, "{name} has an unreviewed direct button");
+            assert_eq!(production.matches("ui::Button; Button!(").count(), allowed_buttons, "{name} has an unreviewed direct button");
             // Paragraphs and descriptions can use multiple lines. Button and Chip retain
             // their toolkit one-line defaults.
         }
         let source = fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui/cr/components.rs")).unwrap();
-        assert!(source.split("#[cfg(test)]").next().unwrap().matches(".word_break(WordBreak::KeepAll)").count() >= 1);
+        assert!(source.split("#[cfg(test)]").next().unwrap().matches("word_break = WordBreak::KeepAll").count() >= 1);
     }
 
     #[test]
@@ -3631,10 +3693,11 @@ mod tests {
         assert!(bare.split("\nfn ").next().unwrap().contains("FieldNode(o, inner)"));
         let node = production.split("fn FieldNode(").nth(1).unwrap();
         let node = node.split("\nfn ").next().unwrap().split("\npub fn ").next().unwrap();
-        assert!(node.contains(".word_break(WordBreak::KeepAll)"));
-        assert!(node.contains(".overflow_wrap(OverflowWrap::Anywhere)"));
+        assert!(node.contains("word_break = WordBreak::KeepAll"));
+        assert!(node.contains("overflow_wrap = OverflowWrap::Anywhere"));
         let text = production.split("fn scale_text(").nth(1).unwrap();
-        assert!(text.contains("if wrap_anywhere {\n        t = t.overflow_wrap(OverflowWrap::Anywhere);"));
+        assert!(text.contains("let overflow_wrap = if wrap_anywhere { Some(OverflowWrap::Anywhere) } else { None };"));
+        assert!(text.contains("overflow_wrap = overflow_wrap,"));
         for screen in [include_str!("monitor.rs"), include_str!("routines.rs")] {
             assert!(!screen.contains(concat!("TODO(compose-rust#", "443)")));
         }
@@ -3645,7 +3708,7 @@ mod tests {
         let source = include_str!("components.rs");
         let card = source.split("pub fn EmberCard(").nth(1).unwrap()
             .split("pub fn InsetPanel(").next().unwrap();
-        assert!(card.contains("cu::Column().modifier(Modifier::new().weight(1.0)).content(content)"));
+        assert!(card.contains("Column!(modifier = Modifier::new().weight(1.0), content = content)"));
     }
 
     #[test]
@@ -3657,7 +3720,7 @@ mod tests {
         assert!(monitor.contains(r#"Label("할당된 프로젝트가 없습니다", Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(3))"#));
         let vcs = include_str!("vcs.rs").split("#[cfg(test)]").next().unwrap();
         assert!(!vcs.contains("TextOverflow::Clip"));
-        assert!(vcs.contains(".word_break(compose_rust::WordBreak::KeepAll)"));
+        assert!(vcs.contains("word_break = compose_rust::WordBreak::KeepAll"));
     }
 
     // ---- FR-L10: a navigation row is a control the renderer can click -----------------------
@@ -4005,6 +4068,7 @@ mod tests {
                 safe_area_top: 0.0,
                 safe_area_leading: 0.0,
                 safe_area_trailing: 0.0,
+                safe_area_bottom: 0.0,
             };
             let (bytes, _) = host.dispatch(HostEvent { node_id: *node_id, handler_id: 0, payload }).expect("dispatch");
             sent.extend(decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")));
@@ -4089,13 +4153,13 @@ mod tests {
     fn host_clickables() {
         use crate::ui::shell::{NavBadge, NavMenu};
         use crate::ui::cr::shell::{NavRow, RailItem, ToolRow};
-        cu::Column().content(|| {
+        { use ::compose_rust::ui::Column; Column!({
             NavRow(NavMenu::Projects, false, NavBadge::None, || { CLICKS.fetch_add(1, Ordering::SeqCst); });
             RailItem(NavMenu::Projects, false, NavBadge::None, || { CLICKS.fetch_add(1, Ordering::SeqCst); });
             ToolRow(crate::ui::shell::ICON_GEAR_SVG, "설정", false, || { CLICKS.fetch_add(1, Ordering::SeqCst); });
             MenuRow("항목", 200.0, false, || { CLICKS.fetch_add(1, Ordering::SeqCst); });
             Clickable(Modifier::new().size(40.0, 40.0), Alignment::Center, || { CLICKS.fetch_add(1, Ordering::SeqCst); }, || {});
-        });
+        }) };
     }
 
     /// The renderer acts on `OnClick` (it makes the node a button) and on nothing else a
@@ -4848,6 +4912,62 @@ mod tests {
             mh.press_escape();
             assert_eq!(mh.open_modals().len(), 1, "2nd Escape closes top-most 변경 사항 sheet and keeps 새 채널 open");
         }
+        crate::ui::window_size::set_opened_for_test(None);
+    }
+
+    #[test]
+    fn fr_l32_escape_after_closing_a_sheet_by_another_route_and_owner_claim_checking() {
+        use compose_rust::runtime::{mutable_state_of, remember};
+        use std::sync::{Arc, Mutex};
+        let _guard = crate::services::test_guard();
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+
+        // 1. Closing the top sheet via its own state (e.g. close button / action) and then
+        // pressing Escape closes the remaining sheet underneath without panicking or losing track.
+        {
+            let top_cell = Arc::new(Mutex::new(None));
+            let base_cell = Arc::new(Mutex::new(None));
+            let (tc, bc) = (top_cell.clone(), base_cell.clone());
+            let mut mh = ModalHost::new(move || {
+                let base = remember(|| mutable_state_of(true));
+                let top = remember(|| mutable_state_of(true));
+                *bc.lock().unwrap() = Some(base.clone());
+                *tc.lock().unwrap() = Some(top.clone());
+                let close_base = base.clone();
+                EmberSheet("더보기", base.get(), move || close_base.set(false), None, || {});
+                let close_top = top.clone();
+                EmberSheet("세부 정보", top.get(), move || close_top.set(false), None, || {});
+            });
+            assert_eq!(mh.open_modals().len(), 2, "both sheets open");
+            // Close the top sheet by another route (state flip, not Escape).
+            top_cell.lock().unwrap().as_ref().unwrap().set(false);
+            let bytes = mh.host.render_frame(16_000_000).expect("render").to_vec();
+            mh.apply(&bytes);
+            assert_eq!(mh.open_modals().len(), 1, "only the base sheet remains");
+            // Escape now closes the base sheet cleanly.
+            mh.press_escape();
+            assert!(mh.open_modals().is_empty(), "Escape closes the remaining sheet");
+            assert!(!base_cell.lock().unwrap().as_ref().unwrap().get_untracked());
+        }
+
+        // 2. OwnerClaimSheet while a claim is in flight (`ClaimState::Checking`) still closes
+        // on Escape (dismisses the prompt so the user can continue working while it checks).
+        {
+            let ui = crate::ui::coexist::shared_ui();
+            ui.owner_claim.set(crate::owner_claim::ClaimView {
+                state: crate::owner_claim::ClaimState::Checking { holders: 0 },
+                generation: 9,
+            });
+            ui.owner_claim_dismissed.set(None);
+            let mut mh = ModalHost::new(crate::ui::cr::owner_claim::OwnerClaimSheet);
+            assert_eq!(mh.open_modals().len(), 1, "owner claim sheet is open while checking");
+            mh.press_escape();
+            assert!(mh.open_modals().is_empty(), "Escape dismisses the owner claim sheet while checking");
+            assert!(ui.owner_claim_dismissed.get_untracked().is_some());
+            ui.owner_claim.set(crate::owner_claim::ClaimView::default());
+            ui.owner_claim_dismissed.set(None);
+        }
+
         crate::ui::window_size::set_opened_for_test(None);
     }
 }

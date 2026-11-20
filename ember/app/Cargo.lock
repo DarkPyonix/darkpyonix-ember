@@ -667,7 +667,7 @@ dependencies = [
 [[package]]
 name = "compose-rust"
 version = "0.0.12"
-source = "git+https://github.com/DarkPyonix/compose-rust?tag=v0.0.12#144c9beea53fb8eeaa61555b170dc72d0be7657a"
+source = "git+https://github.com/DarkPyonix/compose-rust?rev=a85f02dec4b23b9f25af508fb84b3ab0bb7148dd#a85f02dec4b23b9f25af508fb84b3ab0bb7148dd"
 dependencies = [
  "compose-rust-macros",
  "jni",
@@ -676,7 +676,7 @@ dependencies = [
 [[package]]
 name = "compose-rust-macros"
 version = "0.0.12"
-source = "git+https://github.com/DarkPyonix/compose-rust?tag=v0.0.12#144c9beea53fb8eeaa61555b170dc72d0be7657a"
+source = "git+https://github.com/DarkPyonix/compose-rust?rev=a85f02dec4b23b9f25af508fb84b3ab0bb7148dd#a85f02dec4b23b9f25af508fb84b3ab0bb7148dd"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1121,7 +1121,7 @@ dependencies = [
 [[package]]
 name = "dioxus-compose"
 version = "0.0.1"
-source = "git+https://github.com/DarkPyonix/dioxus-compose?rev=e3220fd865b5081a0476f561b5c8b52d2b15e585#e3220fd865b5081a0476f561b5c8b52d2b15e585"
+source = "git+https://github.com/DarkPyonix/dioxus-compose?rev=3758928bf86d4224f572467628b37d1d3966b487#3758928bf86d4224f572467628b37d1d3966b487"
 dependencies = [
  "blitz-dom",
  "blitz-html",
@@ -1277,7 +1277,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3049,7 +3049,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]

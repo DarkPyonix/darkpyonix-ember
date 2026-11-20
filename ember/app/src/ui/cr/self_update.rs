@@ -26,20 +26,17 @@ pub fn SelfUpdateSection() {
     let line_color = if matches!(state, UpdateState::Failed { .. }) { p.red.strong } else { p.text_2 };
 
     InsetPanel(true, || {
-        cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-            cu::Row()
-                .alignment(Alignment::CenterStart)
-                .modifier(Modifier::new().fill_max_width().height(24.0))
-                .content(|| {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width().height(24.0), {
                     Label(VERSION_LABEL, Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(1));
-                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                     Txt(RUNNING_VERSION, TypeRole::Mono, Some(paint(p.text)), Some(1), None, None, None);
-                });
+                }) };
             Label(&line, Fs::Xs, Weight::Regular, Some(paint(line_color)), Some(3));
-        });
+        }) };
     });
 
-    cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
+    { use ::compose_rust::ui::Row; Row!(spacing = SP[1], alignment = Alignment::CenterStart, {
         AppButton(CHECK_LABEL, None, ButtonKind::Default, true, can_check(&state), false, || {
             if let Some(s) = try_services() {
                 self_update::request_check(s.rt.handle());
@@ -53,5 +50,5 @@ pub fn SelfUpdateSection() {
                 });
             });
         }
-    });
+    }) };
 }

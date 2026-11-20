@@ -83,7 +83,7 @@ pub fn draw(spec: &CharSpec, size: f32) {
     // Android, compose-rust#677); the modifier sets the box.
     let doc = svg(spec).replacen("width=\"100\" height=\"100\"", crate::ui::shell::FILL_BOX, 1);
     let id = compose_rust::asset(AssetKind::Svg, doc_bytes(doc));
-    cu::Image(id).modifier(Modifier::new().size(size, size));
+    { use ::compose_rust::ui::Image; Image!(id, modifier = Modifier::new().size(size, size)) };
 }
 
 /// The gap between style cards (`.cs-grid` gap `--sp2`).
@@ -138,20 +138,20 @@ pub fn StylePicker(seed_name: &str, current: CharStyle, on_pick: impl FnMut(Char
 }
 
 fn StyleGrid(seed_name: &str, current: CharStyle, columns: usize, on_pick: impl FnMut(CharStyle) + Clone + 'static) {
-    cu::Column().spacing(STYLE_CARD_GAP).modifier(Modifier::new().fill_max_width()).content(|| {
+    { use ::compose_rust::ui::Column; Column!(spacing = STYLE_CARD_GAP, modifier = Modifier::new().fill_max_width(), {
         for row in CharStyle::ALL.chunks(columns.max(1)) {
-            cu::Row().spacing(STYLE_CARD_GAP).modifier(Modifier::new().fill_max_width()).content(|| {
+            { use ::compose_rust::ui::Row; Row!(spacing = STYLE_CARD_GAP, modifier = Modifier::new().fill_max_width(), {
                 for &style in row {
                     let mut pick = on_pick.clone();
                     StyleCard(seed_name, style, style == current, columns, move || pick(style));
                 }
                 // A short last row keeps the cards at the grid's column width.
                 for _ in row.len()..columns.max(1) {
-                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                 }
-            });
+            }) };
         }
-    });
+    }) };
 }
 
 /// One `.cs-card`: the character, the style name and its description, chosen or not.
@@ -170,15 +170,8 @@ fn StyleCard(seed_name: &str, style: CharStyle, chosen: bool, columns: usize, on
         .checked(chosen)
         .label(style.label());
     super::components::ClickableAs(card, super::components::Press::Card, Alignment::TopCenter, on_click, || {
-        cu::Column()
-            .alignment(Alignment::TopCenter)
-            .spacing(STYLE_CARD_INNER_GAP)
-            .modifier(Modifier::new().fill_max_width().padding(STYLE_CARD_PAD))
-            .content(|| {
-                cu::Box()
-                    .alignment(Alignment::Center)
-                    .modifier(Modifier::new().size(STYLE_CARD_ART.0, STYLE_CARD_ART.0))
-                    .content(|| {
+        { use ::compose_rust::ui::Column; Column!(alignment = Alignment::TopCenter, spacing = STYLE_CARD_INNER_GAP, modifier = Modifier::new().fill_max_width().padding(STYLE_CARD_PAD), {
+                { use ::compose_rust::ui::Box; Box!(alignment = Alignment::Center, modifier = Modifier::new().size(STYLE_CARD_ART.0, STYLE_CARD_ART.0), {
                         draw(
                             &CharSpec {
                                 style,
@@ -192,7 +185,7 @@ fn StyleCard(seed_name: &str, style: CharStyle, chosen: bool, columns: usize, on
                             },
                             STYLE_CARD_ART.1,
                         );
-                    });
+                    }) };
                 Label(style.label(), Fs::Sm, Weight::Semibold, None, Some(1));
                 // `.cs-s`: 12/18 muted, centred like the card (`text-align:center`).
                 Txt(
@@ -204,7 +197,7 @@ fn StyleCard(seed_name: &str, style: CharStyle, chosen: bool, columns: usize, on
                     None,
                     Some(TextAlign::Center),
                 );
-            });
+            }) };
     });
 }
 

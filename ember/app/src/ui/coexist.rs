@@ -481,7 +481,7 @@ mod tests {
             let launcher = launcher.clone();
             Box::new(Recomposer::new(move || {
                 let rev = launcher.get();
-                cu::Text(format!("rev:{rev}"));
+                { use ::compose_rust::ui::Text; Text!(format!("rev:{rev}")) };
             }))
         });
 

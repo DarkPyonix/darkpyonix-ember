@@ -93,7 +93,7 @@ pub fn DeviceScopeSection() {
         Label(line, Fs::Sm, Weight::Medium, Some(paint(p.text)), Some(1));
     }
     InsetPanel(true, || {
-        cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| match state.get() {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), content = || match state.get() {
             ListState::Loading => Label("기기를 불러오는 중입니다", Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1)),
             ListState::Failed(t) => Label(&t, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(2)),
             ListState::Ready(list) if list.is_empty() => {
@@ -101,16 +101,16 @@ pub fn DeviceScopeSection() {
             }
             ListState::Ready(list) => {
                 for row in scope_rows(&list, self_row.as_deref()) {
-                    cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                        cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                            cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
+                    { use ::compose_rust::ui::Row; Row!(spacing = SP[1], alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
+                        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), {
+                            { use ::compose_rust::ui::Row; Row!(spacing = SP[1], alignment = Alignment::CenterStart, {
                                 Label(&row.name, Fs::Sm, Weight::Medium, Some(paint(p.text)), Some(1));
                                 if row.is_self {
                                     Pill("이 기기", PillTone::Grey, true);
                                 }
-                            });
+                            }) };
                             Txt(&row.short_peer, TypeRole::Mono, Some(paint(p.muted)), Some(1), None, None, None);
-                        });
+                        }) };
                         for chip in &row.chips {
                             let (st, er, pe) = (state.clone(), error.clone(), pending.clone());
                             let (peer, from, to) = (row.peer_id.clone(), row.scope, chip.scope);
@@ -123,10 +123,10 @@ pub fn DeviceScopeSection() {
                                 }
                             });
                         }
-                    });
+                    }) };
                     if pending.get().is_some_and(|q| q.peer_id == row.peer_id) {
                         Label(CONFIRM_SELF, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(3));
-                        cu::Row().spacing(SP[1]).content(|| {
+                        { use ::compose_rust::ui::Row; Row!(spacing = SP[1], {
                             let (st, er, pe) = (state.clone(), error.clone(), pending.clone());
                             AppButton("권한 좁히기", None, ButtonKind::Destructive, true, true, false, move || {
                                 if let Some(q) = pe.get_untracked() {
@@ -136,11 +136,11 @@ pub fn DeviceScopeSection() {
                             });
                             let pe = pending.clone();
                             AppButton("취소", None, ButtonKind::Default, true, true, false, move || pe.set(None));
-                        });
+                        }) };
                     }
                 }
             }
-        });
+        }) };
     });
     if let Some(t) = error.get() {
         Label(&t, Fs::Xs, Weight::Regular, Some(paint(p.red.strong)), Some(2));

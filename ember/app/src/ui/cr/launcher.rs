@@ -16,7 +16,7 @@ use compose_rust::{Alignment, ButtonVariant, SpaceRole};
 use ember_client::wire::SessionPatch;
 
 use super::compat::{Badge, StatusDot, StatusPill};
-use super::components::{pressable, AppButton, ButtonKind, Clickable, EmberCard, EmberField, EmberSheet, FieldOptions, Label, OptionSheet, SheetFooter};
+use super::components::{pressable, AppButton, ButtonKind, EmberCard, EmberField, EmberSheet, FieldOptions, Label, OptionSheet, SheetFooter};
 use super::notice;
 use super::theme::*;
 use crate::model::{self, SessionRow, Tone};
@@ -109,8 +109,9 @@ pub fn SessionRowWith(row: &SessionRow, menu_start_open: bool) {
     EmberCard(false, true, None, None, None, || {
         { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, space_role = SpaceRole::Sm, modifier = Modifier::new().fill_max_width(), {
             let (u, id) = (ui.clone(), row.id.clone());
-            Clickable(
+            super::components::ClickableAs(
                 Modifier::new().weight(1.0),
+                super::components::Press::Row,
                 Alignment::CenterStart,
                 move || u.open_conversation(&id),
                 || {

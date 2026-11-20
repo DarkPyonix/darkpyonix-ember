@@ -54,7 +54,7 @@ use super::characters::{CharState, Character};
 use super::compat::Spinner;
 use super::home::{CardHead, Dot as HomeDot};
 use super::components::{
-    AppButton, BackButton, ButtonKind, Clickable, CloseButton, NamedClickable, NameThenPill, EmberCard, EmberCardSized, TrackBar, EmberField, EmberSheet,
+    AppButton, BackButton, ButtonKind, Clickable, CloseButton, NamedClickable, NamedClickableOn, NameThenPill, EmberCard, EmberCardSized, TrackBar, EmberField, EmberSheet,
     FieldOptions, IconButton, Label, OptionSheet, PickChip, Pill, PillTone, PopExtra, PopKind, PopMenu, PopRow, PopoverMenu, PopoverMenuWith, SearchField, Select, SheetFooter, Txt,
     SEARCH_FIELD_H_COMPACT,
 };
@@ -240,12 +240,13 @@ pub fn StopCircleButton(on_click: impl FnMut() + 'static) {
 pub fn SendCircleButton(size: f32, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     // Named "보내기" for assistive technology (compose-rust v0.0.7, #429).
-    NamedClickable(
+    NamedClickableOn(
         super::a11y::SEND,
         Modifier::new()
             .size(size, size)
             .background(paint(p.ink))
             .shape_role(ShapeRole::Full),
+        Some(p.ink),
         Alignment::Center,
         on_click,
         || NavIcon(ICON_SEND_SVG, p.ink_text.to_argb(), 15.0),

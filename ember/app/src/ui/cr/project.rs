@@ -497,9 +497,7 @@ fn ComputerStrip(chips: &[ComputerChip], st: &Ui) {
                 { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[1])) };
             }
             // The hub's devices, registered with the node's token (FR-X7, #490).
-            // TODO(compose-rust#817, after v0.0.12): `Modifier::border` has no stroke dash in
-            // v0.0.11, so the add chip keeps a solid 1 px border (`.cchip.add{border-style:dashed}`).
-            let add = Modifier::new().height(56.0).border(1.0, paint(p.line)).corner_radius(CORNER_MD);
+            let add = add_computer_chip_frame(p);
             let ui = st.add.clone();
             Clickable(add, Alignment::CenterStart, move || ui.show(), || {
                 { use ::compose_rust::ui::Row; Row!(spacing = SP[1], alignment = Alignment::CenterStart, {
@@ -515,6 +513,16 @@ fn ComputerStrip(chips: &[ComputerChip], st: &Ui) {
         }
     }) };
 }
+
+/// The add chip's frame, `.cchip.add`: 56 px high, the md corner and a dashed 1 px `line`
+/// border (`border-style:dashed`), drawn with `Modifier::border_dashed` since compose-rust
+/// v0.0.12 (#817). A browser dashes a 1 px border in 3 px dashes and 3 px gaps.
+pub(crate) fn add_computer_chip_frame(p: &Palette) -> Modifier {
+    Modifier::new().height(56.0).border_dashed(1.0, paint(p.line), ADD_CHIP_DASH, ADD_CHIP_DASH).corner_radius(CORNER_MD)
+}
+
+/// The dash and the gap of the add chip's border, in dp.
+pub(crate) const ADD_CHIP_DASH: f32 = 3.0;
 
 const ICON_ARROW_LEFT_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>"#;
 const ICON_ARROW_RIGHT_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>"#;
@@ -2252,6 +2260,20 @@ mod tests {
     }
 
     #[test]
+    fn fr_l26_the_add_computer_chip_has_a_dashed_border() {
+        // #671: `.cchip.add{border-style:dashed}`, a 1 px `line` border in 3 px dashes.
+        for p in [&LIGHT, &DARK] {
+            let frame = format!("{:?}", add_computer_chip_frame(p));
+            assert!(frame.contains("border_dash: Some((3.0, 3.0))"), "{frame}");
+            assert!(frame.contains("border_width: Some(1.0)"), "{frame}");
+        }
+        let src = include_str!("project.rs");
+        let src = &src[..src.find("#[cfg(test)]").unwrap()];
+        let strip = &src[src.find("fn ComputerStrip(").unwrap()..src.find("fn StripArrow(").unwrap()];
+        assert!(strip.contains("let add = add_computer_chip_frame(p);"));
+    }
+
+    #[test]
     fn fr_l26_strip_arrow_state_comes_from_the_scroll_state() {
         let src = include_str!("project.rs");
         let src = &src[..src.find("#[cfg(test)]").unwrap()];
@@ -2264,7 +2286,8 @@ mod tests {
         let strip = &src[src.find("fn ComputerStrip(").unwrap()..src.find("fn StripArrow(").unwrap()];
         assert!(!strip.contains("scroll.offset()"), "the strip keeps no offset from composition");
         // The open toolkit gaps cite their compose-rust issues.
-        assert!(strip.contains("TODO(compose-rust#817, after v0.0.12)") && strip.contains("TODO(compose-rust#818)"));
+        assert!(strip.contains("TODO(compose-rust#818)"));
+        assert!(!strip.contains("TODO(compose-rust#817"), "the dash landed in v0.0.12");
         assert!(!strip.contains("TODO(compose-rust, #671)") && !arrow.contains("TODO("));
     }
 

@@ -139,7 +139,7 @@ Ember의 지금 동작과 같다).
 
 Rivet Q3(원격 제어 연결을 기존 CDP relay와 병행할지)에 대한 Ember 쪽 제안은 "둘 다 필요 없다"다.
 에이전트는 그 컴퓨터에서 CLI를 로컬로 부르고, 사람은 자기 기기에서 본다. 다른 컴퓨터의 Rivet을
-원격으로 조종하는 연결은 이 설계에 없다. 이 판단은 Rivet 쪽과 맞춰야 한다 (Q-R14).
+원격으로 조종하는 연결은 이 설계에 없다. 이것이 Q-R14의 결정이다 [leader, 2026-11-20]. Rivet `PR-3`과 맞춘다.
 
 ### 4.4 에이전트 경로
 
@@ -216,7 +216,16 @@ call 매크로로 쓴다.
 | Q-R12 프로필 암호화 | 결정 [leader, 2026-11-20] | 디렉터리 권한만. Rivet에서 프로필은 설치된 Chromium의 것이고 OS 키체인을 이미 쓴다 |
 | Q-R13 지연 예산 | 무효 [leader, 2026-11-20] | 프레임 경로가 없다. Rivet의 지연 숫자는 측정 뒤에만 SPEC에 넣는다 |
 
-다시 쓰면서 생긴 질문이다. 리더가 아직 분류하지 않았다.
+다시 쓰면서 생긴 질문과 리더의 분류다 (2026-11-20).
+
+| 질문 | 상태 | 내용 |
+| --- | --- | --- |
+| Q-R14 egress의 모양 | 결정 [leader, 2026-11-20] | (a) 사람의 Rivet은 자기 기기에서 돌고 loopback 리스너로 나간다. 에이전트의 Rivet은 세션의 컴퓨터에서 돈다. 원격 조종 relay는 없다. Rivet `PR-3`과 맞춘다 |
+| Q-R15 브라우저 데이터의 자리 | **열림, 소유자** | 추천 (a): D6와 `FR-R2`를 "로그인은 브라우저와 OS가 가진다, Ember는 설정과 작업 공간만 가진다"로 고친다 |
+| Q-R16 Rivet이 없는 플랫폼 | **열림, 소유자** | 추천 (a): 브라우저 없음, 이유를 보여 준다 |
+| Q-R17 사람과 에이전트의 충돌 | 결정 [leader, 2026-11-20] | 충돌 규칙은 Rivet이 정한다. Ember는 "사람이 쓰는 중" 실패를 "사람이 필요함"으로 올린다 |
+
+아래는 분류 전의 질문 원문이다. 선택지와 근거를 남기려고 그대로 둔다.
 
 - **Q-R14. egress의 모양.** (a) 사람의 Rivet은 자기 기기에서 돌고 loopback 리스너로 나간다. 에이전트의
   Rivet은 세션의 컴퓨터에서 직접 돈다. 다른 컴퓨터의 Rivet을 원격 조종하는 연결은 없다 (4.3).
@@ -235,7 +244,7 @@ call 매크로로 쓴다.
 
 ## 7. SPEC/INTENT 변경 제안
 
-적용하지 않았다. 모두 [provisional]이고, Q-R14~R17의 답에 따라 바뀐다.
+적용하지 않았다. 모두 [provisional]이고, 소유자의 Q-R15, Q-R16 답에 따라 바뀐다.
 
 > **§R (title)** Browser: Rivet on the user's installed Chromium, with Ember's settings,
 > workspaces and egress (D6).
@@ -287,13 +296,13 @@ INTENT 제안:
 ## 8. 작업 분해
 
 추정은 에이전트 세션 하나의 작업일이고 거칠다. Rivet 쪽 작업은 세지 않았다. 빌드와 테스트는
-빌더가 돌린다. **이 표는 재계획의 초안이다. 리더가 Q-R14~R17을 분류하고 Rivet 쪽과 계약을 맞춘
+빌더가 돌린다. **이 표는 재계획의 초안이다. 소유자가 Q-R15, Q-R16에 답하고 Rivet 쪽과 계약을 맞춘
 뒤에 일정에 넣는다.**
 
 | # | 무엇 | 닿는 곳 | 증명하는 테스트 | 일 | 기다리는 것 |
 | --- | --- | --- | --- | --- | --- |
 | R0 | 문서 재정렬: SPEC §R, Status 표, INTENT D6, `PROJECT.md` M6, `REMOTE-BROWSER.md`, #12 본문 | `docs/` | 문서 검사 | 1 | Q-R15 |
-| R1 | 계약 초안 (`PR-2`, `PR-3`의 Ember 쪽): 설정 문서의 봉투, 금지 필드 목록, egress 인자, CLI 실패 종류의 대응. 공유 벡터 | `docs/design/`, `ember/vectors/rivet/` | 벡터를 읽는 양쪽 테스트 | 2 | Rivet 저장소와 합의, Q-R14 |
+| R1 | 계약 초안 (`PR-2`, `PR-3`의 Ember 쪽): 설정 문서의 봉투, 금지 필드 목록, egress 인자, CLI 실패 종류의 대응. 공유 벡터 | `docs/design/`, `ember/vectors/rivet/` | 벡터를 읽는 양쪽 테스트 | 2 | Rivet 저장소와 합의 |
 | R2 | 서버 보관 API: `/api/rivet/settings`, `/api/rivet/workspaces`, 기기 범위, 허용 목록 검사 | `ember/server` | `fr_r2_settings_round_trip_between_devices`, `fr_r2_credential_like_field_is_refused`, `fr_r2_scope_is_user_and_device` | 2.5 | R1 |
 | R3 | egress 리스너를 클라이언트에서 쓸 수 있게 옮긴다 (transport 위) | `ember/client`, `ember/server` (공유 코드) | `fr_r1_client_listener_egresses_through_a_node`, `fr_r1_unreachable_node_fails_explicitly` | 2 | 없음. 지금 할 수 있다 |
 | R4 | `ember-app`의 동기화 글루: 받기, 로컬 `rivet` CLI로 적용, 충돌 알림 (UI 없는 부분) | `ember/app`, `ember/client` | 가짜 `rivet` 실행 파일로 `fr_r2_app_applies_after_confirmation` | 2 | R2, Rivet M4 |

@@ -13,7 +13,7 @@
 #![allow(non_snake_case)]
 
 use compose_rust::ui as cu;
-use compose_rust::ui::{Modifier, Role};
+use compose_rust::ui::{HoverStyle, Modifier, PressStyle, Role};
 use compose_rust::{
     Alignment, ButtonVariant, Color, ColorRole, IconRole,
     KeyEvent, OverflowWrap, Paint, ShapeRole, TextAlign, TextOverflow, TypeRole, WordBreak,
@@ -99,8 +99,85 @@ fn with_height(m: Modifier, height: Option<f32>) -> Modifier {
 /// follows Ember's scheme. The renderer draws the tint and the keyboard focus ring in the shape
 /// the same node carries (`pressedShape`), so a pressable puts its `corner_radius`,
 /// `corner_radii` or `shape_role` on the node that takes the click (FR-L34.2, #251).
+///
+/// Since compose-rust v0.0.12 the rest of the mockup's press, hover and focus also travels on
+/// the same node (FR-L34.1, FR-L34.2): the press-in curve `cubic-bezier(.2,0,0,1)`
+/// ([`PRESS_EASING`]), a hover layer that turns `surface` into `--hover` ([`hover_layer`]), and
+/// the keyboard ring 2 px of `c-blue` 2 px outside the outline (`:focus-visible`,
+/// `outline-offset:2px`). An `ink` fill takes [`pressable_on`] instead.
 pub fn pressable(modifier: Modifier) -> Modifier {
-    modifier.press_feedback(PRESS_SCALE, ember_theme().press_alpha())
+    let theme = ember_theme();
+    let p = theme.palette;
+    let [x1, y1, x2, y2] = PRESS_EASING;
+    modifier
+        .press_feedback(PRESS_SCALE, theme.press_alpha())
+        .press_style(PressStyle::default().press_easing(x1, y1, x2, y2))
+        .hover_style(HoverStyle::fill(paint(p.text), hover_layer(p.surface, p.hover, p.text)))
+        .focus_ring(paint(p.blue.strong), FOCUS_RING_W, FOCUS_RING_OFFSET)
+}
+
+/// [`pressable`] for a node whose fill is `fill`. On `ink` (`.btn.primary`, a chosen `.seg`
+/// button or `.chip`, `.sendround`) the press tint is the light `ink_text`, as the mockup tints
+/// in the element's own text colour, and hover lays no layer but fades the node to 0.88
+/// (`.btn.primary:hover{opacity:.88}`). Any other fill is [`pressable`].
+pub fn pressable_on(modifier: Modifier, fill: Color) -> Modifier {
+    let kind = if fill == ember_theme().palette.ink { Press::Ink } else { Press::Surface };
+    pressable_as(modifier, kind)
+}
+
+/// What a pressable is to the mockup's `:hover` and press rules.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Press {
+    /// `.btn`, `.icon-btn`, `.chip`, `.pickchip`, `.nav` and the rows of a menu: `--hover`.
+    Surface,
+    /// `.btn.primary`, `.sendround` and the chosen `.seg` button or `.chip`: an `ink_text`
+    /// tint and 0.88 opacity under the pointer.
+    Ink,
+    /// `.list-row`: `surface-2` under the pointer.
+    Row,
+    /// `.cs-card`: the border turns `c-grey` under the pointer and nothing is laid over it.
+    Card,
+}
+
+/// [`pressable`] for a pressable of the given [`Press`] kind.
+pub fn pressable_as(modifier: Modifier, kind: Press) -> Modifier {
+    let p = ember_theme().palette;
+    let [x1, y1, x2, y2] = PRESS_EASING;
+    let base = pressable(modifier);
+    match kind {
+        Press::Surface => base,
+        Press::Ink => base
+            .press_style(PressStyle::tint(paint(p.ink_text)).press_easing(x1, y1, x2, y2))
+            .hover_style(HoverStyle::fill(paint(p.ink), 0.0).content_alpha(INK_HOVER_ALPHA)),
+        Press::Row => base.hover_style(HoverStyle::fill(paint(p.text), hover_layer(p.surface, p.surface_2, p.text))),
+        Press::Card => base.hover_style(HoverStyle::fill(paint(p.text), 0.0).border(paint(p.grey.strong))),
+    }
+}
+
+/// The mockup's press-in curve (`core.js` `pressStart`, `cubic-bezier(.2,0,0,1)`).
+pub const PRESS_EASING: [f32; 4] = [0.2, 0.0, 0.0, 1.0];
+/// The keyboard focus ring's width and its distance outside the outline, in dp
+/// (`:focus-visible{outline:2px solid var(--c-blue);outline-offset:2px}`).
+pub const FOCUS_RING_W: f32 = 2.0;
+pub const FOCUS_RING_OFFSET: f32 = 2.0;
+/// What an `ink` pressable's opacity becomes under the pointer (`.btn.primary:hover`).
+pub const INK_HOVER_ALPHA: f32 = 0.88;
+
+/// The alpha at which `ink` laid over `base` comes closest to `target`: the mean over the
+/// three channels of the alpha each one needs. The toolkit draws a hover layer over the node,
+/// where the mockup swaps the background to `--hover`; this is the layer that lands on
+/// `--hover` over `surface`.
+pub fn hover_layer(base: Color, target: Color, ink: Color) -> f32 {
+    let ch = |c: Color, s: u32| ((c.to_argb() >> s) & 0xff) as f32;
+    let (mut sum, mut n) = (0.0f32, 0.0f32);
+    for s in [16, 8, 0] {
+        let span = ch(ink, s) - ch(base, s);
+        if span.abs() >= 1.0 {
+            sum += (ch(target, s) - ch(base, s)) / span;
+            n += 1.0;
+        }
+    }
+    if n == 0.0 { 0.0 } else { (sum / n).clamp(0.0, 1.0) }
 }
 
 /// A container that reacts to a click.
@@ -117,7 +194,34 @@ pub fn Clickable(
     mut on_click: impl FnMut() + 'static,
     content: impl FnOnce(),
 ) {
-    cu::Box().modifier(pressable(modifier)).alignment(alignment).on_click(move || on_click()).content(content);
+    ClickableOn(modifier, None, alignment, on_click, content);
+}
+
+/// A [`Clickable`] whose fill is `fill`, so an `ink` one presses and hovers as
+/// [`pressable_on`] says.
+pub fn ClickableOn(
+    modifier: Modifier,
+    fill: Option<Color>,
+    alignment: Alignment,
+    mut on_click: impl FnMut() + 'static,
+    content: impl FnOnce(),
+) {
+    let modifier = match fill {
+        Some(fill) => pressable_on(modifier, fill),
+        None => pressable(modifier),
+    };
+    cu::Box().modifier(modifier).alignment(alignment).on_click(move || on_click()).content(content);
+}
+
+/// A [`Clickable`] of the given [`Press`] kind (a `.list-row`, a `.cs-card`).
+pub fn ClickableAs(
+    modifier: Modifier,
+    kind: Press,
+    alignment: Alignment,
+    mut on_click: impl FnMut() + 'static,
+    content: impl FnOnce(),
+) {
+    cu::Box().modifier(pressable_as(modifier, kind)).alignment(alignment).on_click(move || on_click()).content(content);
 }
 
 /// A [`Clickable`] whose child is only an icon or a glyph, named for assistive technology with
@@ -132,7 +236,19 @@ pub fn NamedClickable(
     on_click: impl FnMut() + 'static,
     content: impl FnOnce(),
 ) {
-    Clickable(modifier.label(label).role(Role::Button).click_action(true), alignment, on_click, content);
+    NamedClickableOn(label, modifier, None, alignment, on_click, content);
+}
+
+/// A [`NamedClickable`] whose fill is `fill`, as [`ClickableOn`].
+pub fn NamedClickableOn(
+    label: &'static str,
+    modifier: Modifier,
+    fill: Option<Color>,
+    alignment: Alignment,
+    on_click: impl FnMut() + 'static,
+    content: impl FnOnce(),
+) {
+    ClickableOn(modifier.label(label).role(Role::Button).click_action(true), fill, alignment, on_click, content);
 }
 
 /// A [`NamedClickable`] that cannot act now: the same painted box, named and a disabled button
@@ -1430,13 +1546,14 @@ pub fn AppButton(
         // label style (about 17/600). compose-rust v0.0.7 sends both only when they are set.
         .font_size(s.fs.size())
         .font_weight(s.weight.value())
-        .modifier(pressable(
+        .modifier(pressable_on(
             Modifier::new()
                 .fill_max_width_if(fill_max_width)
                 .height(s.height)
                 .background(paint(s.fill))
                 .border(1.0, paint(s.border))
                 .shape_role(ShapeRole::Full),
+            s.fill,
         ))
         .on_click(on_click);
     // With an icon the renderer draws the text beside the glyph and the button itself had no
@@ -1467,7 +1584,7 @@ pub fn AppMenuButton(
             .color(paint(s.text))
             .font_size(s.fs.size())
             .font_weight(s.weight.value())
-            .modifier(pressable(
+            .modifier(pressable_on(
                 Modifier::new()
                     .fill_max_width_if(fill_max_width)
                     .height(s.height)
@@ -1475,6 +1592,7 @@ pub fn AppMenuButton(
                     .border(1.0, paint(s.border))
                     .shape_role(ShapeRole::Full)
                     .expanded(expanded),
+                s.fill,
             ))
             .on_click(on_click),
     );
@@ -1518,7 +1636,7 @@ pub fn ChoiceButton(
         });
     };
     if enabled {
-        Clickable(frame, Alignment::Center, on_click, label);
+        ClickableOn(frame, Some(s.fill), Alignment::Center, on_click, label);
     } else {
         let frame = frame.disabled(true);
         let frame = if chosen { frame } else { frame.alpha(CHOICE_DISABLED_ALPHA) };
@@ -1602,7 +1720,7 @@ pub fn InkIconButton(icon: IconRole, on_click: impl FnMut() + 'static) {
         .icon(icon)
         .variant(ButtonVariant::Text)
         .color(paint(p.ink_text))
-        .modifier(pressable(Modifier::new().size(H_BTN, H_BTN).background(paint(p.ink)).shape_role(ShapeRole::Full)))
+        .modifier(pressable_on(Modifier::new().size(H_BTN, H_BTN).background(paint(p.ink)).shape_role(ShapeRole::Full), p.ink))
         .on_click(on_click);
 }
 
@@ -2036,8 +2154,9 @@ pub const MODAL_SCRIM: Color = Color::argb(0x4D00_0000);
 pub fn FilterChip(text: &str, selected: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let (bg, ink) = if selected { (p.ink, p.ink_text) } else { (p.surface_2, p.text_2) };
-    Clickable(
+    ClickableOn(
         Modifier::new().height(H_CTL).background(paint(bg)).shape_role(ShapeRole::Full).selected(selected),
+        Some(bg),
         Alignment::Center,
         on_click,
         || {
@@ -2971,8 +3090,93 @@ mod tests {
         // The two visible buttons that stay direct send the same press values through the helper.
         for (file, src) in [("launcher.rs", include_str!("launcher.rs")), ("routines.rs", include_str!("routines.rs"))] {
             let production = src.split("#[cfg(test)]").next().unwrap();
-            assert_eq!(production.matches(".modifier(pressable(").count(), 1, "{file}");
+            let direct = production.matches(".modifier(pressable(").count() + production.matches(".modifier(pressable_on(").count();
+            assert_eq!(direct, 1, "{file}");
             assert!(!production.contains(".press_feedback("), "{file}");
+        }
+    }
+
+    #[test]
+    fn fr_l34_1_every_shared_pressable_sends_the_mockup_curve_hover_and_ring() {
+        // #250, #251, compose-rust v0.0.12: the press-in curve `cubic-bezier(.2,0,0,1)`, a hover
+        // style, and the keyboard ring 2 px of `c-blue` 2 px outside (`outline-offset:2px`),
+        // each once on the node that takes the click.
+        use compose_rust::schema::Modifier as M;
+        let _guard = crate::services::test_guard();
+        let p = ember_theme().palette;
+        let ring = format!("{:?}", M::FocusRing { paint: paint(p.blue.strong), width_dp: 2.0, offset_dp: 2.0 });
+        for (name, content) in shared_pressables() {
+            let nodes = emitted_nodes(content);
+            let node = clicked(&nodes);
+            assert_eq!(node.mods.iter().filter(|m| **m == ring).count(), 1, "{name}: {:?}", node.mods);
+            let press: Vec<_> = node.mods.iter().filter(|m| m.starts_with("PressStyle")).collect();
+            assert_eq!(press.len(), 1, "{name}: {:?}", node.mods);
+            assert!(press[0].contains("press_easing: Some([0.2, 0.0, 0.0, 1.0])"), "{name}: {}", press[0]);
+            assert_eq!(node.mods.iter().filter(|m| m.starts_with("HoverStyle")).count(), 1, "{name}: {:?}", node.mods);
+        }
+    }
+
+    #[test]
+    fn fr_l34_1_an_ink_pressable_tints_in_its_light_text_and_fades_on_hover() {
+        // #250 (b): on `ink` the tint is the element's own light text colour, not `OnSurface`;
+        // `.btn.primary:hover{opacity:.88}` lays no layer. A `surface` pressable keeps the
+        // node's content colour and lays the `--hover` layer.
+        use compose_rust::schema::Modifier as M;
+        let _guard = crate::services::test_guard();
+        let p = ember_theme().palette;
+        let ink_press = format!("{:?}", M::PressStyle { tint: Some(paint(p.ink_text)), press_easing: Some(PRESS_EASING) });
+        let ink_hover = format!("{:?}", M::HoverStyle { fill: Some(paint(p.ink)), fill_alpha: 0.0, border: None, content_alpha: 0.88 });
+        let inked: [(&str, fn()); 5] = [
+            ("FilterChip selected", || FilterChip("전체", true, || {})),
+            ("ChoiceButton chosen", || ChoiceButton("선택", Choice::Toggle, true, false, true, || {})),
+            ("AppButton primary", || AppButton("저장", None, ButtonKind::Primary, false, true, false, || {})),
+            ("InkIconButton", || InkIconButton(IconRole::Add, || {})),
+            ("SendCircleButton", || crate::ui::cr::session::SendCircleButton(36.0, || {})),
+        ];
+        for (name, content) in inked {
+            let nodes = emitted_nodes(content);
+            let node = clicked(&nodes);
+            assert!(node.mods.contains(&ink_press), "{name}: {:?}", node.mods);
+            assert!(node.mods.contains(&ink_hover), "{name}: {:?}", node.mods);
+        }
+        let plain = emitted_nodes(|| FilterChip("전체", false, || {}));
+        let node = clicked(&plain);
+        let plain_press = format!("{:?}", M::PressStyle { tint: None, press_easing: Some(PRESS_EASING) });
+        assert!(node.mods.contains(&plain_press), "{:?}", node.mods);
+        let layer = hover_layer(p.surface, p.hover, p.text);
+        let plain_hover = format!("{:?}", M::HoverStyle { fill: Some(paint(p.text)), fill_alpha: layer, border: None, content_alpha: 1.0 });
+        assert!(node.mods.contains(&plain_hover), "{:?}", node.mods);
+    }
+
+    #[test]
+    fn fr_l34_1_a_list_row_hovers_to_surface_2_and_a_style_card_to_a_grey_border() {
+        // `.list-row:hover{background:var(--surface-2)}`, `.cs-card:hover{border-color:var(--c-grey)}`.
+        use compose_rust::schema::Modifier as M;
+        let _guard = crate::services::test_guard();
+        let p = ember_theme().palette;
+        let row = emitted_nodes(|| ClickableAs(Modifier::new().size(40.0, 40.0), Press::Row, Alignment::Center, || {}, || {}));
+        let want = format!("{:?}", M::HoverStyle { fill: Some(paint(p.text)), fill_alpha: hover_layer(p.surface, p.surface_2, p.text), border: None, content_alpha: 1.0 });
+        assert!(clicked(&row).mods.contains(&want), "{:?}", clicked(&row).mods);
+        let card = emitted_nodes(|| ClickableAs(Modifier::new().size(40.0, 40.0), Press::Card, Alignment::Center, || {}, || {}));
+        let want = format!("{:?}", M::HoverStyle { fill: Some(paint(p.text)), fill_alpha: 0.0, border: Some(paint(p.grey.strong)), content_alpha: 1.0 });
+        assert!(clicked(&card).mods.contains(&want), "{:?}", clicked(&card).mods);
+        // The launcher's conversation row and the character style card use them.
+        assert!(include_str!("launcher.rs").contains("super::components::Press::Row"));
+        assert!(include_str!("characters.rs").contains("super::components::Press::Card"));
+    }
+
+    #[test]
+    fn fr_l34_1_the_hover_layer_turns_surface_into_the_mockup_hover() {
+        // `--hover` is a background in the mockup; the toolkit lays a layer over the node, so
+        // `text` at this alpha over `surface` lands on `--hover` within a step in each scheme.
+        for p in [&LIGHT, &DARK] {
+            let a = hover_layer(p.surface, p.hover, p.text);
+            assert!(a > 0.0 && a < 0.2, "{a}");
+            for s in [16, 8, 0] {
+                let ch = |c: Color| ((c.to_argb() >> s) & 0xff) as f32;
+                let mixed = ch(p.surface) * (1.0 - a) + ch(p.text) * a;
+                assert!((mixed - ch(p.hover)).abs() <= 4.0, "channel {s}: {mixed} vs {}", ch(p.hover));
+            }
         }
     }
 
@@ -3942,6 +4146,7 @@ mod tests {
                 safe_area_top: 0.0,
                 safe_area_leading: 0.0,
                 safe_area_trailing: 0.0,
+                safe_area_bottom: 0.0,
             };
             let (bytes, _) = host.dispatch(HostEvent { node_id: *node_id, handler_id: 0, payload }).expect("dispatch");
             sent.extend(decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")));

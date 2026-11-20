@@ -679,6 +679,7 @@ mod tests {
             safe_area_top: top,
             safe_area_leading: leading,
             safe_area_trailing: 0.0,
+            safe_area_bottom: 0.0,
         };
         let (bytes, _) = host.dispatch(HostEvent { node_id: 0, handler_id: 0, payload }).expect("dispatch");
         let text: String = compose_rust::protocol::decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")).collect();

@@ -1,336 +1,316 @@
-# 1.0 이후 설계: 원격 브라우저 (#12, M6, SPEC §R)
+# 1.0 이후 설계: Ember의 브라우저는 Rivet이다 (#12, M6, SPEC §R)
 
-상태: **제안.** 이 문서는 설계 노트이고 코드, SPEC, INTENT를 바꾸지 않는다. 서버와 노드 쪽은
-구현되어 있고(#29, #44, #344), 클라이언트 뷰어와 실제 수용 실행은 없다(#12). 6절의 질문은
-리더에게 올리는 제안이고 결정된 사실이 아니다. 작성 기준: `develop` 8ea03cb9, 2026-11-20.
-읽은 것만 사실로 적고, 확인하지 못한 것은 "확인 못 함"으로 적는다. 빌드와 테스트는 돌리지
-않았다(AGENTS.md: 문서 서브 에이전트는 빌드하지 않는다).
+상태: **제안, 리더 검토(2026-11-20)를 반영해 다시 썼다.** 이 문서의 첫 판은 메인 서버의 headless
+Chrome을 클라이언트로 스트리밍하는 뷰어를 설계했다. 그것은 소유자 원칙과 어긋난다:
+
+> Rivet(LogitAI/rivet-browser)이 Ember의 브라우저다. 사용자가 설치한 Chromium 위의 네이티브
+> 프레임과 에이전트 CLI다. Ember는 설정, 작업 공간, egress를 맞춘다. Ember는 서버의 Chrome을
+> 스트리밍하지 않는다. [리더가 전한 소유자 원칙, 2026-11-20]
+
+그래서 이 판은 Rivet을 기준으로 다시 짠다. 코드, SPEC, INTENT는 바꾸지 않았다. 기준: Ember
+`develop` 8ea03cb9, Rivet `develop`의 `PROJECT.md`, `docs/INTENT.md`, `docs/SPEC.md`,
+`rivet/protocol/control.proto` (2026-11-20에 읽음). 빌드와 테스트는 돌리지 않았다.
 
 ## 1. 범위
 
 안에 있는 것:
 
-- `FR-R5`: 클라이언트가 원격 브라우저를 보여 주고 조작한다(프레임 표면, 입력, takeover UI,
-  egress 선택, 프로필 지우기). 데스크톱과 Android가 대상이다.
-- `FR-R1`부터 `FR-R4`의 수용 실행 세 가지(egress IP, egress 전환 뒤 로그인 유지, 에이전트 작업
-  중 takeover)와 그 실행을 막는 서버 쪽 빈 곳.
-- 에이전트가 브라우저 도구를 받는 경로의 기본값과 버전 고정.
-- 이슈 완료 기준 4번(E1: 런처와 대화 화면에 웹뷰 없음)을 뷰어 설계가 지키는 방법.
+- Ember가 Rivet을 위해 하는 세 가지: 사용자별 설정과 논리 작업 공간의 보관과 전달(Rivet `FR-6`,
+  `PR-2`), 컴퓨터 egress(Rivet `FR-7`, `PR-3`), 에이전트가 `rivet` CLI에 닿는 길(Rivet `FR-4`,
+  `FR-5`).
+- 지금 Ember에 있는 서버 Chrome 스트리밍 코드와 SPEC §R 가운데 무엇이 남고 무엇이 바뀌는지.
+- #12의 완료 기준 네 가지를 Rivet 기준으로 다시 읽은 것.
 
 밖에 있는 것:
 
-- 에디터 창의 확장 웹뷰(`FR-E8`, D44, `docs/design/EDITOR-WEBVIEWS.md`). 원격 브라우저 뷰어는
-  웹뷰가 아니고 그 호스트 모듈을 쓰지 않는다. 섞으면 `check-no-webview.sh`의 예외 경로가
-  넓어지기 때문이다.
-- 에이전트 자신의 API 트래픽 egress(`FR-X6`, D19, `ember/server/src/egress_proxy.rs`). 같은 노드
-  `/egress`를 쓰지만 별개 기능이다.
-- 휴대폰을 egress로 쓰는 것. 휴대폰에는 `ember-node`가 없다(`docs/design/MOBILE-NO-NODE.md`).
-- 영상 코덱 스트림(H.264, WebRTC), 소리, 여러 사용자가 각자 다른 탭을 보는 것. 4.5절에 기각
-  이유를 적는다.
-- iOS. iOS 클라이언트가 생긴 뒤에 Android 단계를 따라간다(`FR-L36`이 iOS를 제외한다).
+- Rivet 자체(프레임, 런타임 주입, 제어 프로토콜, 설치 도구). Rivet 저장소의 일이다. 이 문서는
+  Ember 쪽 절반과 두 저장소 사이의 계약만 다룬다.
+- 서버 Chrome의 프레임을 받는 뷰어, 프레임 표면 위젯, 입력 전달, 공유 뷰포트. 원칙에 따라 만들지
+  않는다. compose-rust에 `FrameSurface`를 요청하지 않는다.
+- 쿠키, 비밀번호, 패스키, 브라우저 프로필 파일의 복사나 동기화. Rivet `C7`, `NFR-2`가 금지한다.
+- 에디터 창의 확장 웹뷰(`FR-E8`)와 에이전트 API 트래픽 egress(`FR-X6`, D19). 같은 노드 `/egress`를
+  쓰지만 별개 기능이다.
 
 ## 2. 현재 있는 것
 
-### 2.1 코드에서 확인
+### 2.1 Rivet (문서와 README에서 확인, 코드는 읽지 않음)
 
-| 무엇 | 어디 | 비고 |
+| 항목 | 내용 |
+| --- | --- |
+| 정체 | 설치된 Chromium 계열 브라우저의 프로세스 안에 런타임을 넣어 프레임을 바꾼다. 포크도 웹뷰도 아니다 (`C1`, `C2`) |
+| 플랫폼 | Windows가 첫 호스트다 (`C4`). macOS와 Linux 호스트는 현재 범위 밖이다 (`PROJECT.md`) |
+| 프로필 | Rivet 전용 프로필에만 들어간다. 사용자의 기존 브라우저 프로세스와 기본 프로필에는 들어가지 않는다 (`FR-1`) |
+| 자격증명 | 브라우저와 OS의 보안 저장소에 남는다. Rivet과 Ember는 복사하지 않는다 (`C7`, D14, `NFR-2`) |
+| 제어 | `rivet` CLI와 프레임이 같은 로컬 제어 채널을 쓴다 (`PR-1`, `control.proto`: `PageOpen`, `Navigate`, `InputText`, `InputClick`, `InputKey`, `ReadPage`, `ReadFrame`, `WorkspaceList`, `WorkspaceSwitch`, `SetVisibility`) |
+| 표시 정책 | `visible`, `hidden`, `auto`. `hidden`은 보이는 창과 프레임 캡처를 만들지 않는다 (`FR-5`) |
+| Ember 쪽 요구 | 설정과 작업 공간 `FR-6`, `PR-2` (Draft). 컴퓨터 egress `FR-7`, `PR-3` (Draft) |
+| 상태 | README: "Early implementation". `rivet session start`, 생성된 제어 프로토콜, Windows 런타임 주입이 있다. 직접 프레임, 브라우저 제어 명령, Ember 통합, 설치 도구는 끝나지 않았다 |
+| 열린 질문 | Q2: 설정 파일의 인증, 암호화, 충돌 해결을 Ember API와 Rivet 중 어디에 둘지. Q3: 원격 컴퓨터의 제어 연결을 기존 CDP relay와 병행할지, Rivet 전용 relay로 둘지 |
+
+### 2.2 Ember (코드에서 확인)
+
+| 무엇 | 어디 | Rivet 기준에서 |
 | --- | --- | --- |
-| 프로젝트마다 headless Chromium 하나, 1280×800 | `ember/server/src/browser/chrome.rs`, `instance.rs` | `--headless=new`, `--proxy-bypass-list=<-loopback>` |
-| 프로필 위치와 지우기 | `browser/mod.rs`, `browser/api.rs` (`DELETE /api/browsers/{project}/data`) | `<EMBER_DATA_DIR>/browser/<project>/profile` |
-| egress 선택과 영속화 | `browser/egress.rs`, `store.rs` | `direct`, `proxy`, `computer` 세 종류 |
-| 컴퓨터별 loopback SOCKS5 리스너 | `ember/server/src/computers/egress.rs`, `computers/mod.rs` (`egress_proxy`) | 인증 없는 127.0.0.1 바인드 |
-| 노드의 SOCKS5 출구 | `ember/node/src/egress.rs` (715줄) | `CONNECT`만, 정책 `EMBER_NODE_EGRESS_DENY` |
-| egress 전환 시 재시작 | `instance.rs` (`Browser.close` 뒤 같은 프로필로 재기동) | 해석 실패 시 direct로 떨어지지 않음 |
-| 뷰 스트림 | `browser/api.rs` (`GET /api/browsers/{project}/view`, WebSocket) | JSON 상태와 `[u32 길이][JSON 머리][JPEG]` 프레임 |
-| 입력 | `instance.rs` (`InputEvent`), `POST …/input` | mouse, wheel, key, text, navigate, reload, back, forward, takeover, select_tab, screencast |
-| CDP 릴레이와 takeover 대기 | `browser/cdp.rs`, `instance.rs` (`agent_command`) | takeover 중 에이전트 명령이 대기한다 |
-| 에이전트용 MCP 설정 | `browser/agent.rs` | `EMBER_BROWSER_MCP=chrome-devtools\|playwright\|off`, 기본 `off` |
-| 에이전트 릴레이 인증 | `ember/server/src/auth.rs` (`agent_cdp_nonce`, `agent_cdp_path_ok`) | 실행마다 nonce를 경로에 넣는다 |
-| 기기 scope | `ember/server/src/devices/scope.rs` (95행 근처) | 제한 scope는 `view`, `input`, `cdp`, `agent-config`를 못 쓴다 |
-| owner 전용 경로 | `ember/client/src/owner.rs` (`PUT /api/browsers/{project}/egress`) | 브라우저 경로 중 이것 하나만 목록에 있다 |
-| Origin 검사 | `browser/api.rs` 195행, 264행 (`check_origin`) | 두 WebSocket 업그레이드 |
+| 노드의 SOCKS5 출구 (`CONNECT`만, `EMBER_NODE_EGRESS_DENY`) | `ember/node/src/egress.rs` | **남는다.** Rivet `FR-7`의 바닥이다 |
+| 컴퓨터별 loopback SOCKS5 리스너 | `ember/server/src/computers/egress.rs`, `computers/mod.rs` (`egress_proxy`) | **남는다, 자리가 바뀐다.** 지금은 서버에서 듣는다. 브라우저가 도는 기기에서 들어야 한다 (4.3) |
+| egress 선택과 영속화 (`direct`, `proxy`, `computer`) | `ember/server/src/browser/egress.rs`, `store.rs` | **남는다.** 프로젝트가 아니라 작업 공간이나 세션에 붙는다 |
+| owner 전용 egress 변경 | `ember/client/src/owner.rs` | 남는다 |
+| headless Chromium 실행, 프로젝트별 프로필 | `ember/server/src/browser/chrome.rs`, `instance.rs`, `mod.rs` | **대체 예정** |
+| 뷰 스트림 WebSocket, JPEG 프레임, 입력, takeover | `browser/api.rs`, `instance.rs` | **대체 예정** |
+| CDP 릴레이, 에이전트용 MCP 설정 (`EMBER_BROWSER_MCP`) | `browser/cdp.rs`, `browser/agent.rs`, `auth.rs` (`agent_cdp_nonce`) | **대체 예정.** 에이전트는 `rivet` CLI를 쓴다 |
+| 테스트 | `ember/server/tests/browser.rs` (Chrome이 없으면 건너뛰고 통과), `browser_egress.rs`, `ember/node/tests/egress.rs` | 뒤의 둘은 남는다 |
 
-테스트(이름은 파일에서 읽음, 실행하지 않음):
+"대체 예정"은 지금 지우라는 뜻이 아니다. Rivet 경로가 수용 기준을 통과할 때까지 코드는 그대로
+두고, 새 작업을 그 위에 얹지 않는다 (작업 분해 R9).
 
-- `ember/server/tests/browser.rs`: `cookies_survive_egress_switch_and_clear_removes_them`,
-  `view_stream_frames_and_click`, `agent_relay_activity_and_takeover`. 실제 Chrome을 띄우고,
-  egress는 테스트 안의 SOCKS5 서버다.
-- `ember/server/tests/browser_egress.rs`: `loopback_listener_egresses_through_the_node`,
-  `unreachable_node_closes_the_proxied_connection`. 리스너에서 노드를 거쳐 TCP echo까지이고
-  Chrome은 없다.
-- `ember/node/tests/egress.rs`: `socks5_connect_through_the_node_stream`,
-  `token_and_policy_are_enforced`.
-- `ember/server/src/browser/chrome.rs`의 단위 테스트 `loopback_goes_through_proxy`.
-
-MCP 서버 목록(`StartRequest::mcp_servers`)을 읽는 어댑터는 `claude_code.rs`, `codex.rs`,
-`antigravity.rs`, `acp.rs`다. Antigravity와 ACP가 브라우저 MCP로 실제 페이지를 조작하는지는
-확인 못 함(목록을 읽는 코드만 봤다).
-
-### 2.2 문서에만 있음
-
-- `docs/design/REMOTE-BROWSER.md`가 프로토콜을 적는다. 내용은 위 코드와 맞는다. 다만 두 줄이
-  오래됐다(3절 G12).
-- PROJECT.md 56행과 M6 마일스톤 설명은 "dioxus-compose의 frame-surface 위젯"에 뷰어가 달려
-  있다고 적는다. compose-rust와 dioxus-compose의 `docs/SPEC.md`에서 그런 위젯 항목을 찾지
-  못했다(`frame surface`, `FrameSurface`, `texture`, `video`로 검색. `Video`는 아이콘 태그 17뿐).
-
-### 2.3 툴킷 쪽에서 쓸 수 있는 것 (compose-rust `docs/SPEC.md`, 문서로만 확인)
-
-- `FR-16` 에셋: `asset(kind, bytes)`, `RegisterAsset`, `ReleaseAsset`. 같은 바이트는 한 번만
-  등록된다. `Image`는 `ContentScale`(`Fit`, `Crop`, `FillBounds`)을 받는다.
-- `FR-46` 노드 단위 포인터 이벤트(`Move`, `Down`, `Up`, `Wheel`, `ContextMenu`, 캡처), `Agreed`.
-- `FR-12` `KeyDown` 소비, `FR-45` `OnKeyUp`과 `OnFocusGained`, `Agreed`. IME 조합 중에는 키가
-  Host로 오지 않는다(`FR-12`, D5).
-- `FR-78` 클립보드 읽기(`Agreed`), `FR-73` 클립보드 쓰기(`Draft`).
-- `FR-81` `NativeView`: 플랫폼 뷰를 노드 사각형에 놓는 자리(`Agreed`, 에디터 웹뷰용).
-- `FR-39` `#[Composable]`과 호출 매크로.
-
-`Agreed`는 합의된 설계라는 뜻이고 구현 여부는 항목마다 다르다. 위 항목의 구현 상태는 확인 못
-함.
+Ember의 문서, 코드 어디에도 Rivet이라는 말이 없다 (`docs/`, `ember/*/src` 검색). SPEC §R, INTENT
+D6, `docs/design/REMOTE-BROWSER.md`, `PROJECT.md`의 M6는 모두 서버 Chrome 모델을 적는다.
 
 ## 3. 빈 곳
 
-| ID | 빈 곳 | 걸리는 SPEC / 완료 기준 |
-| --- | --- | --- |
-| G1 | 클라이언트에 뷰어가 없다. `ember/app/src`와 `ember/client/src`에서 브라우저 관련 코드는 `owner.rs`의 경로 한 줄뿐이다. | `FR-R5`, 기준 3 |
-| G2 | `ember/client`에 `/api/browsers` REST와 뷰 WebSocket 코덱이 없다. | `FR-R5` |
-| G3 | 프레임 표면 위젯이 툴킷에 없다(2.2). | `FR-R5` |
-| G4 | 실제 Chrome, 실제 리스너, 실제 노드를 한 번에 잇는 테스트가 없다. 조각만 따로 검증된다. | `FR-R1`, 기준 1 |
-| G5 | 수용 실행 세 가지가 실행되지 않았다(SPEC 상태표 70행). | 기준 1, 2, 3 |
-| G6 | `browser.rs`의 테스트는 Chrome이 없으면 `skipping`을 찍고 통과한다. `.github/workflows`에 Chrome 설치 단계가 없어서 CI에서 실제로 돌았는지는 러너 이미지에 달려 있다. 확인 못 함. | `FR-R1`부터 `FR-R4`의 "CI" 표기 |
-| G7 | takeover는 불리언 하나다. 어느 뷰어든 켜고 끌 수 있고, 켠 뷰어가 끊겨도 풀리지 않는다(`input` 밖에서 해제 코드를 찾지 못했다). 에이전트 명령은 무기한 대기한다. | `FR-R3` |
-| G8 | 터치(`Input.dispatchTouchEvent`), 뷰어별 뷰포트, 클립보드, 파일 업로드, 다운로드, JS 대화상자 처리가 없다(`instance.rs`에서 해당 CDP 호출을 찾지 못했다). | `FR-R5`, 기준 3 |
-| G9 | Chrome 실행 인자에 WebRTC와 QUIC 관련 플래그가 없다. SOCKS5 출구는 `CONNECT`(TCP)만 받으므로 프록시를 거치지 않는 UDP가 서버의 IP를 드러낼 수 있다. 실제로 새는지는 재지 않았다. | `FR-R1` |
-| G10 | 브라우저 MCP는 서버 단위 환경 변수이고 기본이 꺼져 있다. 프로젝트별 설정과 UI가 없다. 패키지는 `@latest`로 받는다. | `FR-R3`, AGENTS.md 규칙 4 |
-| G11 | 프로필 디렉터리는 `create_dir_all`로 만들고 권한을 따로 좁히지 않는다(stderr 로그만 `0600`). | `FR-R2` |
-| G12 | `REMOTE-BROWSER.md`가 "The ember API itself has no auth yet"와 "노드 스트림은 plain HTTP WebSocket"이라고 적는다. `auth.rs`(D37)와 `NodeClient::over_transport`가 이미 있다. | 문서 정합 |
-| G13 | `FR-R5`의 "web" 클라이언트가 무엇인지 정해지지 않았다. `ember/` 아래에서 웹 클라이언트를 찾지 못했다. | `FR-R5` |
-| G14 | 서버에 Chrome이 없을 때의 경로가 오류 메시지뿐이다. 설치 안내와 클라이언트 표시가 없다. | `FR-R5` |
-
-SPEC과 코드가 어긋나는 곳: `FR-R1`은 egress가 "transport stream(`FR-N5`)으로 운반된다"고 적는다.
-리스너는 `NodeClient`의 WebSocket을 쓰고, `NodeClient`는 HTTP와 transport 두 경로를 가진다.
-transport 경로로 `/egress`를 검증하는 테스트는 찾지 못했다(`browser_egress.rs`와
-`node/tests/egress.rs`는 HTTP 노드를 쓴다).
+| ID | 빈 곳 |
+| --- | --- |
+| G1 | **문서가 원칙과 다르다.** `FR-R2`(프로필 데이터를 메인 서버에 둔다), `FR-R3`(DevTools 프로토콜 기반 도구, takeover), `FR-R5`(모든 클라이언트에서 원격 브라우저), INTENT D6("data on the main server")가 Rivet의 `C7`, D4와 맞지 않는다. Rivet D14는 "Ember는 원래 브라우저 데이터를 메인 서버에 둔다. 이 결정은 Rivet의 브라우저에만 해당한다"고 적어 두 모델이 나란히 있는 것으로 읽힌다 (Q-R15) |
+| G2 | Ember 서버에 Rivet 설정 문서와 작업 공간을 보관하는 API가 없다. 계약(`PR-2`)도 Draft이고 스키마가 없다 |
+| G3 | egress 리스너가 서버에서만 뜬다. 사용자의 데스크톱에서 도는 브라우저가 쓸 수 없다 |
+| G4 | egress의 모양이 정해지지 않았다. Rivet D5는 "그 컴퓨터의 Rivet 호스트에서 실제 요청을 실행한다"고 적고 결합 방식은 `PR-3`의 실험으로 미룬다 (Rivet Q3) |
+| G5 | 에이전트가 `rivet` CLI에 닿는 길이 없다. 노드의 `/env` 탐침은 `rivet`을 보지 않고, 에이전트 안내문에 브라우저 항목이 없다 |
+| G6 | **플랫폼.** Rivet은 Windows뿐이다. Ember의 메인 서버와 컴퓨터는 주로 macOS와 Linux다 (`PROJECT.md`: Raspberry Pi 또는 Mac mini). 그 컴퓨터의 세션은 Rivet이 올 때까지 브라우저가 없다 (Q-R16) |
+| G7 | 사람과 에이전트가 같은 Rivet 창을 동시에 만질 때의 규칙이 없다. 서버 Chrome의 takeover는 없어진다 (Q-R17) |
+| G8 | 수용 실행이 한 번도 없었다. 그리고 그 기준의 뜻이 바뀐다 (4.6) |
+| G9 | Rivet 자체가 초기 구현이다. Ember 쪽 작업의 대부분은 Rivet의 M3(CLI 표시 정책)과 M4, M5를 기다린다 |
 
 ## 4. 제안 구조
 
-### 4.1 전체 흐름
+### 4.1 전체 그림
 
 ```text
- ember/app (뷰어 창)                 ember server                        ember node X
- ┌───────────────────────┐          ┌──────────────────────────┐        ┌──────────────┐
- │ BrowserSurface        │◀─frames──│ /api/browsers/{p}/view   │        │              │
- │ (프레임 표면)          │──input──▶│  WebSocket               │        │              │
- │ 툴바: 주소, 탭, egress │──REST───▶│ /api/browsers/{p}[/...]  │        │              │
- │ takeover, 에이전트 표시│          │                          │        │              │
- └──────────┬────────────┘          │ BrowserInstance          │        │              │
-            │ ember/client::browser │  └ Chrome (headless)     │        │              │
-            │ (코덱, 상태, 재연결)   │       │ socks5://127.0.0.1│        │              │
-            └── transport(FR-N5) ───│       ▼                  │        │              │
-                                    │ EgressListener ──/egress─┼─FR-N5─▶│ SOCKS5 출구  │─▶ 대상
- agent CLI ── MCP(stdio) ── CDP ───▶│ /api/browsers/{p}/cdp/<n>│        │ (DNS도 여기) │
-                                    └──────────────────────────┘        └──────────────┘
+ 사용자의 데스크톱 (Windows)                    ember server                  컴퓨터 X (ember node)
+ ┌────────────────────────────────┐          ┌──────────────────────┐       ┌──────────────────┐
+ │ 설치된 Chromium + Rivet 프레임  │          │ Rivet 설정 문서       │       │ SOCKS5 출구       │─▶ 대상
+ │   (Rivet 전용 프로필, 로컬)     │          │ 논리 작업 공간        │       │ (있는 코드)       │
+ │      ▲ 로컬 제어 채널 (PR-1)    │          │ egress 선택           │       │                  │
+ │      │                         │          │ (쿠키, 비밀번호 없음)  │       │ [Windows일 때]    │
+ │ rivet CLI ◀── ember-app ───────┼─ sync ──▶│ /api/rivet/*         │       │ rivet CLI (hidden)│
+ │              (등록된 기기, D37) │          │                      │       │   ▲               │
+ │ loopback SOCKS5 리스너 ────────┼──────────┼── transport (FR-N5) ─┼──────▶│   │ ember-exec    │
+ └────────────────────────────────┘          └──────────────────────┘       └───┼──────────────┘
+                                              agent CLI (메인 서버) ── 도구 호출 ─┘
 ```
 
-서버 쪽 프로토콜은 그대로 둔다. 필드는 더하기만 한다(D15: 버전 필드 없음, 모르는 필드 무시).
+프레임은 어느 선으로도 흐르지 않는다. 사람이 보는 화면은 자기 기기의 Rivet 창이다.
 
-### 4.2 구성 요소와 위치
+### 4.2 설정과 작업 공간 동기화
 
-1. **`ember/client/src/browser.rs` (새 모듈, UI 없음).** REST 호출, 뷰 WebSocket, 프레임 머리
-   파싱, 입력 메시지 직렬화, 재연결을 맡는다. 좌표 환산(`deviceWidth / jpegWidth`)도 여기 둔다.
-   UI와 떼어 두는 이유: 툴킷 API 이전과 무관하게 지금 쓸 수 있고, `MemNetwork`와 가짜 서버로
-   시험할 수 있다. 메시지 예시는 `ember/vectors/`에 두어 서버 테스트와 같은 벡터를 쓴다.
-2. **`ember/app`의 뷰어 화면.** 데스크톱은 별도 창, 휴대폰은 전체 화면 경로를 제안한다(Q-R1).
-   구성: 프레임 표면, 주소 줄, 뒤로/앞으로/새로 고침, 탭 목록(`ViewState.tabs`), egress 선택,
-   "에이전트 동작 중" 표시(`agent_active`), takeover 버튼, 프로필 지우기, 입력 줄(IME용).
-   **이 UI는 12월의 호출 매크로 이전(builder API 제거) 뒤에 호출 매크로로 쓴다.** builder API로
-   먼저 쓰면 바로 다시 써야 하기 때문이다.
-3. **프레임 표면.** 4.3절.
-4. **`ember/server/src/browser/`의 보강.** takeover 보유자, 터치와 대화상자 입력, 누출 차단
-   플래그, 프로젝트별 에이전트 설정. 모두 기존 모듈 안의 추가다.
-5. **진입점.** 대화 화면 헤더에 "브라우저" 버튼을 두고, 에이전트가 브라우저를 쓰는 동안 세션에
-   표시를 단다. 버튼은 뷰어 창을 열 뿐이고 대화 화면 안에 프레임을 그리지 않는다. 대화 화면의
-   재구성을 프레임마다 일으키지 않기 위해서다.
+- **보관.** 서버는 사용자별 Rivet 설정 문서 하나와 논리 작업 공간 목록을 가진다. 내용은 Rivet이
+  정한 스키마의 불투명한 문서로 다루고, Ember는 스키마 버전, 수정 시각, 쓴 기기만 읽는다. 이유:
+  Rivet의 사이드바 모델(Rivet D10)이 바뀔 때마다 Ember 서버를 고치지 않기 위해서다.
+- **허용 목록.** 서버는 문서에 쿠키, 비밀번호, 패스키, 암호화 키로 보이는 필드가 있으면 거절한다.
+  Rivet `FR-6`의 셋째 수용 기준을 Ember 쪽에서도 지키는 검사다. 키 이름 목록은 계약에 적는다.
+- **누가 말하는가.** `ember-app`이 등록된 기기(D37의 기기 키)로 서버와 말하고, 받은 문서를 로컬
+  `rivet` CLI로 적용한다. Rivet은 Ember의 transport를 직접 말하지 않는다. 이유: transport 타입은
+  transport 크레이트 밖에서 금지돼 있고(`check-transport-isolation.sh`), Rivet이 기기 등록을 따로
+  하면 기기 키가 둘이 된다. Rivet Q2("인증, 암호화, 충돌 해결을 어디에 둘지")에 대한 Ember 쪽
+  제안은 "인증과 전달은 Ember, 충돌을 보여 주고 고르는 것은 Rivet"이다.
+- **적용.** Rivet `FR-6`대로 다른 기기의 변경은 사용자 확인 뒤 적용한다. 서버가 안 닿으면 마지막
+  문서를 쓴다. 충돌은 문서 전체의 수정 시각과 기기로 알리고 병합은 하지 않는다.
+- **프로젝트와의 연결.** 논리 작업 공간에 Ember 프로젝트 id를 선택 필드로 둔다. 대화 화면의
+  "브라우저" 버튼은 그 프로젝트의 작업 공간으로 Rivet을 연다. 지금의 "프로젝트마다 브라우저
+  하나"(서버 프로필)를 대신한다.
 
-### 4.3 프레임 표면: 세 가지 길
+### 4.3 egress
 
-| 길 | 방법 | 장점 | 단점 |
-| --- | --- | --- | --- |
-| A | 프레임마다 `asset(kind, bytes)`로 등록하고 `Image`가 그 id를 가리킨다. 이전 프레임은 `ReleaseAsset`. | 툴킷 변경이 없다(문서 기준). | 프레임마다 JPEG가 배치를 건너고 Host 재구성이 돈다. 비용을 잰 적이 없다. |
-| B | compose-rust에 새 위젯(가칭 `FrameSurface`)을 요청한다. Host가 노드에 최신 프레임만 밀어 넣고 Renderer가 디코드해 그린다. | 재구성 없이 표면만 갱신된다. 휴대폰에서도 같은 코드다. | 툴킷 SPEC 항목, 이슈, 구현이 필요하다. 지금 항목이 없다. |
-| C | `FR-81` `NativeView`에 Ember가 만든 플랫폼 이미지 레이어를 붙인다. | 웹뷰가 아니다. 프레임 경로가 짧다. | 플랫폼 다섯 개마다 코드가 필요하고, 겹침과 입력이 뷰 쪽으로 넘어간다. |
+두 경우를 나눈다.
 
-제안: A를 먼저 재고(작업 S6), 예산(7절 `NFR-RB1` 제안)을 못 맞추면 B를 요청한다. C는 A와 B가
-둘 다 안 될 때의 대안으로만 둔다. 플랫폼별 코드가 `NFR-L3`(모든 OS에서 한 설계)과 맞지 않기
-때문이다.
+**사람이 보는 브라우저.** Rivet은 사용자의 기기에서 돌고, 그 트래픽만 고른 컴퓨터로 나간다.
+`ember-app`이 자기 기기의 loopback에 SOCKS5 리스너를 띄우고 transport로 그 컴퓨터의 `/egress`에
+잇는다. Rivet은 그 리스너를 프록시로 받아 브라우저를 연다. 지금 서버에 있는 `EgressListener`를
+클라이언트가 쓸 수 있는 자리로 옮기는 일이다. 이 모양을 권하는 이유는 둘이다. 프로필이 사용자의
+기기에 그대로 있으므로 egress를 바꿔도 로그인이 유지된다(#12 기준 2). 화면을 다른 컴퓨터에서
+끌어올 필요가 없으므로 스트리밍이 생기지 않는다.
 
-세 길 모두 웹뷰를 만들지 않는다. 따라서 E1과 `NFR-L2`는 뷰어가 어느 창에 있든 지켜진다.
-`ember/app/tests/no_webview.rs`와 `check-no-webview.sh`는 `ember/app`과 `ember/client` 전체를
-훑으므로 새 모듈도 자동으로 검사된다.
+**에이전트의 브라우저.** 에이전트의 도구는 세션의 현재 컴퓨터에서 돈다(D4). 그 컴퓨터에 Rivet이
+있으면 에이전트는 거기서 `rivet`을 `hidden`으로 부른다. 트래픽은 그 컴퓨터에서 바로 나가므로
+egress가 따로 필요 없다. Rivet D5의 "그 컴퓨터의 Rivet 호스트에서 실제 요청을 실행한다"가 이
+경우다. 로그인은 그 컴퓨터의 Rivet 전용 프로필의 것이다.
 
-### 4.4 입력
+두 경우 모두 대상 컴퓨터가 안 닿으면 직접 연결로 조용히 바꾸지 않고 실패한다 (Rivet `FR-7`,
+Ember의 지금 동작과 같다).
 
-- 포인터: `FR-46`의 `Move`, `Down`, `Up`, `Wheel`, `ContextMenu`를 `mouse`와 `wheel` 메시지로
-  바꾼다. `Move`는 프레임 간격에 맞춰 솎는다. 릴레이 경로에서 입력이 밀리지 않게 하기 위해서다.
-- 키: 표면 노드의 `KeyDown`과 `OnKeyUp`을 `key` 메시지로 바꾼다. 표면 같은 비텍스트 노드가
-  포커스와 키를 받는지는 확인 못 함(compose-rust SPEC 1722행은 컨테이너 `on_key_down`이 없다고
-  적은 적이 있다). 안 되면 입력 줄이 키도 받는다.
-- 글자(IME, 휴대폰 키보드): 툴킷이 조합 중인 글자를 Host에 보내지 않으므로, 뷰어의 입력 줄
-  (`TextField`)에서 확정된 글자를 `text` 메시지(`Input.insertText`)로 보낸다.
-- 터치: 서버에 `touch` 메시지를 더한다(`Input.dispatchTouchEvent`). 그 전까지 휴대폰은 탭을
-  `mouse`로 보낸다(지금 설계 문서의 방식).
-- 클립보드: 붙여넣기는 `FR-78`로 읽어 `text`로 보낸다. 복사는 서버에 선택 글자를 돌려주는
-  메시지가 필요하다(없음, 작업 S5).
-- takeover: 4.6절.
+Rivet Q3(원격 제어 연결을 기존 CDP relay와 병행할지)에 대한 Ember 쪽 제안은 "둘 다 필요 없다"다.
+에이전트는 그 컴퓨터에서 CLI를 로컬로 부르고, 사람은 자기 기기에서 본다. 다른 컴퓨터의 Rivet을
+원격으로 조종하는 연결은 이 설계에 없다. 이 판단은 Rivet 쪽과 맞춰야 한다 (Q-R14).
 
-### 4.5 검토한 대안과 기각 이유
+### 4.4 에이전트 경로
 
-- **뷰어를 웹뷰로 만든다.** 기각. 런처 프로세스에 웹뷰가 생기고 E1, `NFR-L2`, AGENTS.md 규칙
-  5를 어긴다. 에디터 창의 웹뷰 예외(D44)는 확장 콘텐츠에만 열려 있다.
-- **사용자 OS의 브라우저로 서버 페이지를 연다.** 보류(Q-R3). 웹뷰는 아니지만 owner 리스너의
-  인증을 브라우저에 넘겨야 하고, 휴대폰에서는 앱을 떠난다.
-- **H.264나 WebRTC 스트림.** 기각(지금은). headless Chrome의 screencast는 JPEG와 PNG만 주고,
-  인코더 의존성과 영상 표면이 둘 다 새로 필요하다. JPEG로 예산을 못 맞출 때 다시 본다.
-- **Chrome을 egress 컴퓨터에서 띄운다.** 기각. 프로필이 그 컴퓨터로 가므로 `FR-R2`와 D6("데이터는
-  메인 서버")을 어긴다.
-- **Ember가 자체 브라우저 MCP를 만든다.** 기각(지금은). E2(에이전트를 고치지 않고 설정만)와
-  기성 MCP 두 개가 이미 연결되어 있다. 버전 고정으로 위험을 줄인다(Q-R5).
+- **도구는 CLI다.** 에이전트는 셸 도구로 `rivet ... --json`을 부른다. `ember-exec`가 그 명령을
+  현재 컴퓨터의 노드로 보낸다. MCP 서버를 따로 띄우지 않는다. 이유: Rivet `C5`가 CLI를 일급
+  표면으로 정했고, 에이전트를 고치지 않고 설정만 더한다는 E2에 맞는다.
+- **발견.** 노드의 `/env` 탐침에 `rivet --version`을 더한다. 없으면 에이전트 안내문에 브라우저
+  항목을 넣지 않는다. 브라우저를 추측해 띄우지 않는다 (Rivet `FR-1`, Q-R9).
+- **버전 고정.** 지원하는 `rivet` 버전 범위를 SPEC에 적고, 범위 밖이면 안내문에서 뺀다. 올릴 때는
+  실제 CLI로 통합 실행을 한다 (Q-R5, AGENTS 규칙 4).
+- **스위치.** 프로젝트별로 켜고 기본은 꺼짐을 권한다. 로그인된 프로필은 권한이기 때문이다
+  (Q-R4, 소유자 답 대기).
+- **표시.** 에이전트의 기본은 `hidden`이다. `control.proto`에는 `FAILURE_KIND_NEEDS_VISIBLE`이
+  있다: 명령이 시각 증거를 요구하는데 정책이 창을 금지할 때의 실패다. 사람이 직접 해야 하는
+  단계(로그인, 2단계 인증)를 알리는 신호는 프로토콜에 없다. 그 신호를 계약(R1)에 넣자고 Rivet
+  쪽에 제안하고, Ember는 두 경우를 세션의 "사람이 필요함" 상태로 올린다(`FR-T8`의 needs input과
+  같은 길).
 
-### 4.6 takeover 모델
+### 4.5 클라이언트 UI
 
-제안: takeover에 보유자(뷰어 연결 id)를 둔다. 보유자만 끌 수 있고, 보유자의 WebSocket이 끊기면
-서버가 푼다. 보유한 채 입력이 없는 시간이 한도를 넘으면 상태에 경고를 싣고, 더 지나면 푼다.
-이유: 지금은 휴대폰이 잠들면 에이전트의 도구 호출이 끝없이 멈춘다(G7). `ViewState`에
-`takeover_by`와 `takeover_since`를 더한다(추가 필드, D15에 맞음).
+작다. 대화 화면 헤더의 "브라우저" 버튼(그 프로젝트의 작업 공간으로 Rivet을 연다), egress 선택,
+Rivet이나 Chromium이 없을 때의 안내, 설정 동기화의 충돌 알림. 웹뷰도 프레임 표면도 없다. Rivet은
+별도 프로세스의 브라우저이므로 E1과 `NFR-L2`에 닿지 않는다. 이 UI는 12월의 call 매크로 이전 뒤에
+call 매크로로 쓴다.
+
+### 4.6 #12의 완료 기준을 다시 읽는다
+
+| 기준 | Rivet 기준의 뜻 |
+| --- | --- |
+| 1. IP 확인 페이지가 egress 컴퓨터를 보이고 그 컴퓨터의 localhost, LAN 페이지에 닿는다 | 그대로다. Rivet `FR-7`의 첫 수용 기준과 같다. 사람의 Rivet은 4.3의 리스너로, 에이전트의 Rivet은 그 컴퓨터에서 직접 |
+| 2. 로그인이 egress 전환 뒤에도 남는다 | 사람의 Rivet에서는 프로필이 움직이지 않으므로 남는다. 컴퓨터를 옮긴 에이전트 세션은 새 컴퓨터의 프로필을 쓰므로 남지 않는다. 그 경우는 브라우저의 공식 동기화와 사용자의 로그인에 맡긴다 (Rivet D4). 기준 문장을 고쳐야 한다 |
+| 3. 에이전트가 폼을 채우는 동안 사용자가 로그인 단계를 넘겨받는다 | `visible` 세션에서 사람이 같은 창을 직접 만진다. 넘겨받기 버튼이 아니라 충돌 규칙이 필요하다 (Q-R17) |
+| 4. 런처와 대화 화면에 웹뷰가 없다 | 그대로다. Rivet은 웹뷰가 아니고 다른 프로세스다 |
+
+### 4.7 버린 것
+
+- **서버 Chrome을 스트리밍하는 뷰어 (이 문서의 첫 판).** 소유자 원칙과 어긋난다.
+- **프로필을 메인 서버에 두고 컴퓨터마다 내려보낸다.** Rivet `C7`, `NFR-2`가 금지한다.
+- **Rivet이 올 때까지 서버 Chrome 코드를 계속 키운다.** 버릴 코드에 일을 쌓는다. 지금 코드는 얼리고
+  새 작업은 Rivet 계약 쪽에 둔다.
+- **Ember가 CDP로 설치된 Chromium을 직접 조종한다.** Rivet의 제어 표면과 겹치고, Rivet 전용
+  프로필과 세션 수명 규칙(`FR-1`)을 Ember가 다시 구현하게 된다.
 
 ## 5. 위험
 
 | # | 위험 | 완화 |
 | --- | --- | --- |
-| 1 | 길 A의 프레임 비용이 커서 입력 지연이 길다. | S6에서 먼저 잰다. 못 맞추면 B를 요청하고 UI 단계를 그 뒤로 미룬다. |
-| 2 | 릴레이 경로의 대역폭. 1280×800 JPEG 품질 70은 프레임당 수십에서 수백 KB로 추정한다(재지 않음). | 뷰어가 `screencast` 메시지로 품질과 크기를 낮춘다. 서버는 느린 뷰어의 프레임을 이미 버린다(`broadcast::channel(4)`, `Lagged`). 경로 상태(`FR-N5`)가 relayed면 기본값을 낮춘다. |
-| 3 | 실제 사이트가 headless 또는 자동화 Chrome을 막아 로그인 수용 기준이 실패한다. | 수용 실행의 사이트를 소유자가 정한다(Q-R10). 막는 사이트를 기록한다. |
-| 4 | UDP 누출로 서버 IP가 보인다(G9). | 프록시를 거치지 않는 UDP를 막는 플래그를 넣고 실제 Chrome에서 누출 검사 페이지로 확인한다(Q-R11). 플래그 동작은 가정하지 않고 통합 테스트로 확인한다(AGENTS.md 규칙 4). |
-| 5 | 에이전트가 로그인된 프로필로 사용자의 권한을 쓴다. | 프로젝트별 opt-in, 기본 꺼짐(Q-R4). "에이전트 동작 중" 표시와 takeover. |
-| 6 | `@latest` MCP 패키지가 바뀌어 동작이 달라지거나 공급망 위험이 생긴다. | 버전을 고정하고 SPEC에 적는다(Q-R5). |
-| 7 | takeover 동안 MCP 도구 호출이 시간 초과로 실패한다. | 4.6의 자동 해제. 에이전트 쪽 시간 초과 값은 실제 CLI로 확인한다(확인 못 함). |
-| 8 | loopback SOCKS5 리스너는 인증이 없어 서버의 다른 프로세스가 그 컴퓨터의 egress를 쓸 수 있다. | 지금은 문서화된 신뢰 경계다. 브라우저가 멈추면 리스너를 내리는 것을 S3에 넣는다. |
-| 9 | 12월 호출 매크로 이전과 UI 작업이 겹친다. | UI 단계(S8 이후)를 이전 뒤로 고정한다. S1부터 S7은 UI가 없어 먼저 한다. |
-| 10 | 공유 뷰포트라 휴대폰에서 데스크톱 배치가 보인다. | v1은 확대와 이동으로 버틴다(Q-R7). |
-| 11 | 서버에 Chrome이 없다. | 클라이언트가 이유와 설치 방법을 보여 준다(Q-R9). |
+| 1 | Rivet이 Windows뿐이라 macOS, Linux 컴퓨터의 세션에는 오래 브라우저가 없다 | Q-R16으로 묻는다. 그 사이의 임시 길(얼린 서버 Chrome을 스위치 뒤에 남길지)은 원칙에 닿으므로 리더와 소유자가 정한다 |
+| 2 | Rivet의 일정에 Ember 쪽이 묶인다 | Rivet 없이 할 수 있는 것을 먼저 한다: 문서 재정렬(R0), 계약 초안(R1), 서버 보관 API(R2), 리스너 이전(R3). 가짜 `rivet`으로 테스트한다 |
+| 3 | 계약이 두 저장소에서 따로 바뀐다 | 계약 벡터를 한 곳에 두고 양쪽 테스트가 같은 파일을 읽는다 (Rivet `rivet/protocol/vectors`의 방식). 스키마 버전이 다르면 손실 없이 호환 여부를 보고한다 (`PR-2`) |
+| 4 | 프록시를 거치지 않는 UDP(WebRTC, QUIC)로 진짜 IP가 샌다 | egress가 컴퓨터일 때만 막는 플래그를 Rivet이 브라우저에 넘긴다. 실제 브라우저로 확인한다 (Q-R11, 소유자 답 대기) |
+| 5 | 에이전트가 로그인된 Rivet 프로필로 사용자의 권한을 쓴다 | 프로젝트별 스위치, 기본 꺼짐 (Q-R4). 에이전트 기본은 `hidden`이고 사람이 필요한 단계는 올린다 |
+| 6 | loopback SOCKS5 리스너에 같은 기기의 다른 프로세스가 닿는다 | Rivet 세션이 끝나면 리스너를 내린다. 리스너는 요청마다 임의 포트를 쓴다. 지금 서버 쪽과 같은 신뢰 경계다 |
+| 7 | 동기화 문서에 비밀이 섞인다 | 서버의 허용 목록 검사(4.2)와 Rivet 쪽 검사를 둘 다 둔다 |
+| 8 | 서버 Chrome 코드를 지우기 전에 누가 그 위에 기능을 얹는다 | SPEC Status 표에 "대체 예정, 새 작업 금지"를 적는다 (R0) |
 
-## 6. 소유자 결정 필요
+## 6. 결정과 열린 질문
 
-- **Q-R1. 뷰어는 어디에 뜨는가?** (a) 데스크톱은 별도 네이티브 창, 휴대폰은 전체 화면 경로.
-  (b) 대화 화면 안의 패널. (c) 최상위 탭 하나. 추천: (a). 이슈 본문이 "native viewer window"라고
-  적고, 프레임 갱신이 대화 화면을 재구성하지 않는다.
-- **Q-R2. 프레임 표면은 어느 길인가?** A(에셋 교체), B(compose-rust 새 위젯), C(`NativeView`).
-  추천: A를 재고 예산을 못 맞추면 B. 툴킷 변경 없이 시작할 수 있고, 숫자가 B의 근거가 된다.
-- **Q-R3. `FR-R5`의 "web"은 무엇인가?** (a) SPEC에서 뺀다. (b) 서버가 주는 뷰어 페이지를
-  사용자의 브라우저로 연다. (c) 미룬다. 추천: (c), `FR-R5`를 데스크톱과 Android로 좁히고 web은
-  별도 행으로 둔다. 웹 클라이언트가 지금 없기 때문이다.
-- **Q-R4. 에이전트의 브라우저 사용 기본값은?** (a) 지금처럼 서버 환경 변수, 기본 꺼짐. (b)
-  프로젝트별 스위치(owner 전용 경로), 기본 꺼짐. (c) 기본 켜짐. 추천: (b). 로그인된 프로필은
-  권한이므로 프로젝트 단위로 사람이 켠다.
-- **Q-R5. MCP 패키지 버전은?** (a) `@latest`. (b) 고정 버전을 SPEC에 적고 올릴 때 통합 테스트를
-  돌린다. (c) 자체 MCP. 추천: (b). 실제 동작에 맞춰 통합한다는 규칙 4와 맞는다.
-- **Q-R6. 뷰어가 여럿일 때 takeover는?** (a) 지금처럼 누구나 켜고 끈다. (b) 보유자 한 명,
-  끊기면 자동 해제. 추천: (b). 에이전트가 끝없이 멈추는 경우를 없앤다.
-- **Q-R7. 휴대폰의 뷰포트는?** (a) 공유 1280×800을 유지하고 확대와 이동. (b) takeover 보유자가
-  뷰포트를 바꾼다(모바일 에뮬레이션). 추천: v1은 (a). 에이전트가 보는 배치가 작업 중에 바뀌지
-  않는다.
-- **Q-R8. 프로필 지우기는 owner 전용인가?** 지금 owner 전용 목록에는 egress 변경만 있다. (a)
-  그대로. (b) `DELETE …/data`도 owner 전용. 추천: (b). 모든 로그인을 지우는 되돌릴 수 없는
-  동작이다.
-- **Q-R9. Chrome은 어떻게 마련하는가?** (a) 설치된 Chrome만 쓰고 없으면 안내. (b) 처음 쓸 때
-  Chrome for Testing을 받는다. (c) 번들. 추천: (a) 먼저. 다운로드와 번들은 배포 크기와 갱신
-  책임을 더한다.
-- **Q-R10. 로그인 수용 실행은 어느 사이트로 하는가?** (a) 저장소의 테스트 사이트만. (b) 소유자가
-  고른 실제 사이트 하나 이상. 추천: (b)와 (a) 둘 다. 실제 사이트가 headless를 막는지가 이 기능의
-  쓸모를 정한다.
-- **Q-R11. 프록시를 거치지 않는 UDP(WebRTC)를 막는가?** (a) 막는다. 일부 화상 통화 사이트가
-  안 된다. (b) 둔다. 추천: (a). `FR-R1`의 뜻이 "페이지가 그 컴퓨터의 IP를 본다"이기 때문이다.
-- **Q-R12. 프로필을 암호화하는가?** (a) 디렉터리 권한 `0700`만. (b) 저장 시 암호화. 추천: (a).
-  서버의 토큰 저장소와 같은 신뢰 경계이고, Chrome 프로필 암호화는 별도 설계가 필요하다.
-- **Q-R13. 지연 예산 숫자를 SPEC에 넣는가?** 7절의 `NFR-RB1` 값은 재지 않은 초안이다. 추천:
-  S6의 측정 뒤에 숫자를 정해 넣는다.
+첫 판의 Q-R1~R13에 대한 리더 검토 결과다.
+
+| 질문 | 상태 | 내용 |
+| --- | --- | --- |
+| Q-R1 뷰어 위치 | 무효 [leader, 2026-11-20] | 뷰어 창이 없다. 브라우저는 Rivet 자신의 네이티브 창이다 |
+| Q-R2 프레임 표면 | 무효 [leader, 2026-11-20] | 스트리밍하지 않는다. `FrameSurface` 위젯을 요청하지 않는다 |
+| Q-R3 `FR-R5`의 "web" | 무효 [leader, 2026-11-20] | `FR-R5`를 Rivet 기준으로 다시 쓴다 (데스크톱 먼저). 웹 뷰어는 없다 |
+| Q-R4 에이전트 브라우저 기본값 | **열림, 소유자** | 추천: 기본 꺼짐, 프로젝트별로 사람이 켠다 |
+| Q-R5 버전 고정 | 결정 [leader, 2026-11-20] | Rivet 에이전트 CLI(브라우저 제어 도구)의 버전을 SPEC에 고정하고 통합 실행을 거쳐서만 올린다 |
+| Q-R6 takeover | 무효 [leader, 2026-11-20] | 사용자가 로컬 Rivet 창을 직접 쓴다. 에이전트와 사람이 부딪칠 수 있으면 Rivet 설계에서 다시 묻는다 (Q-R17) |
+| Q-R7 휴대폰 뷰포트 | 무효 [leader, 2026-11-20] | 공유 서버 뷰포트가 없다 |
+| Q-R8 프로필 지우기 | 결정 [leader, 2026-11-20] | owner 전용이고 확인을 거친다. 되돌릴 수 없는 동작이다 |
+| Q-R9 Chromium 마련 | 결정 [leader, 2026-11-20] | 설치된 Chromium만 쓰고 없으면 안내한다. 내려받기와 번들은 없다 |
+| Q-R10 실제 사이트 수용 실행 | **열림, 소유자** | 추천: 테스트 사이트와 소유자가 고른 실제 사이트 하나, 둘 다 |
+| Q-R11 WebRTC 누출 | **열림, 소유자** | 추천: 다른 컴퓨터를 거칠 때만 막는다 |
+| Q-R12 프로필 암호화 | 결정 [leader, 2026-11-20] | 디렉터리 권한만. Rivet에서 프로필은 설치된 Chromium의 것이고 OS 키체인을 이미 쓴다 |
+| Q-R13 지연 예산 | 무효 [leader, 2026-11-20] | 프레임 경로가 없다. Rivet의 지연 숫자는 측정 뒤에만 SPEC에 넣는다 |
+
+다시 쓰면서 생긴 질문이다. 리더가 아직 분류하지 않았다.
+
+- **Q-R14. egress의 모양.** (a) 사람의 Rivet은 자기 기기에서 돌고 loopback 리스너로 나간다. 에이전트의
+  Rivet은 세션의 컴퓨터에서 직접 돈다. 다른 컴퓨터의 Rivet을 원격 조종하는 연결은 없다 (4.3).
+  (b) Rivet 전용 relay로 다른 컴퓨터의 Rivet 호스트를 조종한다 (Rivet Q3). 추천 (a). 스트리밍이
+  생기지 않고 있는 노드 출구를 그대로 쓴다. Rivet 쪽 `PR-3`과 맞춰야 한다.
+- **Q-R15. `FR-R2`와 D6의 "브라우저 데이터는 메인 서버에".** Rivet `C7`과 맞지 않는다. (a) D6와
+  `FR-R2`를 "로그인은 브라우저와 OS가 가진다, Ember는 설정과 작업 공간만 가진다"로 고친다.
+  (b) 두 모델을 나란히 둔다. 추천 (a). D6가 [user] 결정이므로 소유자의 확인이 필요해 보인다.
+- **Q-R16. Rivet이 없는 플랫폼.** macOS, Linux 컴퓨터와 휴대폰의 세션은 Rivet이 올 때까지 무엇을
+  쓰는가. (a) 브라우저 없음, 이유를 보여 준다. (b) 얼린 서버 Chrome의 에이전트 CDP 경로만 스위치
+  뒤에 남긴다 (화면 스트리밍은 없이). 추천 (a). (b)는 버릴 코드를 살려 두고 원칙의 경계에 닿는다.
+- **Q-R17. 사람과 에이전트의 충돌.** `visible` 세션에서 둘이 같은 창을 만질 때. (a) 사람의 입력이
+  오면 에이전트의 입력 명령이 "사람이 쓰는 중"으로 실패하고 다시 시도한다. (b) 에이전트는 자기
+  탭만 만지고 사람은 다른 탭을 쓴다. (c) 규칙 없음. 추천: Rivet 쪽에서 정하되 Ember는 (a)의 실패
+  종류를 "사람이 필요함"으로 올릴 수 있으면 된다.
 
 ## 7. SPEC/INTENT 변경 제안
 
-적용하지 않았다. 아래는 제안 문안이고 모두 [provisional]이다. `NFR-R1`, `NFR-R2`가 이미 릴리스
-항목이라 원격 브라우저의 비기능 항목은 `NFR-RB`로 적었다. 접두어는 리더가 정한다.
+적용하지 않았다. 모두 [provisional]이고, Q-R14~R17의 답에 따라 바뀐다.
 
-> **FR-R3a** *[provisional, #12]* Takeover has one holder: the viewer connection that turned it
-> on. Only the holder (or an owner-presence request) turns it off. The server releases it when the
-> holder's view stream closes, and after 10 minutes with no input from the holder. `ViewState`
-> carries `takeover_by` and `takeover_since`. | A viewer takes over and its connection drops: the
-> agent's held command proceeds within 5 s (`fr_r3_takeover_releases_when_holder_disconnects`).
+> **§R (title)** Browser: Rivet on the user's installed Chromium, with Ember's settings,
+> workspaces and egress (D6).
 
-> **FR-R1a** *[provisional, #12]* With a computer or proxy egress, the browser sends no traffic
-> that bypasses the proxy: non-proxied UDP (WebRTC, QUIC) is disabled. | A WebRTC leak page shows
-> no address of the main server; the launch arguments carry the flags (unit test) and a real
-> Chrome run confirms it.
+> **FR-R1** (changed) A Rivet browser session can egress from a chosen computer. For the user's
+> own Rivet the path is a loopback SOCKS5 listener on the user's device carried over a transport
+> stream (`FR-N5`) to that computer's ember node; an agent's Rivet runs on the session's current
+> computer and egresses there directly. An unreachable computer fails explicitly, never falls back
+> to a direct connection. | A what-is-my-IP page shows the chosen computer's public IP; a page on
+> that computer's LAN or `localhost` is reachable (Rivet `FR-7`).
 
-> **FR-R5** (changed) *[provisional, #12]* The remote browser is available from the desktop
-> client and the Android client. The viewer draws screencast frames on a compose-rust surface and
-> never allocates a webview (`NFR-L2`). | Verified from the phone client: open a page, type with
-> the on-screen keyboard, take over and hand back.
->
-> **FR-R5w** *[provisional, #12]* A web client for the remote browser. Not implemented, no design.
+> **FR-R2** (replaced) Ember stores each user's Rivet settings document and logical workspaces on
+> the main server and delivers them to the user's registered devices. Ember never stores, copies
+> or transfers cookies, passwords, passkeys or browser encryption keys (Rivet `C7`, `NFR-2`). |
+> A setting saved on one device is offered on another and applied after the user confirms; a
+> document carrying a credential-like field is refused; with the server unreachable the last
+> document is used.
 
-> **FR-R6** *[provisional, #12]* The viewer: frame surface, address bar, back, forward, reload,
-> tab list, egress chooser, an "agent is active" indicator, a takeover control, clear data. Input:
-> pointer, wheel, keys, committed text (IME and on-screen keyboards), touch on phones, paste. |
-> `fr_r6_*` codec tests in `ember/client`; the viewer screen has a `#[Preview]` entry.
+> **FR-R3** (replaced) Agents drive the browser through the `rivet` CLI on the session's current
+> computer, hidden by default; a step that needs a person is raised as "needs input" in the
+> session. The supported `rivet` version range is stated here and raised only after an
+> integration run with the real CLI. | With `rivet` absent or out of range, the agent's
+> instructions carry no browser entry. An agent fills a form; at the login step the session shows
+> that a person is needed; after the person signs in, the agent continues.
 
-> **FR-R7** *[provisional, #12]* Agent browser use is switched per project (owner route), off by
-> default. The MCP server package and version are fixed in this row: `chrome-devtools-mcp@<x.y.z>`
-> (default), `@playwright/mcp@<x.y.z>`. | With the switch off an agent start carries no
-> `ember-browser` server; with it on, an integration test with the real CLI lists the browser
-> tools.
+> **FR-R4** (changed) Clearing a workspace's browser data is owner-only and confirmed. Ember
+> removes its own records (workspace, egress choice) and asks Rivet to clear the Rivet profile's
+> site data on that device.
 
-> **FR-R8** *[provisional, #12]* JavaScript dialogs, file choosers and downloads have a defined
-> behaviour: dialogs are shown in the viewer and answered there; a file chooser takes a file sent
-> through `FR-F*` transfers; downloads are saved under the project's browser directory on the main
-> server and listed. | One test per case against a real Chrome.
+> **FR-R5** (replaced) The browser is Rivet, on desktop first. Ember streams no browser frames
+> and has no viewer. Platforms without a Rivet host show why the browser is unavailable.
 
-> **NFR-RB1** *[provisional, #12, numbers not measured]* From an input event in the viewer to the
-> frame that shows its effect: p50 at most 150 ms on a direct path, at most 400 ms relayed. If the
-> desktop viewer misses this, the reason is recorded and `FR-R5` on Android waits.
+> **Status table, FR-R1 to R5.** "Server Chrome implementation (`ember/server/src/browser/`:
+> launch, view stream, input, CDP relay, MCP config) is to be replaced by Rivet; no new work lands
+> on it. The node egress and the egress choice stay."
 
 INTENT 제안:
 
-> **D6 amendment** *[provisional, #12]* The viewer is native: it draws frames the main server
-> streams and holds no web engine in the client. Rejected: a webview viewer (E1), running Chrome on
-> the egress computer (profile would leave the main server), a video codec stream (no encoder or
-> video surface today). Agent browser use is opt-in per project because a logged-in profile is
-> authority. Takeover has one holder and releases itself when the holder leaves.
+> **D6 amendment** [user principle relayed by the leader, 2026-11-20; wording provisional] Rivet
+> (LogitAI/rivet-browser) is Ember's browser: a native frame on the user's installed Chromium and
+> an agent CLI. Ember syncs settings and workspaces and provides the computer egress. Ember never
+> streams a server Chrome. Sign-in state stays with the browser and the operating system.
+> Rejected: a headless Chrome on the main server streamed to a viewer; a browser profile held on
+> the main server.
+
+그 밖에 `PROJECT.md`의 M6 행("viewing depends on dioxus-compose's frame-surface widget")과
+`docs/design/REMOTE-BROWSER.md`(머리에 "대체됨, 이 문서를 보라")를 고친다.
 
 ## 8. 작업 분해
 
-추정은 에이전트 세션 하나의 작업일이고 거칠다. 빌드와 테스트 실행은 builder 서브 에이전트나
-리더가 dispatch한 CI가 한다. S6의 결과에 따라 S8 이후가 바뀐다.
+추정은 에이전트 세션 하나의 작업일이고 거칠다. Rivet 쪽 작업은 세지 않았다. 빌드와 테스트는
+빌더가 돌린다. **이 표는 재계획의 초안이다. 리더가 Q-R14~R17을 분류하고 Rivet 쪽과 계약을 맞춘
+뒤에 일정에 넣는다.**
 
-| # | 무엇 | 크레이트 | 증명하는 테스트 | 일 | 소유자 손 |
+| # | 무엇 | 닿는 곳 | 증명하는 테스트 | 일 | 기다리는 것 |
 | --- | --- | --- | --- | --- | --- |
-| S1 | 결정 반영: SPEC 행과 INTENT 수정(7절), `REMOTE-BROWSER.md`의 오래된 두 줄(G12) | `docs/` | 문서 검사(`check-no-em-dash.sh`) | 0.5 | Q-R 답 |
-| S2 | takeover 보유자와 자동 해제(4.6) | `ember/server` | `fr_r3_takeover_releases_when_holder_disconnects`, `fr_r3_only_the_holder_hands_back` | 1 | 없음 |
-| S3 | UDP 누출 차단 플래그, 프로필 `0700`, 브라우저 정지 시 리스너 내리기, Chrome 없음을 CI에서 실패로 만드는 스위치(가칭 `EMBER_REQUIRE_CHROME`) | `ember/server`, `.github/` | `fr_r1a_launch_args_block_non_proxied_udp`, 스위치가 켜진 CI 실행에서 `browser.rs`가 건너뛰지 않음 | 1 | 없음 |
-| S4 | 실제 Chrome에서 리스너와 실제 `ember-node` 프로세스를 거쳐 테스트 사이트까지 가는 종단 테스트. HTTP 노드와 transport 노드 둘 다 | `ember/server`, `ember/node` | `fr_r1_chrome_egresses_through_a_real_node`, `fr_r2_login_survives_a_switch_between_two_nodes` | 1.5 | 없음 |
-| S5 | 서버 입력 보강: `touch`, 대화상자, 파일 선택, 다운로드, 선택 글자 복사 | `ember/server` | `fr_r8_*` (실제 Chrome) | 2 | 없음 |
-| S6 | 프레임 표면 측정: 길 A로 10, 30 fps에서 CPU와 입력 지연을 잰다. 결과로 Q-R2와 Q-R13을 정하고, 필요하면 compose-rust 이슈를 연다 | `.scratch/`, `ember/app` (예제) | 측정 기록(숫자와 방법) | 1 | 결과 검토 |
-| S7 | `ember/client::browser`: REST, 뷰 WebSocket 코덱, 재연결, 공유 벡터 | `ember/client`, `ember/vectors` | `fr_r6_frame_header_round_trips`, `fr_r6_input_messages_match_shared_vectors`, `fr_r6_view_stream_reconnects` | 1.5 | 없음 |
-| S8 | 뷰어 창(데스크톱): 표면, 툴바, 탭, egress 선택, 표시, takeover, 지우기. **호출 매크로 이전 뒤, 호출 매크로로 작성** | `ember/app` | `fr_r6_viewer_*` UI 테스트, `no_webview.rs`, `#[Preview]` 항목 | 3 to 4 | 화면 확인 |
-| S9 | 입력 연결: 포인터, 휠, 키, 입력 줄(IME), 붙여넣기 | `ember/app`, `ember/client` | `fr_r6_pointer_maps_to_viewport_css_pixels`, `fr_r6_committed_text_is_sent_once` | 2 | 한글 IME 확인 |
-| S10 | 진입점: 대화 헤더 버튼, 세션의 에이전트 표시, 프로젝트별 에이전트 스위치(`FR-R7`)와 MCP 버전 고정 | `ember/app`, `ember/server`, `ember/client` | `fr_r7_switch_off_adds_no_browser_server`, 실제 CLI 통합 테스트 | 2 | 없음 |
-| S11 | Android: 전체 화면 경로, 터치, 화면 키보드, 확대와 이동 | `ember/app` | `fr_r5_*` 과 Flip 4 실행 | 2 | 휴대폰 확인 |
-| S12 | 수용 실행: 공인 IP가 다른 두 번째 컴퓨터로 egress IP와 LAN 페이지, 실제 사이트 로그인과 전환, 에이전트 폼 입력 중 takeover, 휴대폰 | 없음(실행과 기록) | SPEC 수용 기준 그대로, 실제 출력 기록 | 1 | 두 번째 컴퓨터, 실제 계정, 휴대폰 |
-| S13 | SPEC 상태표와 `REMOTE-BROWSER.md` 갱신, #12 닫기 | `docs/` | 없음 | 0.5 | 없음 |
+| R0 | 문서 재정렬: SPEC §R, Status 표, INTENT D6, `PROJECT.md` M6, `REMOTE-BROWSER.md`, #12 본문 | `docs/` | 문서 검사 | 1 | Q-R15 |
+| R1 | 계약 초안 (`PR-2`, `PR-3`의 Ember 쪽): 설정 문서의 봉투, 금지 필드 목록, egress 인자, CLI 실패 종류의 대응. 공유 벡터 | `docs/design/`, `ember/vectors/rivet/` | 벡터를 읽는 양쪽 테스트 | 2 | Rivet 저장소와 합의, Q-R14 |
+| R2 | 서버 보관 API: `/api/rivet/settings`, `/api/rivet/workspaces`, 기기 범위, 허용 목록 검사 | `ember/server` | `fr_r2_settings_round_trip_between_devices`, `fr_r2_credential_like_field_is_refused`, `fr_r2_scope_is_user_and_device` | 2.5 | R1 |
+| R3 | egress 리스너를 클라이언트에서 쓸 수 있게 옮긴다 (transport 위) | `ember/client`, `ember/server` (공유 코드) | `fr_r1_client_listener_egresses_through_a_node`, `fr_r1_unreachable_node_fails_explicitly` | 2 | 없음. 지금 할 수 있다 |
+| R4 | `ember-app`의 동기화 글루: 받기, 로컬 `rivet` CLI로 적용, 충돌 알림 (UI 없는 부분) | `ember/app`, `ember/client` | 가짜 `rivet` 실행 파일로 `fr_r2_app_applies_after_confirmation` | 2 | R2, Rivet M4 |
+| R5 | 에이전트 경로: `/env` 탐침, 안내문, 버전 범위, 프로젝트별 스위치, 사람이 필요한 단계 올리기 | `ember/node`, `ember/server` | `fr_r3_no_rivet_no_browser_entry`, `fr_r3_person_needed_becomes_needs_input`, 실제 CLI 통합 테스트 | 3 | Rivet M3, Q-R4 |
+| R6 | 프로필 데이터 지우기를 owner 전용으로 (Q-R8) | `ember/server`, `ember/client` (`owner.rs`) | `fr_r4_clear_is_owner_only` | 0.5 | 없음 |
+| R7 | 클라이언트 UI: 브라우저 버튼, egress 선택, 안내, 충돌 알림. call 매크로로 쓴다 | `ember/app` | UI 테스트, `no_webview.rs` | 2.5 | 12월 call 매크로 이전, R4 |
+| R8 | 수용 실행 (4.6의 네 기준): Windows 기기의 Rivet, 다른 공인 IP의 컴퓨터, 실제 사이트 | 없음 (실행과 기록) | SPEC 수용 기준, 실제 출력 | 1 | Rivet M5, Q-R10, Q-R11, 소유자의 Windows 기기와 두 번째 컴퓨터 |
+| R9 | 서버 Chrome 코드와 테스트를 지운다 (`browser/chrome.rs`, `instance.rs`, `cdp.rs`, `agent.rs`, 뷰와 입력 경로) | `ember/server` | 남은 egress 테스트가 통과한다 | 1 | R8 통과, Q-R16 |
 
-의존: S2부터 S5와 S7은 서로 독립이고 지금 시작할 수 있다. S6은 Q-R2 전에 한다. S8은 S6, S7과
-12월 이전에 달려 있다. S9, S10, S11은 S8 뒤다. S12는 전부 뒤다. 합계는 대략 19에서 20일이고,
-길 B가 필요해지면 툴킷 쪽 작업이 여기에 더해진다(이 문서에서 추정하지 않는다).
+Rivet을 기다리지 않는 것은 R0, R3, R6이고 R1과 R2는 계약 합의만 있으면 된다. 합쳐서 17일 안팎이다.
 
-검증 메모: S12 전에는 기준 1, 2, 3을 "검증됨"으로 적지 않는다. 두 번째 컴퓨터, 실제 네트워크,
-화면이 필요한 확인은 사람이 해야 하고 그 전에는 "아직 검증 안 됨"으로 보고한다(AGENTS.md
-Verification).
+## 확인하지 못한 것
+
+- Rivet의 코드는 읽지 않았다. 문서와 `control.proto`의 메시지 이름만 봤다. CLI의 실제 명령 이름과
+  JSON 출력은 모른다.
+- Rivet이 브라우저에 프록시 인자를 넘기는 길이 있는지 모른다. 4.3의 첫 경우는 그것을 전제한다.
+- Rivet의 Android 계획(Rivet D14가 언급한다)의 상태는 모른다.
+- 소유자 원칙의 원문을 보지 못했다. 리더가 전한 문장으로 적었다.
+- 첫 판에서 찾은 서버 Chrome 쪽 사실(Chrome이 없으면 테스트가 건너뛰고 통과한다, takeover가 풀리지
+  않는다, 프로필 디렉터리 권한을 좁히지 않는다)은 대체될 코드의 것이라 이 판에서는 뺐다.

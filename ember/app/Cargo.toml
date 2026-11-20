@@ -28,8 +28,11 @@ path = "src/main.rs"
 # ("Local dioxus-compose"). The crate's build script fetches the renderer for its version; set
 # DIOXUS_COMPOSE_RENDERER_DIR to use a renderer you built yourself.
 # TODO: 배포되면 버전 의존성으로 바꾼다 (compose-rust and dioxus-compose are not yet published).
-compose-rust = { git = "https://github.com/DarkPyonix/compose-rust", tag = "v0.0.11", default-features = false }
-dioxus-compose = { git = "https://github.com/DarkPyonix/dioxus-compose", rev = "94ade333480b4a8a5cb3427f38b23dc5ac055f84" }
+# compose-rust feat/fr39-flip (#906, widgets as call macros, builders gone), until it merges
+# into develop. dioxus-compose chore/compose-rust-fr39-flip pins the same rev, so the app and
+# dioxus-compose share one compose-rust.
+compose-rust = { git = "https://github.com/DarkPyonix/compose-rust", rev = "2db741fdaede32fdd9e28525891586f0964cc7e2", default-features = false }
+dioxus-compose = { git = "https://github.com/DarkPyonix/dioxus-compose", rev = "9bff06f3f5f8c6b41a83ef82179080a0ca2d8a5a" }
 
 # Everything below the UI: sync engine, state reducer, transcript, cache.
 ember-client = { path = "../client" }

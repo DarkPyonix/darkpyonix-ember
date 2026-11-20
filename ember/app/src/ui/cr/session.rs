@@ -5236,11 +5236,7 @@ mod tests {
         }
         let open = CHEVRON_OPEN.with(|c| c.borrow().clone()).expect("state captured");
         assert!(!open.get_untracked());
-        host.dispatch(HostEvent {
-            node_id: clicks[0].0,
-            handler_id: clicks[0].1,
-            payload: EventPayload::Clicked,
-        })
+        host.dispatch(HostEvent::new(clicks[0].0, clicks[0].1, EventPayload::Clicked))
         .expect("dispatch");
         assert!(open.get_untracked(), "the chevron opened the chooser");
         let src = include_str!("session.rs").split("#[cfg(test)]").next().unwrap();
@@ -5356,10 +5352,7 @@ mod tests {
         shared_ui().update_prefs(|p| p.session_view = Some("multi".to_string()));
         let mut host = Host::new(|| Box::new(Recomposer::new(host_session_multi)));
         let mut all = texts(&decode_batch(host.rebuild().expect("rebuild")).expect("decode"));
-        let resize = HostEvent {
-            node_id: 0,
-            handler_id: 0,
-            payload: EventPayload::WindowSizeChanged {
+        let resize = HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
                 width_dp: 1440.0,
                 height_dp: 900.0,
                 class: WindowSizeClass::Expanded,
@@ -5368,8 +5361,7 @@ mod tests {
                 safe_area_leading: 0.0,
                 safe_area_trailing: 0.0,
                 safe_area_bottom: 0.0,
-            },
-        };
+            });
         let (bytes, _) = host.dispatch(resize.clone()).expect("dispatch");
         all.extend(texts(&decode_batch(bytes).expect("decode")));
         for want in ["멀티", "싱글", "상태", "탭 1", "IDE 열기"] {

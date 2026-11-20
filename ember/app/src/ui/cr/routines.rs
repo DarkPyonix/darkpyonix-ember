@@ -3348,10 +3348,7 @@ mod tests {
         let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
         scan_all(&batch, &mut seen, &mut value_change, &mut placeholders);
         let (bytes, _) = host
-            .dispatch(HostEvent {
-                node_id: 0,
-                handler_id: 0,
-                payload: EventPayload::WindowSizeChanged {
+            .dispatch(HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
                     width_dp: 1440.0,
                     height_dp: 900.0,
                     class: WindowSizeClass::Expanded,
@@ -3360,8 +3357,7 @@ mod tests {
                     safe_area_leading: 0.0,
                     safe_area_trailing: 0.0,
                     safe_area_bottom: 0.0,
-                },
-            })
+                }))
             .expect("dispatch resize");
         scan_all(&decode_batch(bytes).expect("decode"), &mut seen, &mut value_change, &mut placeholders);
 
@@ -3376,11 +3372,7 @@ mod tests {
         // 1. Click "편집" to open the inline routine form; it starts clean.
         let edit_btn = find_clickable(&seen, "편집");
         let (bytes, _) = host
-            .dispatch(HostEvent {
-                node_id: edit_btn,
-                handler_id: seen.clickables[&edit_btn],
-                payload: EventPayload::Clicked,
-            })
+            .dispatch(HostEvent::new(edit_btn, seen.clickables[&edit_btn], EventPayload::Clicked))
             .expect("click 편집");
         scan_all(&decode_batch(bytes).expect("decode"), &mut seen, &mut value_change, &mut placeholders);
         assert!(seen.texts.values().any(|t| t == "루틴 편집"), "inline edit form opened");
@@ -3393,11 +3385,7 @@ mod tests {
             .map(|(id, _)| *id)
             .expect("name field with OnValueChange");
         let (bytes, _) = host
-            .dispatch(HostEvent {
-                node_id: name_field,
-                handler_id: value_change[&name_field],
-                payload: EventPayload::TextChanged("수정된 루틴 이름".into()),
-            })
+            .dispatch(HostEvent::new(name_field, value_change[&name_field], EventPayload::TextChanged("수정된 루틴 이름".into())))
             .expect("change routine name");
         scan_all(&decode_batch(bytes).expect("decode"), &mut seen, &mut value_change, &mut placeholders);
         assert!(svc.ui.routine_form_dirty.get(), "editing a field marks routine_form_dirty");
@@ -3405,11 +3393,7 @@ mod tests {
         // 3. Click "취소" -> asks "변경 사항을 버릴까요?", click "계속 편집" -> stays in dirty form.
         let cancel_btn = find_clickable(&seen, "취소");
         let (bytes, _) = host
-            .dispatch(HostEvent {
-                node_id: cancel_btn,
-                handler_id: seen.clickables[&cancel_btn],
-                payload: EventPayload::Clicked,
-            })
+            .dispatch(HostEvent::new(cancel_btn, seen.clickables[&cancel_btn], EventPayload::Clicked))
             .expect("click 취소");
         scan_all(&decode_batch(bytes).expect("decode"), &mut seen, &mut value_change, &mut placeholders);
         assert!(
@@ -3418,11 +3402,7 @@ mod tests {
         );
         let keep_btn = find_clickable(&seen, "계속 편집");
         let (bytes, _) = host
-            .dispatch(HostEvent {
-                node_id: keep_btn,
-                handler_id: seen.clickables[&keep_btn],
-                payload: EventPayload::Clicked,
-            })
+            .dispatch(HostEvent::new(keep_btn, seen.clickables[&keep_btn], EventPayload::Clicked))
             .expect("click 계속 편집");
         scan_all(&decode_batch(bytes).expect("decode"), &mut seen, &mut value_change, &mut placeholders);
         assert!(seen.texts.values().any(|t| t == "루틴 편집"), "form remains open after 계속 편집");
@@ -3431,11 +3411,7 @@ mod tests {
         // 4. Click another routine row ("PR 열리면 리뷰") -> asks "변경 사항을 버릴까요?", click "계속 편집".
         let other_row = find_clickable(&seen, "PR 열리면 리뷰");
         let (bytes, _) = host
-            .dispatch(HostEvent {
-                node_id: other_row,
-                handler_id: seen.clickables[&other_row],
-                payload: EventPayload::Clicked,
-            })
+            .dispatch(HostEvent::new(other_row, seen.clickables[&other_row], EventPayload::Clicked))
             .expect("click another routine row");
         scan_all(&decode_batch(bytes).expect("decode"), &mut seen, &mut value_change, &mut placeholders);
         assert!(
@@ -3444,11 +3420,7 @@ mod tests {
         );
         let keep_btn = find_clickable(&seen, "계속 편집");
         let (bytes, _) = host
-            .dispatch(HostEvent {
-                node_id: keep_btn,
-                handler_id: seen.clickables[&keep_btn],
-                payload: EventPayload::Clicked,
-            })
+            .dispatch(HostEvent::new(keep_btn, seen.clickables[&keep_btn], EventPayload::Clicked))
             .expect("click 계속 편집 after row click");
         scan_all(&decode_batch(bytes).expect("decode"), &mut seen, &mut value_change, &mut placeholders);
         assert!(seen.texts.values().any(|t| t == "루틴 편집"), "form remains open after row 계속 편집");
@@ -3471,11 +3443,7 @@ mod tests {
         // Clicking "계속 편집" cancels the pending navigation and stays on Routines.
         let keep_btn = find_clickable(&seen, "계속 편집");
         let (bytes, _) = host
-            .dispatch(HostEvent {
-                node_id: keep_btn,
-                handler_id: seen.clickables[&keep_btn],
-                payload: EventPayload::Clicked,
-            })
+            .dispatch(HostEvent::new(keep_btn, seen.clickables[&keep_btn], EventPayload::Clicked))
             .expect("click 계속 편집 after sidebar nav");
         scan_all(&decode_batch(bytes).expect("decode"), &mut seen, &mut value_change, &mut placeholders);
         assert_eq!(svc.ui.menu.get(), crate::ui::cr::shell::NavMenu::Routines);
@@ -3488,11 +3456,7 @@ mod tests {
         scan_all(&batch, &mut seen, &mut value_change, &mut placeholders);
         let discard_btn = find_clickable(&seen, "버리기");
         let (bytes, _) = host
-            .dispatch(HostEvent {
-                node_id: discard_btn,
-                handler_id: seen.clickables[&discard_btn],
-                payload: EventPayload::Clicked,
-            })
+            .dispatch(HostEvent::new(discard_btn, seen.clickables[&discard_btn], EventPayload::Clicked))
             .expect("click 버리기");
         scan_all(&decode_batch(bytes).expect("decode"), &mut seen, &mut value_change, &mut placeholders);
         assert_eq!(
@@ -4000,10 +3964,7 @@ mod tests {
             .iter()
             .map(|m| format!("{m:?}"))
             .collect();
-        let event = HostEvent {
-            node_id: 0,
-            handler_id: 0,
-            payload: EventPayload::WindowSizeChanged {
+        let event = HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
                 width_dp: 1440.0,
                 height_dp: 900.0,
                 class: WindowSizeClass::Expanded,
@@ -4012,8 +3973,7 @@ mod tests {
                 safe_area_leading: 0.0,
                 safe_area_trailing: 0.0,
                 safe_area_bottom: 0.0,
-            },
-        };
+            });
         let (bytes, _) = host.dispatch(event).expect("dispatch");
         text.extend(decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")));
         for want in [
@@ -4044,10 +4004,7 @@ mod tests {
             .iter()
             .map(|m| format!("{m:?}"))
             .collect();
-        let event = HostEvent {
-            node_id: 0,
-            handler_id: 0,
-            payload: EventPayload::WindowSizeChanged {
+        let event = HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
                 width_dp: 390.0,
                 height_dp: 844.0,
                 class: WindowSizeClass::Compact,
@@ -4056,8 +4013,7 @@ mod tests {
                 safe_area_leading: 0.0,
                 safe_area_trailing: 0.0,
                 safe_area_bottom: 0.0,
-            },
-        };
+            });
         let (bytes, _) = host.dispatch(event).expect("dispatch");
         text.extend(decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")));
         for want in ["루틴", "새 루틴", "develop CI 실패 요약"] {
@@ -4249,10 +4205,7 @@ mod tests {
             let first = decode_batch(initial).expect("decode");
             check_no_empty_buttons(&first, &format!("initial width {w}"));
 
-            let event = HostEvent {
-                node_id: 0,
-                handler_id: 0,
-                payload: EventPayload::WindowSizeChanged {
+            let event = HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
                     width_dp: w,
                     height_dp: h,
                     class,
@@ -4261,8 +4214,7 @@ mod tests {
                     safe_area_leading: 0.0,
                     safe_area_trailing: 0.0,
                     safe_area_bottom: 0.0,
-                },
-            };
+                });
             let (bytes, _) = host.dispatch(event).expect("dispatch");
             let m = decode_batch(bytes).expect("decode");
             check_no_empty_buttons(&m, &format!("width {w}"));
@@ -4570,10 +4522,7 @@ mod tests {
             }
         };
         scan(&decode_batch(host.rebuild().expect("rebuild")).expect("decode"));
-        let resize = HostEvent {
-            node_id: 0,
-            handler_id: 0,
-            payload: EventPayload::WindowSizeChanged {
+        let resize = HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
                 width_dp: 1440.0,
                 height_dp: 900.0,
                 class: WindowSizeClass::Expanded,
@@ -4582,8 +4531,7 @@ mod tests {
                 safe_area_leading: 0.0,
                 safe_area_trailing: 0.0,
                 safe_area_bottom: 0.0,
-            },
-        };
+            });
         let (bytes, _) = host.dispatch(resize).expect("dispatch resize");
         scan(&decode_batch(bytes).expect("decode"));
 
@@ -4595,11 +4543,7 @@ mod tests {
         assert_eq!(open.len(), 1, "one run, one 세션 열기");
         let open_btn = open[0];
         let handler_id = clickables[&open_btn];
-        host.dispatch(HostEvent {
-            node_id: open_btn,
-            handler_id,
-            payload: EventPayload::Clicked,
-        })
+        host.dispatch(HostEvent::new(open_btn, handler_id, EventPayload::Clicked))
         .expect("dispatch click on 세션 열기");
 
         assert_eq!(
@@ -4639,10 +4583,7 @@ mod tests {
             }
         };
         scan(&decode_batch(host.rebuild().expect("rebuild")).expect("decode"));
-        let resize = HostEvent {
-            node_id: 0,
-            handler_id: 0,
-            payload: EventPayload::WindowSizeChanged {
+        let resize = HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
                 width_dp: 1440.0,
                 height_dp: 900.0,
                 class: WindowSizeClass::Expanded,
@@ -4651,8 +4592,7 @@ mod tests {
                 safe_area_leading: 0.0,
                 safe_area_trailing: 0.0,
                 safe_area_bottom: 0.0,
-            },
-        };
+            });
         let (bytes, _) = host.dispatch(resize).expect("dispatch resize");
         scan(&decode_batch(bytes).expect("decode"));
 
@@ -4663,11 +4603,7 @@ mod tests {
             .expect("expected clickable '지금 실행' button in detail header");
         let handler_id = clickables[&run_btn];
         let (after_click, _) = host
-            .dispatch(HostEvent {
-                node_id: run_btn,
-                handler_id,
-                payload: EventPayload::Clicked,
-            })
+            .dispatch(HostEvent::new(run_btn, handler_id, EventPayload::Clicked))
             .expect("dispatch click on 지금 실행");
         let after_mutations = decode_batch(after_click).expect("decode after click");
         let after_text: String = after_mutations.iter().map(|m| format!("{m:?}")).collect();
@@ -4760,10 +4696,7 @@ mod tests {
             let mut host = Host::new(|| Box::new(Recomposer::new(|| RoutinesScreenWith(sample_entries(), true))));
             let mut seen = Seen::default();
             seen.scan(&decode_batch(host.rebuild().expect("rebuild")).expect("decode"));
-            let resize = HostEvent {
-                node_id: 0,
-                handler_id: 0,
-                payload: EventPayload::WindowSizeChanged {
+            let resize = HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
                     width_dp: w,
                     height_dp: h,
                     class,
@@ -4772,8 +4705,7 @@ mod tests {
                     safe_area_leading: 0.0,
                     safe_area_trailing: 0.0,
                     safe_area_bottom: 0.0,
-                },
-            };
+                });
             let (bytes, _) = host.dispatch(resize).expect("dispatch resize");
             seen.scan(&decode_batch(bytes).expect("decode"));
             if class == WindowSizeClass::Compact {
@@ -4788,7 +4720,7 @@ mod tests {
                     .map(|(id, _)| *id)
                     .unwrap_or_else(|| panic!("a clickable row named {name}"));
                 let (bytes, _) = host
-                    .dispatch(HostEvent { node_id: row, handler_id: seen.clickables[&row], payload: EventPayload::Clicked })
+                    .dispatch(HostEvent::new(row, seen.clickables[&row], EventPayload::Clicked))
                     .expect("dispatch click on the routine row");
                 seen.scan(&decode_batch(bytes).expect("decode"));
             }
@@ -4800,7 +4732,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("a clickable 지금 실행 at {w}"));
             assert_ne!(seen.enabled.get(&run_btn), Some(&false), "지금 실행 starts enabled at {w}");
             let (bytes, _) = host
-                .dispatch(HostEvent { node_id: run_btn, handler_id: seen.clickables[&run_btn], payload: EventPayload::Clicked })
+                .dispatch(HostEvent::new(run_btn, seen.clickables[&run_btn], EventPayload::Clicked))
                 .expect("dispatch click on 지금 실행");
             seen.scan(&decode_batch(bytes).expect("decode"));
 

@@ -2748,7 +2748,7 @@ mod tests {
 
     fn click(host: &mut Host, tree: &mut Tree, label: &str) {
         let (node_id, handler_id) = tree.click_target(label);
-        let (bytes, _) = host.dispatch(HostEvent { node_id, handler_id, payload: compose_rust::EventPayload::Clicked }).expect("click");
+        let (bytes, _) = host.dispatch(HostEvent::new(node_id, handler_id, compose_rust::EventPayload::Clicked)).expect("click");
         tree.read(bytes);
     }
 
@@ -2787,12 +2787,12 @@ mod tests {
         let (mut host, mut tree, c) = model_picker_host();
         let (node_id, handler_id) = tree.field("모델 검색", PropertyKind::OnValueChange);
         let (bytes, _) = host
-            .dispatch(HostEvent { node_id, handler_id, payload: compose_rust::EventPayload::TextChanged("sonnet 보통") })
+            .dispatch(HostEvent::new(node_id, handler_id, compose_rust::EventPayload::TextChanged("sonnet 보통")))
             .expect("type");
         tree.read(bytes);
         let (node_id, handler_id) = tree.field("모델 검색", PropertyKind::OnSubmit);
         let (bytes, _) = host
-            .dispatch(HostEvent { node_id, handler_id, payload: compose_rust::EventPayload::TextSubmitted("sonnet 보통") })
+            .dispatch(HostEvent::new(node_id, handler_id, compose_rust::EventPayload::TextSubmitted("sonnet 보통")))
             .expect("enter");
         tree.read(bytes);
         let sel = c.selection.get_untracked();
@@ -2808,12 +2808,12 @@ mod tests {
         let before = c.selection.get_untracked();
         let (node_id, handler_id) = tree.field("모델 검색", PropertyKind::OnValueChange);
         let (bytes, _) = host
-            .dispatch(HostEvent { node_id, handler_id, payload: compose_rust::EventPayload::TextChanged("gemini flash") })
+            .dispatch(HostEvent::new(node_id, handler_id, compose_rust::EventPayload::TextChanged("gemini flash")))
             .expect("type");
         tree.read(bytes);
         assert!(tree.has("Gemini · 준비 중입니다"), "the row says why: {:?}", tree.sent);
         let (node_id, handler_id) = tree.field("모델 검색", PropertyKind::OnSubmit);
-        host.dispatch(HostEvent { node_id, handler_id, payload: compose_rust::EventPayload::TextSubmitted("gemini flash") })
+        host.dispatch(HostEvent::new(node_id, handler_id, compose_rust::EventPayload::TextSubmitted("gemini flash")))
             .expect("enter");
         assert_eq!(c.selection.get_untracked(), before);
         assert_eq!(c.open.get_untracked(), Some(Pick::Model));
@@ -2933,7 +2933,7 @@ mod tests {
     fn key_down(host: &mut Host, tree: &mut Tree, key: compose_rust::Key, ctrl_key: bool, code: u32, text: &'static str) -> i64 {
         let (node_id, handler_id) = tree.field("모델 검색", PropertyKind::OnKeyDown);
         let payload = compose_rust::EventPayload::KeyDown { key, shift_key: false, ctrl_key, alt_key: false, meta_key: false, repeat: false, code, text };
-        let (bytes, consumed) = host.dispatch(HostEvent { node_id, handler_id, payload }).expect("key");
+        let (bytes, consumed) = host.dispatch(HostEvent::new(node_id, handler_id, payload)).expect("key");
         let bytes = bytes.to_vec();
         tree.read(&bytes);
         consumed
@@ -3106,7 +3106,7 @@ mod tests {
         assert_eq!(key_down(&mut host, &mut tree, compose_rust::Key::Other, false, 0x04, "a"), 0, "a letter stays the field's");
         // The active row is drawn on `hover` (`.mp-row.act`); the fill is `model_row_fill`'s.
         let (node_id, handler_id) = tree.field("모델 검색", PropertyKind::OnSubmit);
-        host.dispatch(HostEvent { node_id, handler_id, payload: compose_rust::EventPayload::TextSubmitted("") }).expect("enter");
+        host.dispatch(HostEvent::new(node_id, handler_id, compose_rust::EventPayload::TextSubmitted(""))).expect("enter");
         let sel = c.selection.get_untracked();
         assert_eq!((sel.option.model, sel.option.effort), ("opus", Some("Medium")), "the second row, Opus 5.5 (보통)");
         assert_eq!(c.open.get_untracked(), None);
@@ -3160,10 +3160,7 @@ mod tests {
         let mut host = Host::new(|| Box::new(Recomposer::new(HomeScreen)));
         let first = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
         let mut all = texts(&first);
-        let event = HostEvent {
-            node_id: 0,
-            handler_id: 0,
-            payload: EventPayload::WindowSizeChanged {
+        let event = HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
                 width_dp: 1440.0,
                 height_dp: 900.0,
                 class: WindowSizeClass::Expanded,
@@ -3172,8 +3169,7 @@ mod tests {
                 safe_area_leading: 0.0,
                 safe_area_trailing: 0.0,
                 safe_area_bottom: 0.0,
-            },
-        };
+            });
         let (bytes, _) = host.dispatch(event).expect("dispatch");
         let batch = decode_batch(bytes).expect("decode");
         // The resize only re-emits what changed, so the greeting is in the first batch.

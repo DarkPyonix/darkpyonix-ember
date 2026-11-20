@@ -118,7 +118,7 @@ compiled or seen on a display yet, for the same reason as the table above.
 | `src/ui/cr/shell.rs:412` | The bottom bar has no backdrop blur. | compose-rust#300 | Open | Add the blur and the safe-area inset. |
 | `src/ui/cr/vcs.rs:344` `StageCheck` | A painted square lies over an invisible toolkit checkbox; a partial check reports unchecked. | compose-rust#767 | Open | Use the toolkit `Checkbox` with its shape and partial state. |
 | `src/ui/cr/components.rs:950` | The frame and the 12 px inset sit on a box around a bare field. | compose-rust#771 | Open | Move them onto the field. |
-| `src/ui/cr/components.rs:482`, `home.rs:826` | A popover menu's arrow-key navigation and initial focus on the selected row are in the v0.0.11 renderer (`HostPopover.kt`), waiting on a display check and issue closure. | compose-rust#810 | Open (in v0.0.11) | Check the keys and focus on a display. |
+| `src/ui/cr/components.rs` (`PopoverMenu`), `home.rs` (`mode_menu`) | A popover menu's arrow keys and focus on the selected row work on macOS (checked 2026-11-21, #888), but the row the keys move to shows no mark, and a bottom sheet at 560 and below has no menu keyboard. | compose-rust#810 | Open (keys in the pinned compose-rust) | Check the mark again when the renderer draws one; use the menu keyboard in sheets when the toolkit offers it. |
 | `src/ui/cr/home.rs:918` | The model popover's row takes a fixed height, not `equal_height`. | compose-rust#766 | Open | Use `equal_height` again. |
 | `src/ui/cr/project.rs:473` | The add chip has a solid border where the mockup has a dashed one. | compose-rust#817 | Open | Set the stroke dash. |
 | `src/ui/cr/project.rs:457` | The strip's scroll step is taken from the window's width. | compose-rust#818 | Open | Read the viewport size from `ScrollState`. |
@@ -286,7 +286,7 @@ API는 핀에 있다.
 | `src/ui/cr/shell.rs:412` | 하단 바에 배경 흐림이 없다. | compose-rust#300 | 열림 | 흐림과 안전 영역 여백을 넣는다. |
 | `src/ui/cr/vcs.rs:344` `StageCheck` | 그린 네모 위에 보이지 않는 툴킷 체크박스를 얹는다. 부분 선택은 선택 안 됨으로 읽힌다. | compose-rust#767 | 열림 | 모양과 부분 상태가 있는 툴킷 `Checkbox`를 쓴다. |
 | `src/ui/cr/components.rs:950` | 테두리와 12 px 안쪽 여백이 맨 필드를 감싼 상자에 있다. | compose-rust#771 | 열림 | 필드로 옮긴다. |
-| `src/ui/cr/components.rs:482`, `home.rs:826` | 팝오버 메뉴의 방향키 이동과 선택된 행 초기 포커스가 v0.0.11 렌더러(`HostPopover.kt`)에 들어왔고 화면 확인과 이슈 닫힘을 기다린다. | compose-rust#810 | 열림(v0.0.11에 있음) | 화면에서 키와 포커스를 확인한다. |
+| `src/ui/cr/components.rs` (`PopoverMenu`), `home.rs` (`mode_menu`) | 팝오버 메뉴의 방향키와 선택된 행 초기 포커스는 macOS에서 동작한다(2026-11-21 확인, #888). 그러나 키로 옮긴 행에 아무 표시가 없고, 560 이하의 바텀 시트에는 메뉴 키보드가 없다. | compose-rust#810 | 열림(고정된 compose-rust에 키 있음) | 렌더러가 표시를 그리면 다시 확인하고, 툴킷이 시트에서 메뉴 키보드를 주면 쓴다. |
 | `src/ui/cr/home.rs:918` | 모델 팝오버의 행이 `equal_height` 대신 고정 높이를 쓴다. | compose-rust#766 | 열림 | `equal_height`로 되돌린다. |
 | `src/ui/cr/project.rs:473` | 목업은 점선인데 추가 칩 테두리가 실선이다. | compose-rust#817 | 열림 | 선 무늬를 준다. |
 | `src/ui/cr/project.rs:457` | 스트립의 스크롤 한 걸음을 창 폭에서 구한다. | compose-rust#818 | 열림 | `ScrollState`에서 뷰포트 크기를 읽는다. |

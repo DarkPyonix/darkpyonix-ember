@@ -1033,7 +1033,7 @@ fn fr_l31_36_the_editor_has_no_tab_strip_while_no_tab_is_open() {
 
 #[compose_rust::runtime::Composable]
 fn toolkit_probe() {
-    compose_rust::ui::Text("probe".to_string());
+    { use ::compose_rust::ui::Text; Text!("probe".to_string()) };
 }
 
 // FR-L33.1 (#875): the window's safe area reaches the toolkit after the page's first render. The
@@ -1069,6 +1069,7 @@ fn fr_l33_1_the_safe_area_arriving_after_the_first_render_moves_the_top_bar() {
                 safe_area_top: lights.top,
                 safe_area_leading: lights.leading,
                 safe_area_trailing: lights.trailing,
+                safe_area_bottom: 0.0,
             },
         })
         .expect("dispatch");

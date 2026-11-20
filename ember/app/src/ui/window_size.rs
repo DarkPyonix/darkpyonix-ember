@@ -163,7 +163,7 @@ mod tests {
             WindowSizeClass::Medium => "Medium",
             WindowSizeClass::Expanded => "Expanded",
         };
-        cu::Text(format!("{}x{} {class}", w.width_dp, w.height_dp));
+        { use ::compose_rust::ui::Text; Text!(format!("{}x{} {class}", w.width_dp, w.height_dp)) };
     }
 
     fn texts(batch: &[compose_rust::protocol::Mutation<'_>]) -> String {
@@ -191,6 +191,7 @@ mod tests {
                     safe_area_top: 0.0,
                     safe_area_leading: 0.0,
                     safe_area_trailing: 0.0,
+                    safe_area_bottom: 0.0,
                 },
             };
             let (bytes, _) = host.dispatch(event).expect("dispatch");

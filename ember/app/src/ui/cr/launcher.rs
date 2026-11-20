@@ -40,26 +40,21 @@ pub fn ConnectionBanner() {
 /// The banner itself, so a review window can show it without a live connection problem.
 pub fn ConnectionBannerView(text: &str, tone: Tone) {
     let (fill, ink) = super::compat::tone_colors(tone, ember_theme().palette);
-    cu::Row()
-        .alignment(Alignment::CenterStart)
-        .modifier(
-            Modifier::new()
+    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new()
                 .fill_max_width()
                 .height(48.0)
                 .background(paint(fill))
-                .corner_radius(CORNER_MD),
-        )
-        .content(|| {
-            cu::Spacer().modifier(Modifier::new().width(SP[3]));
+                .corner_radius(CORNER_MD), {
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[3])) };
             super::shell::NavIcon(super::shell::ICON_INFO_SVG, ink.to_argb(), 18.0);
-            cu::Spacer().modifier(Modifier::new().width(SP[2]));
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
             Label(text, Fs::Sm, Weight::Medium, Some(paint(ink)), Some(1));
-            cu::Spacer().modifier(Modifier::new().weight(1.0));
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
             AppButton("다시 시도", None, ButtonKind::Default, true, true, false, || {
                 services().client.reconnect_push();
             });
-            cu::Spacer().modifier(Modifier::new().width(SP[2]));
-        });
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
+        }) };
 }
 
 /// The patch the Pin / Unpin item sends (FR-L9).
@@ -110,25 +105,25 @@ pub fn SessionRowWith(row: &SessionRow, menu_start_open: bool) {
     // `.list-row`: a status dot tile, the title over the agent line (and the preview when
     // there is one), then the status pill, the time and the menu button at the right.
     // Everything of the row is one node, so the sheets below are not spaced as siblings.
-    cu::Box().modifier(Modifier::new().fill_max_width()).content(|| {
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width(), {
     EmberCard(false, true, None, None, None, || {
-        cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Sm).modifier(Modifier::new().fill_max_width()).content(|| {
+        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, space_role = SpaceRole::Sm, modifier = Modifier::new().fill_max_width(), {
             let (u, id) = (ui.clone(), row.id.clone());
             Clickable(
                 Modifier::new().weight(1.0),
                 Alignment::CenterStart,
                 move || u.open_conversation(&id),
                 || {
-                    cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Sm).content(|| {
+                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, space_role = SpaceRole::Sm, {
                         StatusDot(row.status);
-                        cu::Column().content(|| {
+                        { use ::compose_rust::ui::Column; Column!({
                             Label(&row.title, Fs::Md, Weight::Medium, Some(paint(p.text)), Some(1));
                             if !preview.is_empty() {
                                 Label(&preview, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
                             }
                             Label(&meta, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                        });
-                    });
+                        }) };
+                    }) };
                 },
             );
             if row.pinned {
@@ -137,15 +132,11 @@ pub fn SessionRowWith(row: &SessionRow, menu_start_open: bool) {
             StatusPill(row.status);
             Label(&when, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
             let open = menu_open.clone();
-            cu::Button("")
-                .icon(compose_rust::IconRole::More)
-                .variant(ButtonVariant::Text)
-                .color(paint(p.text_2))
-                // A bare glyph with no ring, which no shared button draws; it still sends the
-                // shared press values (FR-L34.5, #250).
-                .modifier(pressable(Modifier::new().size(H_CTL, H_CTL)))
-                .on_click(move || open.set(true));
-        });
+            { use ::compose_rust::ui::Button; Button!("", move || open.set(true), icon = compose_rust::IconRole::More, variant = ButtonVariant::Text, color = paint(p.text_2), 
+// A bare glyph with no ring, which no shared button draws; it still sends the
+// shared press values (FR-L34.5, #250).
+modifier = pressable(Modifier::new().size(H_CTL, H_CTL))) };
+        }) };
     });
     // The row menu is a modal list: the toolkit `Menu` cannot be placed below its anchor.
     let labels: Vec<String> = [pin_label, "이름 변경", archive_label, "내보내기"].iter().map(|s| s.to_string()).collect();
@@ -173,7 +164,7 @@ pub fn SessionRowWith(row: &SessionRow, menu_start_open: bool) {
     // the current title is the placeholder; an empty entry keeps it.
     let dismiss = renaming.clone();
     EmberSheet("세션 이름 변경", renaming.get(), move || dismiss.set(false), None, || {
-        cu::Column().space_role(SpaceRole::Md).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
+        { use ::compose_rust::ui::Column; Column!(space_role = SpaceRole::Md, modifier = Modifier::new().fill_max_width().padding(SP[4]), {
             let (title, submit_open, id) = (new_title.clone(), renaming.clone(), row.id.clone());
             EmberField(FieldOptions {
                 fill_max_width: true,
@@ -185,7 +176,7 @@ pub fn SessionRowWith(row: &SessionRow, menu_start_open: bool) {
                 })),
                 ..Default::default()
             });
-        });
+        }) };
         SheetFooter(|| {
             let cancel = renaming.clone();
             AppButton("취소", None, ButtonKind::Default, true, true, false, move || cancel.set(false));
@@ -196,7 +187,7 @@ pub fn SessionRowWith(row: &SessionRow, menu_start_open: bool) {
             });
         });
     });
-    });
+    }) };
 }
 
 /// A review window: the connection banner and a few session rows, the first with its menu open
@@ -210,10 +201,8 @@ pub fn rows_preview() {
         model::project_sessions(s, &project, cx, false)
     });
     // `ScrollColumn` takes only a modifier, so the spacing is a `Column` inside it.
-    cu::ScrollColumn()
-        .modifier(Modifier::new().fill_max_size().background(paint(theme.palette.bg)).padding_role(SpaceRole::Md))
-        .content(|| {
-            cu::Column().spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(|| {
+    { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().fill_max_size().background(paint(theme.palette.bg)).padding_role(SpaceRole::Md), {
+            { use ::compose_rust::ui::Column; Column!(spacing = SP[3], modifier = Modifier::new().fill_max_width(), {
                 ConnectionBannerView("오프라인: 저장된 데이터를 보여주는 중입니다", Tone::Neutral);
                 ConnectionBanner();
                 for (i, row) in rows.iter().take(4).enumerate() {
@@ -224,8 +213,8 @@ pub fn rows_preview() {
                     }
                     SessionRowWith(&row, false);
                 }
-            });
-        });
+            }) };
+        }) };
 }
 
 /// Change a session's metadata on the main server (FR-L9); say so when it fails.

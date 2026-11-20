@@ -149,7 +149,7 @@ fn icon_bytes(svg: &'static str, size: f32, argb: u32) -> &'static [u8] {
 /// no such glyphs).
 pub fn NavIcon(svg: &'static str, argb: u32, size: f32) {
     let id = compose_rust::asset(AssetKind::Svg, icon_bytes(svg, size, argb));
-    cu::Image(id).modifier(Modifier::new().size(size, size));
+    { use ::compose_rust::ui::Image; Image!(id, modifier = Modifier::new().size(size, size)) };
 }
 
 /// The 18 px red count badge (`.redbadge`): white 11 px number on `red`.
@@ -158,26 +158,21 @@ pub fn RedBadge(n: usize) {
     let text = badge_text(n);
     let narrow = text.chars().count() <= 1;
     let width = if narrow { Some(18.0) } else { None };
-    cu::Box()
-        .modifier(
-            Modifier::new()
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                 .width_if(width)
                 .height(18.0)
                 .background(paint(p.red.strong))
-                .corner_radius(9.0),
-        )
-        .alignment(Alignment::Center)
-        .content(|| {
-            cu::Row().alignment(Alignment::Center).content(|| {
+                .corner_radius(9.0), alignment = Alignment::Center, {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::Center, {
                 if !narrow {
-                    cu::Spacer().modifier(Modifier::new().width(5.0));
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(5.0)) };
                 }
                 Label(&text, Fs::Xs2, Weight::Semibold, Some(paint(compose_rust::Color::rgb(0xffffff))), None);
                 if !narrow {
-                    cu::Spacer().modifier(Modifier::new().width(5.0));
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(5.0)) };
                 }
-            });
-        });
+            }) };
+        }) };
 }
 
 /// One sidebar row: 38 px pill, icon, label, then a muted count or a red badge at the right.
@@ -194,12 +189,12 @@ pub fn NavRow(menu: NavMenu, active: bool, badge: NavBadge, on_click: impl FnMut
         Alignment::CenterStart,
         on_click,
         || {
-            cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                cu::Spacer().modifier(Modifier::new().width(SP[2]));
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
                 NavIcon(menu.svg(), fg.to_argb(), 18.0);
-                cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
                 Label(menu.label(), Fs::Md, Weight::Medium, Some(paint(fg)), Some(1));
-                cu::Spacer().modifier(Modifier::new().weight(1.0));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                 match badge {
                     NavBadge::None => {}
                     NavBadge::Count(n) => {
@@ -208,8 +203,8 @@ pub fn NavRow(menu: NavMenu, active: bool, badge: NavBadge, on_click: impl FnMut
                     }
                     NavBadge::Alert(n) => RedBadge(n),
                 }
-                cu::Spacer().modifier(Modifier::new().width(SP[2]));
-            });
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
+            }) };
         },
     );
 }
@@ -228,21 +223,18 @@ pub fn RailItem(menu: NavMenu, active: bool, badge: NavBadge, on_click: impl FnM
         Alignment::Center,
         on_click,
         move || {
-            cu::Tooltip(tip).content(move || {
+            { use ::compose_rust::ui::Tooltip; Tooltip!(tip, content = move || {
                 NavIcon(menu.svg(), fg.to_argb(), 20.0);
                 if let NavBadge::Alert(n) = badge {
-                    cu::Box()
-                        .modifier(Modifier::new().fill_max_width().fill_max_height())
-                        .alignment(Alignment::TopEnd)
-                        .content(|| {
+                    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().fill_max_height(), alignment = Alignment::TopEnd, {
                             // `.nav .redbadge`: top 2, right 0.
-                            cu::Column().content(|| {
-                                cu::Spacer().modifier(Modifier::new().height(2.0));
+                            { use ::compose_rust::ui::Column; Column!({
+                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(2.0)) };
                                 RedBadge(n);
-                            });
-                        });
+                            }) };
+                        }) };
                 }
-            });
+            }) };
         },
     );
 }
@@ -273,9 +265,9 @@ pub fn ToolRow(svg: &'static str, label: &str, rail: bool, on_click: impl FnMut(
             Alignment::Center,
             on_click,
             move || {
-                cu::Tooltip(tip).content(|| {
+                { use ::compose_rust::ui::Tooltip; Tooltip!(tip, {
                     NavIcon(svg, p.muted.to_argb(), 20.0);
-                });
+                }) };
             },
         );
         return;
@@ -285,12 +277,12 @@ pub fn ToolRow(svg: &'static str, label: &str, rail: bool, on_click: impl FnMut(
         Alignment::CenterStart,
         on_click,
         || {
-            cu::Row().alignment(Alignment::CenterStart).content(|| {
-                cu::Spacer().modifier(Modifier::new().width(SP[2]));
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
                 NavIcon(svg, p.muted.to_argb(), 18.0);
-                cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
                 Label(label, Fs::Sm, Weight::Medium, Some(paint(p.muted)), Some(1));
-            });
+            }) };
         },
     );
 }
@@ -305,34 +297,32 @@ pub fn Brand(compact: bool, on_click: impl FnMut() + 'static) {
     if compact {
         let tip = super::a11y::SIDEBAR_TOGGLE.to_string();
         NamedClickable(super::a11y::SIDEBAR_TOGGLE, m, Alignment::Center, on_click, move || {
-            cu::Tooltip(tip).content(|| {
-                cu::Box().alignment(Alignment::CenterStart).content(|| {
-                    cu::Row().content(|| {
-                        cu::Image(compose_rust::asset(AssetKind::Svg, mark))
-                            .modifier(Modifier::new().size(size, size));
-                    });
-                });
-            });
+            { use ::compose_rust::ui::Tooltip; Tooltip!(tip, {
+                { use ::compose_rust::ui::Box; Box!(alignment = Alignment::CenterStart, {
+                    { use ::compose_rust::ui::Row; Row!({
+                        { use ::compose_rust::ui::Image; Image!(compose_rust::asset(AssetKind::Svg, mark), modifier = Modifier::new().size(size, size)) };
+                    }) };
+                }) };
+            }) };
         });
         return;
     }
     Clickable(m, Alignment::CenterStart, on_click, || {
         // A Box centers both children on the cross axis: the logo against the two-line text.
-        cu::Box().alignment(Alignment::CenterStart).content(|| {
-            cu::Row().alignment(Alignment::CenterStart).content(|| {
+        { use ::compose_rust::ui::Box; Box!(alignment = Alignment::CenterStart, {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, {
                 // 6 side padding, the 32 px mark, then the 10 px gap.
-                cu::Spacer().modifier(Modifier::new().width(6.0 + size + 10.0));
-                cu::Column().spacing(6.0).content(|| {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(6.0 + size + 10.0)) };
+                { use ::compose_rust::ui::Column; Column!(spacing = 6.0, {
                     Label("Ember", Fs::Lg, Weight::Semibold, None, None);
                     Label(ORG_NAME, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
-                });
-            });
-            cu::Row().content(|| {
-                cu::Spacer().modifier(Modifier::new().width(6.0));
-                cu::Image(compose_rust::asset(AssetKind::Svg, mark))
-                    .modifier(Modifier::new().size(size, size));
-            });
-        });
+                }) };
+            }) };
+            { use ::compose_rust::ui::Row; Row!({
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(6.0)) };
+                { use ::compose_rust::ui::Image; Image!(compose_rust::asset(AssetKind::Svg, mark), modifier = Modifier::new().size(size, size)) };
+            }) };
+        }) };
     });
 }
 
@@ -341,24 +331,16 @@ pub fn Brand(compact: bool, on_click: impl FnMut() + 'static) {
 pub fn UserRow(rail: bool) {
     let p = ember_theme().palette;
     let (name, handle) = DEMO_USER;
-    cu::Row()
-        .alignment(Alignment::CenterStart)
-        .modifier(Modifier::new().fill_max_width())
-        .content(|| {
+    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
             if rail {
-                cu::Spacer().modifier(Modifier::new().weight(1.0));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
             } else {
-                cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[1])) };
             }
-            cu::Box()
-                .modifier(
-                    Modifier::new()
+            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                         .size(28.0, 28.0)
                         .background(paint(p.blue.strong))
-                        .corner_radius(14.0),
-                )
-                .alignment(Alignment::Center)
-                .content(|| {
+                        .corner_radius(14.0), alignment = Alignment::Center, {
                     Label(
                         &avatar_initial(name),
                         Fs::Sm,
@@ -366,17 +348,17 @@ pub fn UserRow(rail: bool) {
                         Some(paint(compose_rust::Color::rgb(0xffffff))),
                         None,
                     );
-                });
+                }) };
             if rail {
-                cu::Spacer().modifier(Modifier::new().weight(1.0));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
             } else {
-                cu::Spacer().modifier(Modifier::new().width(SP[2]));
-                cu::Column().spacing(4.0).content(|| {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
+                { use ::compose_rust::ui::Column; Column!(spacing = 4.0, {
                     Label(name, Fs::Sm, Weight::Semibold, None, Some(1));
                     Label(handle, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                });
+                }) };
             }
-        });
+        }) };
 }
 
 /// Whether the demo-only sidebar/phone-menu rows (`플랫폼: 기타`, `데모 초기화`) are shown.
@@ -402,20 +384,14 @@ pub fn Sidebar(rail: bool, active: NavMenu, counts: NavCounts, on_collapse: impl
     let demo_tools = show_demo_tools();
     let plat_ios = remember(|| mutable_state_of(false));
     let plat_label = if plat_ios.get() { "플랫폼: iOS" } else { "플랫폼: 기타" };
-    cu::Row().modifier(Modifier::new().fill_max_height()).content(|| {
-        cu::Column()
-            .modifier(Modifier::new().width(width - 1.0).fill_max_height().background(paint(p.bg)))
-            .content(|| {
-                cu::Row().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
-                    cu::Spacer().modifier(Modifier::new().width(side));
-                    cu::Column()
-                        .spacing(2.0)
-                        .alignment(if rail { Alignment::TopCenter } else { Alignment::TopStart })
-                        .modifier(Modifier::new().weight(1.0).fill_max_height())
-                        .content(|| {
-                            cu::Spacer().modifier(Modifier::new().height(top));
+    { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_height(), {
+        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().width(width - 1.0).fill_max_height().background(paint(p.bg)), {
+                { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width().fill_max_height(), {
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(side)) };
+                    { use ::compose_rust::ui::Column; Column!(spacing = 2.0, alignment = if rail { Alignment::TopCenter } else { Alignment::TopStart }, modifier = Modifier::new().weight(1.0).fill_max_height(), {
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(top)) };
                             Brand(rail, on_collapse);
-                            cu::Spacer().modifier(Modifier::new().height(below_brand));
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(below_brand)) };
                             for menu in NavMenu::ALL {
                                 let u = ui.clone();
                                 let badge = nav_badge(menu, &counts);
@@ -425,13 +401,13 @@ pub fn Sidebar(rail: bool, active: NavMenu, counts: NavCounts, on_collapse: impl
                                     NavRow(menu, menu == active, badge, move || choose(&u, menu));
                                 }
                             }
-                            cu::Spacer().modifier(Modifier::new().weight(1.0));
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                             // `.sidetools`: 8 margin, a 1 px `--line` border, 8 padding.
-                            cu::Spacer().modifier(Modifier::new().height(SP[1]));
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[1])) };
                             // In the rail the border spans the 44 px tool width only.
                             let divider = Modifier::new().height(1.0).background(paint(p.line));
-                            cu::Spacer().modifier(if rail { divider.width(44.0) } else { divider.fill_max_width() });
-                            cu::Spacer().modifier(Modifier::new().height(4.0));
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = if rail { divider.width(44.0) } else { divider.fill_max_width() }) };
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(4.0)) };
                             let u = ui.clone();
                             ToolRow(theme_svg, &format!("테마: {}", pref.label()), rail, move || {
                                 u.set_theme_pref(u.theme_pref.get_untracked().next());
@@ -453,15 +429,15 @@ pub fn Sidebar(rail: bool, active: NavMenu, counts: NavCounts, on_collapse: impl
                                 });
                             }
                             // `.me`: 8 margin and 12 padding above the avatar.
-                            cu::Spacer().modifier(Modifier::new().height(16.0));
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(16.0)) };
                             UserRow(rail);
-                            cu::Spacer().modifier(Modifier::new().height(bottom));
-                        });
-                    cu::Spacer().modifier(Modifier::new().width(side));
-                });
-            });
-        cu::Spacer().modifier(Modifier::new().width(1.0).fill_max_height().background(paint(p.line)));
-    });
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(bottom)) };
+                        }) };
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(side)) };
+                }) };
+            }) };
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(1.0).fill_max_height().background(paint(p.line))) };
+    }) };
 }
 
 /// The floating bottom bar: five equal-width tabs, icon above an 11 px label, red badges.
@@ -471,23 +447,18 @@ pub fn BottomBar(active: NavMenu, counts: NavCounts, on_choose: impl FnMut(Botto
     let theme = ember_theme();
     let p = theme.palette;
     let marked = tab_for_menu(active);
-    cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
-        cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
-            cu::Spacer().modifier(Modifier::new().width(TABBAR_SIDE_GAP));
-            cu::Box()
-                .modifier(
-                    with_shadows(Modifier::new(), theme.shadow_md())
+    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), {
+        { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width(), {
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(TABBAR_SIDE_GAP)) };
+            { use ::compose_rust::ui::Box; Box!(modifier = with_shadows(Modifier::new(), theme.shadow_md())
                         .weight(1.0)
                         .height(TABBAR_H)
                         .background(paint(p.surface))
                         .border(1.0, paint(p.line))
-                        .corner_radius(TABBAR_RADIUS),
-                )
-                .alignment(Alignment::Center)
-                .content(|| {
-                    cu::Row().alignment(Alignment::Center).modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
+                        .corner_radius(TABBAR_RADIUS), alignment = Alignment::Center, {
+                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::Center, modifier = Modifier::new().fill_max_width().fill_max_height(), {
                         // `.side` padding 6 4: the tabs sit 4 px inside the border.
-                        cu::Spacer().modifier(Modifier::new().width(SP[0]));
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[0])) };
                         for tab in BOTTOM_TABS {
                             let mut choose_tab = on_choose.clone();
                             let ink = if tab == marked { p.text } else { p.muted };
@@ -500,39 +471,33 @@ pub fn BottomBar(active: NavMenu, counts: NavCounts, on_choose: impl FnMut(Botto
                                 || {
                                   // The pill fills its cell (`.nav.tab{flex:1 1 0;min-width:0}` at 560
                                   // and below): a fixed 70 dp pill overflowed a 360 window (FR-L28.1).
-                                  cu::Box()
-                                    .modifier(Modifier::new().fill_max_width().height(52.0).background(bg).corner_radius(20.0))
-                                    .alignment(Alignment::Center)
-                                    .content(|| {
-                                    cu::Box().modifier(Modifier::new().fill_max_width().fill_max_height()).alignment(Alignment::Center).content(|| {
-                                        cu::Column().alignment(Alignment::TopCenter).spacing(2.0).content(|| {
+                                  { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().height(52.0).background(bg).corner_radius(20.0), alignment = Alignment::Center, {
+                                    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().fill_max_height(), alignment = Alignment::Center, {
+                                        { use ::compose_rust::ui::Column; Column!(alignment = Alignment::TopCenter, spacing = 2.0, {
                                             NavIcon(tab.svg(), ink.to_argb(), 18.0);
                                             Label(tab.label(), Fs::Xs2, Weight::Medium, Some(paint(ink)), Some(1));
-                                        });
+                                        }) };
                                         // `.nav.tab .redbadge`: top 0, right 4, on the tab itself.
                                         if let Some(n) = tab_badge(tab, &counts) {
-                                            cu::Box()
-                                                .modifier(Modifier::new().fill_max_width().fill_max_height())
-                                                .alignment(Alignment::TopEnd)
-                                                .content(|| {
-                                                    cu::Row().content(|| {
+                                            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().fill_max_height(), alignment = Alignment::TopEnd, {
+                                                    { use ::compose_rust::ui::Row; Row!({
                                                         RedBadge(n);
-                                                        cu::Spacer().modifier(Modifier::new().width(SP[0]));
-                                                    });
-                                                });
+                                                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[0])) };
+                                                    }) };
+                                                }) };
                                         }
-                                    });
-                                    });
+                                    }) };
+                                    }) };
                                 },
                             );
                         }
-                        cu::Spacer().modifier(Modifier::new().width(SP[0]));
-                    });
-                });
-            cu::Spacer().modifier(Modifier::new().width(TABBAR_SIDE_GAP));
-        });
-        cu::Spacer().modifier(Modifier::new().height(TABBAR_BOTTOM_GAP));
-    });
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[0])) };
+                    }) };
+                }) };
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(TABBAR_SIDE_GAP)) };
+        }) };
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(TABBAR_BOTTOM_GAP)) };
+    }) };
 }
 
 /// Whether the phone layout draws its floating bottom bar. A detail view (an open conversation
@@ -552,10 +517,10 @@ pub fn PhoneMenu(open: compose_rust::runtime::MutableState<bool>, on_settings: i
     let demo_tools = show_demo_tools();
     let plat_ios = remember(|| mutable_state_of(false));
     let plat_label = if plat_ios.get() { "플랫폼: iOS" } else { "플랫폼: 기타" };
-    cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::TopStart).content(|| {
-        cu::Spacer().modifier(Modifier::new().weight(1.0));
-        cu::Column().alignment(Alignment::TopEnd).content(|| {
-            cu::Spacer().modifier(Modifier::new().height(10.0));
+    { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width(), alignment = Alignment::TopStart, {
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
+        { use ::compose_rust::ui::Column; Column!(alignment = Alignment::TopEnd, {
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(10.0)) };
             let o = open.clone();
             NamedClickable(
                 super::a11y::MENU,
@@ -569,18 +534,14 @@ pub fn PhoneMenu(open: compose_rust::runtime::MutableState<bool>, on_settings: i
                 || NavIcon(ICON_MENU_SVG, p.text_2.to_argb(), 16.0),
             );
             if open.get() {
-                cu::Spacer().modifier(Modifier::new().height(4.0));
-                cu::Box()
-                    .modifier(
-                        with_shadows(Modifier::new(), theme.shadow_lg())
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(4.0)) };
+                { use ::compose_rust::ui::Box; Box!(modifier = with_shadows(Modifier::new(), theme.shadow_lg())
                             .width(168.0)
                             .background(paint(p.surface))
                             .border(1.0, paint(p.line))
                             .corner_radius(CORNER_MD)
-                            .padding(4.0),
-                    )
-                    .content(|| {
-                        cu::Column().content(|| {
+                            .padding(4.0), {
+                        { use ::compose_rust::ui::Column; Column!({
                             let (u, o) = (ui.clone(), open.clone());
                             menu_item(theme_svg, "테마 전환", move || {
                                 u.set_theme_pref(u.theme_pref.get_untracked().next());
@@ -612,12 +573,12 @@ pub fn PhoneMenu(open: compose_rust::runtime::MutableState<bool>, on_settings: i
                                     }
                                 });
                             }
-                        });
-                    });
+                        }) };
+                    }) };
             }
-        });
-        cu::Spacer().modifier(Modifier::new().width(SP[2]));
-    });
+        }) };
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
+    }) };
 }
 
 /// `.pmenu-pop button`: 38 px high, 10 px side padding, 8 px gap.
@@ -628,12 +589,12 @@ fn menu_item(svg: &'static str, label: &str, on_click: impl FnMut() + 'static) {
         Alignment::CenterStart,
         on_click,
         || {
-            cu::Row().alignment(Alignment::CenterStart).content(|| {
-                cu::Spacer().modifier(Modifier::new().width(10.0));
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(10.0)) };
                 NavIcon(svg, p.text.to_argb(), 18.0);
-                cu::Spacer().modifier(Modifier::new().width(SP[0] * 2.0));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[0] * 2.0)) };
                 Label(label, Fs::Sm, Weight::Regular, Some(paint(p.text)), Some(1));
-            });
+            }) };
         },
     );
 }
@@ -641,12 +602,12 @@ fn menu_item(svg: &'static str, label: &str, on_click: impl FnMut() + 'static) {
 /// A menu whose screen is not built yet ("준비 중입니다").
 pub fn Placeholder(menu: NavMenu) {
     // A `Box` centers on both axes; a `Column`'s alignment is the horizontal one only.
-    cu::Box().alignment(Alignment::Center).modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
-        cu::Column().alignment(Alignment::Center).space_role(SpaceRole::Sm).content(|| {
+    { use ::compose_rust::ui::Box; Box!(alignment = Alignment::Center, modifier = Modifier::new().fill_max_width().fill_max_height(), {
+        { use ::compose_rust::ui::Column; Column!(alignment = Alignment::Center, space_role = SpaceRole::Sm, {
             Label(menu.label(), Fs::Xl3, PAGE_TITLE_WEIGHT, None, None);
             Label(PLACEHOLDER_TEXT, Fs::Md, Weight::Regular, Some(paint(ember_theme().palette.muted)), None);
-        });
-    });
+        }) };
+    }) };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -687,22 +648,20 @@ pub fn shell() {
     });
 
     let content = || {
-        cu::Column().modifier(Modifier::new().weight(1.0).fill_max_width().fill_max_height()).content(|| {
+        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0).fill_max_width().fill_max_height(), {
             // The strip the reported window controls cover above the content (FR-L33): a
             // leading set where the content touches the left edge (bottom tabs), a trailing set
             // (Windows caption, a Linux desktop's own) always, its width kept clear at the right.
             // Computed in `shell`, beside `mode`, so one read of the window size drives both.
             if strip.content_strip > 0.0 {
-                cu::Row()
-                    .modifier(Modifier::new().fill_max_width().height(strip.content_strip))
-                    .content(|| {
-                        cu::Spacer().modifier(Modifier::new().weight(1.0));
+                { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width().height(strip.content_strip), {
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                         if strip.trailing > 0.0 {
-                            cu::Spacer().modifier(Modifier::new().width(strip.trailing));
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(strip.trailing)) };
                         }
-                    });
+                    }) };
             }
-            cu::Column().modifier(Modifier::new().weight(1.0).fill_max_width()).content(|| {
+            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0).fill_max_width(), {
                 // TODO(#220 phases 4-7): each screen replaces its placeholder as it moves.
                 if ui.characters.get().is_some() {
                     super::characters_screen::CharactersScreen();
@@ -734,16 +693,14 @@ pub fn shell() {
                     };
                     Placeholder(menu);
                 }
-            });
-        });
+            }) };
+        }) };
     };
 
-    cu::Box()
-        .modifier(Modifier::new().fill_max_width().fill_max_height().background(paint(theme.palette.bg)))
-        .content(|| {
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().fill_max_height().background(paint(theme.palette.bg)), {
             if mode == ShellMode::BottomTabs {
                 let detail = ui.detail_open.get();
-                cu::Column().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
+                { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width().fill_max_height(), {
                     content();
                     if bottom_bar_shown(detail) {
                         let u = ui.clone();
@@ -753,14 +710,14 @@ pub fn shell() {
                             BottomTab::More => more.set(true),
                         });
                     }
-                });
+                }) };
                 let s = settings_open.clone();
                 // The mockup hides the menu while a detail view (an open room) is shown.
                 if !detail {
                     PhoneMenu(phone_menu.clone(), move || s.set(true));
                 }
             } else {
-                cu::Row().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
+                { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width().fill_max_height(), {
                     let c = collapsed.clone();
                     let s = settings_open.clone();
                     Sidebar(
@@ -771,12 +728,12 @@ pub fn shell() {
                         move || s.set(true),
                     );
                     content();
-                });
+                }) };
             }
 
             let close = more_open.clone();
             EmberSheet("더보기", more_open.get(), move || close.set(false), None, || {
-                cu::Column().modifier(Modifier::new().fill_max_width().padding_role(SpaceRole::Md)).space_role(SpaceRole::Sm).content(|| {
+                { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width().padding_role(SpaceRole::Md), space_role = SpaceRole::Sm, {
                     for menu in MORE_MENUS {
                         let (u, more) = (ui.clone(), more_open.clone());
                         NavRow(menu, menu == active, NavBadge::None, move || {
@@ -800,14 +757,14 @@ pub fn shell() {
                         more.set(false);
                         settings.set(true);
                     });
-                });
+                }) };
             });
             let close = settings_open.clone();
             super::settings::SettingsSheet(settings_open.get(), move || close.set(false));
             super::new_session::NewSessionDialog();
             // The owner claim's code entry and requests (FR-S12, #842).
             super::owner_claim::OwnerClaimSheet();
-        });
+        }) };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -990,6 +947,7 @@ mod tests {
                     safe_area_top: 0.0,
                     safe_area_leading: 0.0,
                     safe_area_trailing: 0.0,
+                    safe_area_bottom: 0.0,
                 },
             };
             let (bytes, _) = host.dispatch(event).expect("dispatch");
@@ -1025,6 +983,7 @@ mod tests {
                     safe_area_top: 0.0,
                     safe_area_leading: 0.0,
                     safe_area_trailing: 0.0,
+                    safe_area_bottom: 0.0,
                 },
             };
             let (bytes, _) = host.dispatch(event).expect("dispatch");
@@ -1072,6 +1031,7 @@ mod tests {
                     safe_area_top: top,
                     safe_area_leading: leading,
                     safe_area_trailing: 0.0,
+                    safe_area_bottom: 0.0,
                 },
             };
             let (bytes, _) = host.dispatch(event).expect("dispatch");
@@ -1099,11 +1059,12 @@ mod tests {
         let src = include_str!("shell.rs");
         let production = src.split("#[cfg(test)]").next().unwrap();
         assert!(
-            production.contains("cu::Column().modifier(Modifier::new().weight(1.0).fill_max_width().fill_max_height())"),
+            production.contains("Column!(modifier = Modifier::new().weight(1.0).fill_max_width().fill_max_height(), {"),
             "the shell content column must fill the width"
         );
         assert!(
-            production.contains("cu::Column().modifier(Modifier::new().weight(1.0).fill_max_width())"),
+            production.contains("Column!(modifier = Modifier::new().weight(1.0).fill_max_width(), {"
+),
             "the screen column inside it must fill the width"
         );
     }
@@ -1447,12 +1408,12 @@ mod tests {
     fn rail_with_demo_probe() {
         let theme = ember_theme();
         let theme_svg = if theme.scheme == Scheme::Dark { ICON_MOON_SVG } else { ICON_SUN_SVG };
-        cu::Column().content(|| {
+        { use ::compose_rust::ui::Column; Column!({
             Sidebar(true, NavMenu::Sessions, NavCounts::default(), || {}, || {});
             ToolRow(ICON_CPU_SVG, "플랫폼: 기타", true, || {});
             ToolRow(NavMenu::Routines.svg(), "데모 초기화", true, || {});
             ToolRow(theme_svg, "테마: 시스템", false, || {});
-        });
+        }) };
     }
 
     #[test]

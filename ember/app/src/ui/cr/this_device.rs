@@ -84,7 +84,7 @@ pub fn ThisDeviceSection() {
     }
 
     InsetPanel(true, || {
-        cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
             Label(PEER_ID_LABEL, Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(1));
             match &me {
                 Ok(id) => {
@@ -108,7 +108,7 @@ pub fn ThisDeviceSection() {
                     Some(Err(t)) => Label(t, Fs::Xs, Weight::Regular, Some(paint(p.red.strong)), Some(3)),
                 }
             }
-        });
+        }) };
     });
 
     Label(ADDR_LABEL, Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(1));

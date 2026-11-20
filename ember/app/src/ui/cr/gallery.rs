@@ -36,7 +36,7 @@ pub fn launch(pref: ThemePref) {
 
 fn section(title: &str, content: impl FnOnce()) {
     Label(title, Fs::Xs, Weight::Medium, Some(paint(ember_theme().palette.muted)), None);
-    cu::Row().space_role(compose_rust::SpaceRole::Sm).alignment(Alignment::CenterStart).content(content);
+    { use ::compose_rust::ui::Row; Row!(space_role = compose_rust::SpaceRole::Sm, alignment = Alignment::CenterStart, content = content) };
 }
 
 #[Composable]
@@ -44,10 +44,8 @@ pub fn gallery() {
     let theme = ember_theme();
     let p = theme.palette;
     let sheet_open = remember(|| mutable_state_of(false));
-    cu::ScrollColumn()
-        .modifier(Modifier::new().fill_max_size().background(paint(p.bg)).padding(24.0))
-        .content(|| {
-            cu::Row().space_role(compose_rust::SpaceRole::Sm).content(|| {
+    { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().fill_max_size().background(paint(p.bg)).padding(24.0), {
+            { use ::compose_rust::ui::Row; Row!(space_role = compose_rust::SpaceRole::Sm, {
                 Label("Components", Fs::Xl, Weight::Semibold, None, None);
                 AppButton("라이트/다크 전환", None, ButtonKind::Default, true, true, false, || {
                     let ui = crate::ui::coexist::shared_ui();
@@ -60,7 +58,7 @@ pub fn gallery() {
                 });
                 let open = sheet_open.clone();
                 AppButton("시트 열기", None, ButtonKind::Primary, true, true, false, move || open.set(true));
-            });
+            }) };
             section("Buttons", || {
                 AppButton("보내기", None, ButtonKind::Primary, false, true, false, || {});
                 AppButton("취소", None, ButtonKind::Default, false, true, false, || {});
@@ -96,20 +94,16 @@ pub fn gallery() {
             });
             section("Radius ruler (8, 12, 14, 24 dp)", || {
                 for r in [8.0_f32, 12.0, 14.0, 24.0] {
-                    cu::Box()
-                        .modifier(
-                            Modifier::new()
+                    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                                 .size(64.0, 64.0)
                                 .background(paint(p.ink))
-                                .corner_radius(r),
-                        )
-                        .content(|| {});
+                                .corner_radius(r), {}) };
                 }
             });
             section("Cards", || {
                 EmberCard(false, false, None, None, None, || {
                     Label("카드", Fs::Lg, Weight::Semibold, None, None);
-                    cu::Spacer().modifier(Modifier::new().height(SP[2]));
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[2])) };
                     InsetPanel(false, || Label("안쪽 패널", Fs::Md, Weight::Regular, None, None));
                 });
                 EmberCard(true, false, None, None, None, || {
@@ -117,7 +111,7 @@ pub fn gallery() {
                 });
             });
             section("Text and field", || {
-                cu::Column().content(|| {
+                { use ::compose_rust::ui::Column; Column!({
                     Txt("Headline", TypeRole::Headline, None, None, None, None, None);
                     Txt("Body text 본문 글자", TypeRole::Body, None, None, None, None, None);
                     Txt("Caption", TypeRole::Caption, None, None, None, None, None);
@@ -128,13 +122,13 @@ pub fn gallery() {
                         fill_max_width: true,
                         ..Default::default()
                     });
-                });
+                }) };
             });
             let close = sheet_open.clone();
             EmberSheet("시트 제목", sheet_open.get(), move || close.set(false), None, || {
                 Label("시트 내용", Fs::Md, Weight::Regular, None, None);
             });
-        });
+        }) };
 }
 
 #[cfg(test)]

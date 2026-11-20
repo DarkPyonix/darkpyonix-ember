@@ -375,10 +375,8 @@ pub fn MembersSheet(channel: &str, channel_name: &str, st: &OwnerState, live: bo
     )
     .min(900.0);
     EmberSheet(&format!("{channel_name} 멤버/게스트"), st.open.get(), close.clone(), None, || {
-        cu::ScrollColumn()
-            .modifier(Modifier::new().fill_max_width().max_height(body_h))
-            .content(|| {
-                cu::Column().spacing(SP[3]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
+        { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().fill_max_width().max_height(body_h), {
+                { use ::compose_rust::ui::Column; Column!(spacing = SP[3], modifier = Modifier::new().fill_max_width().padding(SP[4]), {
                     if !live {
                         Label("서버에 연결되어 있지 않아 초대와 게스트를 관리할 수 없습니다", Fs::Sm, Weight::Regular, Some(paint(ember_theme().palette.muted)), None);
                         return;
@@ -386,8 +384,8 @@ pub fn MembersSheet(channel: &str, channel_name: &str, st: &OwnerState, live: bo
                     InviteSection(channel, st);
                     InviteList(channel, st);
                     GuestList(channel, st);
-                });
-            });
+                }) };
+            }) };
         SheetFooter(|| {
             AppButton("닫기", None, ButtonKind::Default, true, true, false, close.clone());
         });
@@ -478,7 +476,7 @@ fn InviteList(channel: &str, st: &OwnerState) {
         Label("초대가 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
     }
     for r in rows {
-        cu::Row().space_role(SpaceRole::Sm).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+        { use ::compose_rust::ui::Row; Row!(space_role = SpaceRole::Sm, alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
             let tone = match r.state {
                 InviteState::Pending => PillTone::Green,
                 InviteState::Used => PillTone::Blue,
@@ -491,7 +489,7 @@ fn InviteList(channel: &str, st: &OwnerState) {
                 (None, None) => String::new(),
             };
             Label(&text, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
-            cu::Spacer().modifier(Modifier::new().weight(1.0));
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
             if r.can_revoke {
                 let (s, c, id) = (st.clone(), channel.to_string(), r.id.clone());
                 let sure = st.confirm.get().is_revoke(&r.id);
@@ -513,7 +511,7 @@ fn InviteList(channel: &str, st: &OwnerState) {
                     }
                 });
             }
-        });
+        }) };
     }
 }
 
@@ -536,7 +534,7 @@ fn GuestList(channel: &str, st: &OwnerState) {
         hours.set(h)
     });
     let custom = st.custom.get();
-    cu::Row().space_role(SpaceRole::Sm).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+    { use ::compose_rust::ui::Row; Row!(space_role = SpaceRole::Sm, alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
         // Read here so a generation bump redraws the field empty.
         let _gen = st.custom_gen.get();
         // v0.0.7: #374 fixed (`TextField::text`); workaround kept until checked on a display (a
@@ -553,7 +551,7 @@ fn GuestList(channel: &str, st: &OwnerState) {
             })),
             ..Default::default()
         });
-    });
+    }) };
     match clamp_hours(&custom) {
         None if !custom.trim().is_empty() => {
             Label(error_message(Some("invalid_hours")), Fs::Sm, Weight::Regular, Some(paint(p.red.strong)), None);
@@ -571,17 +569,17 @@ fn GuestList(channel: &str, st: &OwnerState) {
     }
     let custom_ok = custom.trim().is_empty() || clamp_hours(&custom).is_some();
     for g in rows {
-        cu::Column().spacing(SP[0]).modifier(Modifier::new().fill_max_width()).content(|| {
-            cu::Row().space_role(SpaceRole::Sm).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[0], modifier = Modifier::new().fill_max_width(), {
+            { use ::compose_rust::ui::Row; Row!(space_role = SpaceRole::Sm, alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
                 Label(&g.name, Fs::Md, Weight::Medium, None, Some(1));
                 Pill("게스트", PillTone::Grey, true);
                 // Hidden unless an allowance is in force now.
                 if let Some(b) = &g.badge {
                     Pill(b, PillTone::Green, true);
                 }
-                cu::Spacer().modifier(Modifier::new().weight(1.0));
-            });
-            cu::Row().space_role(SpaceRole::Sm).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
+            }) };
+            { use ::compose_rust::ui::Row; Row!(space_role = SpaceRole::Sm, alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
                 let (s, c, id) = (st.clone(), channel.to_string(), g.id.clone());
                 AppButton(&format!("{hours}시간 허용"), None, ButtonKind::Default, true, !st.busy.get() && custom_ok, false, move || {
                     s.confirm.set(Confirm::None);
@@ -594,10 +592,10 @@ fn GuestList(channel: &str, st: &OwnerState) {
                         s.clear(&c, &id)
                     });
                 }
-            });
+            }) };
             // Remove sits on its own row, away from the allowance buttons.
-            cu::Row().space_role(SpaceRole::Sm).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                cu::Spacer().modifier(Modifier::new().weight(1.0));
+            { use ::compose_rust::ui::Row; Row!(space_role = SpaceRole::Sm, alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                 let sure = st.confirm.get().is_remove(&g.id);
                 if sure {
                     let s2 = st.clone();
@@ -617,8 +615,8 @@ fn GuestList(channel: &str, st: &OwnerState) {
                         s.remove(&c, &id);
                     }
                 });
-            });
-        });
+            }) };
+        }) };
     }
 }
 

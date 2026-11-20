@@ -47,8 +47,8 @@ use crate::ui::home::{
     model_catalog, modes_for, project_options, DEFAULT_PROJECT, Harness, Selection,
 };
 use super::components::{
-    pill_colors, pill_metrics, pressable, AppButton, BackButton, ButtonKind, EmberCard, EmberField, EmberSheet, InsetPanel, SearchField,
-    ChoiceRow, CloseButton, DataNamedOverlay, FieldOptions, Label, MonoLabel, NamedClickable, NamedDisabled, NamedSelect, Pill, PillTone, SheetFooter,
+    pill_colors, pill_metrics, pressable_on, AppButton, BackButton, ButtonKind, EmberCard, EmberField, EmberSheet, InsetPanel, SearchField,
+    ChoiceRow, CloseButton, DataNamedOverlay, FieldOptions, Label, MonoLabel, NamedClickable, NamedClickableOn, NamedDisabled, NamedSelect, Pill, PillTone, SheetFooter,
 };
 use super::characters::{CharState, Character};
 use super::compat::Spinner;
@@ -1125,7 +1125,7 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                         RoutineHeader(compact, move || {
                             if compact {
                                 // The painted pill is the control (compose-rust#429).
-                                NamedClickable(
+                                NamedClickableOn(
                                     "새 루틴",
                                     Modifier::new()
                                         .width(52.0)
@@ -1133,6 +1133,7 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                                         .background(paint(p.ink))
                                         .border(1.0, paint(p.ink))
                                         .shape_role(ShapeRole::Full),
+                                    Some(p.ink),
                                     Alignment::Center,
                                     move || rl_new(Leave::NewForm),
                                     move || NavIcon(super::shell::ICON_PLUS_SVG, p.ink_text.to_argb(), 18.0),
@@ -1149,13 +1150,14 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                                     // Not `AppButton`: that sets the 14/500 label and no
                                     // width, which changes this pill; it still sends the
                                     // shared press values (FR-L34.5, #250).
-                                    .modifier(pressable(
+                                    .modifier(pressable_on(
                                         Modifier::new()
                                             .width(btn_w)
                                             .height(40.0)
                                             .background(paint(p.ink))
                                             .border(1.0, paint(p.ink))
                                             .shape_role(ShapeRole::Full),
+                                        p.ink,
                                     ))
                                     .on_click(move || rl_new(Leave::NewForm));
                             }
@@ -1447,13 +1449,14 @@ pub fn glyph_button_width(label: &str) -> f32 {
 fn GlyphButton(label: &'static str, svg: &'static str, primary: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let (fill, border, text) = if primary { (p.ink, p.ink, p.ink_text) } else { (p.surface, p.line, p.text) };
-    NamedClickable(
+    NamedClickableOn(
         label,
         Modifier::new()
             .size(glyph_button_width(label), H_CTL)
             .background(paint(fill))
             .border(1.0, paint(border))
             .shape_role(ShapeRole::Full),
+        Some(fill),
         Alignment::Center,
         on_click,
         move || {
@@ -3487,6 +3490,7 @@ mod tests {
                     safe_area_top: 0.0,
                     safe_area_leading: 0.0,
                     safe_area_trailing: 0.0,
+                    safe_area_bottom: 0.0,
                 },
             })
             .expect("dispatch resize");
@@ -4138,6 +4142,7 @@ mod tests {
                 safe_area_top: 0.0,
                 safe_area_leading: 0.0,
                 safe_area_trailing: 0.0,
+                safe_area_bottom: 0.0,
             },
         };
         let (bytes, _) = host.dispatch(event).expect("dispatch");
@@ -4181,6 +4186,7 @@ mod tests {
                 safe_area_top: 0.0,
                 safe_area_leading: 0.0,
                 safe_area_trailing: 0.0,
+                safe_area_bottom: 0.0,
             },
         };
         let (bytes, _) = host.dispatch(event).expect("dispatch");
@@ -4385,6 +4391,7 @@ mod tests {
                     safe_area_top: 0.0,
                     safe_area_leading: 0.0,
                     safe_area_trailing: 0.0,
+                    safe_area_bottom: 0.0,
                 },
             };
             let (bytes, _) = host.dispatch(event).expect("dispatch");
@@ -4705,6 +4712,7 @@ mod tests {
                 safe_area_top: 0.0,
                 safe_area_leading: 0.0,
                 safe_area_trailing: 0.0,
+                safe_area_bottom: 0.0,
             },
         };
         let (bytes, _) = host.dispatch(resize).expect("dispatch resize");
@@ -4773,6 +4781,7 @@ mod tests {
                 safe_area_top: 0.0,
                 safe_area_leading: 0.0,
                 safe_area_trailing: 0.0,
+                safe_area_bottom: 0.0,
             },
         };
         let (bytes, _) = host.dispatch(resize).expect("dispatch resize");
@@ -4893,6 +4902,7 @@ mod tests {
                     safe_area_top: 0.0,
                     safe_area_leading: 0.0,
                     safe_area_trailing: 0.0,
+                    safe_area_bottom: 0.0,
                 },
             };
             let (bytes, _) = host.dispatch(resize).expect("dispatch resize");

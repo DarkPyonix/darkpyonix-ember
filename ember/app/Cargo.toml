@@ -27,9 +27,12 @@ path = "src/main.rs"
 # three levels deeper than the main checkout). To build against a local checkout, see README.md
 # ("Local dioxus-compose"). The crate's build script fetches the renderer for its version; set
 # DIOXUS_COMPOSE_RENDERER_DIR to use a renderer you built yourself.
-# TODO: 배포되면 버전 의존성으로 바꾼다 (compose-rust and dioxus-compose are not yet published).
-compose-rust = { git = "https://github.com/DarkPyonix/compose-rust", tag = "v0.0.11", default-features = false }
-dioxus-compose = { git = "https://github.com/DarkPyonix/dioxus-compose", rev = "94ade333480b4a8a5cb3427f38b23dc5ac055f84" }
+# TODO: dioxus-compose가 배포되면 버전 의존성으로 바꾼다 (compose-rust is on crates.io since 0.0.12; dioxus-compose is not yet published).
+compose-rust = { version = "0.0.12", default-features = false }
+# dioxus-compose chore/compose-rust-0-0-12: pins compose-rust by git rev 851335fe, the commit
+# v0.0.12 was cut from; the patch below makes that dependency the published 0.0.12, so the app
+# and dioxus-compose share one compose-rust.
+dioxus-compose = { git = "https://github.com/DarkPyonix/dioxus-compose", rev = "59ab0593689aa5d9a1531fabd8c3f0338cfb0d87" }
 
 # Everything below the UI: sync engine, state reducer, transcript, cache.
 ember-client = { path = "../client" }
@@ -78,3 +81,6 @@ ember-server = { path = "../server" }
 # Serves the in-process server on a loopback listener for the editor relay over HTTP
 # (`tests/fr_n9_device_editor.rs`); the version ember-server uses.
 axum = "0.8"
+
+[patch."https://github.com/DarkPyonix/compose-rust"]
+compose-rust = { version = "0.0.12" }

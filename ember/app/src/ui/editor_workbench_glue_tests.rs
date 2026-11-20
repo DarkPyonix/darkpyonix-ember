@@ -1069,6 +1069,7 @@ fn fr_l33_1_the_safe_area_arriving_after_the_first_render_moves_the_top_bar() {
                 safe_area_top: lights.top,
                 safe_area_leading: lights.leading,
                 safe_area_trailing: lights.trailing,
+                safe_area_bottom: 0.0,
             },
         })
         .expect("dispatch");

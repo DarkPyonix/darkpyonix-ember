@@ -169,7 +169,7 @@ fn StyleCard(seed_name: &str, style: CharStyle, chosen: bool, columns: usize, on
         .role(Role::RadioButton)
         .checked(chosen)
         .label(style.label());
-    super::components::Clickable(card, Alignment::TopCenter, on_click, || {
+    super::components::ClickableAs(card, super::components::Press::Card, Alignment::TopCenter, on_click, || {
         cu::Column()
             .alignment(Alignment::TopCenter)
             .spacing(STYLE_CARD_INNER_GAP)

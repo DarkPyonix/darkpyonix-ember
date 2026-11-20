@@ -103,10 +103,7 @@ pub fn SettingsContent() {
         None => ("http://127.0.0.1:8880".to_string(), "기본 경로".to_string()),
     };
 
-    cu::Column()
-        .spacing(SP[3])
-        .modifier(Modifier::new().fill_max_width().padding(SP[4]))
-        .content(|| {
+    { use ::compose_rust::ui::Column; Column!(spacing = SP[3], modifier = Modifier::new().fill_max_width().padding(SP[4]), {
             // 1. Theme preference (FR-L28)
             SectionBlock("화면 테마", "앱 전체의 색상 모드를 선택합니다.", || {
                 ChoiceRow(|| {
@@ -119,17 +116,17 @@ pub fn SettingsContent() {
                 });
             });
 
-            cu::Separator(Some(paint(p.line)));
+            { use ::compose_rust::ui::Separator; Separator!(Some(paint(p.line))) };
 
             // 2. Editor keymap (FR-L30)
             SectionBlock(
                 "에디터 단축키",
                 "Ember 에디터의 기본 단축키 체계를 선택합니다.",
                 || {
-                    cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                    { use ::compose_rust::ui::Row; Row!(spacing = SP[1], alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
                         // The choices wrap in the room the table button leaves: a zero width
                         // keeps a weighted child from asking for its whole line first.
-                        cu::Column().modifier(Modifier::new().weight(1.0).width(0.0)).content(|| {
+                        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0).width(0.0), {
                             ChoiceRow(|| {
                                 for km in Keymap::ALL {
                                     let u = ui.clone();
@@ -138,7 +135,7 @@ pub fn SettingsContent() {
                                     });
                                 }
                             });
-                        });
+                        }) };
                         let toggle = shortcuts_open.clone();
                         let is_open = shortcuts_open.get();
                         AppButton(
@@ -150,15 +147,15 @@ pub fn SettingsContent() {
                             false,
                             move || toggle.set(!is_open),
                         );
-                    });
+                    }) };
                     if shortcuts_open.get() {
-                        cu::Spacer().modifier(Modifier::new().height(SP[1]));
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[1])) };
                         ShortcutTableView(current_keymap, Os::current());
                     }
                 },
             );
 
-            cu::Separator(Some(paint(p.line)));
+            { use ::compose_rust::ui::Separator; Separator!(Some(paint(p.line))) };
 
             // 3. Remembered default IDE target (FR-L7)
             SectionBlock(
@@ -179,7 +176,7 @@ pub fn SettingsContent() {
                 },
             );
 
-            cu::Separator(Some(paint(p.line)));
+            { use ::compose_rust::ui::Separator; Separator!(Some(paint(p.line))) };
 
             // 4. Archived sessions visibility (FR-L9)
             SectionBlock(
@@ -196,11 +193,8 @@ pub fn SettingsContent() {
                         Alignment::CenterStart,
                         move || u.set_show_archived(!show_archived),
                         || {
-                            cu::Row()
-                                .alignment(Alignment::CenterStart)
-                                .modifier(Modifier::new().fill_max_width())
-                                .content(|| {
-                                    cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
+                                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
                                     Label(
                                         "보관된 세션 표시",
                                         Fs::Sm,
@@ -208,20 +202,20 @@ pub fn SettingsContent() {
                                         Some(paint(p.text)),
                                         Some(1),
                                     );
-                                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                                     Pill(
                                         if show_archived { "켜짐" } else { "꺼짐" },
                                         if show_archived { PillTone::Green } else { PillTone::Grey },
                                         true,
                                     );
-                                    cu::Spacer().modifier(Modifier::new().width(SP[2]));
-                                });
+                                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
+                                }) };
                         },
                     );
                 },
             );
 
-            cu::Separator(Some(paint(p.line)));
+            { use ::compose_rust::ui::Separator; Separator!(Some(paint(p.line))) };
 
             // 5. This device on the transport (FR-N9, #856)
             SectionBlock(
@@ -230,7 +224,7 @@ pub fn SettingsContent() {
                 super::this_device::ThisDeviceSection,
             );
 
-            cu::Separator(Some(paint(p.line)));
+            { use ::compose_rust::ui::Separator; Separator!(Some(paint(p.line))) };
 
             // 6. Per-device scope (FR-N8, #817)
             SectionBlock(
@@ -239,7 +233,7 @@ pub fn SettingsContent() {
                 super::device_scope::DeviceScopeSection,
             );
 
-            cu::Separator(Some(paint(p.line)));
+            { use ::compose_rust::ui::Separator; Separator!(Some(paint(p.line))) };
 
             // 7. Updates of the installed app (NFR-R2, #880)
             SectionBlock(
@@ -248,65 +242,54 @@ pub fn SettingsContent() {
                 super::self_update::SelfUpdateSection,
             );
 
-            cu::Separator(Some(paint(p.line)));
+            { use ::compose_rust::ui::Separator; Separator!(Some(paint(p.line))) };
 
             // 8. Connection & local storage info
             SectionBlock("연결 및 저장소", "현재 연결된 메인 서버 주소와 로컬 데이터 폴더입니다.", || {
                 InsetPanel(true, || {
-                    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                    { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
                         InfoRow("메인 서버", &server_url);
                         InfoRow("데이터 경로", &data_dir);
-                    });
+                    }) };
                 });
             });
-        });
+        }) };
 }
 
 fn SectionBlock(title: &str, subtitle: &str, content: impl FnOnce()) {
     let p = ember_theme().palette;
-    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+    { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
         Label(title, Fs::Md, Weight::Semibold, Some(paint(p.text)), Some(1));
         Label(subtitle, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
-        cu::Spacer().modifier(Modifier::new().height(2.0));
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(2.0)) };
         content();
-    });
+    }) };
 }
 
 fn InfoRow(label: &str, value: &str) {
     let p = ember_theme().palette;
-    cu::Row()
-        .alignment(Alignment::CenterStart)
-        .modifier(Modifier::new().fill_max_width().height(24.0))
-        .content(|| {
+    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width().height(24.0), {
             Label(label, Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(1));
-            cu::Spacer().modifier(Modifier::new().weight(1.0));
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
             Txt(value, TypeRole::Mono, Some(paint(p.text)), Some(1), None, None, None);
-        });
+        }) };
 }
 
 fn ShortcutTableView(keymap: Keymap, os: Os) {
     let p = ember_theme().palette;
     let rows = shortcut_rows(keymap, os);
     InsetPanel(true, || {
-        cu::Column().spacing(4.0).modifier(Modifier::new().fill_max_width()).content(|| {
+        { use ::compose_rust::ui::Column; Column!(spacing = 4.0, modifier = Modifier::new().fill_max_width(), {
             for row in rows.iter().take(8) {
-                cu::Row()
-                    .alignment(Alignment::CenterStart)
-                    .modifier(Modifier::new().fill_max_width().height(24.0))
-                    .content(|| {
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width().height(24.0), {
                         Label(row.label, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));
-                        cu::Spacer().modifier(Modifier::new().weight(1.0));
-                        cu::Row()
-                            .alignment(Alignment::Center)
-                            .modifier(
-                                Modifier::new()
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
+                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::Center, modifier = Modifier::new()
                                     .height(20.0)
                                     .background(paint(p.surface))
                                     .border(1.0, paint(p.line))
-                                    .shape_role(ShapeRole::Full),
-                            )
-                            .content(|| {
-                                cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                                    .shape_role(ShapeRole::Full), {
+                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[1])) };
                                 Txt(
                                     &row.chord,
                                     TypeRole::Mono,
@@ -316,11 +299,11 @@ fn ShortcutTableView(keymap: Keymap, os: Os) {
                                     None,
                                     None,
                                 );
-                                cu::Spacer().modifier(Modifier::new().width(SP[1]));
-                            });
-                    });
+                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[1])) };
+                            }) };
+                    }) };
             }
-        });
+        }) };
     });
 }
 

@@ -231,10 +231,10 @@ pub fn NewChannelSheet(st: &NewChannelState, rooms: &[Room], feed: Option<Feed>,
     let sheet_open = st.open.get();
 
     EmberSheet("새 채널", sheet_open, request_close.clone(), None, || {
-        cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
-            cu::Column().spacing(SP[3]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
+        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), {
+            { use ::compose_rust::ui::Column; Column!(spacing = SP[3], modifier = Modifier::new().fill_max_width().padding(SP[4]), {
                 // Name.
-                cu::Column().spacing(4.0).modifier(Modifier::new().fill_max_width()).content(|| {
+                { use ::compose_rust::ui::Column; Column!(spacing = 4.0, modifier = Modifier::new().fill_max_width(), {
                     Label("이름", Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(1));
                     let _gen = st.generation.get();
                     let d = st.draft.clone();
@@ -256,14 +256,14 @@ pub fn NewChannelSheet(st: &NewChannelState, rooms: &[Room], feed: Option<Feed>,
                     if let Some(e) = problem.filter(|_| !draft.name.trim().is_empty()) {
                         Label(e.text(), Fs::Sm, Weight::Regular, Some(paint(p.red.strong)), None);
                     }
-                });
+                }) };
                 // Project.
-                cu::Column().spacing(4.0).modifier(Modifier::new().fill_max_width()).content(|| {
+                { use ::compose_rust::ui::Column; Column!(spacing = 4.0, modifier = Modifier::new().fill_max_width(), {
                     Label("프로젝트", Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(1));
                     if projects.is_empty() {
                         Label("프로젝트가 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
                     }
-                    cu::ScrollRow().modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0])).content(|| {
+                    { use ::compose_rust::ui::ScrollRow; ScrollRow!(modifier = Modifier::new().fill_max_width().height(H_CTL + SP[0]), {
                         for name in projects.iter() {
                             let (d, n) = (st.draft.clone(), name.clone());
                             FilterChip(&display_name(name), *name == draft.project, move || {
@@ -271,17 +271,17 @@ pub fn NewChannelSheet(st: &NewChannelState, rooms: &[Room], feed: Option<Feed>,
                                 x.set_project(&n);
                                 d.set(x);
                             });
-                            cu::Spacer().modifier(Modifier::new().width(SP[0]));
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[0])) };
                         }
-                    });
-                });
+                    }) };
+                }) };
                 // Members.
-                cu::Column().spacing(4.0).modifier(Modifier::new().fill_max_width()).content(|| {
+                { use ::compose_rust::ui::Column; Column!(spacing = 4.0, modifier = Modifier::new().fill_max_width(), {
                     Label("멤버 (에이전트)", Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(1));
                     if agents.is_empty() {
                         Label("이 프로젝트에는 에이전트 세션이 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
                     }
-                    cu::ScrollRow().modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0])).content(|| {
+                    { use ::compose_rust::ui::ScrollRow; ScrollRow!(modifier = Modifier::new().fill_max_width().height(H_CTL + SP[0]), {
                         for a in agents.iter() {
                             let (d, id) = (st.draft.clone(), a.id.clone());
                             FilterChip(&a.label, draft.has_member(&a.id), move || {
@@ -289,21 +289,21 @@ pub fn NewChannelSheet(st: &NewChannelState, rooms: &[Room], feed: Option<Feed>,
                                 x.toggle_member(&id);
                                 d.set(x);
                             });
-                            cu::Spacer().modifier(Modifier::new().width(SP[0]));
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[0])) };
                         }
-                    });
+                    }) };
                     if let Some(h) = draft.members_hint() {
                         Label(h, Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
                     }
-                });
+                }) };
                 if let Some(f) = failure.as_ref() {
                     Label(f, Fs::Sm, Weight::Regular, Some(paint(p.red.strong)), None);
                 }
                 if feed.is_none() && !review {
                     Label(DEMO_NO_CREATE, Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
                 }
-            });
-        });
+            }) };
+        }) };
         SheetFooter(|| {
             AppButton("취소", None, ButtonKind::Default, true, !busy, false, request_close.clone());
             let (s2, f2, o2) = (st.clone(), feed.clone(), open.clone());
@@ -324,9 +324,9 @@ pub fn NewChannelSheet(st: &NewChannelState, rooms: &[Room], feed: Option<Feed>,
             move || c.set(false)
         };
         EmberSheet("변경 사항", st.confirm.get() && sheet_open, keep.clone(), None, || {
-            cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
+            { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width().padding(SP[4]), {
                 Label(DISCARD_QUESTION, Fs::Md, Weight::Regular, None, Some(3));
-            });
+            }) };
             SheetFooter(|| {
                 AppButton("계속 편집", None, ButtonKind::Default, true, true, false, keep.clone());
                 let s = st.clone();

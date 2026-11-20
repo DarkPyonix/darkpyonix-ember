@@ -1113,13 +1113,8 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
 
     let inline_form = form_initial.is_some() && form_layout(mode) == FormLayout::Inline;
 
-    cu::ScrollColumn()
-        .modifier(Modifier::new().fill_max_width().fill_max_height())
-        .content(|| {
-            cu::Column()
-                .spacing(SP[4])
-                .modifier(Modifier::new().fill_max_width().padding(pad))
-                .content(|| {
+    { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().fill_max_width().fill_max_height(), {
+            { use ::compose_rust::ui::Column; Column!(spacing = SP[4], modifier = Modifier::new().fill_max_width().padding(pad), {
                     if mode != PaneMode::DetailOnly {
                         let rl_new = request_leave.clone();
                         RoutineHeader(compact, move || {
@@ -1143,14 +1138,11 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                                 let btn_w = (18.0 + 12.0 + super::home::text_px(label, Fs::Sm.size()) + 36.0)
                                     .ceil()
                                     .max(116.0);
-                                cu::Button(label)
-                                    .icon(IconRole::Add)
-                                    .variant(ButtonVariant::Text)
-                                    .color(paint(p.ink_text))
-                                    // Not `AppButton`: that sets the 14/500 label and no
-                                    // width, which changes this pill; it still sends the
-                                    // shared press values (FR-L34.5, #250).
-                                    .modifier(pressable_on(
+                                { use ::compose_rust::ui::Button; Button!(label, move || rl_new(Leave::NewForm), icon = IconRole::Add, variant = ButtonVariant::Text, color = paint(p.ink_text), 
+// Not `AppButton`: that sets the 14/500 label and no
+// width, which changes this pill; it still sends the
+// shared press values (FR-L34.5, #250).
+modifier = pressable_on(
                                         Modifier::new()
                                             .width(btn_w)
                                             .height(40.0)
@@ -1158,8 +1150,7 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                                             .border(1.0, paint(p.ink))
                                             .shape_role(ShapeRole::Full),
                                         p.ink,
-                                    ))
-                                    .on_click(move || rl_new(Leave::NewForm));
+                                    )) };
                             }
                         });
                     }
@@ -1173,8 +1164,8 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                     }
                     match mode {
                         PaneMode::Both => {
-                            cu::Row().spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(|| {
-                                cu::Column().modifier(Modifier::new().width(list_pane_width(window.width_dp))).content(|| {
+                            { use ::compose_rust::ui::Row; Row!(spacing = SP[4], modifier = Modifier::new().fill_max_width(), {
+                                { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().width(list_pane_width(window.width_dp)), {
                                     ListPane(
                                         &cur_entries,
                                         &groups,
@@ -1192,10 +1183,10 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                                         },
                                         on_toggle.clone(),
                                     );
-                                });
+                                }) };
                                 // Clipped to its column: the inline form never spreads over the
                                 // list beside it (design review R6, #848).
-                                cu::Column().modifier(Modifier::new().weight(1.0).clip(true)).content(|| {
+                                { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0).clip(true), {
                                     if let (true, Some((initial, editing))) = (inline_form, form_initial.as_ref()) {
                                         let rl_close = request_leave.clone();
                                         let save_cb = on_save.clone();
@@ -1237,8 +1228,8 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                                         on_run_now.clone(),
                                         on_toggle.clone(),
                                     );
-                                });
-                            });
+                                }) };
+                            }) };
                         }
                         PaneMode::ListOnly => {
                             ListPane(
@@ -1289,10 +1280,10 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                         }
                     }
                     if compact {
-                        cu::Spacer().modifier(Modifier::new().height(compact_bottom_clearance()));
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(compact_bottom_clearance())) };
                     }
-                });
-        });
+                }) };
+        }) };
 
     if let (false, Some((initial, editing))) = (inline_form, form_initial) {
         let rl_close = request_leave.clone();
@@ -1325,9 +1316,9 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
             .get()
             .or_else(|| try_services().and_then(|s| s.ui.routine_pending_leave.get()));
         EmberSheet("변경 사항", asked.is_some(), keep.clone(), None, || {
-            cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
+            { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width().padding(SP[4]), {
                 Label(ROUTINE_DISCARD_QUESTION, Fs::Md, Weight::Regular, None, Some(3));
-            });
+            }) };
             SheetFooter(|| {
                 AppButton("계속 편집", None, ButtonKind::Default, true, true, false, keep.clone());
                 let (c, perform) = (pending_leave.clone(), perform.clone());
@@ -1352,11 +1343,9 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
 #[compose_rust::runtime::Composable]
 pub fn preview_routines() {
     let p = ember_theme().palette;
-    cu::Box()
-        .modifier(Modifier::new().fill_max_size().background(paint(p.bg)))
-        .content(|| {
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_size().background(paint(p.bg)), {
             RoutinesScreenWith(sample_entries(), true);
-        });
+        }) };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1380,21 +1369,16 @@ fn TriggerPill(trigger: Trigger, small: bool) {
         Trigger::Time => ICON_CLOCK_SVG,
         Trigger::Event => ICON_ZAP_SVG,
     };
-    cu::Row()
-        .alignment(Alignment::CenterStart)
-        .modifier(
-            Modifier::new()
+    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new()
                 .height(height)
                 .background(paint(bg))
-                .shape_role(ShapeRole::Full),
-        )
-        .content(|| {
-            cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                .shape_role(ShapeRole::Full), {
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[1])) };
             NavIcon(icon_svg, fg.to_argb(), if small { 12.0 } else { 14.0 });
-            cu::Spacer().modifier(Modifier::new().width(4.0));
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(4.0)) };
             Label(trigger.label(), fs, weight, Some(paint(fg)), Some(1));
-            cu::Spacer().modifier(Modifier::new().width(SP[1]));
-        });
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[1])) };
+        }) };
 }
 
 /// The page header for Routines: 32px regular title, Korean subtitle, and action button.
@@ -1415,10 +1399,10 @@ pub const RUN_NOW_BUSY_LABEL: &str = "실행 중";
 /// spinner beside it, as a CI "run" button does while its job runs (FR-L25, #494).
 fn RunNowButton(busy: bool, on_click: impl FnMut() + 'static) {
     if busy {
-        cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], {
             Spinner(12.0);
             AppButton(RUN_NOW_BUSY_LABEL, None, ButtonKind::Primary, true, false, false, || {});
-        });
+        }) };
     } else {
         GlyphButton("지금 실행", ICON_PLAY_SVG, true, on_click);
     }
@@ -1460,10 +1444,10 @@ fn GlyphButton(label: &'static str, svg: &'static str, primary: bool, on_click: 
         Alignment::Center,
         on_click,
         move || {
-            cu::Row().alignment(Alignment::CenterStart).spacing(GLYPH_BUTTON_GAP).content(|| {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = GLYPH_BUTTON_GAP, {
                 NavIcon(svg, text.to_argb(), GLYPH_BUTTON_ICON);
                 Label(label, GLYPH_BUTTON_FS, Weight::Medium, Some(paint(text)), Some(1));
-            });
+            }) };
         },
     );
 }
@@ -1472,32 +1456,27 @@ fn GlyphButton(label: &'static str, svg: &'static str, primary: bool, on_click: 
 /// a middle dot (design review R4, #848).
 fn ScheduleLine(line: &str, cron: Option<&str>) {
     let p = ember_theme().palette;
-    cu::Row().alignment(Alignment::CenterStart).spacing(SP[0]).content(|| {
+    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[0], {
         Label(line, SCHED_FS, Weight::Medium, Some(paint(p.text_2)), Some(1));
         if let Some(c) = cron {
             Label("·", SCHED_FS, Weight::Medium, Some(paint(p.text_2)), Some(1));
             CronChip(c);
         }
-    });
+    }) };
 }
 
 /// The mockup's `.cron`: mono 12 `text-2` on `surface-2`, a 1 dp `line` border, `r-xs` corners
 /// and 4 dp on each side.
 fn CronChip(cron: &str) {
     let p = ember_theme().palette;
-    cu::Row()
-        .alignment(Alignment::CenterStart)
-        .modifier(
-            Modifier::new()
+    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new()
                 .background(paint(p.surface_2))
                 .border(1.0, paint(p.line))
-                .corner_radius(CORNER_XS),
-        )
-        .content(|| {
-            cu::Spacer().modifier(Modifier::new().width(SP[0]));
+                .corner_radius(CORNER_XS), {
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[0])) };
             MonoLabel(cron, Fs::Xs, Weight::Regular, Some(paint(p.text_2)));
-            cu::Spacer().modifier(Modifier::new().width(SP[0]));
-        });
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[0])) };
+        }) };
 }
 
 /// A 36x20 toggle switch matching the mockup (`.switch.on` ink, off `track`, thumb `surface`).
@@ -1507,12 +1486,8 @@ fn CronChip(cron: &str) {
 fn RoutineSwitch(routine_name: &str, checked: bool, on_change: impl FnMut(bool) + 'static) {
     let p = ember_theme().palette;
     let track_color = if checked { p.ink } else { p.track };
-    cu::Switch(checked)
-        .size(36.0, 20.0)
-        .track_color(paint(track_color))
-        .thumb_color(paint(p.surface))
-        .accessible_name(routine_switch_name(routine_name))
-        .on_change(on_change);
+    let name = routine_switch_name(routine_name);
+    { use ::compose_rust::ui::Switch; Switch!(checked, on_change, size = (36.0, 20.0), track_color = paint(track_color), thumb_color = paint(p.surface), accessible_name = Some(name.as_str())) };
 }
 
 /// The accessible name of a routine's switch.
@@ -1581,24 +1556,19 @@ fn SegChoices(
 fn FilterSegButton(text: &str, selected: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let (bg, border, fg) = seg_colors(selected, p);
-    cu::Box()
-        .modifier(
-            Modifier::new()
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                 .height(H_CTL)
                 .background(paint(bg))
                 .border(1.0, paint(border))
-                .shape_role(ShapeRole::Full),
-        )
-        .alignment(Alignment::Center)
-        .content(move || {
-            cu::Row().alignment(Alignment::CenterStart).content(|| {
-                cu::Spacer().modifier(Modifier::new().width(SEG_PAD_X));
+                .shape_role(ShapeRole::Full), alignment = Alignment::Center, content = move || {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SEG_PAD_X)) };
                 Label(text, SEG_FS, Weight::Medium, Some(paint(fg)), Some(1));
-                cu::Spacer().modifier(Modifier::new().width(SEG_PAD_X));
-            });
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SEG_PAD_X)) };
+            }) };
             // A project's name is data, so the button over the pill carries it.
             DataNamedOverlay(text, true, None, on_click);
-        });
+        }) };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1636,19 +1606,16 @@ fn Dashboard(entries: &[Entry], now: Minutes, compact: bool, width_dp: f32) {
     let kpis_content = move || {
         // The two KPI rows sit together at the top of the card (`.rt-topwrap .kpis` row gap
         // `--sp4`), not spread over the height the chart card beside it gives (design review B5).
-        cu::Column()
-            .spacing(ROUTINE_KPI_ROW_GAP)
-            .modifier(Modifier::new().fill_max_width().height(card_h))
-            .content(|| {
-                cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
+        { use ::compose_rust::ui::Column; Column!(spacing = ROUTINE_KPI_ROW_GAP, modifier = Modifier::new().fill_max_width().height(card_h), {
+                { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width(), {
                     RoutineKpiView(&k[0], 0);
                     RoutineKpiView(&k[1], 1);
-                });
-                cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
+                }) };
+                { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width(), {
                     RoutineKpiView(&k[2], 2);
                     RoutineKpiView(&k[3], 3);
-                });
-            });
+                }) };
+            }) };
     };
 
     let hero_content = move || {
@@ -1656,15 +1623,15 @@ fn Dashboard(entries: &[Entry], now: Minutes, compact: bool, width_dp: f32) {
     };
 
     if width_dp > 1279.0 {
-        cu::Row().spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(|| {
+        { use ::compose_rust::ui::Row; Row!(spacing = SP[4], modifier = Modifier::new().fill_max_width(), {
             EmberCard(false, true, Some(1.1), None, None, kpis_content);
             EmberCard(false, true, Some(1.0), None, None, hero_content);
-        });
+        }) };
     } else {
-        cu::Column().spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(|| {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[3], modifier = Modifier::new().fill_max_width(), {
             EmberCard(false, true, None, None, None, kpis_content);
             EmberCard(false, true, None, None, None, hero_content);
-        });
+        }) };
     }
 }
 
@@ -1678,20 +1645,13 @@ fn HeroCardContent(
 ) {
     let p = ember_theme().palette;
     let (chart_w, chart_h, chart_gap) = chart;
-    cu::Row()
-        .spacing(SP[3])
-        .alignment(Alignment::CenterStart)
-        .modifier(Modifier::new().fill_max_width().height(card_h))
-        .content(|| {
-            cu::Column().spacing(SP[1]).modifier(Modifier::new().weight(1.0)).content(|| {
+    { use ::compose_rust::ui::Row; Row!(spacing = SP[3], alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width().height(card_h), {
+            { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().weight(1.0), {
                 Label("성공률 (전체 기록)", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                cu::Spacer().modifier(Modifier::new().height(SP[1]));
-                cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).content(|| {
-                    cu::Box()
-                        .modifier(Modifier::new().size(76.0, 76.0))
-                        .alignment(Alignment::Center)
-                        .content(|| {
-                            cu::Canvas(ring_cmd.clone()).modifier(Modifier::new().size(76.0, 76.0));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[1])) };
+                { use ::compose_rust::ui::Row; Row!(spacing = SP[2], alignment = Alignment::CenterStart, {
+                    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().size(76.0, 76.0), alignment = Alignment::Center, {
+                            { use ::compose_rust::ui::Canvas; Canvas!(ring_cmd.clone(), modifier = Modifier::new().size(76.0, 76.0)) };
                             Label(
                                 &rate.map(|r| format!("{r}%")).unwrap_or_else(|| "-".into()),
                                 Fs::Md,
@@ -1699,29 +1659,29 @@ fn HeroCardContent(
                                 None,
                                 Some(1),
                             );
-                        });
-                    cu::Column().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
-                        cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
-                            cu::Box().modifier(Modifier::new().size(8.0, 8.0).background(paint(p.blue.strong)).shape_role(ShapeRole::Full));
+                        }) };
+                    { use ::compose_rust::ui::Column; Column!(spacing = SP[1], alignment = Alignment::CenterStart, {
+                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], {
+                            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().size(8.0, 8.0).background(paint(p.blue.strong)).shape_role(ShapeRole::Full)) };
                             Label("성공", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                        });
-                        cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
-                            cu::Box().modifier(Modifier::new().size(8.0, 8.0).background(paint(p.orange.strong)).shape_role(ShapeRole::Full));
+                        }) };
+                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], {
+                            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().size(8.0, 8.0).background(paint(p.orange.strong)).shape_role(ShapeRole::Full)) };
                             Label("실패", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                        });
-                    });
-                });
+                        }) };
+                    }) };
+                }) };
                 if !busy {
                     Label("최근 7일 동안 끝난 실행이 없습니다", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 }
-            });
-            cu::Column().spacing(SP[0]).modifier(Modifier::new().width(chart_w)).content(|| {
+            }) };
+            { use ::compose_rust::ui::Column; Column!(spacing = SP[0], modifier = Modifier::new().width(chart_w), {
                 Label("요일별 실행", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                cu::Spacer().modifier(Modifier::new().height(SP[0]));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[0])) };
                 WeekdayBars(bars, chart_w, chart_h, chart_gap);
-                cu::Row().modifier(Modifier::new().width(chart_w).height(24.0)).content(|| {
+                { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().width(chart_w).height(24.0), {
                     for b in bars {
-                        cu::Column().modifier(Modifier::new().weight(1.0)).alignment(Alignment::Center).content(|| {
+                        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), alignment = Alignment::Center, {
                             Label(
                                 b.label,
                                 Fs::Xs,
@@ -1729,11 +1689,11 @@ fn HeroCardContent(
                                 Some(paint(if b.today { p.text } else { p.muted })),
                                 Some(1),
                             );
-                        });
+                        }) };
                     }
-                });
-            });
-        });
+                }) };
+            }) };
+        }) };
 }
 
 /// The weekday bars as the mockup's `.bars2`: one pill per day clipped to its shape (`.bar
@@ -1745,44 +1705,33 @@ pub fn WeekdayBars(bars: &[DayBar; 7], chart_w: f32, chart_h: f32, chart_gap: f3
     let p = ember_theme().palette;
     let totals: Vec<usize> = bars.iter().map(|b| b.ok + b.fail).collect();
     let rects = bar_rects(&totals, chart_w, chart_h, chart_gap);
-    cu::Column().modifier(Modifier::new().size(chart_w, chart_h + 1.0)).content(|| {
-        cu::Row().spacing(chart_gap).modifier(Modifier::new().size(chart_w, chart_h)).content(|| {
+    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().size(chart_w, chart_h + 1.0), {
+        { use ::compose_rust::ui::Row; Row!(spacing = chart_gap, modifier = Modifier::new().size(chart_w, chart_h), {
             for (b, &(_, _, w, h)) in bars.iter().zip(rects.iter()) {
-                cu::Box()
-                    .modifier(Modifier::new().size(w, chart_h))
-                    .alignment(Alignment::BottomCenter)
-                    .content(|| {
+                { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().size(w, chart_h), alignment = Alignment::BottomCenter, {
                         if h <= 0.0 {
                             return;
                         }
                         let (fail_h, gap_h, ok_h) = weekday_bar_parts(h, b.ok, b.fail);
-                        cu::Column()
-                            .modifier(
-                                Modifier::new()
+                        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new()
                                     .size(w, h)
                                     .corner_radius(weekday_bar_radius(w, h))
-                                    .clip(true),
-                            )
-                            .content(|| {
+                                    .clip(true), {
                                 if fail_h > 0.0 {
-                                    cu::Box().modifier(
-                                        Modifier::new().fill_max_width().height(fail_h).background(paint(p.orange.strong)),
-                                    );
+                                    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().height(fail_h).background(paint(p.orange.strong))) };
                                 }
                                 if gap_h > 0.0 {
-                                    cu::Spacer().modifier(Modifier::new().height(gap_h));
+                                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(gap_h)) };
                                 }
                                 if ok_h > 0.0 {
-                                    cu::Box().modifier(
-                                        Modifier::new().fill_max_width().height(ok_h).background(paint(p.blue.strong)),
-                                    );
+                                    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().height(ok_h).background(paint(p.blue.strong))) };
                                 }
-                            });
-                    });
+                            }) };
+                    }) };
             }
-        });
-        cu::Spacer().modifier(Modifier::new().width(chart_w).height(1.0).background(paint(p.line)));
-    });
+        }) };
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(chart_w).height(1.0).background(paint(p.line))) };
+    }) };
 }
 
 /// A routine KPI number: `.kpi .v` 28/400 (`style.css:110`, `routines.css:64`), design review B5.
@@ -1797,10 +1746,10 @@ pub const ROUTINE_DETAIL_TITLE: (Fs, Weight) = (Fs::Lg, Weight::Semibold);
 /// compose-rust#443's `overflow_wrap` does not change it.
 fn RoutineKpiView(kpi: &RoutineKpi, index: usize) {
     let p = ember_theme().palette;
-    cu::Column().modifier(Modifier::new().weight(1.0)).spacing(SP[0]).content(|| {
+    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), spacing = SP[0], {
         Label(kpi.label, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
         if index < 3 {
-            cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], {
                 Label(&kpi.value, Fs::Xl2, ROUTINE_KPI_WEIGHT, None, Some(1));
                 if let Some(note) = &kpi.note {
                     let tone = match index {
@@ -1810,14 +1759,14 @@ fn RoutineKpiView(kpi: &RoutineKpi, index: usize) {
                     };
                     Pill(note, tone, true);
                 }
-            });
+            }) };
         } else {
             Label(&kpi.value, Fs::Xl2, ROUTINE_KPI_WEIGHT, None, Some(1));
             if let Some(note) = &kpi.note {
                 Label(note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
             }
         }
-    });
+    }) };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1837,34 +1786,28 @@ fn ListPane(
     on_toggle: impl Fn(String, bool) + Clone + 'static,
 ) {
     let p = ember_theme().palette;
-    cu::Box()
-        .modifier(
-            Modifier::new()
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                 .fill_max_width()
                 .background(paint(p.surface_2))
                 .border(1.0, paint(p.line))
                 .corner_radius(CORNER_LG)
-                .padding(13.0),
-        )
-        .content(|| {
-            cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+                .padding(13.0), {
+            { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), {
                 // v0.0.7: #328 fixed (labels stay on one line, and a weighted child keeps its
                 // longest word, #427); workaround kept until checked on a display (whether the
                 // sixth filter chip still clips at 1440; it is reachable by scrolling).
-                cu::ScrollRow()
-                    .modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0]))
-                    .content(|| {
+                { use ::compose_rust::ui::ScrollRow; ScrollRow!(modifier = Modifier::new().fill_max_width().height(H_CTL + SP[0]), {
                         let f_all = filter.clone();
                         FilterSegButton("전체", filter.get().is_none(), move || f_all.set(None));
-                        cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[1])) };
                         for name in pills {
                             let f_proj = filter.clone();
                             let n = name.clone();
                             let is_sel = filter.get().as_deref() == Some(name.as_str());
                             FilterSegButton(name, is_sel, move || f_proj.set(Some(n.clone())));
-                            cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[1])) };
                         }
-                    });
+                    }) };
                 let q_set = query.clone();
                 SearchField("루틴 검색", H_BTN, move |v| q_set.set(v));
                 if groups.is_empty() {
@@ -1881,7 +1824,7 @@ fn ListPane(
                     );
                 }
                 for g in groups {
-                    cu::Column().spacing(SP[0]).modifier(Modifier::new().fill_max_width()).content(|| {
+                    { use ::compose_rust::ui::Column; Column!(spacing = SP[0], modifier = Modifier::new().fill_max_width(), {
                         Label(&g.title(), Fs::Xs, Weight::Semibold, Some(paint(p.muted)), Some(1));
                         for r in &g.routines {
                             let runs = entries
@@ -1900,10 +1843,10 @@ fn ListPane(
                                 on_toggle.clone(),
                             );
                         }
-                    });
+                    }) };
                 }
-            });
-        });
+            }) };
+        }) };
 }
 
 fn RoutineRow(
@@ -1937,57 +1880,34 @@ fn RoutineRow(
 
     // The row is named by its routine (data), so a clear button under its content carries the
     // name and the click (`DataNamedOverlay`); the switch above it keeps its own.
-    cu::Box()
-        .modifier(
-            Modifier::new()
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                 .fill_max_width()
                 .height(103.0)
                 .background(paint(p.surface))
                 .border(1.0, paint(row_border))
                 .corner_radius(CORNER_MD)
-                .alpha(row_alpha),
-        )
-        .content(move || {
+                .alpha(row_alpha), content = move || {
             DataNamedOverlay(&routine_name, true, None, move || on_open(open_id.clone()));
-            cu::Column()
-                .spacing(SP[1])
-                .modifier(
-                    Modifier::new()
+            { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new()
                         .fill_max_width()
                         .height(103.0)
-                        .padding(SP[2]),
-                )
-                .content(move || {
-                    cu::Row()
-                        .alignment(Alignment::CenterStart)
-                        .modifier(Modifier::new().fill_max_width())
-                        .content(move || {
+                        .padding(SP[2]), content = move || {
+                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), content = move || {
                             Label(&routine_name, Fs::Md, Weight::Semibold, Some(paint(p.text)), Some(1));
-                            cu::Spacer().modifier(Modifier::new().weight(1.0));
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                             let mut toggle_fn = on_toggle;
                             RoutineSwitch(&routine_name, routine_enabled, move |v| toggle_fn(toggle_id.clone(), v));
-                        });
-                    cu::Row()
-                        .alignment(Alignment::CenterStart)
-                        .spacing(SP[2])
-                        .modifier(Modifier::new().fill_max_width())
-                        .content(move || {
+                        }) };
+                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[2], modifier = Modifier::new().fill_max_width(), content = move || {
                             TriggerPill(routine_trigger, true);
                             Label(&routine_line, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
-                        });
-                    cu::Row()
-                        .alignment(Alignment::CenterStart)
-                        .spacing(SP[1])
-                        .modifier(Modifier::new().fill_max_width())
-                        .content(move || {
-                            cu::Box()
-                                .modifier(
-                                    Modifier::new()
+                        }) };
+                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width(), content = move || {
+                            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                                         .size(8.0, 8.0)
                                         .background(paint(vendor_color))
-                                        .shape_role(ShapeRole::Full),
-                                );
-                            cu::Spacer().modifier(Modifier::new().width(SP[0]));
+                                        .shape_role(ShapeRole::Full)) };
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[0])) };
                             Label(
                                 &format!("{routine_harness} · {computer}"),
                                 Fs::Xs,
@@ -1995,17 +1915,17 @@ fn RoutineRow(
                                 Some(paint(p.muted)),
                                 Some(1),
                             );
-                            cu::Spacer().modifier(Modifier::new().weight(1.0));
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                             if let Some(r) = last_run {
                                 Pill(r.status.label(), status_tone(r.status), true);
-                                cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[1])) };
                                 Label(&ago(now, r.at), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                             } else {
                                 Label("실행 기록 없음", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                             }
-                        });
-                });
-        });
+                        }) };
+                }) };
+        }) };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2112,7 +2032,7 @@ fn DetailPane(
     let on_run_c = std::sync::Arc::clone(&on_run);
 
     EmberCard(false, true, None, Some(0.0), None, move || {
-        cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
+        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), content = move || {
             // Header: Topbar with bottom border
             if layout == DetailHeader::Icons {
                 // `.topbar.rt-dh` on a phone: 56 high, 20 in from each side, and the shared
@@ -2122,23 +2042,13 @@ fn DetailPane(
                 let toggle_fn = on_toggle_c;
                 let edit_fn = on_edit_c;
                 let run_fn = on_run_c;
-                cu::Row()
-                    .alignment(Alignment::CenterStart)
-                    .modifier(Modifier::new().fill_max_width().height(DETAIL_HEADER_H))
-                    .content(move || {
-                    cu::Spacer().modifier(Modifier::new().width(TOPBAR_PAD_X));
-                    cu::Row()
-                    .alignment(Alignment::CenterStart)
-                    .spacing(SP[1])
-                    .modifier(Modifier::new().weight(1.0))
-                    .content(move || {
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width().height(DETAIL_HEADER_H), content = move || {
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(TOPBAR_PAD_X)) };
+                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().weight(1.0), content = move || {
                         BackButton(move || on_back_fn());
-                        cu::Column()
-                            .modifier(Modifier::new().weight(1.0))
-                            .alignment(Alignment::CenterStart)
-                            .content(|| {
+                        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), alignment = Alignment::CenterStart, {
                                 Label(&routine_name_c, Fs::Md, Weight::Semibold, None, Some(1));
-                            });
+                            }) };
                         TriggerPill(routine_trigger, true);
                         RoutineSwitch(&routine_name_c, routine_enabled, move |v| toggle_fn(toggle_id_c.clone(), v));
                         // Each 32 dp square is the control itself (compose-rust#429).
@@ -2173,9 +2083,9 @@ fn DetailPane(
                                 move || NavIcon(ICON_PLAY_SVG, p.ink_text.to_argb(), 16.0),
                             );
                         }
-                    });
-                    cu::Spacer().modifier(Modifier::new().width(TOPBAR_PAD_X));
-                    });
+                    }) };
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(TOPBAR_PAD_X)) };
+                    }) };
             } else if layout == DetailHeader::Stacked {
                 // Narrow panel (768): the title and pill on top, the actions on their own row,
                 // so none of them is clipped.
@@ -2183,67 +2093,54 @@ fn DetailPane(
                 let edit_fn = on_edit;
                 let run_fn = on_run;
                 let title_name = routine_name.clone();
-                cu::Column()
-                    .spacing(SP[2])
-                    .modifier(Modifier::new().fill_max_width().padding(SP[3]))
-                    .content(move || {
-                        cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
-                            cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
+                { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width().padding(SP[3]), content = move || {
+                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[2], modifier = Modifier::new().fill_max_width(), content = move || {
+                            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), content = move || {
                                 Label(&title_name, Fs::Lg, Weight::Semibold, None, Some(2));
-                            });
+                            }) };
                             TriggerPill(routine_trigger, true);
-                        });
-                        cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+                        }) };
+                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[2], modifier = Modifier::new().fill_max_width(), content = move || {
                             RoutineSwitch(&routine_name, routine_enabled, move |v| toggle_fn(toggle_id.clone(), v));
-                            cu::Spacer().modifier(Modifier::new().weight(1.0));
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                             GlyphButton("편집", ICON_EDIT_SVG, false, move || edit_fn(edit_id.clone()));
                             RunNowButton(busy, move || run_fn(run_id.clone()));
-                        });
-                    });
+                        }) };
+                    }) };
             } else {
                 let toggle_fn = on_toggle;
                 let edit_fn = on_edit;
                 let run_fn = on_run;
                 // 56 high as the mockup's `.rt-dh`: 12 above and below the 32 dp buttons, and
                 // 4 more on each side for the card's 16.
-                cu::Row()
-                    .alignment(Alignment::CenterStart)
-                    .spacing(SP[2])
-                    .modifier(Modifier::new().fill_max_width().height(DETAIL_HEADER_H).padding(PAD_ROW_V))
-                    .content(move || {
-                        cu::Spacer().modifier(Modifier::new().width(SP[0]));
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[2], modifier = Modifier::new().fill_max_width().height(DETAIL_HEADER_H).padding(PAD_ROW_V), content = move || {
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[0])) };
                         // The title takes what the actions leave and ellipsizes, so the actions
                         // never leave the panel.
-                        cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
+                        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), content = move || {
                             Label(&routine_name, ROUTINE_DETAIL_TITLE.0, ROUTINE_DETAIL_TITLE.1, None, Some(1));
-                        });
+                        }) };
                         TriggerPill(routine_trigger, true);
                         RoutineSwitch(&routine_name_w, routine_enabled, move |v| toggle_fn(toggle_id.clone(), v));
                         GlyphButton("편집", ICON_EDIT_SVG, false, move || edit_fn(edit_id.clone()));
                         RunNowButton(busy, move || run_fn(run_id.clone()));
-                        cu::Spacer().modifier(Modifier::new().width(SP[0]));
-                    });
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[0])) };
+                    }) };
             }
-            cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().fill_max_width().height(1.0).background(paint(p.line))) };
 
-            cu::Column()
-                .spacing(DETAIL_GAP)
-                .modifier(Modifier::new().fill_max_width().padding(detail_body_pad(compact)))
-                .content(move || {
+            { use ::compose_rust::ui::Column; Column!(spacing = DETAIL_GAP, modifier = Modifier::new().fill_max_width().padding(detail_body_pad(compact)), content = move || {
                     // Schedule & Ring
-                    cu::Row().alignment(Alignment::CenterStart).spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(move || {
-                        cu::Column().modifier(Modifier::new().weight(1.0)).spacing(SP[0]).content(move || {
+                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[3], modifier = Modifier::new().fill_max_width(), content = move || {
+                        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), spacing = SP[0], content = move || {
                             Label(&when_big, if routine_trigger == Trigger::Event { Fs::Xl2 } else { detail_when_fs(compact) }, Weight::Semibold, None, Some(when_big_max_lines(routine_trigger)));
                             // The cron sits on the schedule's line, as the mockup's `.rt-sched`
                             // ("매일 오전 9시 · 0 9 * * *"), in a mono chip (R4, #848).
                             ScheduleLine(&sched_text, cron_chip.as_deref());
                             Label(&next, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                        });
-                        cu::Box()
-                            .modifier(Modifier::new().size(DETAIL_RING, DETAIL_RING))
-                            .alignment(Alignment::Center)
-                            .content(move || {
-                                cu::Canvas(ring_cmd).modifier(Modifier::new().size(DETAIL_RING, DETAIL_RING));
+                        }) };
+                        { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().size(DETAIL_RING, DETAIL_RING), alignment = Alignment::Center, content = move || {
+                                { use ::compose_rust::ui::Canvas; Canvas!(ring_cmd, modifier = Modifier::new().size(DETAIL_RING, DETAIL_RING)) };
                                 Label(
                                     &rate.map(|v| format!("{v}%")).unwrap_or_else(|| "-".to_string()),
                                     Fs::Md,
@@ -2251,15 +2148,15 @@ fn DetailPane(
                                     None,
                                     None,
                                 );
-                            });
-                    });
+                            }) };
+                    }) };
 
                     // Inset cards: 3 cards in one row on wide, 2x2 grid on narrow so the run
                     // history below stays visible above the fold on 390 dp phone screens.
                     // Every tile in a row is as high as the tallest (`.rdetail` grid `stretch`;
                     // review r3: uneven tiles at 390 and 1440).
                     if tile_cols < 3 {
-                        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+                        { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), content = move || {
                             TileRow(move || {
                                 TileCell(move || KeyValue("프로젝트", &project_name, ""));
                                 TileCell(move || AgentKeyValue(harness_kind, &harness_label, &model_title, &agent_project));
@@ -2268,7 +2165,7 @@ fn DetailPane(
                                 TileCell(move || KeyValue("컴퓨터 · 프로필", &computer, "프로필은 하네스를 따릅니다"));
                                 TileCell(move || KeyValue("권한 모드", &mode_label, ""));
                             });
-                        });
+                        }) };
                     } else {
                         TileRow(move || {
                             TileCell(move || KeyValue("프로젝트", &project_name, ""));
@@ -2278,14 +2175,14 @@ fn DetailPane(
                     }
                     // The inset pads 12 16 itself (`.inset`); no second padding inside it.
                     InsetPanel(true, move || {
-                        cu::Column().spacing(SP[0]).modifier(Modifier::new().fill_max_width()).content(move || {
+                        { use ::compose_rust::ui::Column; Column!(spacing = SP[0], modifier = Modifier::new().fill_max_width(), content = move || {
                             Label("프롬프트", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                             Label(&prompt_text, Fs::Sm, Weight::Regular, None, None);
-                        });
+                        }) };
                     });
                     // The heading sits 8 above its rows (mockup `.runtiles { margin-top: 8px }`),
                     // at the body's 14 semibold (`<b>`).
-                    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(move || {
+                    { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), content = move || {
                         Label("실행 기록", Fs::Md, Weight::Semibold, None, Some(1));
                         if entry.runs.is_empty() {
                             Label("아직 실행하지 않았습니다", Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
@@ -2293,32 +2190,32 @@ fn DetailPane(
                         // Tiles two to a row (`.runtiles`), one on a phone (R3, #848).
                         let cols = run_tile_columns(compact);
                         for pair in entry.runs.chunks(cols) {
-                            cu::Row().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                            { use ::compose_rust::ui::Row; Row!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
                                 for run in pair {
-                                    cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                                    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), {
                                         RunTile(run, now, run_is_simulated(run, demo), harness_kind, &runs_project);
-                                    });
+                                    }) };
                                 }
                                 for _ in pair.len()..cols {
-                                    cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {});
+                                    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), {}) };
                                 }
-                            });
+                            }) };
                         }
-                    });
-                });
-        });
+                    }) };
+                }) };
+        }) };
     });
 }
 
 /// A row of detail tiles: each tile as high as the row's tallest (`equal_height`), the mockup's
 /// grid `align-items: stretch` (review r3, #848).
 fn TileRow(content: impl FnOnce()) {
-    cu::Row().spacing(SP[2]).equal_height(true).modifier(Modifier::new().fill_max_width()).content(content);
+    { use ::compose_rust::ui::Row; Row!(spacing = SP[2], intrinsic_size = true, modifier = Modifier::new().fill_max_width(), content = content) };
 }
 
 /// One cell of a `TileRow`: a share of the width and the row's whole height.
 fn TileCell(content: impl FnOnce()) {
-    cu::Box().modifier(Modifier::new().weight(1.0).fill_max_height()).content(content);
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().weight(1.0).fill_max_height(), content = content) };
 }
 
 /// The detail tile's inset (`.inset`: `surface-2`, `corner-md`, 12 16 padding), filling the
@@ -2326,22 +2223,18 @@ fn TileCell(content: impl FnOnce()) {
 /// short tile stood shorter than its neighbour.
 fn TileInset(content: impl FnOnce()) {
     let p = ember_theme().palette;
-    cu::Box()
-        .modifier(
-            Modifier::new()
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                 .fill_max_width()
                 .fill_max_height()
                 .background(paint(p.surface_2))
                 .corner_radius(CORNER_MD)
-                .padding(PAD_ROW_V),
-        )
-        .content(|| {
-            cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
-                cu::Spacer().modifier(Modifier::new().width(SP[0]));
-                cu::Column().modifier(Modifier::new().weight(1.0)).content(content);
-                cu::Spacer().modifier(Modifier::new().width(SP[0]));
-            });
-        });
+                .padding(PAD_ROW_V), {
+            { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width(), {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[0])) };
+                { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), content = content) };
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[0])) };
+            }) };
+        }) };
 }
 
 fn KeyValue(title: &str, value: &str, sub: &str) {
@@ -2351,17 +2244,14 @@ fn KeyValue(title: &str, value: &str, sub: &str) {
     let s = sub.to_string();
     // The inset pads 12 16 itself (`.inset`); a second padding inside doubled it (#494).
     TileInset(move || {
-        cu::Column()
-            .spacing(SP[0])
-            .modifier(Modifier::new().fill_max_width())
-            .content(move || {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[0], modifier = Modifier::new().fill_max_width(), content = move || {
                 Label(&t, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 // Two lines, then an ellipsis: the tile is at least a third of the panel.
                 Label(&v, Fs::Sm, Weight::Medium, None, Some(2));
                 if !s.is_empty() {
                     Label(&s, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
                 }
-            });
+            }) };
     });
 }
 
@@ -2370,19 +2260,16 @@ fn AgentKeyValue(agent: &'static str, label: &str, sub: &str, project: &str) {
     let p = ember_theme().palette;
     let (v, s, proj) = (label.to_string(), sub.to_string(), project.to_string());
     TileInset(move || {
-        cu::Column()
-            .spacing(SP[0])
-            .modifier(Modifier::new().fill_max_width())
-            .content(move || {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[0], modifier = Modifier::new().fill_max_width(), content = move || {
                 Label("에이전트", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], {
                     Character(agent, false, 20.0, &v, &proj, CharState::Idle, None);
                     Label(&v, Fs::Sm, Weight::Medium, None, Some(1));
-                });
+                }) };
                 if !s.is_empty() {
                     Label(&s, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
                 }
-            });
+            }) };
     });
 }
 
@@ -2430,21 +2317,17 @@ fn RunTile(run: &Run, now: Minutes, simulated: bool, agent: &'static str, projec
         .background(paint(p.surface_2))
         .corner_radius(CORNER_MD);
     let content = move || {
-        cu::Row()
-            .alignment(Alignment::CenterStart)
-            .spacing(RUN_TILE_PAD)
-            .modifier(Modifier::new().fill_max_width().padding(RUN_TILE_PAD))
-            .content(|| {
+        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = RUN_TILE_PAD, modifier = Modifier::new().fill_max_width().padding(RUN_TILE_PAD), {
                 Character(agent, false, RUN_TILE_AVATAR, name, &project, state, None);
-                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), {
                     Label(&row.when, Fs::Xs, Weight::Semibold, None, Some(1));
                     Label(&sub, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                });
+                }) };
                 Pill(row.status, tone, true);
                 if let Some(flag) = row.flag {
                     Pill(flag, PillTone::Grey, true);
                 }
-            });
+            }) };
     };
     // A tile with a session is the control itself, named 세션 열기 (compose-rust#429); one
     // without a session is a plain box.
@@ -2459,7 +2342,7 @@ fn RunTile(run: &Run, now: Minutes, simulated: bool, agent: &'static str, projec
             NamedClickable(OPEN_SESSION_LABEL, tile, Alignment::CenterStart, open, content);
         }
         None => {
-            cu::Box().modifier(tile).alignment(Alignment::CenterStart).content(content);
+            { use ::compose_rust::ui::Box; Box!(modifier = tile, alignment = Alignment::CenterStart, content = content) };
         }
     }
 }
@@ -2547,40 +2430,33 @@ pub(super) fn RoutineForm(
         );
         let mut close_x = on_close.clone();
         EmberCard(false, true, None, Some(0.0), None, move || {
-            cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
-                cu::Row()
-                    .alignment(Alignment::CenterStart)
-                    .spacing(SP[2])
-                    .modifier(Modifier::new().fill_max_width().height(64.0).padding(16.0))
-                    .content(move || {
-                        cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), content = move || {
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[2], modifier = Modifier::new().fill_max_width().height(64.0).padding(16.0), content = move || {
+                        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), {
                             Label(title, Fs::Xl, Weight::Semibold, None, Some(1));
-                        });
+                        }) };
                         let mut close = close;
                         AppButton("취소", None, ButtonKind::Default, true, true, false, move || close());
                         AppButton("저장", None, ButtonKind::Primary, true, true, false, save);
                         // The mockup's close button beside 취소 and 저장 (R7, #848).
                         CloseButton(move || close_x());
-                    });
-                cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+                    }) };
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().fill_max_width().height(1.0).background(paint(p.line))) };
                 // The first error also sits under the header buttons once a save was tried, so
                 // it is seen without scrolling to the end of the form.
                 if ctx.tried.get() {
                     if let Some(e) = ctx.draft.get().errors_with_initial(ctx.editing.then_some(&ctx.initial)).first() {
-                        cu::Column().modifier(Modifier::new().fill_max_width().padding(16.0)).content(|| {
+                        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width().padding(16.0), {
                             Label(e.message(), Fs::Sm, Weight::Medium, Some(paint(p.red.strong)), Some(2));
-                        });
+                        }) };
                     }
                 }
-                cu::Column()
-                    .spacing(SP[3])
-                    .modifier(Modifier::new().fill_max_width().padding(16.0))
-                    .content(move || {
+                { use ::compose_rust::ui::Column; Column!(spacing = SP[3], modifier = Modifier::new().fill_max_width().padding(16.0), content = move || {
                         FormFields(&ctx);
                         // The last field clears the page bottom.
-                        cu::Spacer().modifier(Modifier::new().height(SP[4]));
-                    });
-            });
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[4])) };
+                    }) };
+            }) };
         });
         return;
     }
@@ -2610,27 +2486,20 @@ pub(super) fn RoutineForm(
         move || {
             let mut c = close.clone();
             AppButton("취소", None, ButtonKind::Default, true, true, false, move || c());
-            cu::Spacer().modifier(Modifier::new().width(SP[0]));
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[0])) };
             let save = form_save_handler(draft.clone(), tried.clone(), editing_initial.clone(), save_cb.clone());
             AppButton("저장", None, ButtonKind::Primary, true, true, false, save);
-            cu::Spacer().modifier(Modifier::new().width(SP[1]));
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[1])) };
         }
     };
     EmberSheet(title, true, on_close.clone(), wraps.then_some(&mut header_actions as &mut dyn FnMut()), move || {
             let fields = || {
-                cu::Column()
-                    .spacing(SP[3])
-                    .modifier(Modifier::new().fill_max_width().padding(SP[4]))
-                    .content(|| FormFields(&ctx));
+                { use ::compose_rust::ui::Column; Column!(spacing = SP[3], modifier = Modifier::new().fill_max_width().padding(SP[4]), content = || FormFields(&ctx)) };
             };
             if wraps {
-                cu::Column()
-                    .modifier(Modifier::new().fill_max_width())
-                    .content(fields);
+                { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), content = fields) };
             } else {
-                cu::ScrollColumn()
-                    .modifier(Modifier::new().fill_max_width().height(body_height))
-                    .content(fields);
+                { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().fill_max_width().height(body_height), content = fields) };
                 SheetFooter(move || {
                     let mut close = on_close.clone();
                     AppButton("취소", None, ButtonKind::Default, true, true, false, move || close());
@@ -2830,11 +2699,11 @@ fn FormFields(ctx: &FormCtx) {
         if let [a, b] = row[..] {
             // The mockup's `.form` grid: 16 between the columns, 8 under each label.
             let half = ((field_w - SP[3]) / 2.0).max(0.0);
-            cu::Row().spacing(SP[3]).alignment(Alignment::TopStart).modifier(Modifier::new().fill_max_width()).content(|| {
+            { use ::compose_rust::ui::Row; Row!(spacing = SP[3], alignment = Alignment::TopStart, modifier = Modifier::new().fill_max_width(), {
                 for f in [a, b] {
-                    cu::Column().spacing(SP[1]).modifier(Modifier::new().weight(1.0)).content(|| field(f, half, true));
+                    { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().weight(1.0), content = || field(f, half, true)) };
                 }
-            });
+            }) };
         } else {
             for f in row {
                 field(f, field_w, false);
@@ -3834,8 +3703,8 @@ mod tests {
         let src = include_str!("components.rs");
         // `InsetPanel` hands its arguments to `InsetPanelSized`, which builds the row (#886).
         let inset = src.split("pub fn InsetPanelSized(").nth(1).unwrap().split("\n}\n").next().unwrap();
-        assert!(inset.contains("cu::Row().modifier(Modifier::new().fill_max_width_if(fill_max_width))"));
-        assert!(inset.contains("cu::Column().modifier(Modifier::new().weight(1.0)).content(content)"));
+        assert!(inset.contains("Row!(modifier = Modifier::new().fill_max_width_if(fill_max_width), {"));
+        assert!(inset.contains("Column!(modifier = Modifier::new().weight(1.0), content = content)"));
     }
 
     #[test]
@@ -5285,7 +5154,8 @@ mod design_review_tests {
             assert!(has_mod(inset[0], "FillMaxHeight"), "the inset fills the cell: {:?}", inset[0]);
         }
         let src = source();
-        assert!(!src.contains("cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {\n                                    KeyValue("));
+        assert!(!src.contains("Column!(modifier = Modifier::new().weight(1.0), content = move || {\n                                    KeyValue("));
+
     }
 
     fn sample_sheet_form() {
@@ -5476,7 +5346,7 @@ mod design_review_tests {
     #[test]
     fn design_r6_r7_inline_form_stays_in_its_column() {
         let src = source();
-        assert!(src.contains("cu::Column().modifier(Modifier::new().weight(1.0).clip(true)).content(|| {\n                                    if let (true, Some((initial, editing))) = (inline_form"));
+        assert!(src.contains("Column!(modifier = Modifier::new().weight(1.0).clip(true), {\n                                    if let (true, Some((initial, editing))) = (inline_form"));
         assert!(src.contains("CloseButton(move || close_x());"));
         assert!(src.contains("let two = form_two_columns(ctx.layout, field_w);"));
         let label = src.split("fn FormLabel(").nth(1).unwrap().split("\n}\n").next().unwrap();

@@ -43,7 +43,7 @@ fn OwnerClaimForm(view: &ClaimView, prompt: Prompt) {
         move || dismiss(&v)
     };
     EmberSheet(title, true, close.clone(), None, || {
-        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| match &prompt {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width().padding(SP[4]), content = || match &prompt {
             Prompt::Code { holders, left, checking } => {
                 Label(claim::CODE_LINE, Fs::Sm, Weight::Regular, None, Some(4));
                 if *holders > 0 {
@@ -81,7 +81,7 @@ fn OwnerClaimForm(view: &ClaimView, prompt: Prompt) {
                     Label(&format!("기다리는 요청이 {more}개 더 있습니다."), Fs::Xs, Weight::Regular, muted, Some(1));
                 }
             }
-        });
+        }) };
         SheetFooter(|| match &prompt {
             Prompt::Code { checking, .. } => {
                 AppButton(claim::LATER, None, ButtonKind::Default, true, true, false, close.clone());

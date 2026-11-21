@@ -61,3 +61,35 @@ async fn fr_x7_metrics_relay_returns_the_node_sample_and_errors_map() {
     })
     .await;
 }
+
+/// #981: the local computer (`local`) answers from the server's in-process node, not 400, and
+/// carries the pids of the agents this server started (#389).
+#[tokio::test]
+async fn fr_x7_metrics_relay_answers_for_the_local_computer_from_the_in_process_node() {
+    within(async {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let computers = Computers::new(Registry::new(store), computers::default_connector());
+        let app = computers::metrics::router(computers);
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+
+        // This test process stands in for an agent of session `fr-x7-local`.
+        ember_server::agents::proc::note_agent_pid("fr-x7-local", std::process::id());
+
+        let r = reqwest::get(format!("{base}/api/computers/{}/metrics?top=3", computers::LOCAL)).await.unwrap();
+        assert_eq!(r.status(), 200, "{:?}", r.text().await);
+        let s: MetricsSample = r.json().await.unwrap();
+        assert!(!s.cpu.cores.is_empty());
+        assert!(s.processes.len() <= 3);
+        assert!(
+            s.sessions.iter().any(|p| p.session == "fr-x7-local" && p.pid == std::process::id()),
+            "{:?}",
+            s.sessions
+        );
+        // Power is never invented: empty with the reason.
+        assert!(s.processes.iter().all(|p| p.power_watts.is_none()));
+        assert!(s.power_reason.is_some());
+    })
+    .await;
+}

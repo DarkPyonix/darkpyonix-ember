@@ -857,6 +857,8 @@ mod tests {
                     cpu: Some(12.5),
                     mem: Some(256),
                     session: None,
+                    power: None,
+                    process: None,
                 };
                 ProcessRowView(&row, |_| {});
             }))
@@ -1018,5 +1020,66 @@ mod tests {
                 at = parent(id);
             }
         }
+    }
+
+    // ---- #389: chip and OS badges, member rows and power ----
+
+    fn telemetry_feed() -> MonitorFeed {
+        let s: ember_client::api::MetricsSample = serde_json::from_value(serde_json::json!({
+            "at_ms": 1000,
+            "chip": "Apple M2 Pro",
+            "os_name": "macOS",
+            "os_version": "15.2",
+            "cpu": {"total_percent": 25.0, "cores": [10.0, 40.0]},
+            "memory": {"total_bytes": 17179869184u64, "used_bytes": 8589934592u64,
+                       "swap_total_bytes": 0, "swap_used_bytes": 0},
+            "processes": [{"pid": 7, "name": "claude", "cpu_percent": 3.0, "memory_bytes": 1048576, "power_watts": 2.25}],
+            "sessions": [{"pid": 7, "session": "s1"}],
+            "process_count": 9
+        }))
+        .unwrap();
+        let mut f = MonitorFeed::default();
+        f.push(s);
+        f
+    }
+
+    #[test]
+    fn fr_l21_the_status_card_draws_chip_ram_and_os_badges() {
+        let _guard = crate::services::test_guard();
+        fn ui() {
+            StatusCard(&chip(), &telemetry_feed(), true, false);
+        }
+        let text = composed_text(ui);
+        let at = |want: &str| text.find(&format!("\"{want}\"")).unwrap_or_else(|| panic!("missing {want}: {text}"));
+        // The mockup's order: chip, RAM, OS.
+        assert!(at("Apple M2 Pro") < at("16.0 GB") && at("16.0 GB") < at("macOS 15.2"));
+    }
+
+    #[test]
+    fn fr_l21_a_member_row_shows_the_member_the_process_and_the_power() {
+        let _guard = crate::services::test_guard();
+        fn ui() {
+            let f = telemetry_feed();
+            let s = f.latest().unwrap();
+            let members = [crate::ui::project::Member {
+                session_id: "s1".into(),
+                name: "ember-리더".into(),
+                task: String::new(),
+                agent: "claude-code".into(),
+                status: ember_client::LauncherStatus::Running,
+                leader: true,
+                updated_at: 0,
+            }];
+            let rows = crate::ui::monitor::member_rows(crate::ui::monitor::process_rows(s), &s.sessions, &members);
+            assert!(rows[0].session.is_some());
+            ProcessRowView(&rows[0], |_| {});
+        }
+        let text = composed_text(ui);
+        for want in ["\"ember-리더 (리더)\"", "\"claude\"", "\"2.3\"", "\"7\""] {
+            assert!(text.contains(want), "missing {want}: {text}");
+        }
+        // The columns follow the mockup: 이름, PID, CPU, 전력, 메모리.
+        let production = include_str!("monitor.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(production.contains("[SortKey::Name, SortKey::Pid, SortKey::Cpu, SortKey::Power, SortKey::Memory]"));
     }
 }

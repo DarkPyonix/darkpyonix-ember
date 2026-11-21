@@ -2236,6 +2236,15 @@ mod tests {
     }
 
     #[test]
+    fn fr_l21_demo_sample_has_chip_os_power_and_a_member_session() {
+        let s = metrics_sample(1_000_000);
+        assert!(s.chip.is_some() && s.os_name.is_some() && s.os_version.is_some());
+        assert!(s.processes.iter().any(|p| p.power_watts.is_some()));
+        let claude = s.processes.iter().find(|p| p.name == "claude").unwrap();
+        assert_eq!(s.sessions, vec![ember_client::api::SessionProcess { pid: claude.pid, session: "demo-s1".into() }]);
+    }
+
+    #[test]
     fn fr_l21_demo_feed_has_a_network_rate_after_the_first_poll() {
         let now = 1_000_000u64;
         let mut f = crate::ui::monitor::MonitorFeed::default();

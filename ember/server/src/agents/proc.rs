@@ -656,3 +656,30 @@ pub async fn drain_surviving_lines(
     rt.store.clear_shim_offset(session)?;
     Ok(lines)
 }
+
+#[cfg(test)]
+mod agent_pid_tests {
+    use super::*;
+
+    #[test]
+    fn fr_x7_agent_pids_are_kept_per_session_and_dead_ones_dropped() {
+        let me = std::process::id();
+        note_agent_pid("fr-x7-a", me);
+        assert!(agent_pids().contains(&("fr-x7-a".to_string(), me)));
+        // A pid of 0 is no process.
+        note_agent_pid("fr-x7-zero", 0);
+        assert!(!agent_pids().iter().any(|(s, _)| s == "fr-x7-zero"));
+        #[cfg(unix)]
+        {
+            // A process that has exited (and been reaped) is dropped.
+            let mut child = std::process::Command::new("true").spawn().unwrap();
+            let dead = child.id();
+            child.wait().unwrap();
+            note_agent_pid("fr-x7-b", dead);
+            assert!(!agent_pids().iter().any(|(s, _)| s == "fr-x7-b"));
+            // A new pid for a session replaces the old one.
+            note_agent_pid("fr-x7-a", dead);
+            assert!(!agent_pids().iter().any(|(s, _)| s == "fr-x7-a"));
+        }
+    }
+}

@@ -131,7 +131,7 @@ mod tests {
     use super::*;
 
     fn p(pid: u32, cpu: f32, mem: u64) -> ProcessMetrics {
-        ProcessMetrics { pid, name: format!("p{pid}"), cpu_percent: cpu, memory_bytes: mem }
+        ProcessMetrics { pid, name: format!("p{pid}"), cpu_percent: cpu, memory_bytes: mem, power_watts: None }
     }
 
     #[test]
@@ -172,5 +172,54 @@ mod tests {
         assert!(s.process_count as usize >= s.processes.len());
         assert!(s.processes.iter().any(|x| x.pid == std::process::id()) || s.process_count > 5);
         assert!(s.at_ms > 0);
+    }
+
+    // ---- #389: chip, OS and power ----
+
+    #[test]
+    fn fr_x7_os_release_gives_name_and_version() {
+        let text = "PRETTY_NAME=\"Ubuntu 24.04.1 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nVERSION=\"24.04.1 LTS (Noble Numbat)\"\nID=ubuntu\n";
+        assert_eq!(os_release(text), (Some("Ubuntu".into()), Some("24.04".into())));
+        // No VERSION_ID (a rolling release): VERSION, else nothing.
+        assert_eq!(os_release("NAME=Arch Linux\nVERSION=rolling\n"), (Some("Arch Linux".into()), Some("rolling".into())));
+        assert_eq!(os_release("NAME='Alpine Linux'\n"), (Some("Alpine Linux".into()), None));
+        // PRETTY_NAME and VERSION_CODENAME are not NAME or VERSION.
+        assert_eq!(os_release("PRETTY_NAME=x\nVERSION_CODENAME=noble\n"), (None, None));
+        assert_eq!(os_release("NAME=\"\"\n"), (None, None));
+    }
+
+    #[test]
+    fn fr_x7_chip_name_is_trimmed_and_empty_is_none() {
+        assert_eq!(chip_name("  Apple M2 Pro "), Some("Apple M2 Pro".into()));
+        assert_eq!(chip_name("Intel(R) Core(TM) i7-9750H CPU   @ 2.60GHz"), Some("Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz".into()));
+        assert_eq!(chip_name("   "), None);
+        assert_eq!(chip_name(""), None);
+    }
+
+    #[test]
+    fn fr_x7_sample_reports_chip_and_os_and_never_invents_power() {
+        let s = sample(5);
+        if let Some(chip) = &s.chip {
+            assert!(!chip.trim().is_empty() && chip.trim() == chip, "{chip:?}");
+        }
+        if cfg!(any(target_os = "macos", target_os = "linux")) {
+            assert!(s.os_name.as_deref().is_some_and(|n| !n.is_empty()), "{:?}", s.os_name);
+        }
+        assert!(s.processes.iter().all(|p| p.power_watts.is_none()), "no per-process energy API is verified");
+        assert_eq!(s.power_reason.as_deref(), Some(POWER_UNAVAILABLE));
+        assert!(s.sessions.is_empty(), "the node does not know sessions; the server fills them");
+    }
+
+    #[test]
+    fn fr_x7_an_older_sample_without_the_new_fields_still_decodes() {
+        let v = serde_json::json!({
+            "at_ms": 1, "cpu": {"total_percent": null, "cores": []}, "memory": null, "disks": [],
+            "network": [], "temperatures": [], "gpu": {"devices": [], "reason": null},
+            "processes": [{"pid": 1, "name": "a", "cpu_percent": 0.0, "memory_bytes": 0}], "process_count": 1
+        });
+        let s: MetricsSample = serde_json::from_value(v).unwrap();
+        assert_eq!((s.chip, s.os_name, s.os_version, s.power_reason), (None, None, None, None));
+        assert!(s.sessions.is_empty());
+        assert_eq!(s.processes[0].power_watts, None);
     }
 }

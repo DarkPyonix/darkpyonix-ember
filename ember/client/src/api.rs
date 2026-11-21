@@ -2240,6 +2240,32 @@ mod metrics_tests {
     }
 
     #[test]
+    fn fr_x7_a_sample_decodes_chip_os_power_and_sessions_and_an_older_node_leaves_them_empty() {
+        let s: MetricsSample = serde_json::from_value(serde_json::json!({
+            "at_ms": 5,
+            "chip": "Apple M2 Pro",
+            "os_name": "macOS",
+            "os_version": "15.2",
+            "power_reason": "not collected",
+            "processes": [{"pid": 7, "name": "claude", "cpu_percent": 3.0, "memory_bytes": 1, "power_watts": 1.5}],
+            "sessions": [{"pid": 7, "session": "s1"}]
+        }))
+        .unwrap();
+        assert_eq!(s.chip.as_deref(), Some("Apple M2 Pro"));
+        assert_eq!((s.os_name.as_deref(), s.os_version.as_deref()), (Some("macOS"), Some("15.2")));
+        assert_eq!(s.power_reason.as_deref(), Some("not collected"));
+        assert_eq!(s.processes[0].power_watts, Some(1.5));
+        assert_eq!(s.sessions, vec![SessionProcess { pid: 7, session: "s1".into() }]);
+        let old: MetricsSample = serde_json::from_value(serde_json::json!({
+            "at_ms": 5, "processes": [{"pid": 7, "name": "a", "cpu_percent": 0.0, "memory_bytes": 0}]
+        }))
+        .unwrap();
+        assert_eq!((old.chip, old.os_name, old.os_version, old.power_reason), (None, None, None, None));
+        assert!(old.sessions.is_empty());
+        assert_eq!(old.processes[0].power_watts, None);
+    }
+
+    #[test]
     fn fr_x7_a_full_sample_decodes() {
         let s: MetricsSample = serde_json::from_value(json!({
             "at_ms": 5,

@@ -943,6 +943,8 @@ mod tests {
             session: None,
             agent: "claude-code".into(),
             leader: false,
+            power: None,
+            process: None,
         }
     }
 
@@ -1143,8 +1145,9 @@ mod tests {
             network: vec![NetMetrics { interface: "en0".into(), rx_bytes: rx, tx_bytes: tx }],
             temperatures: vec![TempMetrics { label: "cpu".into(), celsius: 51.5 }],
             gpu: GpuReport { devices: vec![], reason: Some("GPU를 읽을 수 없습니다".into()) },
-            processes: vec![ProcessMetrics { pid: 7, name: "node".into(), cpu_percent: 3.0, memory_bytes: 1 << 20 }],
+            processes: vec![ProcessMetrics { pid: 7, name: "node".into(), cpu_percent: 3.0, memory_bytes: 1 << 20, ..Default::default() }],
             process_count: 321,
+            ..Default::default()
         }
     }
 
@@ -1284,9 +1287,9 @@ mod tests {
     fn fr_l21_live_processes_sort_by_cpu_or_memory() {
         let mut s = sample(1, 0, 0);
         s.processes = vec![
-            ProcessMetrics { pid: 1, name: "a".into(), cpu_percent: 1.0, memory_bytes: 900 },
-            ProcessMetrics { pid: 2, name: "b".into(), cpu_percent: 9.0, memory_bytes: 100 },
-            ProcessMetrics { pid: 3, name: "c".into(), cpu_percent: 5.0, memory_bytes: 500 },
+            ProcessMetrics { pid: 1, name: "a".into(), cpu_percent: 1.0, memory_bytes: 900, ..Default::default() },
+            ProcessMetrics { pid: 2, name: "b".into(), cpu_percent: 9.0, memory_bytes: 100, ..Default::default() },
+            ProcessMetrics { pid: 3, name: "c".into(), cpu_percent: 5.0, memory_bytes: 500, ..Default::default() },
         ];
         let mut rows = process_rows(&s);
         sort_rows(&mut rows, SortState { key: SortKey::Cpu, descending: true });
@@ -1396,5 +1399,116 @@ mod tests {
         assert_eq!(labels, ["자동", "냉각", "최대"]);
         assert!(!FAN_MODE_AVAILABLE);
         assert!(FAN_MODE_REASON.ends_with("없습니다"));
+    }
+
+    // ---- #389: chip, OS, power and member rows (FR-L21, FR-X7) ----
+
+    fn sp(pid: u32, session: &str) -> ember_client::api::SessionProcess {
+        ember_client::api::SessionProcess { pid, session: session.into() }
+    }
+
+    #[test]
+    fn fr_l21_os_text_joins_name_and_version() {
+        let mut s = sample(1, 0, 0);
+        assert_eq!(os_text(&s), None);
+        s.os_name = Some("macOS".into());
+        assert_eq!(os_text(&s).as_deref(), Some("macOS"));
+        s.os_version = Some(" 15.2 ".into());
+        assert_eq!(os_text(&s).as_deref(), Some("macOS 15.2"));
+        s.os_name = Some("  ".into());
+        assert_eq!(os_text(&s).as_deref(), Some("15.2"));
+    }
+
+    #[test]
+    fn fr_l21_status_badges_are_chip_ram_and_os_in_order() {
+        let mut s = sample(1, 0, 0);
+        // Only what the node reports: the RAM alone.
+        assert_eq!(status_badges(&s), ["16.0 GB"]);
+        s.chip = Some("Apple M2 Pro".into());
+        s.os_name = Some("macOS".into());
+        s.os_version = Some("15.2".into());
+        assert_eq!(status_badges(&s), ["Apple M2 Pro", "16.0 GB", "macOS 15.2"]);
+        s.chip = Some(" ".into());
+        s.memory = None;
+        assert_eq!(status_badges(&s), ["macOS 15.2"]);
+    }
+
+    #[test]
+    fn fr_l21_power_text_has_one_decimal_or_a_dash() {
+        assert_eq!(power_text(Some(2.345)), "2.3");
+        assert_eq!(power_text(Some(0.0)), "0.0");
+        assert_eq!(power_text(None), "-");
+        assert_eq!(power_text(Some(f32::NAN)), "-");
+    }
+
+    #[test]
+    fn fr_x7_process_rows_carry_power() {
+        let mut s = sample(1, 0, 0);
+        s.processes = vec![
+            ProcessMetrics { pid: 1, name: "a".into(), power_watts: Some(1.5), ..Default::default() },
+            ProcessMetrics { pid: 2, name: "b".into(), power_watts: Some(f32::INFINITY), ..Default::default() },
+            ProcessMetrics { pid: 3, name: "c".into(), ..Default::default() },
+        ];
+        let rows = process_rows(&s);
+        assert_eq!(rows.iter().map(|r| r.power).collect::<Vec<_>>(), [Some(1.5), None, None]);
+    }
+
+    #[test]
+    fn fr_l21_sort_by_power_puts_unknown_last() {
+        let mut rows = vec![row("a", Some(1), None, None), row("b", Some(2), None, None), row("c", Some(3), None, None)];
+        rows[0].power = Some(1.0);
+        rows[2].power = Some(4.0);
+        let s = toggle_sort(SortState::default(), SortKey::Power);
+        assert_eq!((s.key, s.descending), (SortKey::Power, true));
+        sort_rows(&mut rows, s);
+        assert_eq!(names(&rows), ["c", "a", "b"]);
+        sort_rows(&mut rows, toggle_sort(s, SortKey::Power));
+        assert_eq!(names(&rows), ["a", "c", "b"]);
+    }
+
+    #[test]
+    fn fr_l21_member_rows_match_session_pids_and_list_the_rest() {
+        let mut s = sample(1, 0, 0);
+        s.processes = vec![
+            ProcessMetrics { pid: 10, name: "claude".into(), cpu_percent: 20.0, ..Default::default() },
+            ProcessMetrics { pid: 11, name: "node".into(), cpu_percent: 5.0, ..Default::default() },
+        ];
+        // s1 runs as pid 10 (listed), s2 as pid 99 (not in the top list), s9 is not a member
+        // of this computer's projects, s3 reported no pid.
+        let sessions = [sp(10, "s1"), sp(99, "s2"), sp(11, "s9")];
+        let members = [member("s1", true), member("s2", false), member("s3", false)];
+        let rows = member_rows(process_rows(&s), &sessions, &members);
+        assert_eq!(rows.len(), 3);
+        let r = &rows[0];
+        assert_eq!((r.pid, r.session.as_deref(), r.name.as_str()), (Some(10), Some("s1"), "m-s1"));
+        assert_eq!((r.process.as_deref(), r.cpu, r.leader, r.agent.as_str()), (Some("claude"), Some(20.0), true, "claude-code"));
+        // Another session's pid is not marked.
+        assert_eq!((rows[1].pid, rows[1].session.as_deref(), rows[1].name.as_str()), (Some(11), None, "node"));
+        let r = &rows[2];
+        assert_eq!((r.pid, r.session.as_deref(), r.cpu, r.mem, r.power), (Some(99), Some("s2"), None, None, None));
+        // Nothing reported: the rows are unchanged.
+        assert_eq!(member_rows(process_rows(&s), &[], &members), process_rows(&s));
+    }
+
+    #[test]
+    fn fr_l21_member_note_only_with_a_member_row() {
+        let plain = vec![row("a", Some(1), None, None)];
+        assert_eq!(member_note(&plain), None);
+        let mut mine = plain.clone();
+        mine[0].session = Some("s1".into());
+        assert_eq!(member_note(&mine), Some("팀원 행을 누르면 그 팀원의 세션으로 이동합니다."));
+    }
+
+    #[test]
+    fn fr_l21_title_os_is_hidden_on_a_phone() {
+        let mut s = sample(1, 0, 0);
+        s.os_name = Some("Ubuntu".into());
+        s.os_version = Some("24.04".into());
+        let mut f = MonitorFeed::default();
+        assert_eq!(title_os(&f, 1440.0), None, "nothing before a sample");
+        f.push(s);
+        assert_eq!(title_os(&f, 1440.0).as_deref(), Some("Ubuntu 24.04"));
+        assert_eq!(title_os(&f, 561.0).as_deref(), Some("Ubuntu 24.04"));
+        assert_eq!(title_os(&f, 560.0), None, "`.mon-os{display:none}` at 560 and below");
     }
 }

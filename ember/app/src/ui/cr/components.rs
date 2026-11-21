@@ -3476,7 +3476,7 @@ mod tests {
     fn fr_l32_bottom_sheet_wraps_its_content_up_to_the_fraction() {
         // compose-rust#445: the bottom sheet takes a maximum height instead of a fixed one.
         let production = include_str!("components.rs").split("#[cfg(test)]").next().unwrap();
-        let sized = production.split("pub fn EmberSheetSized(").nth(1).unwrap();
+        let sized = production.split("pub fn EmberSheetSized<'t>(").nth(1).unwrap();
         let bottom = sized.split("if presentation == SheetPresentation::Bottom {").nth(1).unwrap();
         let bottom = bottom.split("} else if presentation == SheetPresentation::FullScreen {").next().unwrap();
         assert!(bottom.contains("max_height_fraction = SHEET_BOTTOM_MAX_FRACTION"));

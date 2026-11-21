@@ -1598,6 +1598,6 @@ mod tests {
         f.push(s);
         assert_eq!(title_os(&f, 1440.0).as_deref(), Some("Ubuntu 24.04"));
         assert_eq!(title_os(&f, 561.0).as_deref(), Some("Ubuntu 24.04"));
-        assert_eq!(title_os(&f, 560.0), None, "`.mon-os{display:none}` at 560 and below");
+        assert_eq!(title_os(&f, 560.0), None, "`.mon-os{{display:none}}` at 560 and below");
     }
 }

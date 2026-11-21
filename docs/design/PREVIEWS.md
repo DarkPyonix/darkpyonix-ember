@@ -24,8 +24,12 @@ For each row of `.github/scripts/preview/screens.tsv`, at each size and theme, i
 Sizes: 1440x900, 1024x800, 768x900, 390x844. Themes: light and dark.
 
 It runs on macOS only for now, because it uses `screencapture`, CoreGraphics window ids and
-`sips`. It needs a display and the Screen Recording permission for the terminal that runs it, so
-it is not a CI job.
+`sips`. It needs a display and the Screen Recording permission for the terminal that runs it. The
+CI job "Screen previews" (`.github/workflows/test-previews.yml`, #222) runs it on a hosted
+`macos-15` runner and uploads the images as the artifact `ember-previews-macos`; it has not run
+yet, so its capture step does not fail the run until the first green run. The mockup is not in this
+public repository, so the job writes app captures only until the repository variable
+`EMBER_PREVIEW_MOCKUP_DIR` names a mockup folder in the checkout (an owner decision).
 
 ### How to run
 
@@ -37,7 +41,7 @@ MOCKUP_DIR=/path/to/design-mockup .github/scripts/preview/side-by-side.sh --only
 
 | Variable | Meaning | Default |
 |---|---|---|
-| `MOCKUP_DIR` | The mockup folder. It is not in git, so it is required. | none |
+| `MOCKUP_DIR` | The mockup folder. It is not in git. Without it, only the app is captured (no pairs, no `uv` needed). | none |
 | `EMBER_APP_BIN` | The client binary. A debug build, because the review hooks exist in debug builds only. | `ember/app/target/debug/ember-app` |
 | `OUT_DIR` | Output folder. | `.scratch/preview/` |
 | `CHROME_BIN` | The browser that renders the mockup. | Playwright's cached Chromium, then Google Chrome |
@@ -78,7 +82,7 @@ Known limits:
 
 compose-rust v0.0.11 has no preview API: no `#[Preview]` macro and no preview binary. FR-54
 exists only as a draft (compose-rust issue #357). Until it lands, there is no preview function
-per screen state, no fixed clock and no CI artifact. When it lands, each row of the table becomes
+per screen state and no fixed clock. When it lands, each row of the table becomes
 a `#[Preview]` entry and the script takes the app image from the preview render instead of from
 a window capture (#222).
 
@@ -102,7 +106,10 @@ a window capture (#222).
 크기는 1440x900, 1024x800, 768x900, 390x844이고 테마는 라이트와 다크다.
 
 지금은 macOS에서만 돈다. `screencapture`, CoreGraphics 창 id, `sips`를 쓰기 때문이다. 디스플레이와
-실행하는 터미널의 화면 기록 권한이 필요하므로 CI 작업이 아니다.
+실행하는 터미널의 화면 기록 권한이 필요하다. CI 작업 "Screen previews"(`.github/workflows/test-previews.yml`,
+#222)가 호스팅 `macos-15` 러너에서 이 스크립트를 돌리고 이미지를 아티팩트 `ember-previews-macos`로 올린다.
+아직 돌린 적이 없어서 첫 성공 전까지 캡처 단계는 실행을 실패시키지 않는다. 목업은 이 공개 저장소에 없으므로,
+저장소 변수 `EMBER_PREVIEW_MOCKUP_DIR`가 체크아웃 안의 목업 폴더를 가리키기 전까지(소유자 결정) 앱 캡처만 쓴다.
 
 ### 실행 방법
 
@@ -114,7 +121,7 @@ MOCKUP_DIR=/path/to/design-mockup .github/scripts/preview/side-by-side.sh --only
 
 | 변수 | 뜻 | 기본값 |
 |---|---|---|
-| `MOCKUP_DIR` | 목업 폴더. git에 없으므로 반드시 준다. | 없음 |
+| `MOCKUP_DIR` | 목업 폴더. git에 없다. 주지 않으면 앱만 캡처한다(짝 이미지 없음, `uv` 불필요). | 없음 |
 | `EMBER_APP_BIN` | 클라이언트 바이너리. 리뷰 훅이 디버그 빌드에만 있으므로 디버그 빌드를 쓴다. | `ember/app/target/debug/ember-app` |
 | `OUT_DIR` | 출력 폴더. | `.scratch/preview/` |
 | `CHROME_BIN` | 목업을 그리는 브라우저. | Playwright가 받아 둔 Chromium, 없으면 Google Chrome |
@@ -154,5 +161,5 @@ MOCKUP_DIR=/path/to/design-mockup .github/scripts/preview/side-by-side.sh --only
 
 compose-rust v0.0.11에는 미리보기 API가 없다. `#[Preview]` 매크로도, 미리보기 바이너리도 없다.
 FR-54는 초안으로만 있다 (compose-rust 이슈 #357). 그것이 들어오기 전에는 화면 상태마다의 미리보기
-함수, 고정된 시계, CI 아티팩트가 없다. 들어오면 표의 각 행이 `#[Preview]` 항목이 되고, 스크립트는
+함수와 고정된 시계가 없다. 들어오면 표의 각 행이 `#[Preview]` 항목이 되고, 스크립트는
 앱 이미지를 창 캡처 대신 미리보기 렌더에서 가져온다 (#222).

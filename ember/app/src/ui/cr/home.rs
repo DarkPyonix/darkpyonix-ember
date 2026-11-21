@@ -2128,6 +2128,9 @@ pub fn weekday_usage(state: &ember_client::State, now_ms: i64) -> Vec<WeekDay> {
         .map(|i| WeekDay { label: names[((today - 6 + i + 4).rem_euclid(7)) as usize], counts: [0; 3] })
         .collect();
     for p in state.projects() {
+        if crate::ui::project::project_archived(state, &p.name) {
+            continue;
+        }
         for id in &p.sessions {
             let Some(v) = state.session(id).filter(|v| !v.record.archived) else { continue };
             let age = today - v.record.updated_at.div_euclid(DAY);
@@ -3286,5 +3289,14 @@ mod design_review_tests {
         assert!(src.contains(concat!("CardHead(ICON_CHART_NAV, ", "\"비용과 토큰 추이\"")));
         assert!(src.contains(concat!("CardHead(ICON_TEAM, ", "\"팀원 상태\"")));
         assert!(ICON_ARROW.contains("m4.5 19.5 15-15"));
+    }
+
+    /// #327: the home weekly usage chart skips sessions belonging to archived projects.
+    #[test]
+    fn fr_l26_weekday_usage_skips_archived_projects() {
+        let src = include_str!("home.rs");
+        let start = src.find("pub fn weekday_usage(").expect("weekday_usage");
+        let body = &src[start..start + 900];
+        assert!(body.contains("crate::ui::project::project_archived(state, &p.name)"), "{body}");
     }
 }

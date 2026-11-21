@@ -78,7 +78,7 @@ async fn fr_x7_metrics_relay_answers_for_the_local_computer_from_the_in_process_
         ember_server::agents::proc::note_agent_pid("fr-x7-local", std::process::id());
 
         let r = reqwest::get(format!("{base}/api/computers/{}/metrics?top=3", computers::LOCAL)).await.unwrap();
-        assert_eq!(r.status(), 200, "{:?}", r.text().await);
+        assert_eq!(r.status(), 200);
         let s: MetricsSample = r.json().await.unwrap();
         assert!(!s.cpu.cores.is_empty());
         assert!(s.processes.len() <= 3);

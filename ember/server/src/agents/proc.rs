@@ -261,6 +261,38 @@ impl ProcHandle {
     }
 }
 
+/// Agent process ids by session, for the monitor's member rows (FR-X7, #389). Every agent runs
+/// on this server's machine, so these are pids of the local computer.
+static AGENT_PIDS: Mutex<std::collections::BTreeMap<String, u32>> = Mutex::new(std::collections::BTreeMap::new());
+
+/// Record the agent process of `session`; a later pid for the same session replaces it.
+pub fn note_agent_pid(session: &str, pid: u32) {
+    if pid == 0 {
+        return;
+    }
+    AGENT_PIDS.lock().unwrap_or_else(|e| e.into_inner()).insert(session.to_string(), pid);
+}
+
+/// The recorded agent pids by session, oldest session id first. A pid whose process is gone is
+/// dropped here, so an ended agent is not shown; a pid the OS reused for another process before
+/// this read can still be named for a moment (the monitor polls every few seconds).
+pub fn agent_pids() -> Vec<(String, u32)> {
+    let mut map = AGENT_PIDS.lock().unwrap_or_else(|e| e.into_inner());
+    map.retain(|_, pid| pid_is_alive(*pid));
+    map.iter().map(|(s, p)| (s.clone(), *p)).collect()
+}
+
+#[cfg(unix)]
+fn pid_is_alive(pid: u32) -> bool {
+    session_shim::pid_alive(pid)
+}
+
+/// No liveness check off Unix; the pid stays until the session starts another agent.
+#[cfg(not(unix))]
+fn pid_is_alive(_pid: u32) -> bool {
+    true
+}
+
 /// Attach to an existing session without starting a new process (FR-S8).
 pub async fn reattach_agent(env: &[(String, String)]) -> anyhow::Result<Option<AgentProc>> {
     let Some(rt) = active_runtime() else { return Ok(None) };
@@ -271,6 +303,9 @@ pub async fn reattach_agent(env: &[(String, String)]) -> anyhow::Result<Option<A
         return Ok(None);
     };
     let pid = agent_pid(&rt.dir, &session).await;
+    if let Some(p) = pid {
+        note_agent_pid(&session, p);
+    }
     Ok(Some(bridge(rt, session, client, pid, true, stored)))
 }
 
@@ -278,10 +313,14 @@ pub async fn reattach_agent(env: &[(String, String)]) -> anyhow::Result<Option<A
 pub async fn spawn_agent(mut cmd: AgentCommand) -> anyhow::Result<AgentProc> {
     let session = cmd.env.iter().find(|(k, _)| k == SESSION_ENV).map(|(_, v)| v.clone());
     cmd.env.retain(|(k, _)| k != SESSION_ENV);
-    match (active_runtime(), session) {
+    let proc = match (active_runtime(), session.clone()) {
         (Some(rt), Some(session)) if safe_id(&session) => spawn_shimmed(rt, session, cmd).await,
         _ => spawn_direct(cmd),
+    }?;
+    if let (Some(session), Some(pid)) = (&session, proc.pid) {
+        note_agent_pid(session, pid);
     }
+    Ok(proc)
 }
 
 fn safe_id(id: &str) -> bool {

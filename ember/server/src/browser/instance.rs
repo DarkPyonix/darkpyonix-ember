@@ -640,6 +640,10 @@ const DRIVE_MAX_RETRIES: u32 = 5;
 const DRIVE_RETRY_WINDOW: Duration = Duration::from_secs(5);
 /// Base backoff delay between `drive_inner` retry attempts (doubles up to 800 ms).
 const DRIVE_INITIAL_BACKOFF: Duration = Duration::from_millis(50);
+/// How long one `drive_inner` attempt may take to reach an attached page (target discovery,
+/// choosing or creating a tab, attaching). An attempt over it fails and counts as a retry, so a
+/// driver whose calls hang does not run on unbounded (#344). An attached page is not limited.
+const DRIVE_ATTACH_LIMIT: Duration = Duration::from_secs(30);
 
 /// Keeps one page attached for streaming and input, follows new tabs, and runs the screencast
 /// while anyone watches. Ends when the connection closes, the instance is gone, or retries are
@@ -655,12 +659,23 @@ async fn drive_with_limits(
     retry_window: Duration,
     initial_backoff: Duration,
 ) {
+    drive_bounded(me, cdp, max_retries, retry_window, initial_backoff, DRIVE_ATTACH_LIMIT).await
+}
+
+async fn drive_bounded(
+    me: Weak<BrowserInstance>,
+    cdp: Arc<Cdp>,
+    max_retries: u32,
+    retry_window: Duration,
+    initial_backoff: Duration,
+    attach_limit: Duration,
+) {
     let mut retries = 0u32;
     let mut window_start: Option<Instant> = None;
     let mut gave_up_err: Option<String> = None;
 
     loop {
-        match drive_inner(&me, &cdp).await {
+        match drive_inner(&me, &cdp, attach_limit).await {
             Ok(()) => break,
             Err(e) => {
                 if !cdp.is_open() || me.upgrade().is_none() {
@@ -706,10 +721,29 @@ async fn drive_with_limits(
     }
 }
 
-async fn drive_inner(me: &Weak<BrowserInstance>, cdp: &Arc<Cdp>) -> anyhow::Result<()> {
+/// `fut`, failing with the attach limit's reason when `deadline` passes first.
+async fn within<T>(
+    deadline: tokio::time::Instant,
+    limit: Duration,
+    fut: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    match tokio::time::timeout_at(deadline, fut).await {
+        Ok(r) => r,
+        Err(_) => Err(attach_limit_error(limit)),
+    }
+}
+
+fn attach_limit_error(limit: Duration) -> anyhow::Error {
+    anyhow!("no page attached within {} s", limit.as_secs_f64())
+}
+
+async fn drive_inner(me: &Weak<BrowserInstance>, cdp: &Arc<Cdp>, attach_limit: Duration) -> anyhow::Result<()> {
+    // Every attach phase (this one, and the one after each tab switch) has to reach an attached
+    // page by its deadline (#344).
+    let mut deadline = tokio::time::Instant::now() + attach_limit;
     let mut events = cdp.events();
-    cdp.call("Target.setDiscoverTargets", json!({ "discover": true }), None).await?;
-    let targets = cdp.call("Target.getTargets", json!({}), None).await?;
+    within(deadline, attach_limit, cdp.call("Target.setDiscoverTargets", json!({ "discover": true }), None)).await?;
+    let targets = within(deadline, attach_limit, cdp.call("Target.getTargets", json!({}), None)).await?;
     // Newest last; Chrome lists newest first.
     let mut tabs: Vec<Tab> = targets["targetInfos"]
         .as_array()
@@ -722,6 +756,9 @@ async fn drive_inner(me: &Weak<BrowserInstance>, cdp: &Arc<Cdp>) -> anyhow::Resu
     };
 
     loop {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(attach_limit_error(attach_limit));
+        }
         // Choose the tab: the selected one if it still exists, else the newest.
         let want = follow.borrow_and_update().clone();
         let target = match want.and_then(|w| tabs.iter().find(|t| t.target_id == w).cloned()) {
@@ -729,7 +766,12 @@ async fn drive_inner(me: &Weak<BrowserInstance>, cdp: &Arc<Cdp>) -> anyhow::Resu
             None => match tabs.last().cloned() {
                 Some(t) => t,
                 None => {
-                    let r = cdp.call("Target.createTarget", json!({ "url": "about:blank" }), None).await?;
+                    let r = within(
+                        deadline,
+                        attach_limit,
+                        cdp.call("Target.createTarget", json!({ "url": "about:blank" }), None),
+                    )
+                    .await?;
                     let id = r["targetId"].as_str().unwrap_or_default().to_string();
                     let t = Tab { target_id: id, url: "about:blank".into(), title: String::new() };
                     tabs.push(t.clone());
@@ -737,9 +779,12 @@ async fn drive_inner(me: &Weak<BrowserInstance>, cdp: &Arc<Cdp>) -> anyhow::Resu
                 }
             },
         };
-        let att = cdp
-            .call("Target.attachToTarget", json!({ "targetId": target.target_id, "flatten": true }), None)
-            .await;
+        let att = within(
+            deadline,
+            attach_limit,
+            cdp.call("Target.attachToTarget", json!({ "targetId": target.target_id, "flatten": true }), None),
+        )
+        .await;
         let session_id = match att {
             Ok(v) => v["sessionId"].as_str().unwrap_or_default().to_string(),
             Err(e) => {
@@ -750,7 +795,7 @@ async fn drive_inner(me: &Weak<BrowserInstance>, cdp: &Arc<Cdp>) -> anyhow::Resu
         };
         let page = PageRef { target_id: target.target_id.clone(), session_id: session_id.clone() };
         let sid = Some(session_id.as_str());
-        cdp.call("Page.enable", json!({}), sid).await.ok();
+        within(deadline, attach_limit, cdp.call("Page.enable", json!({}), sid)).await.ok();
         {
             let me = me.upgrade().context("gone")?;
             *me.page.lock().unwrap() = Some((page.clone(), cdp.clone()));
@@ -869,6 +914,8 @@ async fn drive_inner(me: &Weak<BrowserInstance>, cdp: &Arc<Cdp>) -> anyhow::Resu
         if switch {
             cdp.call("Target.detachFromTarget", json!({ "sessionId": session_id }), None).await.ok();
         }
+        // The next attach phase gets its own limit.
+        deadline = tokio::time::Instant::now() + attach_limit;
     }
 }
 

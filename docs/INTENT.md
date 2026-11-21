@@ -1092,3 +1092,19 @@ What trust does not protect. Under D37 agents and terminals run with the full au
 **Why.** A Windows computer hosts its own OSE the same way a Mac or a Linux machine does; one script and one archive shape keep the five targets in step.
 
 **Status.** Written, not yet run in CI (#83). Not built: the live tests on Windows (they use Unix process groups and `pkill`), process tree kill of the extension host on Windows, and hardened token file ACLs. SPEC `FR-W4` (acceptance, Windows).
+
+### D50: channel_post answers a mention: the 30-minute window, the open thread, and the open per-harness decisions
+
+**Decision.** [provisional, #380, 2026-11-21] An agent posts into a channel (`channel_post`, `FR-T12`) only as an answer: it is a member, and a person (or a guest) mentioned it in that channel within the last 30 minutes, or its mention thread there is still open. The thread is the latest mention of the agent in the channel; it stays open until the agent's first post in the channel after it, and at most 24 hours. The rate limit (6 posts a minute per session and channel) stays.
+
+[provisional, #380, 2026-11-21] Three questions of the per-harness registration stay open until a real model turn per harness is measured (owner checklist DarkPyonix/darkpyonix#141); until then the behaviour in `FR-T12` holds:
+
+- **Codex configuration layers.** The name check reads `config.toml` files only. Profile layers (`<CODEX_HOME>/*.config.toml`), plugin servers and managed preferences are not read; when one may exist the server is registered without the allow rule, so Codex asks. Open: whether to read those layers, or to keep asking.
+- **agy "allow always" is keyed by `call_mcp_tool`.** An always rule would allow every MCP tool of the run, so the card for `ember-channels` offers allow once only. Open: whether a later agy version keys the rule by server and tool, and then whether to offer always.
+- **ACP has no name check.** Where an ACP agent keeps its own MCP servers is not known to Ember, so a server of the same name is not detected. Open: whether to check per known agent (`omp`, `gemini`) or to accept the gap.
+
+**Rejected** *[provisional]*. The 30-minute window alone (an agent whose turn runs longer than 30 minutes could never answer). An open thread with no time limit (a mention left unanswered would let an agent post days later). A thread that stays open for every post until a person speaks again (an agent could post many times unprompted after one mention). Storing thread state of its own (the `a2a_messages` row of the mention and the agent's own channel messages already say everything).
+
+**Why.** The owner's rule is that an agent answers in a channel and does not post on its own. A long turn is normal for a coding agent, so the answer must still be possible after 30 minutes, once.
+
+**Status.** Written, not yet compiled or run (#380). SPEC `FR-T12` (open mention thread).

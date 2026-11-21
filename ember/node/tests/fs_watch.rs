@@ -27,8 +27,25 @@ struct Fx {
     _dir: tempfile::TempDir,
 }
 
+/// Where the test folders are made. On macOS this is the boot volume's per-user temp folder,
+/// whatever `TMPDIR` says: in a folder on an external volume FSEvents delivered no event at all
+/// (#976, SPEC FR-W4d), which would test the volume, not the watcher.
+fn temp_root() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        let mut buf = vec![0u8; 1024];
+        // SAFETY: `buf` is writable for its whole length, which is passed as the size.
+        let n = unsafe { libc::confstr(libc::_CS_DARWIN_USER_TEMP_DIR, buf.as_mut_ptr().cast(), buf.len()) };
+        if n > 1 && n <= buf.len() {
+            buf.truncate(n - 1);
+            return PathBuf::from(String::from_utf8(buf).expect("the temp folder path is UTF-8"));
+        }
+    }
+    std::env::temp_dir()
+}
+
 async fn fx_with(limits: WatchLimits) -> Fx {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::Builder::new().prefix("fr-w4d-").tempdir_in(temp_root()).unwrap();
     let tmp = dir.path().canonicalize().unwrap();
     let root = tmp.join("root");
     let outside = tmp.join("outside");

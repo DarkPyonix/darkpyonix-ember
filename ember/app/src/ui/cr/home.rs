@@ -3230,7 +3230,7 @@ mod tests {
         assert_ne!(rows[1], rows[0], "the drawn active row moved to 보통 and is the selected one");
         assert_eq!(rows[0], rows[2], "{rows:?}");
         let (node_id, handler_id) = tree.field("모델 검색", PropertyKind::OnSubmit);
-        host.dispatch(HostEvent { node_id, handler_id, payload: compose_rust::EventPayload::TextSubmitted("") }).expect("enter");
+        host.dispatch(HostEvent::new(node_id, handler_id, compose_rust::EventPayload::TextSubmitted(""))).expect("enter");
         let sel = c.selection.get_untracked();
         assert_eq!((sel.option.model, sel.option.effort), ("opus", Some("Medium")), "Enter took the drawn row, Opus 5.5 (보통)");
         assert_eq!(c.open.get_untracked(), None);

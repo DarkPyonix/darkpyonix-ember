@@ -439,6 +439,17 @@ pub fn connection_banner(c: &ConnectionState) -> Option<(String, Tone)> {
             format!("Disconnected ({error}). Retrying in {}s", retry_in_ms.div_ceil(1000)),
             Tone::Warning,
         )),
+        // FR-S11, #982: no retry loop; say where the token was looked for.
+        ConnectionState::Unauthorized { error, looked_in } => {
+            let mut text = format!("The server refused the token ({error}).");
+            if !looked_in.is_empty() {
+                text.push_str(&format!(" Looked for the token in: {}.", looked_in.join(", ")));
+            }
+            text.push_str(
+                " Put the server's server-token file in one of those places, or set EMBER_SERVER_TOKEN, and restart the app.",
+            );
+            Some((text, Tone::Error))
+        }
     }
 }
 

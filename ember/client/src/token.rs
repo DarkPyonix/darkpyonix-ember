@@ -2,31 +2,116 @@
 //!
 //! The server requires `Authorization: Bearer <token>` on its local HTTP and WebSocket routes
 //! (`FR-S9`). A client on the same computer finds the token the same way every time: the
-//! `EMBER_SERVER_TOKEN` variable, else the `server-token` file in the data folder, else the
-//! one in `~/.ember`. No token means no header, which keeps an older server working.
+//! `EMBER_SERVER_TOKEN` variable, else the `server-token` file in the data folder
+//! (`EMBER_DATA_DIR`), else the one in `~/.ember` (`HOME`, or `USERPROFILE` when `HOME` is unset),
+//! then the one in the app's own data folder ([`set_app_data_dir`], #982). No token means no
+//! header, which keeps an older server working.
 
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 
 /// The token the server requires from apps on the same computer: `env_token` when set and
 /// non-empty, else the first line of `<data_dir>/server-token`, else
-/// `<home>/.ember/server-token`. The result is trimmed; an empty value is none.
+/// `<home>/.ember/server-token`. The result is trimmed; an empty value is none. The full lookup,
+/// with `USERPROFILE` and the app's data folder, is [`TokenLookup`].
 pub fn server_token(env_token: Option<&str>, data_dir: Option<&Path>, home: Option<&Path>) -> Option<String> {
-    // Only the first line counts, so a trailing newline or a note below it is ignored.
-    let clean = |s: &str| {
-        let s = s.lines().next().unwrap_or_default().trim();
-        (!s.is_empty()).then(|| s.to_owned())
-    };
-    if let Some(token) = env_token.and_then(clean) {
-        return Some(token);
+    TokenLookup {
+        env_token: env_token.map(str::to_owned),
+        data_dir: data_dir.map(Path::to_path_buf),
+        home: home.map(Path::to_path_buf),
+        ..TokenLookup::default()
     }
-    let file = match (data_dir, home) {
-        (Some(dir), _) => dir.join("server-token"),
-        (None, Some(home)) => home.join(".ember").join("server-token"),
-        (None, None) => return None,
-    };
-    read_token_file(&file).and_then(|s| clean(&s))
+    .token()
+}
+
+/// Only the first line counts, so a trailing newline or a note below it is ignored.
+fn clean(s: &str) -> Option<String> {
+    let s = s.lines().next().unwrap_or_default().trim();
+    (!s.is_empty()).then(|| s.to_owned())
+}
+
+/// The app's own data folder (`AppConfig::data_dir`), set once by the app at start (#982).
+static APP_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Names the app's own data folder (`AppConfig::data_dir`, on Windows `%APPDATA%/ember`) as the
+/// last place to look for `server-token` (FR-S11, #982). The first call wins; a tool never calls
+/// it, so a tool has no such place.
+pub fn set_app_data_dir(dir: &Path) {
+    let _ = APP_DATA_DIR.set(dir.to_path_buf());
+}
+
+/// Where the server token is looked for, in order (FR-S11, #982):
+///
+/// 1. `EMBER_SERVER_TOKEN`, when set and not blank;
+/// 2. when `EMBER_DATA_DIR` is set, `$EMBER_DATA_DIR/server-token` and no other file;
+/// 3. otherwise `<home>/.ember/server-token`, `<home>` being `HOME`, or `USERPROFILE` when `HOME`
+///    is unset or empty (a Windows program started from the Start menu has no `HOME`);
+/// 4. then `<app data dir>/server-token` (see [`set_app_data_dir`]).
+///
+/// A file that is missing, refused by the file checks (`read_token_file`) or blank is skipped.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TokenLookup {
+    pub env_token: Option<String>,
+    pub data_dir: Option<PathBuf>,
+    pub home: Option<PathBuf>,
+    pub app_data_dir: Option<PathBuf>,
+}
+
+impl TokenLookup {
+    /// The lookup over the variables `var` returns (an empty value counts as unset) and the app's
+    /// data folder `app_data_dir`. Tests pass their own `var`, so the process environment is
+    /// never read or changed.
+    pub fn from_vars(var: impl Fn(&str) -> Option<OsString>, app_data_dir: Option<PathBuf>) -> TokenLookup {
+        let path = |name: &str| var(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+        TokenLookup {
+            env_token: var("EMBER_SERVER_TOKEN").and_then(|v| v.into_string().ok()),
+            data_dir: path("EMBER_DATA_DIR"),
+            home: path("HOME").or_else(|| path("USERPROFILE")),
+            app_data_dir: app_data_dir.filter(|p| !p.as_os_str().is_empty()),
+        }
+    }
+
+    /// The lookup of this process: its environment and the folder given to [`set_app_data_dir`].
+    pub fn from_process() -> TokenLookup {
+        Self::from_vars(|name| std::env::var_os(name), APP_DATA_DIR.get().cloned())
+    }
+
+    /// The token files, in the order they are tried.
+    pub fn files(&self) -> Vec<PathBuf> {
+        if let Some(dir) = &self.data_dir {
+            return vec![dir.join("server-token")];
+        }
+        let mut files = Vec::new();
+        if let Some(home) = &self.home {
+            files.push(home.join(".ember").join("server-token"));
+        }
+        if let Some(app) = &self.app_data_dir {
+            let f = app.join("server-token");
+            if !files.contains(&f) {
+                files.push(f);
+            }
+        }
+        files
+    }
+
+    /// The token: the variable when set and not blank, else the first usable file.
+    pub fn token(&self) -> Option<String> {
+        if let Some(token) = self.env_token.as_deref().and_then(clean) {
+            return Some(token);
+        }
+        self.files().iter().find_map(|f| read_token_file(f).and_then(|s| clean(&s)))
+    }
+
+    /// Every place looked at, for a message after a 401: `EMBER_SERVER_TOKEN`, then each file.
+    /// No token text is ever in it.
+    pub fn describe(&self) -> Vec<String> {
+        let mut out = vec!["EMBER_SERVER_TOKEN".to_string()];
+        out.extend(self.files().iter().map(|f| f.display().to_string()));
+        out
+    }
 }
 
 /// Reads the token file if it may be used (unix): a regular file, not a symlink, with no group
@@ -227,13 +312,10 @@ pub fn auth_headers(token: &str) -> Option<HeaderMap> {
     Some(headers)
 }
 
-/// [`server_token`] over the process environment (`EMBER_SERVER_TOKEN`, `EMBER_DATA_DIR`, `HOME`).
+/// The token of this process ([`TokenLookup::from_process`]): `EMBER_SERVER_TOKEN`,
+/// `EMBER_DATA_DIR`, `HOME` or `USERPROFILE`, and the app's data folder.
 pub fn server_token_from_env() -> Option<String> {
-    let var = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty());
-    let env_token = std::env::var("EMBER_SERVER_TOKEN").ok();
-    let data_dir = var("EMBER_DATA_DIR").map(std::path::PathBuf::from);
-    let home = var("HOME").map(std::path::PathBuf::from);
-    server_token(env_token.as_deref(), data_dir.as_deref(), home.as_deref())
+    TokenLookup::from_process().token()
 }
 
 /// The `Authorization` header value for `token`.

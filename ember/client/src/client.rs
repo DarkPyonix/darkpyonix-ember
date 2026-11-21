@@ -22,7 +22,7 @@ use tokio::sync::{broadcast, mpsc, watch, Notify};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::api::{Api, ApiResult};
+use crate::api::{Api, ApiError, ApiResult};
 use crate::cache;
 use crate::push::{self, Backoff, DecodeError};
 use crate::state::{Changes, ConnectionState, Input, State};
@@ -528,6 +528,9 @@ enum Ended {
     Lost(String),
     /// Paused by the app.
     Paused,
+    /// The server refused the token, also after it was read again once (FR-S11, #982): do not
+    /// retry on a timer.
+    Unauthorized(String),
 }
 
 async fn push_loop(inner: Arc<Inner>) {
@@ -545,6 +548,20 @@ async fn push_loop(inner: Arc<Inner>) {
         let ended = connect_and_run(&inner, &mut mode, &mut backoff).await;
         match ended {
             Ended::Paused => {}
+            Ended::Unauthorized(error) => {
+                // FR-S11: the same token would be refused again, so wait for the app to ask
+                // (`reconnect_push`, a resume) instead of the backoff loop.
+                tracing::warn!("push socket refused the server token: {error}");
+                inner.apply(Input::Connection(ConnectionState::Unauthorized {
+                    error,
+                    looked_in: inner.api.token_lookup(),
+                }));
+                tokio::select! {
+                    _ = inner.reconnect.notified() => {}
+                    r = mode.changed() => if r.is_err() { return },
+                }
+                backoff.reset();
+            }
             Ended::Lost(error) => {
                 let delay = backoff.next_delay();
                 inner.apply(Input::Connection(ConnectionState::Reconnecting {
@@ -568,10 +585,24 @@ async fn connect_and_run(
 ) -> Ended {
     match inner.api.health().await {
         Ok(_) => {}
+        // `health` already read the token again once on its 401 (#369).
+        Err(ApiError::Unauthorized(m)) => return Ended::Unauthorized(m),
         Err(e) => return Ended::Lost(e.to_string()),
     }
-    let mut ws = match inner.api.open_push().await {
+    let opened = match inner.api.open_push().await {
+        // A rotated token (#369): read it again once and retry only when it changed.
+        Err(ApiError::Unauthorized(m)) => {
+            if inner.api.reload_token() {
+                inner.api.open_push().await
+            } else {
+                Err(ApiError::Unauthorized(m))
+            }
+        }
+        other => other,
+    };
+    let mut ws = match opened {
         Ok(ws) => ws,
+        Err(ApiError::Unauthorized(m)) => return Ended::Unauthorized(m),
         Err(e) => return Ended::Lost(e.to_string()),
     };
     backoff.reset();

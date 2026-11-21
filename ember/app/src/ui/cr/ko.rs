@@ -138,6 +138,15 @@ pub fn connection_banner(c: &ConnectionState) -> Option<(String, Tone)> {
             format!("연결이 끊어졌습니다({error}). {}초 후 다시 시도합니다", retry_in_ms.div_ceil(1000)),
             Tone::Warning,
         )),
+        // FR-S11, #982: 같은 토큰은 다시 거부되므로 되풀이하지 않고, 토큰을 찾은 곳을 알린다.
+        ConnectionState::Unauthorized { error, looked_in } => {
+            let mut text = format!("서버가 토큰을 거부했습니다({error}).");
+            if !looked_in.is_empty() {
+                text.push_str(&format!(" 토큰을 찾은 곳: {}.", looked_in.join(", ")));
+            }
+            text.push_str(" 서버의 server-token 파일을 이 중 한 곳에 두거나 EMBER_SERVER_TOKEN을 설정한 뒤 앱을 다시 시작하십시오.");
+            Some((text, Tone::Error))
+        }
     }
 }
 

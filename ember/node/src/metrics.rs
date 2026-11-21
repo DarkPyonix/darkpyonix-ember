@@ -8,6 +8,11 @@
 //!
 //! The sampler keeps one `sysinfo` state between calls, because CPU percent is the change
 //! since the previous refresh. The first call primes it and waits the minimum interval.
+//!
+//! The chip (the CPU brand `sysinfo` reads) and the OS name and version (`/usr/bin/sw_vers` on
+//! macOS, `/etc/os-release` on Linux, nothing elsewhere) are read once, when the sampler starts
+//! (#389). Process power is not collected: no per-process energy API is verified on this node,
+//! so `power_watts` is always `None` and the sample says why ([`POWER_UNAVAILABLE`]).
 
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -23,8 +28,59 @@ pub const MAX_TOP: usize = 200;
 pub const GPU_UNAVAILABLE: &str =
     "GPU metrics are not collected: no verified GPU API on this node";
 
+/// Why every process's power is empty.
+pub const POWER_UNAVAILABLE: &str =
+    "process power is not collected: no verified per-process energy API on this node";
+
 struct Sampler {
     sys: System,
+    chip: Option<String>,
+    os_name: Option<String>,
+    os_version: Option<String>,
+}
+
+/// A processor name with its runs of spaces folded to one (Intel brands pad with spaces);
+/// `None` when nothing is left.
+pub fn chip_name(brand: &str) -> Option<String> {
+    let name = brand.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!name.is_empty()).then_some(name)
+}
+
+/// `NAME` and `VERSION_ID` (else `VERSION`) of an `os-release` file, unquoted; an empty value
+/// is `None`.
+pub fn os_release(text: &str) -> (Option<String>, Option<String>) {
+    let field = |key: &str| {
+        text.lines()
+            .find_map(|l| l.trim().strip_prefix(key).and_then(|rest| rest.strip_prefix('=')))
+            .map(|v| v.trim().trim_matches('"').trim_matches('\'').trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    (field("NAME"), field("VERSION_ID").or_else(|| field("VERSION")))
+}
+
+/// First line of `/usr/bin/sw_vers <arg>` (a fixed path, as `envinfo` runs it).
+fn sw_vers(arg: &str) -> Option<String> {
+    let out = std::process::Command::new("/usr/bin/sw_vers").arg(arg).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = text.lines().next().unwrap_or("").trim().to_string();
+    (!line.is_empty()).then_some(line)
+}
+
+/// The OS name and version of this computer, where the node knows how to read them.
+fn os_about() -> (Option<String>, Option<String>) {
+    if cfg!(target_os = "macos") {
+        return (sw_vers("-productName"), sw_vers("-productVersion"));
+    }
+    if cfg!(target_os = "linux") {
+        return std::fs::read_to_string("/etc/os-release")
+            .or_else(|_| std::fs::read_to_string("/usr/lib/os-release"))
+            .map(|t| os_release(&t))
+            .unwrap_or((None, None));
+    }
+    (None, None)
 }
 
 static SAMPLER: Mutex<Option<Sampler>> = Mutex::new(None);
@@ -65,7 +121,9 @@ pub fn sample(top: usize) -> MetricsSample {
         sys.refresh_cpu_usage();
         sys.refresh_processes(ProcessesToUpdate::All, true);
         std::thread::sleep(MINIMUM_CPU_UPDATE_INTERVAL);
-        Sampler { sys }
+        let chip = sys.cpus().first().and_then(|c| chip_name(c.brand()));
+        let (os_name, os_version) = os_about();
+        Sampler { sys, chip, os_name, os_version }
     });
     let sys = &mut sampler.sys;
     sys.refresh_cpu_usage();
@@ -110,6 +168,7 @@ pub fn sample(top: usize) -> MetricsSample {
             name: p.name().to_string_lossy().into_owned(),
             cpu_percent: if p.cpu_usage().is_finite() { p.cpu_usage().max(0.0) } else { 0.0 },
             memory_bytes: p.memory(),
+            power_watts: None,
         })
         .collect();
     let process_count = all.len() as u32;
@@ -123,6 +182,11 @@ pub fn sample(top: usize) -> MetricsSample {
         gpu: gpu_report(),
         processes: rank_processes(all, top),
         process_count,
+        chip: sampler.chip.clone(),
+        os_name: sampler.os_name.clone(),
+        os_version: sampler.os_version.clone(),
+        power_reason: Some(POWER_UNAVAILABLE.into()),
+        sessions: Vec::new(),
     }
 }
 

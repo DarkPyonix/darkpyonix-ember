@@ -2134,6 +2134,30 @@ pub struct MetricsSample {
     pub processes: Vec<ProcessMetrics>,
     #[serde(default)]
     pub process_count: u32,
+    /// The processor's name as the OS reports it (`Apple M2 Pro`), #389.
+    #[serde(default)]
+    pub chip: Option<String>,
+    /// The OS name (`macOS`) and version (`15.2`) as the node reads them.
+    #[serde(default)]
+    pub os_name: Option<String>,
+    #[serde(default)]
+    pub os_version: Option<String>,
+    /// Why the processes' `power_watts` are empty, when they are.
+    #[serde(default)]
+    pub power_reason: Option<String>,
+    /// The agent processes of Ember sessions on this computer (FR-X7): the server fills it for
+    /// the computer its agents run on.
+    #[serde(default)]
+    pub sessions: Vec<SessionProcess>,
+}
+
+/// One agent process of a session: the process row with this pid is the member's (FR-L21).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct SessionProcess {
+    #[serde(default)]
+    pub pid: u32,
+    #[serde(default)]
+    pub session: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -2217,6 +2241,9 @@ pub struct ProcessMetrics {
     pub cpu_percent: f32,
     #[serde(default)]
     pub memory_bytes: u64,
+    /// Watts drawn by the process, where the node reports it (#389).
+    #[serde(default)]
+    pub power_watts: Option<f32>,
 }
 
 impl Api {

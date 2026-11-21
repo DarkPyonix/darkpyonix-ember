@@ -455,7 +455,7 @@ mod tests {
             vec!["EMBER_SERVER_TOKEN".to_string(), data.path().join("server-token").display().to_string()]
         );
         // The same folder twice (the app's data folder is EMBER_DATA_DIR's) is named once.
-        let l = lookup(&[("HOME", home.path())], None, Some(&home.path().join(".ember")));
+        let l = lookup(&[("HOME", home.path())], None, Some(home.path().join(".ember").as_path()));
         assert_eq!(l.files().len(), 1);
     }
 

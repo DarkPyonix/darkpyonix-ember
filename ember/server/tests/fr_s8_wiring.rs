@@ -390,6 +390,8 @@ async fn fr_s8_crash_between_stdout_read_and_store_commit_replays_event() {
         rest.extend(tick(&l));
     }
     assert_eq!(rest, (3..=10).collect::<Vec<_>>(), "nothing after it is lost: {rest:?}");
+    // The final acknowledgement is written by the bridge's task on this runtime: let it run.
+    _guard.settle().await;
     clear_runtime();
 }
 

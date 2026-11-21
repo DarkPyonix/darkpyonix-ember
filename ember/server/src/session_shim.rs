@@ -20,6 +20,9 @@
 //! - shim to client: `O <start> <len>\n<bytes>` (stdout bytes at absolute offset `start`) and
 //!   `X <reason>\n` (the agent ended; reason is `exit:<code>`, `signal:<n>` or `memory-limit`).
 //!
+//! Start-up: the shim writes [`READY_LINE`] on its stdout once its socket listens, and
+//! [`spawn_shim`] waits for that line (#924).
+//!
 //! A new `ATTACH` supersedes the previous connection. The buffer is bounded
 //! ([`BUFFER_CAP`]); bytes older than the cap and not acknowledged are dropped, and the frame
 //! start offset tells the client about the gap.

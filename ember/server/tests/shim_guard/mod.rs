@@ -63,6 +63,16 @@ impl ShimGuard {
         record(&self.dirs, &self.sids);
     }
 
+    /// Wait (yielding to the runtime) until nothing of this test runs any more, at most
+    /// [`GRACE`]. For a test whose last acknowledgement is sent by a task of its own runtime:
+    /// the drop check blocks the runtime, so that task must run before the test ends.
+    pub async fn settle(&self) {
+        let deadline = Instant::now() + GRACE;
+        while !self.leftovers().is_empty() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
     fn mentions(&self, command: &str) -> bool {
         self.dirs.iter().any(|d| command.contains(&*d.to_string_lossy()))
     }

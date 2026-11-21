@@ -309,7 +309,7 @@ async fn install_on_node(st: &St, computer: &str, body: &[u8]) -> Response {
 fn failure(err: InstallError, id: &str, done: &str) -> Response {
     match err {
         InstallError::Bad(m) => error(StatusCode::BAD_REQUEST, m),
-        InstallError::NotInstalled => error(StatusCode::SERVICE_UNAVAILABLE, "OSE server binary is not installed"),
+        InstallError::NotInstalled => error(StatusCode::SERVICE_UNAVAILABLE, crate::ose::NOT_INSTALLED),
         InstallError::Busy => error(StatusCode::CONFLICT, "an install is already running on this computer"),
         InstallError::Failed { message, output } => {
             let mut body = json!({ "error": message, "id": id, "output": output });

@@ -1,0 +1,85 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ember 팀 캐릭터</title><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%278%27 fill=%27%231c1b19%27/%3E%3Ctext x=%2716%27 y=%2722%27 font-size=%2718%27 font-family=%27sans-serif%27 font-weight=%27700%27 text-anchor=%27middle%27 fill=%27white%27%3EE%3C/text%3E%3C/svg%3E"><link rel="stylesheet" href="style.css"><link rel="stylesheet" href="chars.css">
+<script>(function(){var r=document.documentElement,v;try{v=localStorage.getItem("ember-mock-theme")}catch(e){}r.dataset.theme=(v==="light"||v==="dark")?v:(matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light")})();</script>
+<script src="data.js"></script><script src="chars.js"></script>
+<style>
+/* page-only layout; the characters themselves come from chars.js and chars.css */
+.wrapx{max-width:1180px;margin:0 auto;padding:var(--sp8) var(--sp4) 80px}
+h1{font-size:var(--fs-2xl);line-height:var(--lh-2xl);font-weight:var(--fw-regular);margin:0}
+.lead{color:var(--muted);max-width:820px;font-size:var(--fs-md);line-height:var(--lh-md)}
+.sec{margin-top:var(--sp8)}
+.sec-h{display:flex;align-items:baseline;gap:var(--sp3);flex-wrap:wrap;margin-bottom:6px}
+.sec-h h2{font-size:var(--fs-xl);line-height:var(--lh-xl);font-weight:var(--fw-semibold);margin:0}
+.sec-d{color:var(--muted);font-size:var(--fs-sm);line-height:var(--lh-sm);margin:0 0 var(--sp3);max-width:860px}
+.grid9{display:grid;grid-template-columns:repeat(9,minmax(0,1fr));gap:var(--sp2)}
+.cell{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);padding:var(--sp3) 4px var(--sp2);display:flex;flex-direction:column;align-items:center;gap:6px;min-width:0}
+.cell .lbl{font-size:var(--fs-2xs);line-height:var(--lh-2xs);color:var(--muted);text-align:center}
+.cell.sep{margin-left:var(--sp2)}
+.team-bar{display:flex;align-items:center;gap:var(--sp3);flex-wrap:wrap;margin-bottom:var(--sp3)}
+.segx{display:flex;gap:6px;flex-wrap:wrap}
+.segx button{height:var(--h-ctl);padding:0 12px;border-radius:var(--pill);border:1px solid var(--line);background:var(--surface);color:var(--text-2);cursor:pointer;font-size:var(--fs-sm);line-height:var(--lh-sm)}
+.segx button.on{background:var(--ink);color:var(--ink-text);border-color:var(--ink)}
+.team{display:grid;grid-template-columns:repeat(9,minmax(0,1fr));gap:var(--sp3) var(--sp2);background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);padding:var(--sp5) var(--sp4)}
+.tm{display:flex;flex-direction:column;align-items:center;gap:4px;min-width:0}
+.tm b{font-size:var(--fs-xs);line-height:var(--lh-xs);font-weight:var(--fw-semibold);max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tm span{font-size:var(--fs-2xs);line-height:var(--lh-2xs);color:var(--muted)}
+.ed{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.2fr);gap:var(--sp5);background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);padding:var(--sp5)}
+.ed-stage{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:var(--sp3);min-height:260px;background:var(--surface-2);border-radius:var(--r)}
+.ed-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--sp3)}
+.ed-form label,.ed-form .lab{display:flex;flex-direction:column;gap:6px;font-size:var(--fs-xs);line-height:var(--lh-xs);color:var(--text-2)}
+.ed-form .full{grid-column:1/-1}
+.others{display:flex;gap:10px;flex-wrap:wrap;justify-content:center}
+@media(max-width:1000px){.grid9,.team{grid-template-columns:repeat(5,minmax(0,1fr))}.cell.sep{margin-left:0}.ed{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:560px){.grid9,.team{grid-template-columns:repeat(3,minmax(0,1fr))}.ed-form{grid-template-columns:minmax(0,1fr)}}
+</style></head><body><div class="wrapx">
+<h1>팀 캐릭터</h1>
+<p class="lead">팀(프로젝트)을 만들 때 캐릭터 스타일 여섯 가지 중 하나를 고릅니다. 고른 스타일은 그 팀의 모든 팀원에게 적용됩니다. 모양과 색은 팀원 이름과 하네스로 정해지므로 같은 팀원은 어디서나 같은 모습입니다. 하네스는 앱 팔레트의 색 계열(Claude 주황, Codex 파랑, Gemini 하늘)을 따르고, 웜그레이 바탕에 맞게 채도를 낮췄습니다. 상태는 몸의 움직임으로 보입니다.</p>
+<div id="cands"></div>
+<section class="sec"><div class="sec-h"><h2>팀 미리보기</h2></div><p class="sec-d">데모 팀원 18명을 고른 스타일로 그립니다. 리더에게는 왕관이 붙고, 기본 프로젝트에는 리더가 없습니다.</p>
+<div class="team-bar"><div class="segx" id="teamStyle" role="group" aria-label="팀 캐릭터 스타일"></div></div><div class="team" id="team"></div></section>
+<section class="sec"><div class="sec-h"><h2>편집기</h2></div><p class="sec-d">이름을 바꾸면 캐릭터가 바뀝니다. 말랑과 키링은 실루엣을 고정할 수 있습니다(blobatar의 고정 방식).</p>
+<div class="ed"><div class="ed-stage"><div id="edBig"></div><div class="others" id="edOthers"></div></div>
+<form class="ed-form" onsubmit="return false"><label class="full">이름<input class="field" id="edName" value="ember-리더"></label>
+<label>하네스<select class="field" id="edH"><option value="Claude Code">Claude Code</option><option value="Codex">Codex</option><option value="Gemini CLI">Gemini CLI</option></select></label>
+<label>역할<select class="field" id="edRole"><option value="리더">리더</option><option value="구현">구현</option><option value="리뷰어">리뷰어</option><option value="테스터">테스터</option><option value="디자인">디자인</option><option value="문서">문서</option></select></label>
+<label>스타일<select class="field" id="edV"></select></label>
+<label>실루엣 고정<select class="field" id="edShape"><option value="">자동 (이름이 정합니다)</option></select></label>
+<div class="full lab">상태<div class="segx" id="edSt"></div></div>
+</form></div></section>
+</div>
+<script>
+(function(){
+"use strict";
+var E=window.EmberChar;
+var ST=[["run","실행 중"],["wait","승인 대기"],["fail","실패"],["done","완료"],["idle","유휴"]];
+var H=[["Claude Code","Claude"],["Codex","Codex"],["Gemini CLI","Gemini"]];
+function cell(svg,lbl,sep){return '<div class="cell'+(sep?" sep":"")+'">'+svg+'<span class="lbl">'+lbl+'</span></div>'}
+document.getElementById("cands").innerHTML=E.styles.map(function(s,i){
+ var m={name:"ember-리더",agent:"Claude Code",role:"리뷰어"};
+ var cells=ST.map(function(x){return cell(E.draw(m,{style:s.id,state:x[0],size:64}),x[1])}).join("")+
+  H.map(function(h,k){return cell(E.draw({name:"core-구현",agent:h[0],role:["테스터","디자인","문서"][k]},{style:s.id,state:"idle",size:64}),h[1],k===0)}).join("")+
+  cell(E.draw({name:"ember-리더",agent:"Claude Code",role:"리더"},{style:s.id,state:"done",size:64,lead:true}),"리더 왕관");
+ return '<section class="sec"><div class="sec-h"><h2>'+(i+1)+'. '+s.name+'</h2><span class="pill">'+s.id+'</span></div><p class="sec-d">'+s.desc+'</p><div class="grid9">'+cells+'</div></section>'}).join("");
+/* team */
+var D=window.EMBER_DEMO, P={}; D.projects.forEach(function(p){P[p.id]=p});
+var teamStyle="malang";
+var STM={run:"run",wait:"wait",fail:"fail",done:"done",unread:"done"};
+function team(){document.getElementById("team").innerHTML=D.sessions.slice(0,18).map(function(s){var p=P[s.project], nm=(p.id==="unsorted"?"기본":p.short)+"-"+(s.role||"팀원"), hn=E.harness(s.agent);
+ return '<div class="tm">'+E.draw({name:nm,agent:s.agent,role:s.role,status:s.status},{style:teamStyle,size:64,lead:!!s.lead&&p.id!=="unsorted"})+'<b title="'+nm+'">'+nm+'</b><span>'+({claude:"Claude",codex:"Codex",gemini:"Gemini"})[hn]+'</span></div>'}).join("")}
+var ts=document.getElementById("teamStyle");
+ts.innerHTML=E.styles.map(function(s){return '<button type="button" data-s="'+s.id+'" class="'+(s.id===teamStyle?"on":"")+'" aria-pressed="'+(s.id===teamStyle)+'">'+s.name+'</button>'}).join("");
+ts.addEventListener("click",function(e){var b=e.target.closest("button"); if(!b) return; teamStyle=b.dataset.s; [].forEach.call(ts.children,function(x){x.classList.toggle("on",x===b); x.setAttribute("aria-pressed",x===b)}); team()});
+team();
+/* editor */
+var ed={st:"idle"};
+var vs=document.getElementById("edV"); vs.innerHTML=E.styles.map(function(s){return '<option value="'+s.id+'"'+(s.id==="crew"?" selected":"")+'>'+s.name+'</option>'}).join("");
+var SHN={round:"둥근",organic:"유기",boxy:"네모",capsule:"캡슐",cloud:"구름",droplet:"물방울",nub:"돌기",pebble:"조약돌"};
+var ss=document.getElementById("edShape"); ss.innerHTML+=E.SHAPES.map(function(s){return '<option value="'+s+'">'+SHN[s]+'</option>'}).join("");
+document.getElementById("edSt").innerHTML=ST.map(function(s){return '<button type="button" data-st="'+s[0]+'" class="'+(s[0]==="idle"?"on":"")+'">'+s[1]+'</button>'}).join("");
+function upd(){var n=document.getElementById("edName").value.trim()||"이름 없음", h=document.getElementById("edH").value, role=document.getElementById("edRole").value, v=vs.value, pin=ss.value?{shape:ss.value}:null;
+ document.getElementById("edBig").innerHTML=E.draw({name:n,agent:h,role:role},{style:v,state:ed.st,size:200,lead:role==="리더",pin:pin});
+ document.getElementById("edOthers").innerHTML=["-2","-리뷰","-테스트","-문서","-조사"].map(function(x){return E.draw({name:n+x,agent:h,role:x.slice(1)},{style:v,state:"idle",size:44,pin:pin})}).join("")}
+["edName","edH","edRole","edV","edShape"].forEach(function(id){var el=document.getElementById(id); el.addEventListener("input",upd); el.addEventListener("change",upd)});
+document.getElementById("edSt").addEventListener("click",function(e){var b=e.target.closest("button"); if(!b) return; ed.st=b.dataset.st; [].forEach.call(this.children,function(x){x.classList.toggle("on",x===b)}); upd()});
+upd();
+})();
+</script></body></html>

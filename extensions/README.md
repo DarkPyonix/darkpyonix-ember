@@ -9,5 +9,5 @@ rest of this repository.
 | Extension | Folder | ID | Status |
 |---|---|---|---|
 | DarkPyonix Notebooks for VS Code | [`vscode-darkpyonix/`](vscode-darkpyonix/README.md) | `darkpyonix.vscode-darkpyonix` | **Working** against a fake manager (unit, module-level integration and in-VS Code e2e tests); not yet run against the real manager. Installed by default in Ember's VS Code runtime. |
-| DarkPyonix theme for VS Code | [`vscode-darkpyonix-theme/`](vscode-darkpyonix-theme/README.md) | `DarkPyonix.vscode-darkpyonix-theme` | In progress. The DarkPyonix (phoenix) theme, default in Ember's VS Code runtime. |
+| DarkPyonix theme for VS Code | [`vscode-darkpyonix-theme/`](vscode-darkpyonix-theme/README.md) | `DarkPyonix.vscode-darkpyonix-theme` | The DarkPyonix (phoenix) theme. Installed by default and the default colour theme ("DarkPyonix Dark") in Ember's VS Code runtime: the proxy sets it in the workbench `configurationDefaults` and OSE's staged copy contributes the same defaults (SPEC FR-W6). A user's own setting wins. |
 | DarkPyonix for IntelliJ / PyCharm | [`intellij-darkpyonix/`](intellij-darkpyonix/README.md) | `dev.darkpyonix.intellij` | In progress; built and tested in CI (`test-intellij-plugin.yml`). The same notebook features for JetBrains IDEs. |

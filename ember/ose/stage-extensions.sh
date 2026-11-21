@@ -24,6 +24,16 @@ mkdir -p "$src/extensions/darkpyonix-notebook" "$src/extensions/darkpyonix-theme
 cp "$nb/package.json" "$nb/LICENSE" "$src/extensions/darkpyonix-notebook/"
 cp -R "$nb/dist" "$src/extensions/darkpyonix-notebook/dist"
 th="$repo/extensions/vscode-darkpyonix-theme"
-cp "$th/package.json" "$th/LICENSE" "$src/extensions/darkpyonix-theme/"
+cp "$th/LICENSE" "$src/extensions/darkpyonix-theme/"
+# In OSE the DarkPyonix theme is the default colour theme (SPEC FR-W6, #15): the staged copy of
+# the manifest contributes configurationDefaults (a window-scoped setting, which Code-OSS accepts
+# from an extension). The published theme in extensions/ stays a plain theme. The values match the
+# proxy's THEME_CONFIGURATION_DEFAULTS (ember/proxy/dpx/vscode/html_rewrite.py).
+command -v jq >/dev/null || { echo "error: jq is needed to stage the theme defaults" >&2; exit 1; }
+jq '.contributes.configurationDefaults = {
+      "workbench.colorTheme": "DarkPyonix Dark",
+      "workbench.preferredDarkColorTheme": "DarkPyonix Dark",
+      "workbench.preferredLightColorTheme": "DarkPyonix Light"
+    }' "$th/package.json" > "$src/extensions/darkpyonix-theme/package.json"
 cp -R "$th/themes" "$src/extensions/darkpyonix-theme/themes"
 echo "staged darkpyonix-notebook and darkpyonix-theme into $src/extensions"

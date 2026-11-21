@@ -26,3 +26,6 @@ jobs:
   test_intellij_plugin:
     uses: ./.github/workflows/test-intellij-plugin.yml
     secrets: inherit
+  test_previews:
+    uses: ./.github/workflows/test-previews.yml
+    secrets: inherit

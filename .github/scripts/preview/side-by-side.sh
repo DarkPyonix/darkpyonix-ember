@@ -10,9 +10,9 @@
 #   --list                       print the screen names and exit
 #
 # Environment:
-#   MOCKUP_DIR     the mockup folder (home.html, vcs.html, ...). It is not in git. Without it the
-#                  run writes the app captures only (no mockup renders, no pairs), as the CI
-#                  job "Screen previews" does until the mockup has a place it can read (#222).
+#   MOCKUP_DIR     the mockup folder (home.html, vcs.html, ...): docs/design/mockup in this
+#                  repository, as the CI job "Screen previews" passes it (#222). Without it the
+#                  run writes the app captures only (no mockup renders, no pairs).
 #   EMBER_APP_BIN  the client binary (default: ember/app/target/debug/ember-app). A debug build,
 #                  because the EMBER_CR_* review hooks exist in debug builds only.
 #   OUT_DIR        output folder (default: .scratch/preview).

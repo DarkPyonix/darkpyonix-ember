@@ -27,9 +27,8 @@ It runs on macOS only for now, because it uses `screencapture`, CoreGraphics win
 `sips`. It needs a display and the Screen Recording permission for the terminal that runs it. The
 CI job "Screen previews" (`.github/workflows/test-previews.yml`, #222) runs it on a hosted
 `macos-15` runner and uploads the images as the artifact `ember-previews-macos`; it has not run
-yet, so its capture step does not fail the run until the first green run. The mockup is not in this
-public repository, so the job writes app captures only until the repository variable
-`EMBER_PREVIEW_MOCKUP_DIR` names a mockup folder in the checkout (an owner decision).
+yet, so its capture step does not fail the run until the first green run. It pairs every capture
+with the mockup in `docs/design/mockup/` (committed with the owner's approval, 2026-11-21).
 
 ### How to run
 
@@ -41,7 +40,7 @@ MOCKUP_DIR=/path/to/design-mockup .github/scripts/preview/side-by-side.sh --only
 
 | Variable | Meaning | Default |
 |---|---|---|
-| `MOCKUP_DIR` | The mockup folder. It is not in git. Without it, only the app is captured (no pairs, no `uv` needed). | none |
+| `MOCKUP_DIR` | The mockup folder, `docs/design/mockup` in this repository. Without it, only the app is captured (no pairs, no `uv` needed). | none |
 | `EMBER_APP_BIN` | The client binary. A debug build, because the review hooks exist in debug builds only. | `ember/app/target/debug/ember-app` |
 | `OUT_DIR` | Output folder. | `.scratch/preview/` |
 | `CHROME_BIN` | The browser that renders the mockup. | Playwright's cached Chromium, then Google Chrome |
@@ -108,8 +107,8 @@ a window capture (#222).
 지금은 macOS에서만 돈다. `screencapture`, CoreGraphics 창 id, `sips`를 쓰기 때문이다. 디스플레이와
 실행하는 터미널의 화면 기록 권한이 필요하다. CI 작업 "Screen previews"(`.github/workflows/test-previews.yml`,
 #222)가 호스팅 `macos-15` 러너에서 이 스크립트를 돌리고 이미지를 아티팩트 `ember-previews-macos`로 올린다.
-아직 돌린 적이 없어서 첫 성공 전까지 캡처 단계는 실행을 실패시키지 않는다. 목업은 이 공개 저장소에 없으므로,
-저장소 변수 `EMBER_PREVIEW_MOCKUP_DIR`가 체크아웃 안의 목업 폴더를 가리키기 전까지(소유자 결정) 앱 캡처만 쓴다.
+아직 돌린 적이 없어서 첫 성공 전까지 캡처 단계는 실행을 실패시키지 않는다. 모든 캡처를 `docs/design/mockup/`의
+목업(소유자 승인, 2026-11-21)과 짝짓는다.
 
 ### 실행 방법
 
@@ -121,7 +120,7 @@ MOCKUP_DIR=/path/to/design-mockup .github/scripts/preview/side-by-side.sh --only
 
 | 변수 | 뜻 | 기본값 |
 |---|---|---|
-| `MOCKUP_DIR` | 목업 폴더. git에 없다. 주지 않으면 앱만 캡처한다(짝 이미지 없음, `uv` 불필요). | 없음 |
+| `MOCKUP_DIR` | 목업 폴더, 이 저장소의 `docs/design/mockup`. 주지 않으면 앱만 캡처한다(짝 이미지 없음, `uv` 불필요). | 없음 |
 | `EMBER_APP_BIN` | 클라이언트 바이너리. 리뷰 훅이 디버그 빌드에만 있으므로 디버그 빌드를 쓴다. | `ember/app/target/debug/ember-app` |
 | `OUT_DIR` | 출력 폴더. | `.scratch/preview/` |
 | `CHROME_BIN` | 목업을 그리는 브라우저. | Playwright가 받아 둔 Chromium, 없으면 Google Chrome |

@@ -329,7 +329,15 @@ pub fn metrics_sample(now_ms: u64) -> ember_client::api::MetricsSample {
     let cores: Vec<f32> = (0..8).map(|i| wave(7.0 + i as f32, 4.0, 80.0, i as f32)).collect();
     let total = cores.iter().sum::<f32>() / cores.len() as f32;
     const GB: u64 = 1 << 30;
-    let procs = [("ember-server", 14.0, 420u64), ("claude", 9.5, 880), ("rust-analyzer", 6.0, 1500), ("node", 3.2, 310), ("Code Helper", 2.1, 640)];
+    // Name, CPU percent, memory in MB and power in watts (the mockup's `pwr`; `None` reads "-").
+    let procs = [
+        ("ember-server", 14.0, 420u64, Some(2.4)),
+        ("claude", 9.5, 880, Some(1.6)),
+        ("rust-analyzer", 6.0, 1500, Some(1.1)),
+        ("node", 3.2, 310, None),
+        ("Code Helper", 2.1, 640, Some(0.4)),
+    ];
+    let pid = |i: usize| 100 + i as u32 * 37;
     MetricsSample {
         at_ms: now_ms,
         cpu: CpuMetrics { total_percent: Some(total), cores },
@@ -346,14 +354,21 @@ pub fn metrics_sample(now_ms: u64) -> ember_client::api::MetricsSample {
         processes: procs
             .iter()
             .enumerate()
-            .map(|(i, (name, cpu, mb))| ProcessMetrics {
-                pid: 100 + i as u32 * 37,
+            .map(|(i, (name, cpu, mb, watts))| ProcessMetrics {
+                pid: pid(i),
                 name: (*name).into(),
                 cpu_percent: *cpu + wave(5.0, 0.0, 2.0, i as f32),
                 memory_bytes: mb << 20,
+                power_watts: *watts,
             })
             .collect(),
         process_count: 412,
+        chip: Some("Apple M2 Pro".into()),
+        os_name: Some("macOS".into()),
+        os_version: Some("15.2".into()),
+        power_reason: None,
+        // The `claude` process is the first demo member's agent.
+        sessions: vec![SessionProcess { pid: pid(1), session: "demo-s1".into() }],
     }
 }
 

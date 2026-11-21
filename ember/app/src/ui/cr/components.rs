@@ -1968,6 +1968,32 @@ pub fn CloseButton(on_click: impl FnMut() + 'static) {
     );
 }
 
+/// A sheet's title and an optional muted text beside it (the monitor's OS, `.mon-os`, #389).
+/// [`EmberSheetSized`] takes a `&str` as a title with no subtitle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SheetTitle<'a> {
+    pub text: &'a str,
+    pub subtitle: Option<&'a str>,
+}
+
+impl<'a> From<&'a str> for SheetTitle<'a> {
+    fn from(text: &'a str) -> Self {
+        SheetTitle { text, subtitle: None }
+    }
+}
+
+impl<'a> From<&'a String> for SheetTitle<'a> {
+    fn from(text: &'a String) -> Self {
+        SheetTitle { text: text.as_str(), subtitle: None }
+    }
+}
+
+impl<'a, 'b> From<&'b SheetTitle<'a>> for SheetTitle<'a> {
+    fn from(title: &'b SheetTitle<'a>) -> Self {
+        *title
+    }
+}
+
 /// The header every sheet shares: 60 px high, 20 px side padding, the title in `fs-xl` 600 on
 /// the left, actions right-aligned, a 32 px close button at the far right.
 pub fn SheetHeader(
@@ -1975,10 +2001,30 @@ pub fn SheetHeader(
     on_close: impl FnMut() + 'static,
     actions: Option<&mut dyn FnMut()>,
 ) {
+    SheetHeaderWith(title, None, on_close, actions);
+}
+
+/// [`SheetHeader`] with a muted 13 px text 12 (`--sp3`) to the right of the title (`.mon-os`); without one
+/// it draws exactly what [`SheetHeader`] did.
+pub fn SheetHeaderWith(
+    title: &str,
+    subtitle: Option<&str>,
+    on_close: impl FnMut() + 'static,
+    actions: Option<&mut dyn FnMut()>,
+) {
+    let muted = ember_theme().palette.muted;
     { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width().height(SHEET_HEADER_H), {
             { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[4])) };
             { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().weight(1.0), {
-                Label(title, Fs::Xl, Weight::Semibold, None, Some(1));
+                match subtitle {
+                    None => Label(title, Fs::Xl, Weight::Semibold, None, Some(1)),
+                    Some(sub) => {
+                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[2], {
+                            Label(title, Fs::Xl, Weight::Semibold, None, Some(1));
+                            Label(sub, Fs::Sm, Weight::Regular, Some(paint(muted)), Some(1));
+                        }) };
+                    }
+                }
             }) };
             { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
             if let Some(actions) = actions {
@@ -2005,8 +2051,8 @@ pub fn EmberSheet(
 /// [`EmberSheet`] with the dialog's width (`min(760px, 100%)` for most sheets, `min(1360px,
 /// 100%)` for the computer monitor). Without a width the dialog takes the whole window,
 /// because its content asks for the full width.
-pub fn EmberSheetSized(
-    title: &str,
+pub fn EmberSheetSized<'t>(
+    title: impl Into<SheetTitle<'t>>,
     open: bool,
     width: f32,
     monitor: bool,
@@ -2014,6 +2060,7 @@ pub fn EmberSheetSized(
     actions: Option<&mut dyn FnMut()>,
     content: impl FnOnce(),
 ) {
+    let title: SheetTitle<'t> = title.into();
     let theme = ember_theme();
     // The mockup's `.modal` scrim, rgba(0, 0, 0, 0.3), set on every presentation (compose-rust#384,
     // v0.0.11 `ModalScope::scrim`). The layered card shadow (#214) replaces the Material tint ring that `elevation` painted.
@@ -2033,13 +2080,13 @@ pub fn EmberSheetSized(
     // none and puts its close button in its first card (FR-L27.7).
     let body = move || {
         { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), {
-            if !title.is_empty() {
+            if !title.text.is_empty() {
                 if top_inset > 0.0 {
                     // FR-L33: the full-screen sheet's header starts below the traffic lights
                     // (review ba D: "이 컴퓨터" sat under them at 390).
                     { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().fill_max_width().height(top_inset).background(paint(strip_bg))) };
                 }
-                SheetHeader(title, dismiss, actions);
+                SheetHeaderWith(title.text, title.subtitle, dismiss, actions);
                 { use ::compose_rust::ui::Separator; Separator!(Some(paint(theme.palette.line))) };
             }
             content();

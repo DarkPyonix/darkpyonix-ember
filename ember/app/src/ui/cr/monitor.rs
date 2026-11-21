@@ -21,14 +21,15 @@ pub use crate::ui::monitor::{
     SortState,
 };
 use crate::ui::monitor::{
-    bar_fraction, bar_max, card_view, hero_parts, meter_fraction, metric_badge, empty_text, health_score, process_footer, ram_badge, score_tone,
+    bar_fraction, bar_max, card_view, hero_parts, member_note, member_rows, meter_fraction, metric_badge, empty_text, health_score,
+    power_text, process_footer, score_tone, status_badges, title_os,
     CORE_BARS_GAP, CORE_BARS_H, CORE_BAR_ALPHA, CORE_BAR_RADIUS,
     score_word, status_line, storage_line, CardView, FanMode, FeedStatus, FAN_MODE_AVAILABLE, FAN_MODE_REASON, POLL_SECS,
     TOP_PROCESSES,
 };
 use super::characters::{Character, CharState};
 use super::components::{
-    Choice, ChoiceButton, EmberCard, EmberSheetSized, Label, Pill, PillTone, SHEET_WIDTH_MONITOR,
+    Choice, ChoiceButton, EmberCard, EmberSheetSized, Label, Pill, PillTone, SheetTitle, SHEET_WIDTH_MONITOR,
     WrapLabel,
 };
 use super::theme::*;
@@ -41,6 +42,7 @@ fn header_label(key: SortKey) -> &'static str {
         SortKey::Name => "이름",
         SortKey::Pid => "PID",
         SortKey::Cpu => "CPU",
+        SortKey::Power => "전력",
         SortKey::Memory => "메모리",
     }
 }
@@ -115,8 +117,11 @@ pub fn MonitorSheet(chip: Option<&ComputerChip>, boxes: &[ProjectBox], on_close:
         });
     }
     let feed = feed_state.get();
-    let title = chip.map(|c| c.name.clone()).unwrap_or_else(|| "컴퓨터".to_string());
+    let name = chip.map(|c| c.name.clone()).unwrap_or_else(|| "컴퓨터".to_string());
     let window = crate::ui::window_size::current_window_size();
+    // `.mon-os`: the OS the node reports, beside the title (#389), not at 560 and below.
+    let os = title_os(&feed, window.width_dp);
+    let title = SheetTitle { text: &name, subtitle: os.as_deref() };
     let columns = mon_columns(window.width_dp);
     // The header (60), the 1 dp line under it and, where the sheet is the whole window, the
     // strip above it (FR-L33).
@@ -143,7 +148,13 @@ pub fn MonitorSheet(chip: Option<&ComputerChip>, boxes: &[ProjectBox], on_close:
                     };
                     let online = matches!(c.reachability, Reachability::Online);
                     let members = computer_members(&c.projects, boxes);
-                    let mut rows = feed.processes().unwrap_or_else(|| agent_rows(&members));
+                    // The live rows with the members' agent processes marked by pid (FR-X7,
+                    // #389); before a sample, the members alone.
+                    let sessions = feed.latest().map(|s| s.sessions.clone()).unwrap_or_default();
+                    let mut rows = match feed.processes() {
+                        Some(live) => member_rows(live, &sessions, &members),
+                        None => agent_rows(&members),
+                    };
                     let cur = sort.get();
                     sort_rows(&mut rows, cur);
                     if let Some(n) = offline_notice(c.reachability) {
@@ -165,6 +176,10 @@ pub fn MonitorSheet(chip: Option<&ComputerChip>, boxes: &[ProjectBox], on_close:
                             Some(paint(p.text_2)),
                             None,
                         );
+                        // `.mon-note`: a member row opens the session.
+                        if let Some(note) = member_note(&rows) {
+                            Label(note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                        }
                     }) };
                 }) };
             }) };
@@ -275,9 +290,10 @@ pub fn card_min_height(columns: usize) -> Option<f32> {
     (columns > 1).then_some(200.0)
 }
 
-/// `.mon-card`: a 16 px icon, a 13 px semibold `--text-2` label and an optional badge on the
-/// right (`.mon-badge`). With `fill` the card takes its grid row's height.
-fn MonCard(icon: &'static str, label: &str, badge: Option<(&str, PillTone)>, fill: bool, body: impl FnOnce()) {
+/// `.mon-card`: a 16 px icon, a 13 px semibold `--text-2` label and its badges on the right
+/// (`.mon-badge`, the status card has up to three). With `fill` the card takes its grid row's
+/// height.
+fn MonCard(icon: &'static str, label: &str, badges: &[(&str, PillTone)], fill: bool, body: impl FnOnce()) {
     let p = ember_theme().palette;
     super::components::EmberCardSized(false, true, fill, None, None, None, || {
         let m = Modifier::new().fill_max_width();
@@ -289,7 +305,7 @@ fn MonCard(icon: &'static str, label: &str, badge: Option<(&str, PillTone)>, fil
                 { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().weight(1.0), {
                     WrapLabel(label, Fs::Sm, Weight::Semibold, Some(paint(p.text_2)), Some(2));
                 }) };
-                if let Some((text, tone)) = badge {
+                for (text, tone) in badges.iter().copied() {
                     Pill(text, tone, true);
                 }
             }) };
@@ -299,15 +315,17 @@ fn MonCard(icon: &'static str, label: &str, badge: Option<(&str, PillTone)>, fil
 }
 
 /// The status card (`.mon-score`): the health score with its word, the main disk's free space,
-/// the score ring in its tone, the RAM badge, and the assigned projects. Without a score the
+/// the score ring in its tone, the chip, RAM and OS badges, and the assigned projects. Without a score the
 /// card says why over an empty track (FR-L21, #389).
 fn StatusCard(c: &ComputerChip, feed: &MonitorFeed, online: bool, fill: bool) {
     let p = ember_theme().palette;
     let latest = feed.latest();
     let score = latest.and_then(health_score);
-    let badge = latest.and_then(ram_badge);
+    // Chip, RAM and OS, as reported (#389).
+    let badges = latest.map(status_badges).unwrap_or_default();
+    let header: Vec<(&str, PillTone)> = badges.iter().map(|b| (b.as_str(), PillTone::Grey)).collect();
     let storage = latest.and_then(storage_line);
-    MonCard(super::shell::ICON_GAUGE_SVG, "상태", badge.as_deref().map(|b| (b, PillTone::Grey)), fill, || {
+    MonCard(super::shell::ICON_GAUGE_SVG, "상태", &header, fill, || {
         { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, space_role = SpaceRole::Md, modifier = Modifier::new().fill_max_width(), {
             { use ::compose_rust::ui::Column; Column!(spacing = 4.0, modifier = Modifier::new().weight(1.0), {
                 match score {
@@ -355,7 +373,7 @@ fn StatusCard(c: &ComputerChip, feed: &MonitorFeed, online: bool, fill: bool) {
 /// between toolkit `RadioButton`s only, so the row does not claim it for pill buttons.
 fn FanCard(fill: bool) {
     let p = ember_theme().palette;
-    MonCard(metric_icon(Metric::Fans), Metric::Fans.title(), None, fill, || {
+    MonCard(metric_icon(Metric::Fans), Metric::Fans.title(), &[], fill, || {
         { use ::compose_rust::ui::Row; Row!(alignment = Alignment::BottomStart, space_role = SpaceRole::Xs, {
             Label("-", Fs::Xl4, Weight::Semibold, Some(paint(p.muted)), Some(1));
             Label("RPM", Fs::Lg, Weight::Medium, Some(paint(p.muted)), Some(1));
@@ -379,8 +397,8 @@ fn MetricCard(
     fill: bool,
 ) {
     let p = ember_theme().palette;
-    let header_badge = badge.as_ref().map(|(text, tone)| (text.as_str(), PillTone::from(*tone)));
-    MonCard(metric_icon(metric), metric.title(), header_badge, fill, || match view.as_ref() {
+    let header_badge: Vec<(&str, PillTone)> = badge.iter().map(|(text, tone)| (text.as_str(), PillTone::from(*tone))).collect();
+    MonCard(metric_icon(metric), metric.title(), &header_badge, fill, || match view.as_ref() {
         Some(v) => {
             HeroValue(&v.headline);
             Bars(metric, &v.bars);
@@ -458,12 +476,14 @@ fn ProcessTable(rows: &[ProcessRow], cur: SortState, sort: &MutableState<SortSta
             // Header: 12 px muted, the sorted one in `--text`, numbers right-aligned.
             { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width().height(H_CTL), {
                 { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[3])) };
-                for key in [SortKey::Name, SortKey::Pid, SortKey::Cpu, SortKey::Memory] {
+                // The mockup's columns (`COLS`): 이름, PID, CPU, 전력, 메모리 (#389).
+                for key in [SortKey::Name, SortKey::Pid, SortKey::Cpu, SortKey::Power, SortKey::Memory] {
                     let sort = sort.clone();
                     let (width, end) = match key {
                         SortKey::Name => (None, false),
                         SortKey::Pid => (Some(PID_W), true),
                         SortKey::Cpu => (Some(CPU_W), true),
+                        SortKey::Power => (Some(PWR_W), true),
                         SortKey::Memory => (Some(MEM_W), true),
                     };
                     let ink = if cur.key == key { p.text } else { p.muted };
@@ -481,13 +501,6 @@ fn ProcessTable(rows: &[ProcessRow], cur: SortState, sort: &MutableState<SortSta
                         move || sort.set(toggle_sort(sort.get_untracked(), key)),
                         || Label(&text, Fs::Xs, Weight::Medium, Some(paint(ink)), Some(1)),
                     );
-                    // The power column sits before CPU; the node reports no power yet, so it
-                    // is a label only (`th.c-pwr`).
-                    if key == SortKey::Pid {
-                        { use ::compose_rust::ui::Box; Box!(alignment = Alignment::CenterEnd, modifier = Modifier::new().width(PWR_W).height(H_CTL), {
-                            Label("전력", Fs::Xs, Weight::Medium, Some(paint(p.muted)), Some(1));
-                        }) };
-                    }
                 }
                 { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[3])) };
             }) };
@@ -528,10 +541,12 @@ fn ProcessRowView(row: &ProcessRow, mut on_open: impl FnMut(String) + 'static) {
             }
             { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, space_role = SpaceRole::Sm, modifier = Modifier::new().weight(1.0), {
                 if mine {
+                    // `.mon-who`: the member's character and name in blue, then the process
+                    // (the OS process name of a matched row, else the agent).
                     Character(&row.agent, row.leader, 22.0, &row.name, "", CharState::default(), None);
-                    Label(&row.agent, Fs::Sm, Weight::Medium, Some(paint(p.text)), Some(1));
                     let who = if row.leader { format!("{} (리더)", row.name) } else { row.name.clone() };
                     Label(&who, Fs::Xs, Weight::Medium, Some(paint(p.blue.strong)), Some(1));
+                    Label(row.process.as_deref().unwrap_or(row.agent.as_str()), Fs::Sm, Weight::Medium, Some(paint(p.text)), Some(1));
                 } else {
                     super::shell::NavIcon(super::shell::ICON_CPU_SVG, p.muted.to_argb(), 14.0);
                     Label(&row.name, Fs::Sm, Weight::Medium, Some(paint(p.text)), Some(1));
@@ -543,7 +558,6 @@ fn ProcessRowView(row: &ProcessRow, mut on_open: impl FnMut(String) + 'static) {
                 }) };
             };
             cell(PID_W, row.pid.map_or_else(|| "-".to_string(), |v| v.to_string()));
-            cell(PWR_W, "-".to_string());
             // In-cell CPU bar beside the numeric percent (FR-L21, #389): blue for member rows,
             // muted track fill for other processes.
             { use ::compose_rust::ui::Box; Box!(alignment = Alignment::CenterEnd, modifier = Modifier::new().width(CPU_W), {
@@ -563,6 +577,7 @@ fn ProcessRowView(row: &ProcessRow, mut on_open: impl FnMut(String) + 'static) {
                     Label(&cpu_text(row.cpu), Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
                 }) };
             }) };
+            cell(PWR_W, power_text(row.power));
             cell(MEM_W, mem_text(row.mem));
             { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[3])) };
         }) };
@@ -1033,7 +1048,7 @@ mod tests {
             "cpu": {"total_percent": 25.0, "cores": [10.0, 40.0]},
             "memory": {"total_bytes": 17179869184u64, "used_bytes": 8589934592u64,
                        "swap_total_bytes": 0, "swap_used_bytes": 0},
-            "processes": [{"pid": 7, "name": "claude", "cpu_percent": 3.0, "memory_bytes": 1048576, "power_watts": 2.25}],
+            "processes": [{"pid": 7, "name": "claude", "cpu_percent": 3.0, "memory_bytes": 1048576, "power_watts": 2.34}],
             "sessions": [{"pid": 7, "session": "s1"}],
             "process_count": 9
         }))

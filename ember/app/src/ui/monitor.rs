@@ -8,7 +8,7 @@
 //! window. The temperature meter shows the hottest sensor on a fixed 0 to 100 degree Celsius
 //! scale (memory and disk meters use their percent).
 
-use ember_client::api::{MemoryMetrics, MetricsSample};
+use ember_client::api::{MemoryMetrics, MetricsSample, SessionProcess};
 use ember_client::state::Reachability;
 
 use crate::ui::project::{Member, ProjectBox};
@@ -100,6 +100,10 @@ pub struct ProcessRow {
     pub session: Option<String>,
     pub agent: String,
     pub leader: bool,
+    /// Watts drawn by the process, when reported (#389).
+    pub power: Option<f32>,
+    /// The OS process name of a member row matched by its pid; `name` is then the member's.
+    pub process: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +111,7 @@ pub enum SortKey {
     Name,
     Pid,
     Cpu,
+    Power,
     Memory,
 }
 
@@ -126,8 +131,8 @@ impl Default for SortState {
     }
 }
 
-/// A click on a header: the same key flips the direction; a new key starts descending for CPU
-/// and memory and ascending for name and PID.
+/// A click on a header: the same key flips the direction; a new key starts descending for CPU,
+/// power and memory and ascending for name and PID.
 pub fn toggle_sort(state: SortState, key: SortKey) -> SortState {
     if state.key == key {
         SortState {
@@ -137,7 +142,7 @@ pub fn toggle_sort(state: SortState, key: SortKey) -> SortState {
     } else {
         SortState {
             key,
-            descending: matches!(key, SortKey::Cpu | SortKey::Memory),
+            descending: matches!(key, SortKey::Cpu | SortKey::Power | SortKey::Memory),
         }
     }
 }
@@ -175,6 +180,7 @@ pub fn sort_rows(rows: &mut [ProcessRow], state: SortState) {
             }
             SortKey::Pid => known(&a.pid, &b.pid, desc),
             SortKey::Cpu => known(&a.cpu, &b.cpu, desc),
+            SortKey::Power => known(&a.power, &b.power, desc),
             SortKey::Memory => known(&a.mem, &b.mem, desc),
         };
         primary
@@ -183,8 +189,8 @@ pub fn sort_rows(rows: &mut [ProcessRow], state: SortState) {
     });
 }
 
-/// Members of the projects assigned to a computer, once each. TODO(FR-X7): the client does not
-/// know which computer a session runs on, so this is every member of the assigned projects.
+/// Members of the projects assigned to a computer, once each: every member of the assigned
+/// projects. Which of them has a process here comes from the sample's `sessions` ([`member_rows`]).
 pub fn computer_members(projects: &[String], boxes: &[ProjectBox]) -> Vec<Member> {
     let mut out: Vec<Member> = Vec::new();
     for b in boxes.iter().filter(|b| projects.contains(&b.id)) {
@@ -209,8 +215,48 @@ pub fn agent_rows(members: &[Member]) -> Vec<ProcessRow> {
             session: Some(m.session_id.clone()),
             agent: m.agent.clone(),
             leader: m.leader,
+            power: None,
+            process: None,
         })
         .collect()
+}
+
+/// Mark the rows of members' agent processes (FR-L21, FR-X7): a row whose pid is a member's
+/// session in `sessions` (the server's report) takes the member's name, character and session,
+/// and keeps its process name in `process`. A member whose reported pid is not among the rows
+/// (not in the listed top) is added after them with its pid and unknown values. A session that
+/// is not a member of this computer's projects marks nothing.
+pub fn member_rows(mut rows: Vec<ProcessRow>, sessions: &[SessionProcess], members: &[Member]) -> Vec<ProcessRow> {
+    for m in members {
+        let Some(sp) = sessions.iter().find(|s| s.session == m.session_id) else { continue };
+        if let Some(r) = rows.iter_mut().find(|r| r.pid == Some(sp.pid) && r.session.is_none()) {
+            r.process = Some(std::mem::replace(&mut r.name, m.name.clone()));
+            r.session = Some(m.session_id.clone());
+            r.agent = m.agent.clone();
+            r.leader = m.leader;
+        } else if !rows.iter().any(|r| r.session.as_deref() == Some(m.session_id.as_str())) {
+            rows.push(ProcessRow {
+                pid: Some(sp.pid),
+                name: m.name.clone(),
+                cpu: None,
+                mem: None,
+                session: Some(m.session_id.clone()),
+                agent: m.agent.clone(),
+                leader: m.leader,
+                power: None,
+                process: None,
+            });
+        }
+    }
+    rows
+}
+
+/// The note under the table when a row opens a member's session (mockup `.mon-note`).
+pub const MEMBER_NOTE: &str = "팀원 행을 누르면 그 팀원의 세션으로 이동합니다.";
+
+/// [`MEMBER_NOTE`] when one of the rows is a member's.
+pub fn member_note(rows: &[ProcessRow]) -> Option<&'static str> {
+    rows.iter().any(|r| r.session.is_some()).then_some(MEMBER_NOTE)
 }
 
 /// The line under the title: the online state, and for a computer that is not online the notice
@@ -433,8 +479,8 @@ fn hottest(s: &MetricsSample) -> Option<&ember_client::api::TempMetrics> {
         .max_by(|a, b| a.celsius.partial_cmp(&b.celsius).unwrap_or(std::cmp::Ordering::Equal))
 }
 
-/// The sample's processes as table rows. The client cannot tell an agent process from another
-/// yet (FR-X7), so none is linked to a session.
+/// The sample's processes as table rows, none linked to a session yet ([`member_rows`] marks
+/// the members'). A power value that is not finite is unknown.
 pub fn process_rows(s: &MetricsSample) -> Vec<ProcessRow> {
     s.processes
         .iter()
@@ -446,6 +492,8 @@ pub fn process_rows(s: &MetricsSample) -> Vec<ProcessRow> {
             session: None,
             agent: String::new(),
             leader: false,
+            power: p.power_watts.filter(|w| w.is_finite()),
+            process: None,
         })
         .collect()
 }
@@ -760,7 +808,6 @@ pub fn storage_line(s: &MetricsSample) -> Option<String> {
     Some(format!("{word} \u{00B7} 여유 {}", bytes_text(d.available_bytes)))
 }
 
-/// The RAM size badge of the status card, from the memory total.
 /// The badge shown in the top-right corner of a metric card header (`.mon-badge`, FR-L21, #389):
 /// - CPU / GPU: the sensor's rounded degree Celsius when a matching temperature is reported;
 /// - Memory: memory usage pressure percentage (`압력 N%`) with green/orange/red tone;
@@ -837,6 +884,48 @@ pub fn metric_badge(metric: Metric, s: &MetricsSample) -> Option<(String, crate:
 /// The badge shown in the status card header: total RAM (e.g. `64.0 GB`), when reported.
 pub fn ram_badge(s: &MetricsSample) -> Option<String> {
     s.memory.as_ref().filter(|m| m.total_bytes > 0).map(|m| bytes_text(m.total_bytes))
+}
+
+fn non_empty(v: &Option<String>) -> Option<&str> {
+    v.as_deref().map(str::trim).filter(|v| !v.is_empty())
+}
+
+/// The chip badge: the processor name the node reports (#389).
+pub fn chip_badge(s: &MetricsSample) -> Option<String> {
+    non_empty(&s.chip).map(str::to_string)
+}
+
+/// The OS as the node reports it, name and version (`macOS 15.2`); either alone when the other
+/// is missing (#389).
+pub fn os_text(s: &MetricsSample) -> Option<String> {
+    match (non_empty(&s.os_name), non_empty(&s.os_version)) {
+        (Some(n), Some(v)) => Some(format!("{n} {v}")),
+        (Some(one), None) | (None, Some(one)) => Some(one.to_string()),
+        (None, None) => None,
+    }
+}
+
+/// The status card's header badges in the mockup's order (chip, RAM, OS), each only when
+/// reported.
+pub fn status_badges(s: &MetricsSample) -> Vec<String> {
+    [chip_badge(s), ram_badge(s), os_text(s)].into_iter().flatten().collect()
+}
+
+/// The OS text beside the sheet title (`.mon-os`), not shown at 560 and below
+/// (`.mon-os{display:none}`).
+pub fn title_os(feed: &MonitorFeed, width_dp: f32) -> Option<String> {
+    if width_dp <= 560.0 {
+        return None;
+    }
+    feed.latest().and_then(os_text)
+}
+
+/// A process's power: watts with one decimal (mockup `f1`), a dash when not reported.
+pub fn power_text(v: Option<f32>) -> String {
+    match v.filter(|w| w.is_finite()) {
+        Some(w) => format!("{w:.1}"),
+        None => "-".to_string(),
+    }
 }
 
 /// The fan modes of the mockup's fan card, in order.

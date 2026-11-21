@@ -1964,16 +1964,22 @@ fn review_leader(value: Option<&str>, members: &[Member], m: &Member) -> bool {
 /// The member's character on a leader card (`bot(s,30)` in the mockup's `.ps-lead`).
 pub const LEADER_AVATAR: f32 = 30.0;
 
+/// The radio mark on a leader card: the toolkit's radio button in the mockup's colours and
+/// size (compose-rust#545), named by its member. It shows whether the member leads and takes
+/// no change handler, so a caller cannot make it react: the server does not take a leader yet
+/// (TODO(#384)), and the Host owns the value, so a press changes nothing.
+pub fn LeaderMark(selected: bool, name: &str) {
+    let p = ember_theme().palette;
+    { use ::compose_rust::ui::RadioButton; RadioButton!(selected, |_| {}, ring_color = paint(p.text_2), dot_color = paint(p.ink), size = 16.0, accessible_name = name) };
+}
+
 fn LeaderOption(m: &Member, project_id: &str) {
     let p = ember_theme().palette;
     // `.ps-lead:has(input:checked)`: the chosen card is on `sel` with an `ink` border.
     let card = Modifier::new().fill_max_width().padding(10.0).border(1.0, paint(if m.leader { p.ink } else { p.line })).corner_radius(CORNER_MD);
     let card = if m.leader { card.background(paint(p.sel)) } else { card };
     { use ::compose_rust::ui::Row; Row!(spacing = 10.0, alignment = Alignment::CenterStart, modifier = card, {
-            // The toolkit's radio button in the mockup's colours and size (compose-rust#545),
-            // named by its member. It takes no `on_change`: the Host owns the value, so a press
-            // changes nothing until the server takes a leader (TODO(#384)).
-            { use ::compose_rust::ui::RadioButton; RadioButton!(m.leader, |_| {}, ring_color = paint(p.text_2), dot_color = paint(p.ink), size = 16.0, accessible_name = m.name.as_str()) };
+            LeaderMark(m.leader, &m.name);
             // The member's character, 30 dp, between the mark and the name (review st F).
             Character(&m.agent, m.leader, LEADER_AVATAR, &m.name, project_id, CharState::from_status(m.status), None);
             { use ::compose_rust::ui::Column; Column!(spacing = 2.0, modifier = Modifier::new().weight(1.0), {
@@ -2147,9 +2153,8 @@ mod tests {
         }
         let production = include_str!("project.rs").split("#[cfg(test)]").next().unwrap();
         let lead = production.split("fn LeaderOption(").nth(1).unwrap().split("\nfn ").next().unwrap();
-        assert!(lead.contains("RadioButton!(m.leader, |_| {}, ring_color = paint(p.text_2), dot_color = paint(p.ink), size = 16.0"));
-        assert!(!lead.contains(".border(1.5") && !lead.contains("on_change ="), "no drawn ring is left, and the mark is read only (its change handler does nothing)");
-
+        assert!(lead.contains("LeaderMark(m.leader, &m.name);"), "the card draws the read-only mark");
+        assert!(!lead.contains(".border(1.5"), "no drawn ring is left");
 
         // compose-rust#410 (#673): the search row that the icon opens binds its field to a focus
         // handle and asks for the focus from an effect, once the field's node exists.
@@ -2159,6 +2164,73 @@ mod tests {
         assert!(grid.contains("launched_effect((), move || async move { focus.request() });"));
         let field = include_str!("components.rs").split("#[cfg(test)]").next().unwrap();
         assert!(field.contains("focus_handle = o.focus.as_ref(),"), "EmberField hands the handle to the toolkit field");
+    }
+
+    #[test]
+    fn fr_l26_a_press_on_the_leader_mark_changes_nothing_it_shows() {
+        // The mark is read only: a press, sent the way the Renderer sends one (the value the
+        // user asked for, to the radio's change handler), leaves it showing what it was given.
+        let _guard = crate::services::test_guard();
+        use compose_rust::{EventPayload, PropertyKind};
+        for leader in [true, false] {
+            let mut host = Host::new(move || {
+                Box::new(Recomposer::new(move || {
+                    let mut m = member("a", LauncherStatus::Running);
+                    m.leader = leader;
+                    LeaderOption(&m, "p");
+                }))
+            });
+            let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+            let radio = batch
+                .iter()
+                .find_map(|m| match m {
+                    Mutation::Create { node_id, widget: compose_rust::WidgetKind::RadioButton } => Some(*node_id),
+                    _ => None,
+                })
+                .expect("a toolkit radio button");
+            let checked = |batch: &[Mutation]| -> Vec<bool> {
+                batch
+                    .iter()
+                    .filter_map(|m| match m {
+                        Mutation::SetProp { node_id, property: PropertyKind::Checked, value: PropertyValue::Bool(b) } if *node_id == radio => Some(*b),
+                        _ => None,
+                    })
+                    .collect()
+            };
+            assert_eq!(checked(&batch), vec![leader], "the mark shows the leader value it was given");
+            let handler = batch
+                .iter()
+                .find_map(|m| match m {
+                    Mutation::SetProp { node_id, property: PropertyKind::OnValueChange, value: PropertyValue::Integer(h) } if *node_id == radio => Some(*h as u64),
+                    _ => None,
+                })
+                .expect("the radio's change handler");
+            // Ask for the other state, then for the same one again.
+            for asked in [!leader, leader] {
+                let (bytes, _) = host
+                    .dispatch(HostEvent::new(radio, handler, EventPayload::ValueChanged(if asked { 1.0 } else { 0.0 })))
+                    .expect("dispatch");
+                let after = decode_batch(bytes).expect("decode");
+                assert!(checked(&after).iter().all(|b| *b == leader), "a press changed the mark (leader {leader}, asked {asked}): {after:?}");
+            }
+            let (bytes, _) = host.dispatch(HostEvent::new(0, 0, EventPayload::Resync)).expect("resync");
+            let full = decode_batch(bytes).expect("decode");
+            let radio_now = full
+                .iter()
+                .find_map(|m| match m {
+                    Mutation::Create { node_id, widget: compose_rust::WidgetKind::RadioButton } => Some(*node_id),
+                    _ => None,
+                })
+                .expect("the re-sent tree has the radio");
+            let shown: Vec<bool> = full
+                .iter()
+                .filter_map(|m| match m {
+                    Mutation::SetProp { node_id, property: PropertyKind::Checked, value: PropertyValue::Bool(b) } if *node_id == radio_now => Some(*b),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(shown, vec![leader], "after the presses the re-sent tree shows the radio's state once, as leader {leader}");
+        }
     }
 
     #[test]

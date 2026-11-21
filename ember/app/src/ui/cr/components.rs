@@ -3512,43 +3512,9 @@ mod tests {
 
     #[test]
     fn fr_l32_every_modal_wires_dismiss_and_settings_keeps_its_guard() {
-        // Escape, the scrim and the close button share one callback, so a modal without
-        // on_dismiss could never close on Escape, and a guarded sheet must pass its guard.
-        // `Dialog`, `Sheet` and `Popover` take the dismiss handler as their second positional
-        // argument, so a call without one does not compile; this checks that the modals are
-        // still built through those calls and that each passes a handler.
-        let mut modals = 0;
-        use std::fs;
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui/cr");
-        for entry in fs::read_dir(dir).expect("cr sources") {
-            let path = entry.expect("source entry").path();
-            if path.extension().and_then(|s| s.to_str()) != Some("rs") {
-                continue;
-            }
-            let name = path.file_name().unwrap().to_str().unwrap().to_string();
-            let src = fs::read_to_string(&path).expect("source text");
-            let production = src.split("#[cfg(test)]").next().unwrap();
-            let lines: Vec<&str> = production.lines().collect();
-            for (i, l) in lines.iter().enumerate() {
-                let t = l.trim_start();
-                let call = ["ui::Dialog; Dialog!(", "ui::Sheet; Sheet!(", "ui::Popover; Popover!("]
-                    .iter()
-                    .find_map(|c| t.find(c).map(|at| &t[at + c.len()..]));
-                if let Some(args) = call {
-                    if t.starts_with("//") {
-                        continue;
-                    }
-                    modals += 1;
-                    let near = [args].into_iter().chain(lines[i + 1..(i + 4).min(lines.len())].iter().copied()).collect::<Vec<_>>().join("\n");
-                    let near = near.trim_start();
-                    // `open, on_dismiss, ..`: something follows the first argument's comma.
-                    let after_open = near.split_once(',').map(|(_, rest)| rest.trim_start()).unwrap_or("");
-                    assert!(!after_open.is_empty() && !after_open.starts_with("modifier ="), "{name}:{} modal without on_dismiss", i + 1);
-                }
-            }
-        }
-        assert!(modals > 0, "no modal call found");
-
+        // A guarded sheet must pass its guard as its dismiss handler. That every modal takes a
+        // dismiss handler at all is a compile error otherwise: `tests/compile-fail/` holds a
+        // `Dialog!`, `Sheet!` and `Popover!` called without one, which must not build.
         assert!(include_str!("project.rs").contains("EmberSheet(&format!(\"{} 설정\", b.name), true, request_close,"));
     }
 

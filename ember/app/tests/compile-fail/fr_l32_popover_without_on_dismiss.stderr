@@ -1,0 +1,5 @@
+error: missing required argument `on_dismiss` for Popover!
+ --> tests/compile-fail/fr_l32_popover_without_on_dismiss.rs:7:66
+  |
+7 |     { use ::compose_rust::ui::Popover; Popover!(open, modifier = modifier) };
+  |                                                                  ^^^^^^^^

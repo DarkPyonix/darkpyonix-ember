@@ -80,4 +80,6 @@ ember-server = { path = "../server" }
 # Serves the in-process server on a loopback listener for the editor relay over HTTP
 # (`tests/fr_n9_device_editor.rs`); the version ember-server uses.
 axum = "0.8"
+# Compile-fail cases (`tests/compile_fail.rs`): calls the UI API must refuse to build.
+trybuild = "1"
 

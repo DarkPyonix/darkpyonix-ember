@@ -179,6 +179,15 @@ def default_extensions() -> list[str]:
     return [e.strip() for e in raw.split(os.pathsep) if e.strip()]
 
 
+THEME_EXTENSION = "vscode-darkpyonix-theme"
+
+
+def theme_is_default_extension() -> bool:
+    """Whether the DarkPyonix theme is among the default extensions (by id or as its .vsix), so
+    the workbench can default to it (SPEC FR-W6, #15)."""
+    return any(THEME_EXTENSION in Path(e).name.lower() for e in default_extensions())
+
+
 def extension_id(entry: str) -> str:
     """The `publisher.name` id of an entry: the id itself, or read from a .vsix's
     `extension/package.json`. Lower-cased, as VS Code compares ids case-insensitively."""

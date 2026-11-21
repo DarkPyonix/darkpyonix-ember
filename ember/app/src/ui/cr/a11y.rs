@@ -44,6 +44,8 @@ pub const WEB_MENU: &str = "웹 페이지 열기";
 pub const PROJECT_PICKER: &str = "프로젝트 선택";
 pub const COMPUTER_PICKER: &str = "컴퓨터 선택";
 pub const MODEL_PICKER: &str = "하네스와 모델 선택";
+/// The model picker's list of models (mockup `#mplist`, `role="listbox" aria-label="모델"`).
+pub const MODEL_LIST: &str = "모델";
 pub const ACCOUNT_PICKER: &str = "계정 선택";
 /// The 버전 관리 branch popover (mockup `aria-label="브랜치 전환"`).
 pub const BRANCH_PICKER: &str = "브랜치 전환";

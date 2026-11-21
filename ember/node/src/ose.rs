@@ -53,8 +53,13 @@ pub struct OseLaunch {
     pub connection: EmberOseConnection,
 }
 
-/// The message of a start refused because there is no OSE binary.
-pub const NOT_INSTALLED: &str = "OSE server binary is not installed";
+/// The message of a start refused because there is no OSE binary. It names the install step
+/// (SPEC FR-W4 acceptance step 6, #83): the release archives of ember-server and ember-node carry
+/// `install-ose.sh`, which fetches the matching OSE release into `~/.local/share`, where
+/// [`server_binary`] looks.
+pub const NOT_INSTALLED: &str = "OSE server binary is not installed: run install-ose.sh from the \
+    ember-server or ember-node folder (it fetches the matching DarkPyonix OSE release into \
+    ~/.local/share), or set EMBER_OSE_SERVER to a dpx-ose-server launcher";
 
 /// The runtime dir for the server's `data_dir`: its sibling `<name>-runtime` (SPEC FR-A11). The
 /// server's `runtime_dir` module re-exports it and holds the migration.
@@ -1153,6 +1158,20 @@ fn server_binary() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    /// SPEC FR-W4 acceptance step 6 (#83): a missing OSE says what to do, in the words the
+    /// release archive uses (`install-ose.sh`, the folder it is in) and where the binary is looked up.
+    #[test]
+    fn fr_w4_not_installed_names_the_install_step() {
+        let m = super::NOT_INSTALLED;
+        assert!(m.starts_with("OSE server binary is not installed"), "{m}");
+        for word in ["install-ose.sh", "ember-server", "~/.local/share", "EMBER_OSE_SERVER"] {
+            assert!(m.contains(word), "{word} missing from {m}");
+        }
+        assert!(!m.contains("  "), "line continuation left a double space: {m}");
+        let script = include_str!("../../server/scripts/install-ose.sh");
+        assert!(script.contains("/.local/share"), "install-ose.sh no longer unpacks into ~/.local/share");
+    }
+
     #[test]
     fn fr_w4_windows_strip_verbatim_prefix() {
         use super::strip_verbatim_prefix as s;

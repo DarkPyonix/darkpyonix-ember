@@ -240,8 +240,13 @@ pub enum ProcHandle {
     Shim { client: Arc<ShimClient>, exited: watch::Receiver<bool> },
 }
 
+/// After [`ProcHandle::shutdown`] sent `KILL`, how long it waits for the shim to report the
+/// agent's end before it gives up acknowledging it.
+pub const KILL_END_WAIT: Duration = Duration::from_secs(10);
+
 impl ProcHandle {
-    /// Wait up to `grace` for the agent to exit (after its stdin was closed), then kill it.
+    /// Wait up to `grace` for the agent to exit (after its stdin was closed), then kill it. Under
+    /// a shim the end is then acknowledged, so the shim exits at once instead of lingering (#923).
     pub async fn shutdown(self, grace: Duration) -> anyhow::Result<()> {
         match self {
             ProcHandle::Direct(mut child) => match tokio::time::timeout(grace, child.wait()).await {
@@ -254,7 +259,18 @@ impl ProcHandle {
                 let _ = client.close_stdin().await;
                 if tokio::time::timeout(grace, exited.wait_for(|v| *v)).await.is_err() {
                     client.kill().await?;
+                    if tokio::time::timeout(KILL_END_WAIT, exited.wait_for(|v| *v)).await.is_err() {
+                        tracing::warn!(
+                            target: "ember::shim",
+                            session = %client.session,
+                            "the shim did not report the agent's end within {KILL_END_WAIT:?} of KILL; it lingers until its linger time"
+                        );
+                        return Ok(());
+                    }
                 }
+                // The session is over and the agent has ended (or its shim connection is gone):
+                // acknowledge everything, so the shim exits now. The adapter reads no more output.
+                let _ = client.ack(u64::MAX).await;
             }
         }
         Ok(())
@@ -491,11 +507,14 @@ fn bridge(
     let client = Arc::new(client);
     let (exited_tx, exited_rx) = watch::channel(false);
 
-    // stdout: shim events -> ShimReader. The relay ends (detaching, agent left running) when the
-    // reader is gone.
+    // stdout: shim events -> ShimReader. When the reader is gone the relay stops forwarding but
+    // keeps reading, only to learn the agent's end for [`ProcHandle::shutdown`] (#923). It ends
+    // with the agent's end or with the connection (detaching leaves the agent running: dropping
+    // the client closes the connection).
     let (chunk_tx, chunk_rx) = tokio::sync::mpsc::channel::<Chunk>(64);
     let (ack_tx, mut ack_rx) = tokio::sync::mpsc::unbounded_channel::<Ack>();
     tokio::spawn(async move {
+        let mut forward = true;
         while let Some(ev) = events.recv().await {
             let (chunk, ended) = match ev {
                 ShimEvent::Output { start, data } => (Chunk::Data { start, data }, None),
@@ -505,7 +524,10 @@ fn bridge(
                 tracing::info!(target: "ember::shim", "agent ended: {reason}");
                 let _ = exited_tx.send(true);
             }
-            if chunk_tx.send(chunk).await.is_err() || ended.is_some() {
+            if forward && chunk_tx.send(chunk).await.is_err() {
+                forward = false;
+            }
+            if ended.is_some() {
                 return;
             }
         }

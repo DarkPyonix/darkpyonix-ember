@@ -1095,7 +1095,7 @@ What trust does not protect. Under D37 agents and terminals run with the full au
 
 ### D50: channel_post answers a mention: the 30-minute window, the open thread, and the open per-harness decisions
 
-**Decision.** [provisional, #380, 2026-11-21] An agent posts into a channel (`channel_post`, `FR-T12`) only as an answer: it is a member, and a person (or a guest) mentioned it in that channel within the last 30 minutes, or its mention thread there is still open. The thread is the latest mention of the agent in the channel; it stays open until the agent's first post in the channel after it, and at most 24 hours. The rate limit (6 posts a minute per session and channel) stays.
+**Decision.** [provisional, #380, 2026-11-21; open-thread rule and its 24-hour limit confirmed by the leader 2026-11-21, owner ratification pending] An agent posts into a channel (`channel_post`, `FR-T12`) only as an answer: it is a member, and a person (or a guest) mentioned it in that channel within the last 30 minutes, or its mention thread there is still open. The thread is the latest mention of the agent in the channel; it stays open until the agent's first post in the channel after it, and at most 24 hours. The rate limit (6 posts a minute per session and channel) stays.
 
 [provisional, #380, 2026-11-21] Three questions of the per-harness registration stay open until a real model turn per harness is measured (owner checklist DarkPyonix/darkpyonix#141); until then the behaviour in `FR-T12` holds:
 

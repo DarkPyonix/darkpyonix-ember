@@ -227,7 +227,8 @@ async fn fr_t12_an_open_mention_thread_allows_an_answer_after_the_window() {
     let (st, b) = w.post_as(Some(&w.token(&w.alpha)), "done, see the PR").await;
     assert_eq!(st, StatusCode::CREATED, "{b}");
     assert!(forbidden(w.a2a.check_channel_post_at(&w.alpha, &w.channel, t + 45 * MINUTE_MS)));
-    // A new mention opens a new thread.
+    // A new mention opens a new thread (a few ms later, so it is after the answer).
+    tokio::time::sleep(Duration::from_millis(5)).await;
     let t2 = mention_at(&w, &w.alpha);
     assert!(w.a2a.check_channel_post_at(&w.alpha, &w.channel, t2 + 45 * MINUTE_MS).is_ok());
 }

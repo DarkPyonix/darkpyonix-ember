@@ -2418,11 +2418,11 @@ mod tests {
         let (lost_node, lost) = handler_of(&first, PropertyKind::OnFocusLost);
         assert_eq!(field, lost_node, "both focus events are the text field's");
 
-        let (bytes, _) = host.dispatch(HostEvent { node_id: field, handler_id: gained, payload: EventPayload::FocusGained }).expect("focus");
+        let (bytes, _) = host.dispatch(HostEvent::new(field, gained, EventPayload::FocusGained)).expect("focus");
         let focused = decode_batch(bytes).expect("decode");
         assert_eq!(borders(&focused), ink, "focus redraws the frame in ink");
 
-        let (bytes, _) = host.dispatch(HostEvent { node_id: field, handler_id: lost, payload: EventPayload::FocusLost }).expect("blur");
+        let (bytes, _) = host.dispatch(HostEvent::new(field, lost, EventPayload::FocusLost)).expect("blur");
         let blurred = decode_batch(bytes).expect("decode");
         assert_eq!(borders(&blurred), line, "losing focus puts the line back");
         assert_eq!(FOCUS_LOST.load(Ordering::SeqCst), 1, "the caller's own on_focus_lost still runs");
@@ -3572,7 +3572,7 @@ mod tests {
         // Escape and scrim are interpreted by the renderer, which sends the same
         // dismissal event for both. Host cannot synthesize those physical inputs.
         for expected in 1..=2 {
-            host.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("dispatch dismiss");
+            host.dispatch(HostEvent::new(node_id, handler_id, EventPayload::Clicked)).expect("dispatch dismiss");
             assert_eq!(DISMISSES.load(Ordering::SeqCst), expected);
         }
     }
@@ -3864,7 +3864,7 @@ mod tests {
             }
             node = *parent.get(&node).expect("a clickable ancestor");
         };
-        host.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("click");
+        host.dispatch(HostEvent::new(node_id, handler_id, EventPayload::Clicked)).expect("click");
         assert_eq!(POP_DISMISSED.load(Ordering::SeqCst), 1, "a tap closes the menu");
         assert_eq!(POP_CHOSEN.load(Ordering::SeqCst), 2, "and reports the row");
     }
@@ -4070,7 +4070,7 @@ mod tests {
                 safe_area_trailing: 0.0,
                 safe_area_bottom: 0.0,
             };
-            let (bytes, _) = host.dispatch(HostEvent { node_id: *node_id, handler_id: 0, payload }).expect("dispatch");
+            let (bytes, _) = host.dispatch(HostEvent::new(*node_id, 0, payload)).expect("dispatch");
             sent.extend(decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")));
         }
         compose_rust::window::reset_window_size();
@@ -4182,7 +4182,7 @@ mod tests {
             .collect();
         assert_eq!(clickable.len(), 5, "each row and the bare Clickable carry OnClick: {clickable:?}");
         for (i, (node_id, handler_id)) in clickable.into_iter().enumerate() {
-            host.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("dispatch");
+            host.dispatch(HostEvent::new(node_id, handler_id, EventPayload::Clicked)).expect("dispatch");
             assert_eq!(CLICKS.load(Ordering::SeqCst), i + 1, "the click on row {i} reached its closure");
         }
     }
@@ -4329,11 +4329,7 @@ mod tests {
                 .expect("at least one open modal when pressing Escape");
             let (bytes, _) = self
                 .host
-                .dispatch(HostEvent {
-                    node_id,
-                    handler_id,
-                    payload: EventPayload::Clicked,
-                })
+                .dispatch(HostEvent::new(node_id, handler_id, EventPayload::Clicked))
                 .expect("dispatch Escape dismiss");
             let bytes = bytes.to_vec();
             self.apply(&bytes);
@@ -4366,11 +4362,7 @@ mod tests {
             let (node_id, handler_id) = found.unwrap_or_else(|| panic!("no clickable text {label}"));
             let (bytes, _) = self
                 .host
-                .dispatch(HostEvent {
-                    node_id,
-                    handler_id,
-                    payload: EventPayload::Clicked,
-                })
+                .dispatch(HostEvent::new(node_id, handler_id, EventPayload::Clicked))
                 .expect("click");
             let bytes = bytes.to_vec();
             self.apply(&bytes);

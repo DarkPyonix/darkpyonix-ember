@@ -800,7 +800,7 @@ mod tests {
         let mut last = Vec::new();
         for name in ["크루", "포켓"] {
             let (node_id, handler_id) = nodes.button(name);
-            let (bytes, _) = host.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("dispatch");
+            let (bytes, _) = host.dispatch(HostEvent::new(node_id, handler_id, EventPayload::Clicked)).expect("dispatch");
             let batch = compose_rust::protocol::decode_batch(bytes).expect("decode");
             last = texts_of(&batch).into_iter().map(|(n, t)| (n, t.to_string())).collect::<Vec<_>>();
             nodes.take(&batch);
@@ -869,11 +869,7 @@ mod tests {
         nodes.take(&compose_rust::protocol::decode_batch(host.rebuild().expect("rebuild")).expect("decode"));
 
         let (save_id, save_handler) = nodes.button("팀원 설정 저장");
-        host.dispatch(HostEvent {
-            node_id: save_id,
-            handler_id: save_handler,
-            payload: EventPayload::Clicked,
-        })
+        host.dispatch(HostEvent::new(save_id, save_handler, EventPayload::Clicked))
         .expect("dispatch click on 팀원 설정 저장");
 
         // Wait briefly for the async run_shared task on test_services().rt to apply the patch.

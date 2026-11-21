@@ -890,10 +890,7 @@ mod tests {
             .iter()
             .map(|m| format!("{m:?}"))
             .collect();
-        let event = HostEvent {
-            node_id: 0,
-            handler_id: 0,
-            payload: EventPayload::WindowSizeChanged {
+        let event = HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
                 width_dp: width,
                 height_dp: 900.0,
                 class,
@@ -902,8 +899,7 @@ mod tests {
                 safe_area_leading: 0.0,
                 safe_area_trailing: 0.0,
                 safe_area_bottom: 0.0,
-            },
-        };
+            });
         let (bytes, _) = host.dispatch(event).expect("dispatch");
         text.extend(decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")));
         compose_rust::window::reset_window_size();
@@ -957,10 +953,7 @@ mod tests {
         let _ = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
         // Set desktop 1440x900 so split view opens `RoomView` with `OwnerState` and `MembersSheet`.
         let (bytes, _) = host
-            .dispatch(HostEvent {
-                node_id: 0,
-                handler_id: 0,
-                payload: EventPayload::WindowSizeChanged {
+            .dispatch(HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
                     width_dp: 1440.0,
                     height_dp: 900.0,
                     class: WindowSizeClass::Expanded,
@@ -969,8 +962,7 @@ mod tests {
                     safe_area_leading: 0.0,
                     safe_area_trailing: 0.0,
                     safe_area_bottom: 0.0,
-                },
-            })
+                }))
             .expect("resize to desktop");
         let _ = decode_batch(bytes).expect("decode resize");
 

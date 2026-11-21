@@ -180,10 +180,7 @@ mod tests {
         let first = texts(&decode_batch(host.rebuild().expect("rebuild")).expect("decode"));
         assert!(first.contains("1440x900 Expanded"), "nothing reported yet: {first}");
         let mut report = |width: f32, height: f32| {
-            let event = HostEvent {
-                node_id: 0,
-                handler_id: 0,
-                payload: EventPayload::WindowSizeChanged {
+            let event = HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
                     width_dp: width,
                     height_dp: height,
                     class: WindowSizeClass::from_width_dp(width),
@@ -192,8 +189,7 @@ mod tests {
                     safe_area_leading: 0.0,
                     safe_area_trailing: 0.0,
                     safe_area_bottom: 0.0,
-                },
-            };
+                });
             let (bytes, _) = host.dispatch(event).expect("dispatch");
             texts(&decode_batch(bytes).expect("decode"))
         };

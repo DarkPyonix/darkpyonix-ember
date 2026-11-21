@@ -930,6 +930,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fr_s11_an_unauthorized_push_says_where_the_token_was_looked_for() {
+        let c = ConnectionState::Unauthorized {
+            error: "missing or invalid server token".into(),
+            looked_in: vec!["EMBER_SERVER_TOKEN".into(), "/h/.ember/server-token".into()],
+        };
+        let (text, tone) = connection_banner(&c).unwrap();
+        assert_eq!(tone, Tone::Error);
+        assert!(text.starts_with("The server refused the token (missing or invalid server token)."), "{text}");
+        assert!(text.contains("Looked for the token in: EMBER_SERVER_TOKEN, /h/.ember/server-token."), "{text}");
+        assert!(!text.contains("Retrying"), "no retry loop: {text}");
+    }
+
     fn cand(id: &str, title: &str) -> MentionCandidate {
         MentionCandidate { id: id.into(), title: title.into(), project: "p".into(), agent: "codex".into(), status: SessionStatus::Idle }
     }

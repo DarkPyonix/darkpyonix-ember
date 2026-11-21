@@ -271,6 +271,112 @@ mod tests {
         assert_eq!(home_only.as_deref(), Some("from-home"));
     }
 
+    /// A lookup over the given variables only (never the process environment) and `app` as the
+    /// app's data folder (#982).
+    fn lookup(vars: &[(&str, &Path)], env_token: Option<&str>, app: Option<&Path>) -> TokenLookup {
+        let vars: Vec<(String, std::ffi::OsString)> =
+            vars.iter().map(|(k, v)| (k.to_string(), v.as_os_str().to_owned())).collect();
+        TokenLookup::from_vars(
+            |name| {
+                if name == "EMBER_SERVER_TOKEN" {
+                    return env_token.map(std::ffi::OsString::from);
+                }
+                vars.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
+            },
+            app.map(Path::to_path_buf),
+        )
+    }
+
+    /// `<dir>/.ember/server-token` holding `text`.
+    fn home_token(dir: &Path, text: &str) -> std::path::PathBuf {
+        std::fs::create_dir_all(dir.join(".ember")).unwrap();
+        let f = dir.join(".ember").join("server-token");
+        write_token(&f, text);
+        f
+    }
+
+    #[test]
+    fn fr_s11_lookup_order_is_env_then_data_dir_else_home_then_app_data() {
+        let (data, home, app) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        write_token(&data.path().join("server-token"), "from-data\n");
+        let home_file = home_token(home.path(), "from-home\n");
+        write_token(&app.path().join("server-token"), "from-app\n");
+        let all = [("EMBER_DATA_DIR", data.path()), ("HOME", home.path())];
+
+        assert_eq!(lookup(&all, Some("from-env"), Some(app.path())).token().as_deref(), Some("from-env"));
+        assert_eq!(lookup(&all, None, Some(app.path())).token().as_deref(), Some("from-data"));
+        // A data folder given on purpose is the only file: no fallback to home or the app folder.
+        let empty = tempfile::tempdir().unwrap();
+        let only_data = [("EMBER_DATA_DIR", empty.path()), ("HOME", home.path())];
+        assert_eq!(lookup(&only_data, None, Some(app.path())).token(), None);
+
+        let home_and_app = [("HOME", home.path())];
+        let l = lookup(&home_and_app, None, Some(app.path()));
+        assert_eq!(l.files(), vec![home_file.clone(), app.path().join("server-token")]);
+        assert_eq!(l.token().as_deref(), Some("from-home"));
+        // No token in home: the app's own data folder (on Windows `%APPDATA%/ember`).
+        std::fs::remove_file(&home_file).unwrap();
+        assert_eq!(lookup(&home_and_app, None, Some(app.path())).token().as_deref(), Some("from-app"));
+        // A tool names no app folder: nothing is found.
+        assert_eq!(lookup(&home_and_app, None, None).token(), None);
+    }
+
+    #[test]
+    fn fr_s11_lookup_uses_userprofile_only_when_home_is_unset_or_empty() {
+        let (home, profile, app) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let profile_file = home_token(profile.path(), "from-profile\n");
+        // A Windows program started from the Start menu: no HOME.
+        let no_home = [("USERPROFILE", profile.path())];
+        assert_eq!(lookup(&no_home, None, None).token().as_deref(), Some("from-profile"));
+        assert_eq!(lookup(&no_home, None, Some(app.path())).files()[0], profile_file);
+        let blank_home = [("HOME", Path::new("")), ("USERPROFILE", profile.path())];
+        assert_eq!(lookup(&blank_home, None, None).token().as_deref(), Some("from-profile"));
+        // HOME set: USERPROFILE is not consulted, even when HOME has no token.
+        let both = [("HOME", home.path()), ("USERPROFILE", profile.path())];
+        let l = lookup(&both, None, Some(app.path()));
+        assert_eq!(l.token(), None);
+        assert!(!l.files().contains(&profile_file), "{:?}", l.files());
+        // Nothing at all: no file is named.
+        assert!(lookup(&[], None, None).files().is_empty());
+        assert_eq!(lookup(&[], None, None).token(), None);
+    }
+
+    #[test]
+    fn fr_s11_lookup_skips_a_missing_or_blank_file_to_the_next_place() {
+        let (home, app) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        write_token(&app.path().join("server-token"), "from-app\n");
+        let vars = [("HOME", home.path())];
+        // Missing in home.
+        assert_eq!(lookup(&vars, None, Some(app.path())).token().as_deref(), Some("from-app"));
+        // Blank in home.
+        home_token(home.path(), "  \n");
+        assert_eq!(lookup(&vars, None, Some(app.path())).token().as_deref(), Some("from-app"));
+        // A blank variable falls through to the files too.
+        assert_eq!(lookup(&vars, Some("  "), Some(app.path())).token().as_deref(), Some("from-app"));
+    }
+
+    #[test]
+    fn fr_s11_lookup_describes_every_place_it_looked() {
+        let (data, home, app) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let l = lookup(&[("HOME", home.path())], None, Some(app.path()));
+        assert_eq!(
+            l.describe(),
+            vec![
+                "EMBER_SERVER_TOKEN".to_string(),
+                home.path().join(".ember").join("server-token").display().to_string(),
+                app.path().join("server-token").display().to_string(),
+            ]
+        );
+        let l = lookup(&[("EMBER_DATA_DIR", data.path()), ("HOME", home.path())], None, Some(app.path()));
+        assert_eq!(
+            l.describe(),
+            vec!["EMBER_SERVER_TOKEN".to_string(), data.path().join("server-token").display().to_string()]
+        );
+        // The same folder twice (the app's data folder is EMBER_DATA_DIR's) is named once.
+        let l = lookup(&[("HOME", home.path())], None, Some(&home.path().join(".ember")));
+        assert_eq!(l.files().len(), 1);
+    }
+
     #[test]
     fn fr_s11_token_is_trimmed_and_empty_is_none() {
         let data = tempfile::tempdir().unwrap();

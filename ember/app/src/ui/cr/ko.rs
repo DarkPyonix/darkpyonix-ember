@@ -189,4 +189,20 @@ mod tests {
         };
         assert_eq!(task_line(&task), "#3 [진행 중] 테스트 작성 \u{00b7} alice");
     }
+
+    #[test]
+    fn fr_s11_an_unauthorized_push_says_where_the_token_was_looked_for() {
+        let c = ConnectionState::Unauthorized {
+            error: "missing or invalid server token".into(),
+            looked_in: vec!["EMBER_SERVER_TOKEN".into(), "C:/Users/me/AppData/Roaming/ember/server-token".into()],
+        };
+        let (text, tone) = connection_banner(&c).unwrap();
+        assert_eq!(tone, Tone::Error);
+        assert!(text.starts_with("서버가 토큰을 거부했습니다(missing or invalid server token)."), "{text}");
+        assert!(text.contains("토큰을 찾은 곳: EMBER_SERVER_TOKEN, C:/Users/me/AppData/Roaming/ember/server-token."), "{text}");
+        assert!(!text.contains("다시 시도합니다"), "no retry loop: {text}");
+        // A token given by the caller has no place to name.
+        let given = ConnectionState::Unauthorized { error: "x".into(), looked_in: Vec::new() };
+        assert!(!connection_banner(&given).unwrap().0.contains("찾은 곳"));
+    }
 }

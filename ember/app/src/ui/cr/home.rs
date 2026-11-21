@@ -818,9 +818,8 @@ impl Composer {
     /// by itself (`keep_open`): [`Composer::tap_mode`] closes it once a mode is applied, and
     /// the first tap on 바이패스 only arms that row. At 560 and below it is a bottom sheet with
     /// the same head and rows and no title bar (`plain_sheet`, review K8).
-    /// (TODO(compose-rust#810, in v0.0.11): `HostPopover.kt` moves focus between `Role::MenuItem`
-    /// rows with the arrow keys and focuses the `selected(true)` row when it opens; waits for a
-    /// display check.)
+    /// The arrow keys move between the rows and the current row has focus when the popover
+    /// opens, the toolkit's menu keyboard ([`PopoverMenuWith`], compose-rust#810).
     fn mode_menu(&self, sel: &Selection, share: Option<f32>, anchor: impl FnOnce()) {
         let rows = mode_pop_rows(&mode_picker_rows_pending(sel.option.harness, sel.mode, self.mode_pending.get().map(|(m, _)| m)));
         let header = mode_header(sel.option.harness);
@@ -879,7 +878,7 @@ impl Composer {
         };
         let height = model_sheet_height(crate::ui::window_size::current_window_size().height_dp);
         EmberSheet("", open, dismiss.clone(), None, || {
-            { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width().height(height).label(super::a11y::MODEL_PICKER), content = || self.model_body(ui, sel, true, dismiss)) };
+            { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width().height(height).label(super::a11y::MODEL_PICKER), content = || self.model_body(ui, sel, true, open, dismiss)) };
         });
     }
 
@@ -888,10 +887,11 @@ impl Composer {
     /// `shadow-lg`, the toolkit's own elevation off), 400 wide, 8 below the composer card and
     /// lined up with the chip's start. Inside: the 52 dp harness rail, then the search and the
     /// rows ([`Composer::model_body`]). Escape and a press outside call `on_dismiss`.
+    /// It is a searchable list, not a menu ([leader, 2026-11-21], #888): no node in it declares
+    /// a menu or a menu item, so the toolkit's menu keyboard (compose-rust#810) does not take
+    /// it over, and the search keeps the keys.
     /// Not built: the rail's favourites group and the favourite stars (no place stores them),
-    /// profile names (FR-L17 profiles are not built), and focus on the search when it opens
-    /// (`FieldOptions` carries no focus handle), so the arrow keys and `Ctrl+number` work once
-    /// the search has focus.
+    /// and profile names (FR-L17 profiles are not built).
     pub(super) fn model_popover(&self, ui: &SharedUi, sel: &Selection, share: Option<f32>, anchor: impl FnOnce(), close: impl FnMut() + Clone + 'static) {
         let open = self.open.get() == Some(Pick::Model);
         let mut reset = self.close_model();
@@ -919,7 +919,7 @@ impl Composer {
                     .corner_radius(CORNER_LG)
                     .label(super::a11y::MODEL_PICKER),
             ), anchor = Some(anchor), {
-                { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width().fill_max_height(), content = || self.model_body(ui, sel, false, dismiss)) };
+                { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width().fill_max_height(), content = || self.model_body(ui, sel, false, open, dismiss)) };
             }) };
     }
 
@@ -930,10 +930,29 @@ impl Composer {
     ///
     /// Keyboard, in the search field: Enter takes the active row, the arrows move it, Home and
     /// End jump to the ends while nothing is typed and `Ctrl+1` to `Ctrl+9` choose a row
-    /// (`model_key`, #574). The field consumes the keys it acts on. Not built: scrolling the
-    /// active row into view (a `ScrollColumn` cannot be scrolled to a child from the Host).
-    fn model_body(&self, ui: &SharedUi, sel: &Selection, phone: bool, close: impl FnMut() + Clone + 'static) {
+    /// (`model_key`, #574). The field consumes the keys it acts on. The search takes the focus
+    /// when the picker opens, as the mockup's `open()` focuses `[data-mpq]` ([leader,
+    /// 2026-11-21], #888). The rows are a list named 모델, each a list item that says it is
+    /// selected when it is the active row Ember draws, the honest stand-in for the mockup's
+    /// listbox, options and `aria-activedescendant`, which the toolkit cannot express (no
+    /// combobox, listbox or option role and no relation from the field to a row). Not built:
+    /// scrolling the active row into view (a `ScrollColumn` cannot be scrolled to a child from
+    /// the Host).
+    fn model_body(&self, ui: &SharedUi, sel: &Selection, phone: bool, shown: bool, close: impl FnMut() + Clone + 'static) {
         let p = ember_theme().palette;
+        // The search takes the focus when the picker opens. The request runs as an effect,
+        // after the batch that shows the field; one made earlier is dropped (compose-rust#410).
+        // Only the body on screen asks (`shown`: the popover's wider than 560, the sheet's at
+        // 560 and below), so a closed sheet's field never takes the focus from the popover's.
+        let search_focus = cu::use_focus_handle();
+        {
+            let (focus, is_open) = (search_focus.clone(), shown);
+            compose_rust::runtime::launched_effect(is_open, move || async move {
+                if is_open {
+                    focus.request();
+                }
+            });
+        }
         let agents: Vec<(String, bool)> = ui.live.agents.get().iter().map(|a| (a.kind.clone(), a.installed)).collect();
         let limited: Vec<String> = {
             let accounts = ui.live.accounts.get();
@@ -1045,6 +1064,7 @@ impl Composer {
                                     })),
                                     on_submit: Some(Box::new(enter)),
                                     on_key_down: Some(Box::new(keys)),
+                                    focus: Some(search_focus.clone()),
                                     ..Default::default()
                                 })
                             });
@@ -1058,7 +1078,7 @@ impl Composer {
             // `.mp-body{flex:1 1 auto;overflow:auto;padding:4px 8px 8px}`: the list takes what
             // the fixed height leaves under the search.
             { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().fill_max_width().weight(1.0), {
-                { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width().padding(SP[1]), {
+                { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width().padding(SP[1]).role(Role::List).label(super::a11y::MODEL_LIST), {
                     if rows.is_empty() {
                         // `.mp-empty`.
                         { use ::compose_rust::ui::Box; Box!(alignment = Alignment::Center, modifier = Modifier::new().fill_max_width().padding(SP[4]), {
@@ -1092,8 +1112,9 @@ fn model_row_fill(chosen: bool, active: bool, p: &Palette) -> Option<Color> {
 /// (`pop_metrics(PopKind::Mode)`: 56 high at least, radius 8): 12 before the text, the name at
 /// 14/600 over the harness glyph, the harness and, in red, why the row cannot be chosen; then
 /// the shortcut in a `surface-2` key cap 52 wide (review K5) and 8 after it. A row that cannot
-/// be chosen is drawn at half strength and says why when tapped. It is a menu item that says
-/// whether it is the chosen one, as the rows of the other menus do (#574).
+/// be chosen is drawn at half strength and says why when tapped. It is a list item, not a menu
+/// item, and it says it is selected when it is the active row, the one Enter takes ([leader,
+/// 2026-11-21], #888): a menu item would hand the popover to the toolkit's menu keyboard.
 fn ModelRow(o: &ModelOption, block: Option<&'static str>, chosen: bool, active: bool, shortcut: Option<String>, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let m = pop_metrics(PopKind::Mode);
@@ -1106,8 +1127,8 @@ fn ModelRow(o: &ModelOption, block: Option<&'static str>, chosen: bool, active: 
         .height(m.row_min_h)
         .background(fill)
         .corner_radius(m.row_radius)
-        .role(Role::MenuItem)
-        .selected(chosen)
+        .role(Role::ListItem)
+        .selected(active)
         .click_action(true);
     Clickable(if block.is_some() { modifier.alpha(0.5) } else { modifier }, Alignment::CenterStart, on_click, || {
         { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
@@ -3111,6 +3132,108 @@ mod tests {
         assert_eq!((sel.option.model, sel.option.effort), ("opus", Some("Medium")), "the second row, Opus 5.5 (보통)");
         assert_eq!(c.open.get_untracked(), None);
         assert_eq!(c.model_act.get_untracked(), None, "the next opening starts on the chosen row");
+    }
+
+    /// The last `Semantics` modifier sent for `node`, as its debug text.
+    fn semantics_of(tree: &Tree, node: u32) -> Option<String> {
+        let id = format!("node_id: {node},");
+        tree.log.iter().rev().find(|m| m.starts_with("SetModifier") && m.contains(&id) && m.contains("Semantics")).cloned()
+    }
+
+    /// The model rows on the wire, by title: the semantics (role and state) of each row's pressable node.
+    fn model_row_semantics(tree: &Tree, titles: &[&str]) -> Vec<String> {
+        titles
+            .iter()
+            .map(|t| {
+                let (node, _) = tree.click_target(t);
+                let m = semantics_of(tree, node).unwrap_or_else(|| panic!("{t} row has no semantics"));
+                // Only the role and the state, not the node id.
+                m.split("modifier: ").nth(1).unwrap_or(&m).to_string()
+            })
+            .collect()
+    }
+
+    const OPUS_ROWS: [&str; 3] = ["Opus 5.5 (높음)", "Opus 5.5 (보통)", "Opus 5.5 (낮음)"];
+
+    #[test]
+    fn fr_l15_the_model_popover_is_a_searchable_list_not_a_menu() {
+        // [leader, 2026-11-21], #888: the search and a list of options, so the toolkit's menu
+        // keyboard (compose-rust#810) does not take the popover over. No combobox, listbox or
+        // option role exists in the toolkit, so the rows are list items in a list named 모델,
+        // and the selected one is the active row Ember draws (the chosen one when it opens).
+        let _guard = crate::services::test_guard();
+        let (_host, tree, _c) = model_picker_host();
+        // The picker's box is the node named 하네스와 모델 선택; nothing in it is a menu.
+        let node_of = |m: &String| m.split("node_id: ").nth(1).and_then(|r| r.split(|ch: char| !ch.is_ascii_digit()).next()).and_then(|d| d.parse::<u32>().ok());
+        let named: Vec<u32> = tree.log.iter().filter(|m| m.starts_with("Set") && m.contains(super::super::a11y::MODEL_PICKER)).filter_map(node_of).collect();
+        let (first, _) = tree.click_target(OPUS_ROWS[0]);
+        let picker = {
+            let mut at = Some(first);
+            loop {
+                match at {
+                    Some(n) if named.contains(&n) => break n,
+                    Some(n) => at = tree.parent.get(&n).copied(),
+                    None => panic!("the rows are in no box named {}", super::super::a11y::MODEL_PICKER),
+                }
+            }
+        };
+        let inside = |mut n: u32| loop {
+            if n == picker {
+                return true;
+            }
+            match tree.parent.get(&n) {
+                Some(p) => n = *p,
+                None => return false,
+            }
+        };
+        let menu_like: Vec<&String> = tree
+            .log
+            .iter()
+            .filter(|m| m.starts_with("SetModifier") && m.contains("Semantics") && (m.contains("MenuItem") || m.contains("role: Menu,")))
+            .filter(|m| node_of(m).is_some_and(inside))
+            .collect();
+        assert!(menu_like.is_empty(), "no menu or menu item in the picker: {menu_like:?}");
+        let rows = model_row_semantics(&tree, &OPUS_ROWS);
+        assert!(rows.iter().all(|s| s.contains("role: ListItem,")), "{rows:?}");
+        assert_ne!(rows[0], rows[1], "the active row (the chosen 높음) is selected");
+        assert_eq!(rows[1], rows[2], "the others are not: {rows:?}");
+        // The rows sit in one list named 모델.
+        let (row, _) = tree.click_target(OPUS_ROWS[0]);
+        let mut at = tree.parent.get(&row).copied();
+        let mut list = None;
+        while let Some(id) = at {
+            if semantics_of(&tree, id).is_some_and(|s| s.contains("role: List,")) {
+                list = Some(id);
+                break;
+            }
+            at = tree.parent.get(&id).copied();
+        }
+        let list = list.expect("the rows are in a list");
+        assert!(tree.log.iter().any(|m| m.contains(&format!("node_id: {list},")) && m.contains(super::super::a11y::MODEL_LIST)), "the list is named 모델");
+        // The search is a text field, the closest the toolkit has to a combobox.
+        let (field, _) = tree.field("모델 검색", PropertyKind::OnKeyDown);
+        assert!(!semantics_of(&tree, field).is_some_and(|s| s.contains("Menu")), "the field claims no menu role");
+    }
+
+    #[test]
+    fn fr_l15_the_model_popover_opens_in_the_search_and_enter_takes_the_drawn_row() {
+        // [leader, 2026-11-21], #888: the search has the focus when the picker opens (the
+        // mockup's `open()` focuses `[data-mpq]`), the arrows move the drawn active row, which
+        // is the selected one, and Enter takes that row.
+        let _guard = crate::services::test_guard();
+        let (mut host, mut tree, c) = model_picker_host();
+        tree.read(host.render_frame(1).expect("frame"));
+        let (field, _) = tree.field("모델 검색", PropertyKind::OnKeyDown);
+        assert!(tree.log.iter().any(|m| m == &format!("RequestFocus {{ node_id: {field} }}")), "the search asks for the focus: {:?}", tree.log.iter().filter(|m| m.starts_with("RequestFocus")).collect::<Vec<_>>());
+        key_down(&mut host, &mut tree, compose_rust::Key::ArrowDown, false, 0x51, "ArrowDown");
+        let rows = model_row_semantics(&tree, &OPUS_ROWS);
+        assert_ne!(rows[1], rows[0], "the drawn active row moved to 보통 and is the selected one");
+        assert_eq!(rows[0], rows[2], "{rows:?}");
+        let (node_id, handler_id) = tree.field("모델 검색", PropertyKind::OnSubmit);
+        host.dispatch(HostEvent { node_id, handler_id, payload: compose_rust::EventPayload::TextSubmitted("") }).expect("enter");
+        let sel = c.selection.get_untracked();
+        assert_eq!((sel.option.model, sel.option.effort), ("opus", Some("Medium")), "Enter took the drawn row, Opus 5.5 (보통)");
+        assert_eq!(c.open.get_untracked(), None);
     }
 
     #[test]

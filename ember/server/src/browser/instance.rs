@@ -948,4 +948,60 @@ mod tests {
         assert!(state.error.as_deref().unwrap_or_default().contains("gave up after 4 attempts"));
         assert!(cdp.is_open(), "CDP stayed open; bound stopped the retry loop");
     }
+
+    /// #344: one driver attempt is bounded too. A DevTools endpoint that accepts every call and
+    /// answers none used to keep `drive_inner` waiting on one call after another; now the attempt
+    /// ends at its attach limit, and the reason reaches `wait_page`.
+    #[tokio::test]
+    async fn drive_attach_phase_is_bounded_against_a_hanging_cdp() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_srv = calls.clone();
+        // Fake CDP WebSocket server that stays open, reads every request and answers none.
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let (_sink, mut rx) = ws.split();
+            while let Some(Ok(msg)) = rx.next().await {
+                if let Message::Text(_) = msg {
+                    calls_srv.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = BrowserConfig {
+            root: dir.path().to_path_buf(),
+            chrome: Some(PathBuf::from("/bin/true")),
+            headless: true,
+            window: (800, 600),
+            screencast: ScreencastOptions::default(),
+        };
+        let inst = BrowserInstance::new("p", dir.path().to_path_buf(), &cfg, Egress::Direct, None);
+        inst.state.send_modify(|s| s.running = true);
+        let cdp = Cdp::connect(&format!("ws://{addr}/devtools/browser/fake")).await.unwrap();
+        let driver = tokio::spawn(drive_bounded(
+            Arc::downgrade(&inst),
+            cdp.clone(),
+            0,
+            Duration::from_secs(60),
+            Duration::from_millis(1),
+            Duration::from_millis(200),
+        ));
+
+        // Well below the 30 s a single CDP call may take: the attach limit ended the attempt.
+        let err = tokio::time::timeout(Duration::from_secs(10), inst.wait_page(Duration::from_secs(60)))
+            .await
+            .expect("the attempt ends at its attach limit, not at a call timeout")
+            .err()
+            .expect("wait_page fails when no page was attached");
+        tokio::time::timeout(Duration::from_secs(10), driver).await.expect("the driver ended").unwrap();
+        server.abort();
+
+        let msg = format!("{err:#}");
+        assert!(msg.contains("no page attached within"), "unexpected error: {msg}");
+        assert!(calls.load(Ordering::SeqCst) >= 1, "the driver called the endpoint");
+        assert!(!inst.state.borrow().running, "the instance is marked not running");
+    }
 }

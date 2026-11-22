@@ -1151,6 +1151,29 @@ mod door {
         drop(door);
     }
 
+    /// #924: only a refused connection shows that no server listens on a socket file. A probe
+    /// that fails for another reason (here no permission to connect; under load also no file
+    /// descriptor left) says nothing, so the bind stops instead of taking over a live socket.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fr_s12_a_socket_that_cannot_be_probed_is_not_taken_over() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = fx();
+        let path = socket_path(f.dir.path());
+        let (cfg, _) = config(Confirm::Strict, vec![], 1);
+        let door = OwnerDoor::bind(f.dir.path(), f.owner.clone(), cfg).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let (cfg, _) = config(Confirm::Strict, vec![], 1);
+        let second = OwnerDoor::bind(f.dir.path(), f.owner.clone(), cfg);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(second.is_err(), "a socket that could not be probed must not be replaced");
+        assert!(
+            std::os::unix::net::UnixStream::connect(&path).is_ok(),
+            "the first server's socket is still there and answers"
+        );
+        drop(door);
+    }
+
     /// The Windows twin of `fr_s12_socket_is_0600_and_a_stale_file_is_replaced`: the pipe's
     /// access list, as Windows applied it, holds one entry, for this user, and is protected
     /// (nothing inherited, no Everyone, no anonymous). A second server on the same folder is

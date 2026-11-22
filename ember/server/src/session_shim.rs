@@ -270,9 +270,7 @@ pub async fn run_shim(dir: &Path, id: &str) -> anyhow::Result<()> {
     let agent_pid = child.id().unwrap_or(0);
     let stdout = child.stdout.take().expect("stdout is piped");
     let stdin = child.stdin.take();
-    if let Some(stderr) = child.stderr.take() {
-        tokio::spawn(copy_stderr_redacted(stderr, log));
-    }
+    let stderr_copy = child.stderr.take().map(|stderr| tokio::spawn(copy_stderr_redacted(stderr, log)));
 
     let (tx, _rx) = watch::channel(0u64);
     let shared = Arc::new(Shared {
@@ -337,7 +335,15 @@ pub async fn run_shim(dir: &Path, id: &str) -> anyhow::Result<()> {
             // Report the end only after the last byte of output is in the buffer: wait for the
             // stdout reader to reach the end of the pipe (which the group held) instead of a
             // fixed time, bounded for a process outside the group that still holds the pipe.
-            let _ = tokio::time::timeout(STDOUT_END_LIMIT, reader).await;
+            // The same for stderr: the shim may exit as soon as the end is acknowledged, so the
+            // log must be complete before the end is reported (#923).
+            let ends = async {
+                let _ = reader.await;
+                if let Some(copy) = stderr_copy {
+                    let _ = copy.await;
+                }
+            };
+            let _ = tokio::time::timeout(STDOUT_END_LIMIT, ends).await;
             let reason = {
                 let mut g = shared.inner.lock().unwrap();
                 let r = if g.memory_killed {

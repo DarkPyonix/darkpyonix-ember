@@ -283,6 +283,10 @@ reimplement the Extension Host (E4): without Node there is no Node extension hos
 extensions that ship a web build (VS Code's browser web-worker extension host, as on `vscode.dev`)
 run there. Extensions that need Node require a VS Code server on a computer.
 
+*[Note, 2026-11-22]* #80 is 1.0 work by the owner's decision of 2026-11-22 (relayed by the leader):
+the mobile client without Node, plus the phone webview part of #10. iOS waits on the owner's answer
+to Q-M9. The online path is D52.
+
 ### D11: The 09-22 VS Code decisions still hold, inside the IDE window
 
 These were decided for the IDE window and are unchanged in substance. Their full reasoning is in the
@@ -1118,3 +1122,13 @@ What trust does not protect. Under D37 agents and terminals run with the full au
 **Why.** The owner's rule is that an agent answers in a channel and does not post on its own. A long turn is normal for a coding agent, so the answer must still be possible after 30 minutes, once.
 
 **Status.** Written, not yet compiled or run (#380). SPEC `FR-T12` (open mention thread).
+
+### D52: The phone reaches the IDE through the per-node OSE relay
+
+**Decision.** [provisional, `docs/design/POST-1-0-MOBILE-NO-NODE.md` section 7, Q-M1, Q-M4..Q-M8, Q-M10, Q-M11 decided by the leader 2026-11-20; 1.0 work by the owner's decision of 2026-11-22, #80] The phone's two online IDE modes ("Open IDE → VS Code" and "Open IDE → Ember 에디터") use D42's per-node OSE relay and D37's device key. A small Rust gateway in the app process joins loopback connections to relay streams, so the phone reaches the computer's real OSE and Node runs only on the computer. This fills the D10 mobile-without-Node decision [user] for the online case; it does not change it.
+
+**Rejected** *[provisional]*. A `serve-web` protocol server on the phone (an internal protocol that changes with each commit, and an extension-host connection that E4 forbids us to answer). Reaching `ide_url` from a phone (that URL has no transport relay, and the proxy's own login would overlap the device key of D37). Node file operations as the editor's file path (a second path unlike the desktop editor's, with no language features, short of D38). Language servers run by the node for the editor core (the editor talks to OSE's extension host directly, D9a and D42, so language features come from extensions).
+
+**Why.** The relay, the stream type and the device key exist and are tested on the desktop. What is new is a small gateway crate and one Android Activity.
+
+**Status.** Not built (#80, 1.0 work). SPEC `FR-W5a`–`FR-W5i`, `NFR-W5a`.

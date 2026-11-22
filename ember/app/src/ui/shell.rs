@@ -101,6 +101,8 @@ pub enum Screen {
     Files,
     Launcher,
     Search,
+    /// 세션 with no focused conversation yet (FR-L10).
+    Sessions,
     Conversation(String),
     /// 에이전트: harnesses, models, profiles, network, usage (FR-L20).
     Agents,
@@ -110,28 +112,23 @@ pub enum Screen {
     VersionControl,
     /// 채널 (FR-L12).
     Channels,
-    /// A menu whose screen is not built yet ("준비 중입니다").
-    Placeholder(NavMenu),
 }
 
-/// The screen for the active menu. Home is 홈, `Launcher` renders ProjectScreen for 프로젝트 and the
-/// conversation stands in for 세션; every other menu is a placeholder until its screen lands.
+/// The screen for the active menu: every menu in [`NavMenu::ALL`] maps to a real screen.
 pub fn screen_for(route: &Route, active: NavMenu) -> Screen {
     match (active, route) {
         (NavMenu::Home, _) => Screen::Home,
         (NavMenu::Files, _) => Screen::Files,
         (NavMenu::Routines, _) => Screen::Routines,
         (NavMenu::Sessions, Route::Conversation(id)) => Screen::Conversation(id.clone()),
+        (NavMenu::Sessions, _) => Screen::Sessions,
         (NavMenu::Projects, Route::Search) => Screen::Search,
         (NavMenu::Projects, _) => Screen::Launcher,
         (NavMenu::Agents, _) => Screen::Agents,
         (NavMenu::VersionControl, _) => Screen::VersionControl,
         (NavMenu::Channels, _) => Screen::Channels,
-        (other, _) => Screen::Placeholder(other),
     }
 }
-
-pub const PLACEHOLDER_TEXT: &str = "준비 중입니다";
 
 // ---------------------------------------------------------------------------------------------
 // Bottom tabs
@@ -375,12 +372,22 @@ mod tests {
     }
 
     #[test]
-    fn fr_l10_existing_screens_are_wired_and_the_rest_are_placeholders() {
+    fn fr_l10_every_nav_menu_maps_to_a_real_screen() {
         let c = Route::Conversation("s1".into());
-        assert_eq!(
-            screen_for(&Route::Projects, NavMenu::Projects),
-            Screen::Launcher
-        );
+        let expected = [
+            (NavMenu::Home, Screen::Home),
+            (NavMenu::Projects, Screen::Launcher),
+            (NavMenu::Sessions, Screen::Sessions),
+            (NavMenu::Channels, Screen::Channels),
+            (NavMenu::Routines, Screen::Routines),
+            (NavMenu::VersionControl, Screen::VersionControl),
+            (NavMenu::Agents, Screen::Agents),
+            (NavMenu::Files, Screen::Files),
+        ];
+        assert_eq!(expected.len(), NavMenu::ALL.len());
+        for (menu, screen) in expected {
+            assert_eq!(screen_for(&Route::Projects, menu), screen, "{}", menu.label());
+        }
         assert_eq!(
             screen_for(&Route::Search, NavMenu::Projects),
             Screen::Search
@@ -389,25 +396,7 @@ mod tests {
             screen_for(&c, NavMenu::Sessions),
             Screen::Conversation("s1".into())
         );
-        assert_eq!(screen_for(&Route::Projects, NavMenu::Home), Screen::Home);
         assert_eq!(screen_for(&c, NavMenu::Home), Screen::Home);
-        assert_eq!(
-            screen_for(&Route::Projects, NavMenu::Routines),
-            Screen::Routines
-        );
-        assert_eq!(screen_for(&Route::Projects, NavMenu::Channels), Screen::Channels);
-        assert_eq!(screen_for(&Route::Projects, NavMenu::Files), Screen::Files);
-        assert_eq!(screen_for(&Route::Projects, NavMenu::Agents), Screen::Agents);
-        assert_eq!(
-            screen_for(&Route::Projects, NavMenu::VersionControl),
-            Screen::VersionControl
-        );
-        // 세션 with no open conversation has nothing to show yet.
-        assert_eq!(
-            screen_for(&Route::Projects, NavMenu::Sessions),
-            Screen::Placeholder(NavMenu::Sessions)
-        );
-        assert_eq!(PLACEHOLDER_TEXT, "준비 중입니다");
     }
 
     #[test]
@@ -584,7 +573,6 @@ mod tests {
         // No plain "~다" endings in the user-visible strings of the shell.
         let mut strings: Vec<&str> = NavMenu::ALL.iter().map(|m| m.label()).collect();
         strings.extend(BOTTOM_TABS.iter().map(|t| t.label()));
-        strings.push(PLACEHOLDER_TEXT);
         for s in strings {
             assert!(
                 !s.ends_with('다') || s.ends_with("입니다") || s.ends_with("합니다"),

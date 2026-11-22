@@ -17,6 +17,7 @@ pub mod channel;
 pub mod client;
 pub mod mcp;
 pub mod mention;
+pub mod report;
 pub mod store;
 pub mod team;
 pub mod terminal;
@@ -90,6 +91,8 @@ pub struct A2aConfig {
     pub limits: Limits,
     /// Server-wide switch used until a user sets one through the API.
     pub enabled_by_default: bool,
+    /// Timings of FR-T8 reports (#995).
+    pub reports: report::ReportTimes,
 }
 
 impl A2aConfig {
@@ -99,6 +102,7 @@ impl A2aConfig {
             cli_path: None,
             limits: Limits::default(),
             enabled_by_default: true,
+            reports: report::ReportTimes::default(),
         }
     }
 
@@ -176,6 +180,8 @@ pub struct A2a {
     /// transcripts.
     last_notice: StdMutex<HashMap<(String, String), Instant>>,
     computer_setter: StdMutex<Option<ComputerSetter>>,
+    /// FR-T8 delegators, in-flight reports and what was already reported (#995).
+    report_state: StdMutex<report::ReportState>,
     /// Recent channel posts per (session, channel), for the rate limit of `channel post`.
     channel_posts: StdMutex<HashMap<(String, String), std::collections::VecDeque<Instant>>>,
     /// Sessions whose last start skipped the `ember-channels` registration because the user's own
@@ -676,6 +682,7 @@ impl A2a {
             awaiting: StdMutex::new(HashMap::new()),
             last_notice: StdMutex::new(HashMap::new()),
             computer_setter: StdMutex::new(None),
+            report_state: StdMutex::new(report::ReportState::default()),
             channel_posts: StdMutex::new(HashMap::new()),
             channel_fallback: StdMutex::new(HashSet::new()),
             claude_sources: StdMutex::new(ClaudeConfigSources::from_env()),
@@ -743,6 +750,18 @@ impl A2a {
         tokio::spawn(watch_turns(Arc::downgrade(self), rx));
         let this = self.clone();
         tokio::spawn(async move { this.flush_all().await });
+        // FR-T8 stall reports (#995).
+        let weak = Arc::downgrade(self);
+        let every = self.config.reports.stall_check;
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(every);
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                let Some(this) = weak.upgrade() else { return };
+                this.check_stalls().await;
+            }
+        });
     }
 
     /// Drop a session's `channel_fallback` entry when the session ends (its team member is ended),
@@ -1334,8 +1353,9 @@ impl A2a {
             self.awaiting.lock().unwrap().remove(target);
             return Err(e.into());
         }
-        let ids: Vec<String> = pending.into_iter().map(|m| m.id).collect();
+        let ids: Vec<String> = pending.iter().map(|m| m.id.clone()).collect();
         self.store.mark_delivered(&ids)?;
+        self.note_delivered(target, &pending);
         Ok(true)
     }
 
@@ -1422,6 +1442,16 @@ impl A2a {
                 ),
                 None => "(deleted session)".into(),
             };
+            if m.is_report() {
+                // FR-T8 (#995): built by Ember, never answered automatically.
+                parts.push(format!(
+                    "{HEADER_TAG} Report {} from session {} {sender}\n\
+                     Ember built this status report from that session's turn. No reply is needed; \
+                     act on it only if your own work needs it.\n\n{}",
+                    m.id, m.from_session, m.text
+                ));
+                continue;
+            }
             let mut header = format!(
                 "{HEADER_TAG} Message {} from session {} {sender}",
                 m.id, m.from_session
@@ -1446,9 +1476,29 @@ async fn watch_turns(a2a: Weak<A2a>, mut rx: tokio::sync::broadcast::Receiver<Pu
         let Some(this) = a2a.upgrade() else { return };
         match push {
             Ok(Push::Event { event, .. })
+                if matches!(event.event, AgentEvent::ApprovalRequested { .. } | AgentEvent::QuestionAsked { .. }) =>
+            {
+                // FR-T8 needs input (#995).
+                let (id, what) = match &event.event {
+                    AgentEvent::ApprovalRequested { approval_id, tool, .. } => (approval_id.clone(), format!("approval for {tool}")),
+                    AgentEvent::QuestionAsked { question_id, questions } => (
+                        question_id.clone(),
+                        format!("a question: {}", questions.first().map(|q| q.text.as_str()).unwrap_or("")),
+                    ),
+                    _ => unreachable!(),
+                };
+                let (sid, seq) = (event.session_id, event.seq);
+                tokio::spawn(async move { this.on_prompt(&sid, &id, seq, what).await });
+            }
+            Ok(Push::Event { event, .. })
                 if matches!(event.event, AgentEvent::TurnEnded { .. }) =>
             {
                 let sid = event.session_id;
+                if let AgentEvent::TurnEnded { outcome } = &event.event {
+                    // FR-T8 turn-end report (#995).
+                    let (this, sid, seq, outcome) = (this.clone(), sid.clone(), event.seq, *outcome);
+                    tokio::spawn(async move { this.on_turn_ended(&sid, seq, outcome).await });
+                }
                 {
                     let mut awaiting = this.awaiting.lock().unwrap();
                     if awaiting.get(&sid).is_some_and(|before| event.seq > *before) {
@@ -1737,6 +1787,7 @@ mod channel_tool_tests {
             origin_channel: Some(channel.into()),
             origin_label: Some("Mina".into()),
             origin_guest_until: guest_until,
+            kind: None,
         }
     }
 

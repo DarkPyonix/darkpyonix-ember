@@ -68,6 +68,7 @@ pub mod trust;
 pub mod notifications;
 pub mod session;
 pub mod settings;
+pub mod storage;
 pub mod watch;
 pub mod webview;
 pub mod widget;
@@ -86,6 +87,7 @@ pub use crate::debugger::{ConfigSelector, DebugRequest, DebugUpdate};
 pub use crate::language::{LanguageRequest, LanguageUpdate};
 pub use crate::session::{DirLister, EditorSession, ServerSettingsFile, SessionConfig};
 pub use crate::settings::{EditorSettings, SettingsLayer, SettingsScope, SettingsScopes};
+pub use crate::storage::StorageRoots;
 pub use crate::output::{ExtensionMessage, MessageAction, MessageSeverity, OutputChannel, MAX_OUTPUT_CHANNEL_BYTES};
 pub use crate::widget::{
     Decoration, DecorationId, DecorationKind, HoverPhase, Severity, WidgetCommand, WidgetEvent,

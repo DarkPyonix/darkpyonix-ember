@@ -164,6 +164,11 @@ pub fn gpu_report() -> GpuReport {
     GpuReport { devices: Vec::new(), reason: Some(GPU_UNAVAILABLE.into()) }
 }
 
+#[cfg(any(test, target_os = "linux"))]
+fn gpu_report_at(_drm: &std::path::Path) -> GpuReport {
+    GpuReport { devices: Vec::new(), reason: Some(GPU_UNAVAILABLE.into()) }
+}
+
 /// Why power is empty, `None` when some process has a value.
 fn power_reason(any_power: bool) -> Option<String> {
     if any_power {
@@ -278,6 +283,46 @@ pub fn sample(top: usize) -> MetricsSample {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fr_x7_a_metrics_sample_reads_current_amdgpu_counters() {
+        let drm = tempfile::tempdir().unwrap();
+        let device = drm.path().join("card1/device");
+        std::fs::create_dir_all(&device).unwrap();
+        std::fs::write(device.join("vendor"), "0x1002\n").unwrap();
+        std::fs::write(device.join("gpu_busy_percent"), "41\n").unwrap();
+        std::fs::write(device.join("mem_info_vram_total"), "8388608\n").unwrap();
+        std::fs::write(device.join("mem_info_vram_used"), "2097152\n").unwrap();
+
+        let report = gpu_report_at(drm.path());
+        assert!(report.reason.is_none());
+        assert_eq!(report.devices.len(), 1);
+        let gpu = &report.devices[0];
+        assert_eq!(gpu.utilization_percent, Some(41.0));
+        assert_eq!(gpu.memory_total_bytes, Some(8 * 1024 * 1024));
+        assert_eq!(gpu.memory_used_bytes, Some(2 * 1024 * 1024));
+
+        std::fs::write(device.join("gpu_busy_percent"), "55\n").unwrap();
+        assert_eq!(gpu_report_at(drm.path()).devices[0].utilization_percent, Some(55.0));
+    }
+
+    #[test]
+    fn fr_x7_unavailable_gpu_counters_remain_unknown() {
+        let drm = tempfile::tempdir().unwrap();
+        let device = drm.path().join("card0/device");
+        std::fs::create_dir_all(&device).unwrap();
+        std::fs::write(device.join("vendor"), "0x1002").unwrap();
+        std::fs::write(device.join("gpu_busy_percent"), "101").unwrap();
+        assert!(gpu_report_at(drm.path()).devices.is_empty());
+        assert!(gpu_report_at(drm.path()).reason.is_some());
+
+        std::fs::write(device.join("mem_info_vram_total"), "4096").unwrap();
+        let report = gpu_report_at(drm.path());
+        assert_eq!(report.devices.len(), 1);
+        assert_eq!(report.devices[0].utilization_percent, None);
+        assert_eq!(report.devices[0].memory_total_bytes, Some(4096));
+        assert_eq!(report.devices[0].memory_used_bytes, None);
+    }
 
     fn p(pid: u32, cpu: f32, mem: u64) -> ProcessMetrics {
         ProcessMetrics { pid, name: format!("p{pid}"), cpu_percent: cpu, memory_bytes: mem, power_watts: None }

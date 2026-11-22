@@ -174,6 +174,13 @@ mod tests {
         assert_eq!(status("MainThreadDiagnostics", "$changeMany"), Some(Status::Bridged));
         assert_eq!(status("MainThreadDocuments", "$tryOpenDocument"), Some(Status::Bridged));
         assert_eq!(status("MainThreadTextEditors", "$tryShowTextDocument"), Some(Status::Todo));
+        // INTENT D54 (owner, Q-E7) and the leader's Q2 classification, 2026-11-23.
+        assert_eq!(status("MainThreadLanguageModels", "$registerLanguageModelProvider"), Some(Status::Out));
+        assert_eq!(status("MainThreadChatStatus", "$setEntry"), Some(Status::Out));
+        assert_eq!(status("MainThreadTelemetry", "$publicLog2"), Some(Status::Acked));
+        assert_eq!(status("MainThreadExtensionService", "$onExtensionActivationError"), Some(Status::Todo));
+        let out_actors = ledger().actors.iter().filter(|a| !a.methods.is_empty() && a.methods.iter().all(|(_, s)| *s == Status::Out)).count();
+        assert_eq!(out_actors, 19);
         assert_eq!(status("MainThreadDiagnostics", "$nope"), None);
         assert_eq!(status("ExtHostDocuments", "$acceptModelChanged"), None);
         let bridged = ledger().actors.iter().flat_map(|a| &a.methods).filter(|(_, s)| *s == Status::Bridged).count();

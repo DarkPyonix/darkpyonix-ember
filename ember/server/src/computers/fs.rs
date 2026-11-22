@@ -22,8 +22,10 @@
 //! `GlobRequest`, `GrepRequest`, `WriteRequest`, `MkdirRequest`, `RemoveRequest`,
 //! `RenameRequest`, `SymlinkRequest`, ...) and the response is the node's, unchanged (`remove`
 //! and `rename` answer 204 with no body, as the node does). A node error keeps
-//! its status and body; an unreachable node is 502; an unknown computer is 404; the local
-//! computer (this server) has no node client, so it answers 400.
+//! its status and body; an unreachable node is 502; an unknown computer is 404. The local
+//! computer (this server) is served by the server's in-process node, rooted at `$HOME` and
+//! refusing the server data dir ([`Computers::relay_client`], #981), as its file watch
+//! (`FR-W4d`) and terminals are.
 //!
 //! The write relay carries the content operations `write`, `pwrite` and `setattr` and the
 //! namespace operations `mkdir`, `remove`, `rename` and `symlink`. On Unix the node opens the
@@ -362,7 +364,7 @@ async fn relay(
 
 async fn run(r: Relay, id: String, op: &str, v: Value) -> Response {
     debug_assert!(READ_OPS.contains(&op) || WRITE_OPS.contains(&op) || NAMESPACE_OPS.contains(&op));
-    let node = match r.computers.client(&id) {
+    let node = match r.computers.relay_client(&id) {
         Ok(n) => n,
         Err(e) => return computer_error(e),
     };

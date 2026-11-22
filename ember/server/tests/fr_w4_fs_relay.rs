@@ -488,14 +488,14 @@ async fn fr_w4_fs_relay_write_body_is_capped_at_24_mib() {
 }
 
 #[tokio::test]
-async fn fr_w4_fs_relay_errors_map_unknown_404_local_400_unreachable_502() {
+async fn fr_w4_fs_relay_errors_map_unknown_404_unreachable_502() {
     within(async {
         let f = fx().await;
         let body = json!({ "path": f.root.join("hello.txt") });
         let r = f.c.post(format!("{}/api/computers/nope/fs/stat", f.base)).json(&body).send().await.unwrap();
         assert_eq!(r.status(), 404);
-        let r = f.c.post(format!("{}/api/computers/local/fs/stat", f.base)).json(&body).send().await.unwrap();
-        assert_eq!(r.status(), 400);
+        // The local computer no longer answers 400 (#981): see
+        // `fr_w4_fs_relay_local_computer_reaches_the_in_process_node`.
         // The node's own errors keep status and body.
         let (st, v) = f.post("stat", json!({ "path": f.root.join("missing.txt") })).await;
         assert_eq!(st, 404, "{v}");
@@ -516,6 +516,30 @@ async fn fr_w4_fs_relay_errors_map_unknown_404_local_400_unreachable_502() {
         let down = r.json::<Value>().await.unwrap()["id"].as_str().unwrap().to_string();
         let r = f.c.post(format!("{}/api/computers/{down}/fs/stat", f.base)).json(&body).send().await.unwrap();
         assert_eq!(r.status(), 502);
+    })
+    .await;
+}
+
+/// #981: the local computer (`local`) is served by the server's in-process node (rooted at
+/// `$HOME`), as its file watch is (FR-W4d), instead of answering 400.
+#[tokio::test]
+async fn fr_w4_fs_relay_local_computer_reaches_the_in_process_node() {
+    within(async {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let computers = Computers::new(Registry::new(store), computers::default_connector());
+        let app = computers::fs::router(computers);
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        let c = reqwest::Client::new();
+        let home = std::env::var("HOME").unwrap();
+        let r = c.post(format!("{base}/api/computers/local/fs/stat")).json(&json!({ "path": home })).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        let v: Value = r.json().await.unwrap();
+        assert_eq!(v["kind"], "dir", "{v}");
+        // A path outside `$HOME` is the node's refusal, not the old 400.
+        let r = c.post(format!("{base}/api/computers/local/fs/stat")).json(&json!({ "path": "/" })).send().await.unwrap();
+        assert_eq!(r.status(), 403);
     })
     .await;
 }
@@ -576,14 +600,17 @@ async fn fr_w4_fs_relay_needs_the_server_token() {
         "stat", "lstat", "read", "list", "readlink", "glob", "grep", "write", "pwrite", "setattr", "mkdir", "remove",
         "rename", "symlink",
     ] {
-        let path = format!("/api/computers/local/fs/{op}");
-        assert_eq!(status(&app, "POST", &path, None).await, 401, "{op}: no token");
-        assert_eq!(status(&app, "POST", &path, Some("Bearer dpg_guestcredential")).await, 401, "{op}: guest credential");
-        assert_eq!(status(&app, "POST", &path, Some("Bearer wrong")).await, 401, "{op}: wrong token");
-        // The right token reaches the handler: the local computer has no node, so it answers
-        // 400 or 422 from the relay itself, not 401.
-        let st = status(&app, "POST", &path, Some(&format!("Bearer {token}"))).await;
-        assert!(st == 400 || st == 422, "{op}: {st}");
+        for id in ["local", "nope"] {
+            let path = format!("/api/computers/{id}/fs/{op}");
+            assert_eq!(status(&app, "POST", &path, None).await, 401, "{op} on {id}: no token");
+            assert_eq!(status(&app, "POST", &path, Some("Bearer dpg_guestcredential")).await, 401, "{op} on {id}: guest credential");
+            assert_eq!(status(&app, "POST", &path, Some("Bearer wrong")).await, 401, "{op} on {id}: wrong token");
+        }
+        // The right token reaches the handler: an unknown computer answers 404 from the relay
+        // itself, not 401. (The local computer is served by the in-process node since #981, so
+        // its answer is the node's; `fr_w4_fs_relay_local_computer_reaches_the_in_process_node`.)
+        let st = status(&app, "POST", &format!("/api/computers/nope/fs/{op}"), Some(&format!("Bearer {token}"))).await;
+        assert_eq!(st, 404, "{op}: {st}");
     }
 }
 

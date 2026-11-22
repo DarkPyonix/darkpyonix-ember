@@ -631,6 +631,8 @@ impl Composer {
             account: None,
             computer: computer_id.clone(),
             model: body.model.clone(),
+            effort: sel.option.effort.map(str::to_string),
+            mode: Some(sel.mode.key().to_string()),
             cwd,
         };
         let project_name = sel.project.clone();

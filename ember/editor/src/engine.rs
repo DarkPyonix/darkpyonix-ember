@@ -38,6 +38,7 @@ use crate::semantic::{decode_semantic_tokens, overlay_semantic_runs, DocSemantic
 use crate::widget::{Decoration, DecorationKind, WidgetCommand, WidgetEvent};
 
 mod actors;
+mod debugging;
 mod language;
 
 /// How many versions behind the document an answer of the highlighter may be and still be shown.
@@ -89,6 +90,8 @@ pub enum ReadPurpose {
     WorkspaceEdit { id: u64 },
     /// A local resource request `request` of webview `handle` (FR-E8).
     WebviewResource { handle: String, request: u64 },
+    /// `.vscode/launch.json` for debug start `start`.
+    LaunchJson { start: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -138,6 +141,8 @@ pub enum Input {
     Language(crate::language::LanguageRequest),
     /// An event of an extension webview or its host (FR-E8).
     Webview(crate::webview::WebviewEvent),
+    /// A request of the debugging window; answered with [`SessionUpdate::Debug`].
+    Debug(crate::debugger::DebugRequest),
     /// Result of reading one persisted extension storage file (`MainThreadStorage`).
     StorageRead { shared: bool, extension_id: String, result: Result<Option<Vec<u8>>, String> },
     /// Result of writing or deleting one persisted extension storage file (`MainThreadStorage`).
@@ -243,6 +248,8 @@ pub enum SessionUpdate {
     Language(crate::language::LanguageUpdate),
     /// An extension webview changed (FR-E8): the window applies it to its webview host and panes.
     Webview(crate::webview::WebviewUpdate),
+    /// Debug sessions, call stacks, variables, console lines and breakpoints.
+    Debug(crate::debugger::DebugUpdate),
 }
 
 #[derive(Debug, Clone)]
@@ -262,6 +269,8 @@ enum Pending {
     Language(language::PendingLang),
     /// A call of the webview model (FR-E8).
     Webview(crate::webview::Pending),
+    /// A call of the debug session layer.
+    Debug(crate::debugger::Pending),
 }
 
 /// The running search: the window's id, the provider session, its call, and the open documents whose
@@ -336,6 +345,8 @@ pub struct SessionCore {
     lang: language::LangState,
     /// Extension webviews (FR-E8).
     webviews: crate::webview::Webviews,
+    /// Debug configurations, sessions and breakpoints.
+    debug: crate::debugger::DebugState,
     /// Persistent extension storage (`MainThreadStorage`).
     storage: crate::storage::ExtensionStorage,
     next_token: Token,
@@ -407,6 +418,7 @@ impl SessionCore {
             replace_writes: HashMap::new(),
             lang: language::LangState::default(),
             webviews: crate::webview::Webviews::new(),
+            debug: crate::debugger::DebugState::new(now),
             storage: crate::storage::ExtensionStorage::default(),
             next_token: 0,
             next_generation: 0,
@@ -481,6 +493,7 @@ impl SessionCore {
                 let out = self.webviews.on_event(event);
                 self.apply_webview(out);
             }
+            Input::Debug(request) => self.on_debug_request(request),
             Input::StorageRead { shared, extension_id, result } => {
                 for (req, reply) in self.storage.on_read_done(shared, &extension_id, result) {
                     self.respond(req, Ok(reply));
@@ -513,7 +526,7 @@ impl SessionCore {
         let b = self.codelens_due.values().filter_map(|d| d.deadline());
         let c = self.folding_due.values().filter_map(|d| d.deadline());
         let d = self.semantic_due.values().filter_map(|d| d.deadline());
-        a.chain(b).chain(c).chain(d).min()
+        a.chain(b).chain(c).chain(d).chain(self.debug.next_deadline()).min()
     }
 
     /// Every known language with its display name (FR-L31.7).
@@ -565,6 +578,12 @@ impl SessionCore {
 
     fn ui(&mut self, u: SessionUpdate) {
         self.out.push(Effect::Ui(u));
+    }
+
+    /// The workspace folder: where `.vscode/launch.json` is read and what `${workspaceFolder}`
+    /// stands for. Set once, before the first input.
+    pub fn set_workspace_folder(&mut self, folder: UriComponents) {
+        self.debug.set_workspace(folder);
     }
 
     /// The trust state the extension host was started with (FR-L31.18); set once, before the
@@ -1726,6 +1745,7 @@ impl SessionCore {
                 let out = self.webviews.on_reply(pending, result);
                 self.apply_webview(out);
             }
+            Pending::Debug(pending) => self.on_debug_reply(pending, result),
         }
     }
 
@@ -1837,6 +1857,7 @@ impl SessionCore {
                 let out = self.webviews.on_resource_read(handle, request, &uri, result);
                 self.apply_webview(out);
             }
+            ReadPurpose::LaunchJson { start } => self.on_launch_json_read(start, result),
         }
     }
 
@@ -2233,6 +2254,7 @@ impl SessionCore {
         for k in due_sem {
             self.fire_semantic(&k);
         }
+        self.debug_tick();
     }
 
     /// The `Decorations` prop of every document whose decorations may have changed.

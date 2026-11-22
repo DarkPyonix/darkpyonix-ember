@@ -87,6 +87,10 @@ pub struct SessionConfig {
     /// what the extension host is given, as the Code-OSS workbench does. Compared without regard
     /// to case.
     pub disabled_extensions: Vec<String>,
+    /// Optional local directory for `MainThreadStorage` persistence (`globalState` and
+    /// `workspaceState`). When `None` (default), storage persists under the server's
+    /// `globalStorageHome` and `workspaceStorageHome` via `RemoteFs`.
+    pub storage_dir: Option<std::path::PathBuf>,
 }
 
 impl SessionConfig {
@@ -108,6 +112,7 @@ impl SessionConfig {
             vscode_url: None,
             workspace_trusted: true,
             disabled_extensions: Vec::new(),
+            storage_dir: None,
         }
     }
 
@@ -312,6 +317,16 @@ impl EditorSession {
         .to_ipc()?;
         let (ipc, ipc_lifecycle) = IpcClient::start(mconn, ctx);
         let env = management::get_environment_data(&ipc, &authority, None).await?;
+        let storage_roots = match &config.storage_dir {
+            Some(dir) => crate::storage::StorageRoots::from_local_dir(dir, &config.workspace_path),
+            None => crate::storage::StorageRoots::from_env(
+                &authority,
+                &env.global_storage_home,
+                &env.workspace_storage_home,
+                &config.workspace_path,
+            ),
+        };
+        let local_storage = config.storage_dir.is_some();
         // `IRemoteAgentEnvironment.settingsPath` (remoteAgentEnvironment.ts): the server's Machine settings.json.
         let machine_settings_path =
             env.raw.get("settingsPath").and_then(|u| u.get("path")).and_then(Value::as_str).filter(|p| !p.is_empty()).map(str::to_owned);
@@ -407,13 +422,17 @@ impl EditorSession {
         let commands = crate::commands::parse_contributed_commands(&extensions);
         let mut core = SessionCore::new(LanguageRegistry::from_extensions(&extensions), config.core.clone(), Instant::now());
         core.set_settings(settings.clone());
+        core.set_workspace_folder(workspace.folders[0].uri.clone());
         core.set_grammar_catalog(crate::textmate::GrammarCatalog::from_extensions(&extensions));
         core.set_workspace_trust(crate::trust::WorkspaceTrust::new(config.workspace_trusted, extensions.clone()));
+        core.set_storage_roots(storage_roots);
         let driver = Driver {
             core,
             highlight: None,
             peer: peer.clone(),
             fs: Arc::clone(&fs),
+            authority: authority.clone(),
+            local_storage,
             ipc: ipc.clone(),
             updates: updates_tx,
             reqs: HashMap::new(),
@@ -758,6 +777,11 @@ impl EditorSession {
         self.send(Command::Input(Input::AnswerMessage { id, handle }))
     }
 
+    /// The window shows output channel `id`; the session reads a log channel again only while it is shown.
+    pub fn set_active_output_channel(&self, id: Option<String>) -> Result<(), Error> {
+        self.send(Command::Input(Input::ActiveOutputChannel { id }))
+    }
+
     /// Replace the chosen matches (FR-E7); answered with [`SessionUpdate::ReplaceDone`].
     pub fn replace(&self, id: u64, request: crate::search::ReplaceRequest) -> Result<(), Error> {
         self.send(Command::Input(Input::Replace { id, request }))
@@ -802,6 +826,22 @@ impl EditorSession {
         self.send(Command::Input(Input::Webview(event)))
     }
 
+    /// A request of the debugging window; answered with [`SessionUpdate::Debug`].
+    pub fn debug(&self, request: crate::debugger::DebugRequest) -> Result<(), Error> {
+        self.send(Command::Input(Input::Debug(request)))
+    }
+
+    /// Start the configuration of `.vscode/launch.json` that `selector` names. Answered with
+    /// [`crate::debugger::DebugUpdate::Sessions`], or [`crate::debugger::DebugUpdate::StartFailed`].
+    pub fn start_debugging(&self, selector: crate::debugger::ConfigSelector) -> Result<(), Error> {
+        self.debug(crate::debugger::DebugRequest::Start { selector })
+    }
+
+    /// Stop one debug session, or all of them with `None`.
+    pub fn stop_debugging(&self, session: Option<String>) -> Result<(), Error> {
+        self.debug(crate::debugger::DebugRequest::Stop { session })
+    }
+
     /// After [`SessionUpdate::Desync`]: re-send the session's text as a new generation.
     pub fn resync(&self, uri: UriComponents) -> Result<(), Error> {
         self.send(Command::Resync(uri))
@@ -828,6 +868,8 @@ struct Driver {
     highlight: Option<std::sync::mpsc::SyncSender<HighlightJob>>,
     peer: RpcPeer,
     fs: Arc<RemoteFs>,
+    authority: String,
+    local_storage: bool,
     ipc: IpcClient,
     updates: mpsc::UnboundedSender<SessionUpdate>,
     /// core token → RPC request id, for `Cancel`.
@@ -865,6 +907,82 @@ async fn write_user_file(path: std::path::PathBuf, bytes: Vec<u8>) -> Result<(),
         std::fs::write(&path, bytes).map_err(|e| e.to_string())
     });
     write.await.unwrap_or_else(|e| Err(e.to_string()))
+}
+
+/// Whether a file-channel error says the directory or file already exists.
+fn is_already_exists(error: &ember_editor_conn::Error) -> bool {
+    let text = error.to_string().to_lowercase();
+    text.contains("eexist") || text.contains("fileexists") || text.contains("already exists")
+}
+
+/// Create `dir_path` and any missing parent directories on the remote server via `RemoteFs::mkdir`.
+async fn ensure_remote_dir(fs: &RemoteFs, authority: &str, dir_path: &str) -> Result<(), String> {
+    let trimmed = dir_path.trim_end_matches('/');
+    if trimmed.is_empty() || trimmed == "/" {
+        return Ok(());
+    }
+    let uri = UriComponents::remote(authority, trimmed);
+    match fs.mkdir(&uri).await {
+        Ok(()) => return Ok(()),
+        Err(e) if is_already_exists(&e) => return Ok(()),
+        Err(e) if !is_not_found(&e) => return Err(e.to_string()),
+        Err(_) => {}
+    }
+    let mut missing = vec![trimmed.to_owned()];
+    let mut cur = parent_of_path(trimmed);
+    while !cur.is_empty() && cur != "/" {
+        let cur_uri = UriComponents::remote(authority, &cur);
+        match fs.mkdir(&cur_uri).await {
+            Ok(()) => break,
+            Err(e) if is_already_exists(&e) => break,
+            Err(e) if is_not_found(&e) => {
+                missing.push(cur.clone());
+                cur = parent_of_path(&cur);
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    for path in missing.into_iter().rev() {
+        let u = UriComponents::remote(authority, &path);
+        match fs.mkdir(&u).await {
+            Ok(()) => {}
+            Err(e) if is_already_exists(&e) => {}
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Ok(())
+}
+
+/// Atomically write (`Some`) or delete (`None`) one storage file on the remote server.
+async fn write_remote_storage(
+    fs: &RemoteFs,
+    authority: &str,
+    uri: &UriComponents,
+    bytes: Option<Vec<u8>>,
+) -> Result<(), String> {
+    let Some(bytes) = bytes else {
+        let opts = ember_editor_conn::remote_fs::DeleteOptions::default();
+        return match fs.delete(uri, &opts).await {
+            Ok(()) => Ok(()),
+            Err(e) if is_not_found(&e) => Ok(()),
+            Err(e) => Err(e.to_string()),
+        };
+    };
+    let parent = parent_of_path(&uri.path);
+    ensure_remote_dir(fs, authority, &parent).await?;
+    let name = uri.path.rsplit('/').next().unwrap_or("storage.json");
+    let tmp_path = if parent == "/" {
+        format!("/.{name}.tmp.{}", uuid::Uuid::new_v4().simple())
+    } else {
+        format!("{parent}/.{name}.tmp.{}", uuid::Uuid::new_v4().simple())
+    };
+    let tmp_uri = UriComponents::remote(authority, &tmp_path);
+    fs.write_file(&tmp_uri, bytes, &WriteOptions::default()).await.map_err(|e| e.to_string())?;
+    if let Err(e) = fs.rename(&tmp_uri, uri, true).await {
+        let _ = fs.delete(&tmp_uri, &ember_editor_conn::remote_fs::DeleteOptions::default()).await;
+        return Err(e.to_string());
+    }
+    Ok(())
 }
 
 /// Why a `vscode-userdata:` URI the session was not given is refused.
@@ -1081,18 +1199,22 @@ impl Driver {
                         continue;
                     }
                     let (fs, tx) = (Arc::clone(&self.fs), internal.clone());
+                    // An output channel's log file is named by the extension host with a server path. The
+                    // server's URI transformer usually maps it to `vscode-remote` already; a `file` URI is
+                    // a path on the server, never on this machine, so read it through the same authority.
+                    let target = if uri.scheme == "file" { UriComponents::remote(&self.authority, &uri.path) } else { uri.clone() };
                     // A grammar file comes from an extension on the server: ask how big it is before reading it.
                     let cap = matches!(purpose, crate::engine::ReadPurpose::Grammar { .. }).then_some(crate::textmate::MAX_GRAMMAR_BYTES);
                     tokio::spawn(async move {
                         let read = async {
                             if let Some(cap) = cap {
-                                match fs.stat(&uri).await {
+                                match fs.stat(&target).await {
                                     Ok(st) if st.size > cap => return Err("the grammar file is too large".to_owned()),
                                     Ok(_) => {}
                                     Err(e) => return Err(e.to_string()),
                                 }
                             }
-                            fs.read_file(&uri).await.map_err(|e| e.to_string())
+                            fs.read_file(&target).await.map_err(|e| e.to_string())
                         };
                         // A grammar read is bounded in time as well as in size.
                         let result = match cap {
@@ -1122,6 +1244,50 @@ impl Driver {
                         let result = fs.write_file(&uri, bytes, &WriteOptions::default()).await.map_err(|e| e.to_string());
                         let _ = tx.send(Input::FileWritten { uri, token, result });
                     });
+                }
+                Effect::ReadStorage { uri, shared, extension_id } => {
+                    let tx = internal.clone();
+                    if self.local_storage {
+                        let path = std::path::PathBuf::from(&uri.path);
+                        tokio::spawn(async move {
+                            let result = tokio::task::spawn_blocking(move || {
+                                crate::storage::read_local_optional(&path).map_err(|e| e.to_string())
+                            })
+                            .await
+                            .unwrap_or_else(|e| Err(e.to_string()));
+                            let _ = tx.send(Input::StorageRead { shared, extension_id, result });
+                        });
+                    } else {
+                        let fs = Arc::clone(&self.fs);
+                        tokio::spawn(async move {
+                            let result = match fs.read_file(&uri).await {
+                                Ok(bytes) => Ok(Some(bytes)),
+                                Err(e) if is_not_found(&e) => Ok(None),
+                                Err(e) => Err(e.to_string()),
+                            };
+                            let _ = tx.send(Input::StorageRead { shared, extension_id, result });
+                        });
+                    }
+                }
+                Effect::WriteStorage { uri, bytes, token } => {
+                    let tx = internal.clone();
+                    if self.local_storage {
+                        let path = std::path::PathBuf::from(&uri.path);
+                        tokio::spawn(async move {
+                            let result = tokio::task::spawn_blocking(move || {
+                                crate::storage::write_local_atomic(&path, bytes.as_deref()).map_err(|e| e.to_string())
+                            })
+                            .await
+                            .unwrap_or_else(|e| Err(e.to_string()));
+                            let _ = tx.send(Input::StorageWritten { token, result });
+                        });
+                    } else {
+                        let (fs, authority) = (Arc::clone(&self.fs), self.authority.clone());
+                        tokio::spawn(async move {
+                            let result = write_remote_storage(&fs, &authority, &uri, bytes).await;
+                            let _ = tx.send(Input::StorageWritten { token, result });
+                        });
+                    }
                 }
                 // A file on the client machine is not watched: only this window writes it.
                 Effect::Watch { uri } | Effect::Unwatch { uri } if uri.scheme == crate::settings::SCHEME_USER_DATA => {}

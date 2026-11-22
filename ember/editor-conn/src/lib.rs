@@ -24,6 +24,8 @@
 //! | [`trust`]     | workspace trust: restricted mode extensions, grant (FR-L31.18)   |
 //! | [`uri`]       | `UriComponents` with `$mid` marshalling                           |
 //! | [`webview`]   | `MainThreadWebviews` / panels / views / custom editors (FR-E8)    |
+//! | [`debug`]     | `ExtHostDebugService` calls and DAP messages                      |
+//! | [`coverage`]  | the protocol coverage ledger `coverage.toml` (FR-E9)              |
 //!
 //! Everything is generic over `AsyncRead + AsyncWrite`, so the same code rides a plain TCP socket,
 //! a TLS stream, or an `ember-transport` stream later.
@@ -38,10 +40,12 @@
 //! - CI (`.github/workflows/test.yml`, job `editor-conn-pin`) regenerates [`rpc_ids::PROXY_IDS`]
 //!   at the `ember/ose/VERSION` tag and fails if the table or [`PINNED_COMMIT`] differ;
 //! - at connect time [`handshake::verify_server`] reads the server's `GET /version` and refuses any
-//!   other commit with [`Error::UnsupportedServerVersion`].
+//!   commit outside [`SUPPORTED_BUILDS`] with [`Error::UnsupportedServerVersion`].
 
 pub mod actors;
 pub mod connection;
+pub mod coverage;
+pub mod debug;
 pub mod document;
 pub mod exthost;
 pub mod frame;
@@ -65,13 +69,36 @@ pub const PINNED_VERSION: &str = "1.139.1";
 /// returns from `GET /version`). [`rpc_ids::PROXY_IDS`] was generated from this commit.
 pub const PINNED_COMMIT: &str = "04c0d99f4fb0d8afe6ce4f0c58e31e183ac3e4b1";
 
-/// Refuse any server commit other than [`PINNED_COMMIT`]. A server without a commit (a dev build
+/// One Code-OSS build an editor server may be made from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SupportedBuild {
+    /// The release tag.
+    pub version: &'static str,
+    /// Its commit in `microsoft/vscode`, what the server answers on `GET /version`.
+    pub commit: &'static str,
+}
+
+/// The supported set (SPEC FR-E10, INTENT D50). The first entry is the pin the tables were
+/// generated from. A commit joins only when `scripts/gen-actors/compare.sh <commit>` admits it:
+/// the same proxy ids, and the same signature for every `bridged` method of `coverage.toml`.
+/// The admission report goes in the PR that adds the entry.
+pub const SUPPORTED_BUILDS: &[SupportedBuild] = &[SupportedBuild { version: PINNED_VERSION, commit: PINNED_COMMIT }];
+
+/// Whether an editor server built at `commit` is one this crate can speak to: a commit of
+/// [`SUPPORTED_BUILDS`]. [`check_server_commit`] and the IDE chooser both ask this, so the window
+/// and the menu in front of it cannot disagree.
+pub fn is_supported_commit(commit: &str) -> bool {
+    let commit = commit.trim();
+    SUPPORTED_BUILDS.iter().any(|b| b.commit == commit)
+}
+
+/// Refuse any server commit outside [`SUPPORTED_BUILDS`]. A server without a commit (a dev build
 /// answers `GET /version` with an empty body) or a server returning non-version text (such as an
 /// HTML page from a reverse proxy) is refused with `server: None`: its commit and proxy numbering
 /// are unknown.
 pub fn check_server_commit(server_commit: &str) -> Result<()> {
     let server_commit = server_commit.trim();
-    if server_commit == PINNED_COMMIT {
+    if is_supported_commit(server_commit) {
         Ok(())
     } else {
         let server = (!server_commit.is_empty()
@@ -180,6 +207,25 @@ mod tests {
     fn pinned_commit_is_a_full_sha() {
         assert_eq!(PINNED_COMMIT.len(), 40);
         assert!(PINNED_COMMIT.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+    }
+
+    #[test]
+    fn fr_e10_supported_set_starts_with_the_pin_and_holds_full_unique_shas() {
+        assert_eq!(SUPPORTED_BUILDS[0], SupportedBuild { version: PINNED_VERSION, commit: PINNED_COMMIT });
+        for (i, b) in SUPPORTED_BUILDS.iter().enumerate() {
+            assert_eq!(b.commit.len(), 40, "{b:?}");
+            assert!(b.commit.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()), "{b:?}");
+            assert!(!b.version.is_empty(), "{b:?}");
+            assert!(SUPPORTED_BUILDS[..i].iter().all(|o| o.commit != b.commit && o.version != b.version), "{b:?} listed twice");
+            assert!(is_supported_commit(b.commit) && is_supported_commit(&format!(" {}\n", b.commit)));
+        }
+    }
+
+    #[test]
+    fn fr_e10_is_supported_commit_accepts_only_the_pinned_commit() {
+        assert!(is_supported_commit(PINNED_COMMIT));
+        assert!(!is_supported_commit("0036dcb6c18a603d2168c00fa578be600987ac7b"));
+        assert!(!is_supported_commit(""));
     }
 
     #[test]

@@ -82,6 +82,80 @@ pub fn timeline_summary(demo: bool) -> &'static str {
     }
 }
 
+/// Playback state for the agent communication timeline (FR-L18).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TimelinePlayback {
+    pub playing: bool,
+    pub cursor: usize,
+}
+
+impl TimelinePlayback {
+    pub fn new() -> Self {
+        Self { playing: false, cursor: 0 }
+    }
+
+    /// The highlighted event/lane index clamped to `total`, or `None` when empty.
+    pub fn active_index(&self, total: usize) -> Option<usize> {
+        if total == 0 {
+            None
+        } else {
+            Some(self.cursor.min(total - 1))
+        }
+    }
+
+    /// The Korean label for the play/pause control.
+    pub fn action_label(&self) -> &'static str {
+        if self.playing {
+            "일시 정지"
+        } else {
+            "재생"
+        }
+    }
+
+    /// Toggles playing state. Starting from the last event rewinds to index 0 first.
+    pub fn toggle_play(&mut self, total: usize) {
+        if total == 0 {
+            self.playing = false;
+            self.cursor = 0;
+            return;
+        }
+        if self.playing {
+            self.playing = false;
+        } else {
+            if self.cursor + 1 >= total {
+                self.cursor = 0;
+            }
+            self.playing = true;
+        }
+    }
+
+    /// Advances the cursor by one event, stopping automatically at the last event (`total - 1`).
+    /// Returns `true` while playback remains active after the step.
+    pub fn step_next(&mut self, total: usize) -> bool {
+        if total == 0 {
+            self.playing = false;
+            self.cursor = 0;
+            return false;
+        }
+        if self.cursor + 1 < total {
+            self.cursor += 1;
+            if self.cursor + 1 >= total {
+                self.playing = false;
+            }
+        } else {
+            self.cursor = total - 1;
+            self.playing = false;
+        }
+        self.playing
+    }
+
+    /// Resets the cursor to 0 and pauses playback.
+    pub fn restart(&mut self) {
+        self.playing = false;
+        self.cursor = 0;
+    }
+}
+
 pub const UI_STRINGS: &[&str] = &[
     crate::ui::question::WITHDRAWN_LINE,
     crate::ui::question::CARD_TITLE,
@@ -922,6 +996,31 @@ pub fn ide_description(kind: IdeKind) -> &'static str {
         IdeKind::VsCode => "그 컴퓨터의 웹 IDE를 브라우저로 엽니다",
         IdeKind::Gateway => "JetBrains Gateway에 열기 링크를 보냅니다",
     }
+}
+
+/// What the chooser says under the Ember entry before it is picked, when the editor server the
+/// session's computer runs is not one Ember's editor supports: the editor window would only show
+/// its fallback and offer VS Code. `None` when the launch is not loaded, failed, has no Ember
+/// target, or reports no commit (an older server leaves it out; unknown is not unsupported, and the
+/// window handles that case itself).
+pub fn ember_ide_notice(launch: Option<&Result<crate::server::IdeLaunch, String>>) -> Option<String> {
+    let commit = launch?
+        .as_ref()
+        .ok()?
+        .target(IdeKind::Ember.key())?
+        .launch
+        .as_ref()?
+        .ose
+        .as_ref()?
+        .ose_commit
+        .as_deref()?;
+    if ember_editor_conn::is_supported_commit(commit) {
+        return None;
+    }
+    let short: String = commit.trim().chars().take(12).collect();
+    Some(format!(
+        "이 컴퓨터의 편집기 서버(Code-OSS {short})는 지원하지 않는 버전이라 VS Code에서 열기를 안내합니다."
+    ))
 }
 
 /// The IDE the menu marks as current: the remembered one, else Ember's own editor, which the
@@ -2065,6 +2164,38 @@ mod tests {
         }
     }
 
+    fn launch_with_commit(commit: Option<&str>) -> crate::server::IdeLaunch {
+        crate::demo::ide_launch_with(
+            "s",
+            "p",
+            "/w",
+            Some(ember_client::wire::EmberOseConnection {
+                endpoint: "http://127.0.0.1:9000".into(),
+                relay: None,
+                connection_token: String::new(),
+                ose_commit: commit.map(String::from),
+            }),
+        )
+    }
+
+    #[test]
+    fn fr_e10_chooser_notes_an_unsupported_ose_commit_in_advance() {
+        let other = "0036dcb6c18a603d2168c00fa578be600987ac7b";
+        let unsupported = Ok(launch_with_commit(Some(other)));
+        let n = ember_ide_notice(Some(&unsupported)).expect("an unsupported commit is noted");
+        assert!(n.contains(&other[..12]) && !n.contains(&other[..13]) && n.contains("VS Code"));
+        let pinned = Ok(launch_with_commit(Some(ember_editor_conn::PINNED_COMMIT)));
+        assert_eq!(ember_ide_notice(Some(&pinned)), None);
+        let unknown = Ok(launch_with_commit(None));
+        assert_eq!(ember_ide_notice(Some(&unknown)), None);
+        let failed: Result<crate::server::IdeLaunch, String> = Err("down".into());
+        assert_eq!(ember_ide_notice(Some(&failed)), None);
+        assert_eq!(ember_ide_notice(None), None);
+        let mut no_ember = launch_with_commit(Some(other));
+        no_ember.targets.retain(|t| t.kind != "ember");
+        assert_eq!(ember_ide_notice(Some(&Ok(no_ember))), None);
+    }
+
     #[test]
     fn fr_l7_remembered_ide_is_listed_first_and_nothing_is_added() {
         let c = ide_choices(Some(IdeKind::Gateway));
@@ -3012,5 +3143,60 @@ mod tests {
         assert_eq!(NodeStatus::Done.label(), "완료");
         assert_eq!(NodeStatus::Fail.label(), "실패");
         assert_eq!(NodeStatus::Unknown.label(), "");
+    }
+
+    #[test]
+    fn fr_l18_timeline_playback_steps_through_events_and_restarts() {
+        let mut pb = TimelinePlayback::new();
+        assert!(!pb.playing);
+        assert_eq!(pb.cursor, 0);
+        assert_eq!(pb.active_index(5), Some(0));
+        assert_eq!(pb.active_index(0), None);
+        assert_eq!(pb.action_label(), "재생");
+
+        // Starting playback switches to playing ("일시 정지").
+        pb.toggle_play(5);
+        assert!(pb.playing);
+        assert_eq!(pb.action_label(), "일시 정지");
+        assert_eq!(pb.active_index(5), Some(0));
+
+        // Stepping advances cursor through events and stops at the last event (index 4).
+        assert!(pb.step_next(5));
+        assert_eq!(pb.active_index(5), Some(1));
+        assert!(pb.step_next(5));
+        assert_eq!(pb.active_index(5), Some(2));
+        assert!(pb.step_next(5));
+        assert_eq!(pb.active_index(5), Some(3));
+        assert!(!pb.step_next(5));
+        assert_eq!(pb.active_index(5), Some(4));
+        assert!(!pb.playing);
+        assert_eq!(pb.action_label(), "재생");
+
+        // Toggling play at the end rewinds to 0 and resumes playing.
+        pb.toggle_play(5);
+        assert!(pb.playing);
+        assert_eq!(pb.active_index(5), Some(0));
+
+        // Stepping once then toggling play pauses at current cursor.
+        assert!(pb.step_next(5));
+        assert_eq!(pb.active_index(5), Some(1));
+        pb.toggle_play(5);
+        assert!(!pb.playing);
+        assert_eq!(pb.active_index(5), Some(1));
+
+        // Restart resets cursor to 0 and stops playback.
+        pb.toggle_play(5);
+        assert!(pb.step_next(5));
+        assert_eq!(pb.active_index(5), Some(2));
+        pb.restart();
+        assert!(!pb.playing);
+        assert_eq!(pb.cursor, 0);
+        assert_eq!(pb.active_index(5), Some(0));
+
+        // Empty timeline stays paused with no active index.
+        pb.toggle_play(0);
+        assert!(!pb.playing);
+        assert_eq!(pb.active_index(0), None);
+        assert!(!pb.step_next(0));
     }
 }

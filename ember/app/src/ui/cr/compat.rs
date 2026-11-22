@@ -134,9 +134,7 @@ pub fn MessageText(text: &str, ink: Option<ColorRole>) {
 
 /// Code or tool output in a monospace face.
 ///
-/// TODO(markdown): syntax highlighting. TODO(#673): put the text in a toolkit `ScrollRow` so a
-/// long line scrolls (it needs a display check); long lines wrap until then. TODO(FR-38):
-/// read-only editor view for large outputs.
+/// TODO(markdown): syntax highlighting. TODO(FR-38): read-only editor view for large outputs.
 pub fn CodeText(text: &str, max_lines: Option<u32>, error: bool) {
     let theme = ember_theme();
     { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
@@ -145,7 +143,7 @@ pub fn CodeText(text: &str, max_lines: Option<u32>, error: bool) {
                 .corner_radius(CORNER_SM)
                 .padding(PAD_ROW_V), {
             // `.inset` pads 12 16; the uniform 12 above plus this 4 makes the left edge 16.
-            { use ::compose_rust::ui::Row; Row!({
+            { use ::compose_rust::ui::ScrollRow; ScrollRow!(modifier = Modifier::new().fill_max_width(), {
                 { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(4.0)) };
                 Txt(
                     text,
@@ -224,6 +222,17 @@ mod tests {
         let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
         assert!(
             batch.iter().any(|m| matches!(m, Mutation::Create { widget: compose_rust::WidgetKind::SelectionContainer, .. })),
+            "{batch:?}"
+        );
+    }
+
+    #[test]
+    fn code_text_scrolls_horizontally_in_a_scroll_row() {
+        // #673: long monospace lines scroll sideways inside a toolkit ScrollRow instead of wrapping.
+        let mut host = Host::new(|| Box::new(Recomposer::new(|| CodeText("cargo test --locked", None, false))));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        assert!(
+            batch.iter().any(|m| matches!(m, Mutation::Create { widget: compose_rust::WidgetKind::ScrollRow, .. })),
             "{batch:?}"
         );
     }

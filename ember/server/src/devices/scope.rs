@@ -88,14 +88,14 @@ fn segments(path: &str) -> Option<Vec<&str>> {
 /// Routes no narrow scope reaches, whatever the method: tokens, device management, shells,
 /// the IDE (a code-running editor), the browser's view, input and CDP, ChatGPT sign-in.
 fn never_narrow(segs: &[&str]) -> bool {
-    match segs {
-        ["server-token", ..] | ["devices", ..] | ["chatgpt", ..] => true,
-        ["computers", _, "terms", ..] | ["a2a", "terminal", ..] => true,
-        ["computers", _, "ide", ..] | ["computers", _, "fs", ..] | ["sessions", _, "ide"] => true,
-        ["browsers", _, "view" | "input" | "cdp" | "agent-config", ..] => true,
-        ["agents", "antigravity", "hook"] => true,
-        _ => false,
-    }
+    matches!(
+        segs,
+        ["server-token", ..] | ["devices", ..] | ["chatgpt", ..]
+            | ["computers", _, "terms", ..] | ["a2a", "terminal", ..]
+            | ["computers", _, "ide", ..] | ["computers", _, "fs", ..] | ["sessions", _, "ide"]
+            | ["browsers", _, "view" | "input" | "cdp" | "agent-config", ..]
+            | ["agents", "antigravity", "hook"]
+    )
 }
 
 /// Route families `read_only` may `GET`.

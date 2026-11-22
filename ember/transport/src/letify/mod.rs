@@ -1555,7 +1555,7 @@ mod tests {
         // A short streak is never mentioned, and a new long one warns again.
         assert!(!s.failed());
         assert!(!s.recovered());
-        assert!((0..STANDING_WARN_AFTER).map(|_| s.failed()).any(|w| w));
+        assert!((0..STANDING_WARN_AFTER).any(|_| s.failed()));
     }
 
     /// `FR-N9`: what ends a relay-only dial at once, what is tried again, and what waits.

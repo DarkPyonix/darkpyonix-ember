@@ -1279,10 +1279,20 @@ pub mod page {
         let window_safe = dioxus_compose::use_window_safe_area();
         let safe = crate::ui::safe_area::safe_area_from_toolkit(window_safe.top, window_safe.leading, window_safe.trailing);
         let _ = *s.revision.read();
-        let (error, updates, edit_errors, gone, renamed) = {
+        let (error, fallback, updates, edit_errors, gone, renamed) = {
             let mut state = s.host.state.lock().unwrap();
-            (state.error.clone(), std::mem::take(&mut state.updates), std::mem::take(&mut state.edit_errors), std::mem::take(&mut state.gone), std::mem::take(&mut state.renamed))
+            (state.error.clone(), state.fallback.clone(), std::mem::take(&mut state.updates), std::mem::take(&mut state.edit_errors), std::mem::take(&mut state.gone), std::mem::take(&mut state.renamed))
         };
+        // SPEC FR-E10, Q-E2 (#32): an unsupported server shows one sentence and the VS Code button
+        // instead of the editor; the user chooses, nothing switches by itself.
+        let fallback_text_for = |has_url: bool| fallback.as_ref().map(|f| crate::ui::editor::fallback_sentence(&f.fallback, has_url));
+        // Only an http(s) URL is handed to the OS, as `crate::ide::plan` does for the VS Code target.
+        let fallback_url = fallback.as_ref().and_then(|f| f.vscode_url.clone()).filter(|u| {
+            let lower = u.to_ascii_lowercase();
+            lower.starts_with("http://") || lower.starts_with("https://")
+        });
+        let fallback_button = crate::ui::editor::FALLBACK_BUTTON;
+        let fallback_text = fallback_text_for(fallback_url.is_some());
         for (old, new) in renamed {
             // The tabs below the renamed path follow it (clean ones only: a rename with unsaved
             // changes is refused before it is sent); the session reopens them under the new name.
@@ -1505,7 +1515,21 @@ pub mod page {
                         crate::ui::editor_settings::KeyResolution::Command(id) => { key_s.host.send(HostCommand::ExecuteCommand(id)); }
                     }
                 },
-                if let Some(error) = error {
+                if let Some(text) = fallback_text {
+                    div { style: "{error_style}", "{text}"
+                        if let Some(url) = fallback_url {
+                            button {
+                                onclick: move |_| {
+                                    if let Err(e) = crate::ide::open_external(&url) {
+                                        tracing::warn!("could not open the VS Code target: {e}");
+                                    }
+                                },
+                                "{fallback_button}"
+                            }
+                        }
+                        button { onclick: move |_| crate::services::services().ui.close_editor(), "닫기" }
+                    }
+                } else if let Some(error) = error {
                     div { style: "{error_style}", "{error}" button { onclick: move |_| crate::services::services().ui.close_editor(), "닫기" } }
                 } else {
                     {top_bar(&s, &branch, keymap, safe)}

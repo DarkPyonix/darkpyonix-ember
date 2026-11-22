@@ -27,15 +27,11 @@ pub use crate::ui::files::{
     Transfer, TransferAction, TransferService, action_button_name, TransferState, FILE_DIALOG_TITLE, FILE_PICKER_AVAILABLE, FILE_PICK_REASON, PickOutcome, pick_outcome,
     FILE_PICK_UNAVAILABLE, LOCK_LINE, UNAVAILABLE, clean_member_name, demo_files, is_demo,
 };
-/// Whether the share sheet picks files itself. It does not yet: its file card only says what is
-/// chosen, and the tray's 파일 고르기 opens the dialog.
-const SHARE_SHEET_PICKS_FILES: bool = false;
-
 use crate::ui::files::{choose_target, chip_avail, chip_label, chip_rows, chip_text_max_for, chip_width_est, files_line, fit_chip_text, send_state_at, server_status, share_tap_at, tile_tap_notice};
 use super::compat::Banner;
 use crate::model::Tone;
 use super::characters::{CharState, Character};
-use super::components::{EmberSheetSized, AppButton, ButtonKind, Clickable, EmberCard, EmberSheet, FilterChip, InkIconButton, Label, Pill, PillTone};
+use super::components::{EmberSheetSized, AppButton, ButtonKind, Clickable, EmberCard, EmberSheet, FilterChip, InkIconButton, Label, NamedClickable, Pill, PillTone};
 use super::home::{fit_label, text_px, Cols, Part};
 use super::notice;
 use super::project::{HeaderGap, ThemeButton};
@@ -1567,15 +1563,18 @@ pub(super) fn ShareSheet(open: &MutableState<bool>, devices: &[Device], members:
     let room = super::components::sheet_body_max_height(window.width_dp, window.height_dp, false, 0.0);
     let rows = share_devices(devices);
     let agents = share_agents(members);
-    // The share sheet has no file step of its own (TODO(#673): open the file dialog from its file
-    // card), so it reads as it did before the tray's 파일 고르기 took the dialog.
-    let (file_title, file_why) = share_file_card(&[], SHARE_SHEET_PICKS_FILES);
+    let picked = remember(|| mutable_state_of(Vec::<String>::new()));
+    let files = picked.get();
+    let (file_title, file_why) = share_file_card(&files, FILE_PICKER_AVAILABLE);
     let tap = {
-        let (devices, o) = (devices.to_vec(), open.clone());
-        move |target: SendTarget| match share_tap_at(&target, &devices, &[], SHARE_SHEET_PICKS_FILES, ready, lost) {
+        let (devices, o, files, picked_clear) = (devices.to_vec(), open.clone(), files.clone(), picked.clone());
+        move |target: SendTarget| match share_tap_at(&target, &devices, &files, FILE_PICKER_AVAILABLE, ready, lost) {
             ShareTap::Blocked(why) => notice::post(why),
-            ShareTap::Send(SendTarget::Device(id)) => match transfer_service().send(&id, Vec::new()) {
-                Ok(()) => o.set(false),
+            ShareTap::Send(SendTarget::Device(id)) => match transfer_service().send(&id, files.clone()) {
+                Ok(()) => {
+                    picked_clear.set(Vec::new());
+                    o.set(false);
+                }
                 Err(why) => notice::post(why),
             },
             // The service has no send to an agent's computer yet.
@@ -1601,13 +1600,43 @@ pub(super) fn ShareSheet(open: &MutableState<bool>, devices: &[Device], members:
                         }
                         // The file being shared, with the sheet's close button (`.fl-share-file`).
                         { use ::compose_rust::ui::Row; Row!(spacing = SP[2], alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width().background(paint(p.surface)).corner_radius(CORNER_MD).padding(SP[2]), {
-                                { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().size(44.0, 44.0).background(paint(p.surface_2)).corner_radius(CORNER_LG), alignment = Alignment::Center, content = || NavIcon(ICON_DOC, p.text_2.to_argb(), 22.0)) };
-                                { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), {
-                                    Label(&file_title, Fs::Md, Weight::Semibold, None, Some(1));
-                                    if let Some(why) = file_why {
-                                        Label(why, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                                    }
-                                }) };
+                                let pick_content = || {
+                                    { use ::compose_rust::ui::Row; Row!(spacing = SP[2], alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
+                                        { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().size(44.0, 44.0).background(paint(p.surface_2)).corner_radius(CORNER_LG), alignment = Alignment::Center, content = || NavIcon(ICON_DOC, p.text_2.to_argb(), 22.0)) };
+                                        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), {
+                                            Label(&file_title, Fs::Md, Weight::Semibold, None, Some(1));
+                                            if let Some(why) = file_why {
+                                                Label(why, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                                            }
+                                        }) };
+                                    }) };
+                                };
+                                if FILE_PICKER_AVAILABLE {
+                                    let picked = picked.clone();
+                                    NamedClickable(
+                                        "파일 고르기",
+                                        Modifier::new().weight(1.0).corner_radius(CORNER_SM),
+                                        Alignment::CenterStart,
+                                        move || {
+                                            let picked = picked.clone();
+                                            compose_rust::FileDialog::open_files().title(FILE_DIALOG_TITLE).show(move |result| {
+                                                let outcome = match result {
+                                                    compose_rust::FileDialogResult::Chosen { paths, .. } => pick_outcome(Some(paths), true),
+                                                    compose_rust::FileDialogResult::Cancelled => pick_outcome(None, true),
+                                                    compose_rust::FileDialogResult::Unavailable => pick_outcome(None, false),
+                                                };
+                                                match outcome {
+                                                    PickOutcome::Draft(draft) => picked.set(draft.files),
+                                                    PickOutcome::Nothing => {}
+                                                    PickOutcome::Say(why) => notice::post(why),
+                                                }
+                                            });
+                                        },
+                                        pick_content,
+                                    );
+                                } else {
+                                    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().weight(1.0), alignment = Alignment::CenterStart, content = pick_content) };
+                                }
                                 super::components::CloseButton(close.clone());
                             }) };
                         ShareSectionLabel("Ember로 보내기");
@@ -2094,7 +2123,22 @@ mod tests {
             assert!(production.contains(arm), "{arm}");
         }
         assert!(production.contains("let can_pick = FILE_PICKER_AVAILABLE || demo;"), "the button is off where there is no dialog");
-        assert!(!SHARE_SHEET_PICKS_FILES);
+    }
+
+    #[test]
+    fn fr_l27_7_share_sheet_file_card_opens_file_dialog_when_available() {
+        let _guard = crate::services::test_guard();
+        let production = include_str!("files.rs").split("#[cfg(test)]").next().unwrap();
+        let sheet = &production[production.find("fn ShareSheet(").unwrap()..];
+        assert!(sheet.contains("share_file_card(&files, FILE_PICKER_AVAILABLE)"));
+        assert!(sheet.contains("compose_rust::FileDialog::open_files().title(FILE_DIALOG_TITLE).show("));
+        let nodes = share_nodes((1440.0, 900.0));
+        let has_picker = nodes.iter().any(|n| {
+            n.0 == "Box"
+                && n.1.iter().any(|p| p == "AccessibleName=String(\"파일 고르기\")")
+                && n.1.iter().any(|p| p.starts_with("OnClick="))
+        });
+        assert_eq!(has_picker, FILE_PICKER_AVAILABLE);
     }
 
     #[test]

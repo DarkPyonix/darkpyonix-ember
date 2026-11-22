@@ -1012,10 +1012,10 @@ pub fn temperature_readings(s: &MetricsSample) -> Vec<TempReading> {
     if let Some((idx, t)) = hottest_matching("cpu") {
         picked.push((idx, "CPU".to_string(), t.celsius));
     }
-    if let Some((idx, t)) = hottest_matching("gpu") {
-        if !picked.iter().any(|(i, _, _)| *i == idx) {
-            picked.push((idx, "GPU".to_string(), t.celsius));
-        }
+    if let Some((idx, t)) = hottest_matching("gpu")
+        && !picked.iter().any(|(i, _, _)| *i == idx)
+    {
+        picked.push((idx, "GPU".to_string(), t.celsius));
     }
     if picked.len() < 2 {
         let mut rest: Vec<(usize, &ember_client::api::TempMetrics)> = finite

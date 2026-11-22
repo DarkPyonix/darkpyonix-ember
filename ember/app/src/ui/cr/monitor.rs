@@ -10,7 +10,6 @@
 #![allow(non_snake_case)]
 
 use compose_rust::runtime::{delay, launched_effect, mutable_state_of, remember, MutableState};
-use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
 use ember_client::state::Reachability;
 use compose_rust::{Alignment, SpaceRole};
@@ -93,7 +92,7 @@ pub fn MonitorSheet(chip: Option<&ComputerChip>, boxes: &[ProjectBox], on_close:
     {
         let poll = chip.is_some_and(|c| !matches!(c.reachability, Reachability::Offline));
         let id = chip.map(|c| c.id.clone()).unwrap_or_default();
-        let feed_w = feed_state.clone();
+        let feed_w = feed_state;
         let demo = crate::services::services().demo.is_some() || crate::demo::active_from_env();
         launched_effect((id.clone(), poll), move || async move {
             if !poll || id.is_empty() {
@@ -138,7 +137,7 @@ pub fn MonitorSheet(chip: Option<&ComputerChip>, boxes: &[ProjectBox], on_close:
             { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
         }
     };
-    EmberSheetSized(&title, true, SHEET_WIDTH_MONITOR, true, on_close.clone(), Some(&mut actions), || {
+    EmberSheetSized(title, true, SHEET_WIDTH_MONITOR, true, on_close.clone(), Some(&mut actions), || {
         { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().fill_max_width().height(body_height).background(paint(p.bg)), {
                 { use ::compose_rust::ui::Column; Column!(space_role = SpaceRole::Md, modifier = Modifier::new().fill_max_width().padding(scroll_pad), {
                     let Some(c) = chip else {
@@ -264,7 +263,6 @@ fn Grid(columns: usize, c: &ComputerChip, feed: &MonitorFeed, online: bool) {
                                 empty_text(m, online, feed.status()),
                                 meter_fraction(m, feed),
                                 feed.net_tx_series(),
-                                columns == 1,
                                 fill,
                             )
                         }
@@ -449,14 +447,13 @@ fn MetricCard(
     empty: &str,
     meter: Option<f32>,
     net_tx: &[f32],
-    compact: bool,
     fill: bool,
 ) {
     let p = ember_theme().palette;
     let header_badge: Vec<(&str, PillTone)> = badge.iter().map(|(text, tone)| (text.as_str(), PillTone::from(*tone))).collect();
     MonCard(metric_icon(metric), metric.title(), &header_badge, fill, || match view.as_ref() {
         Some(v) => {
-            HeroValue(&v.headline, compact);
+            HeroValue(&v.headline, !fill);
             match metric {
                 Metric::Cpu => Bars(metric, &v.bars),
                 Metric::Gpu if !v.bars.is_empty() => {
@@ -567,7 +564,7 @@ fn ProcessTable(rows: &[ProcessRow], cur: SortState, sort: &MutableState<SortSta
                 { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[3])) };
                 // The mockup's columns (`COLS`): 이름, PID, CPU, 전력, 메모리.
                 for key in [SortKey::Name, SortKey::Pid, SortKey::Cpu, SortKey::Power, SortKey::Memory] {
-                    let sort = sort.clone();
+                    let sort = *sort;
                     let (width, end) = match key {
                         SortKey::Name => (None, false),
                         SortKey::Pid => (Some(layout.pid_w), true),
@@ -1043,7 +1040,7 @@ mod tests {
 
     fn cpu_card() {
         let view = CardView { headline: "23.1%".into(), lines: vec!["코어 8개".into()], bars: vec![50.0, 100.0] };
-        MetricCard(Metric::Cpu, Some(view), None, "", None, &[], false, false);
+        MetricCard(Metric::Cpu, Some(view), None, "", None, &[], false);
     }
 
     /// Review M1, M2: the big value is the whole number with its unit beside it in a smaller
@@ -1243,7 +1240,7 @@ mod tests {
             f.push(mk(2000, 2000, 400, 15.0, 520));
             f.push(mk(3000, 5000, 900, 12.0, 540));
             for m in [Metric::Gpu, Metric::Memory, Metric::Network] {
-                MetricCard(m, card_view(m, &f), None, "", meter_fraction(m, &f), f.net_tx_series(), false, false);
+                MetricCard(m, card_view(m, &f), None, "", meter_fraction(m, &f), f.net_tx_series(), false);
             }
         }
         let text = composed_text(ui);

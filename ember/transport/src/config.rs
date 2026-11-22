@@ -137,6 +137,13 @@ pub struct LetifyConfig {
     /// it is queued until a slot frees. The default, 48, is also the most: the relay lets one
     /// client hold 64 waiting requests. Tests lower it.
     pub standing_requests: usize,
+    /// Punch a direct UDP path to a peer (EM-11, #10, SPEC `FR-N1`, `FR-N2`): offer and answer
+    /// punches over the rendezvous and probe at the agreed time. It needs a rendezvous
+    /// ([`LetifyConfig::signal`] or the hub) and an address observer ([`LetifyConfig::observer`])
+    /// to learn the public UDP mapping; without both nothing is punched. False on a peer whose
+    /// UDP is blocked, or with `EMBER_LETIFY_UDP_PUNCH=off`; then it neither offers nor answers,
+    /// and its sessions use TCP and the relay as before. Default true.
+    pub udp_punch: bool,
 }
 
 impl Default for LetifyConfig {
@@ -159,13 +166,15 @@ impl Default for LetifyConfig {
             dial_timeout: Duration::from_secs(8),
             connect_timeout: Duration::from_secs(20),
             standing_requests: 48,
+            udp_punch: true,
         }
     }
 }
 
 impl LetifyConfig {
-    /// Reads `EMBER_LETIFY_RELAY_LISTEN`, `EMBER_LETIFY_QAD_LISTEN`, `EMBER_LETIFY_OBSERVER`
-    /// and `EMBER_LETIFY_ADVERTISE` (comma separated `ip:port`), and the polling intervals
+    /// Reads `EMBER_LETIFY_RELAY_LISTEN`, `EMBER_LETIFY_QAD_LISTEN`, `EMBER_LETIFY_OBSERVER`,
+    /// `EMBER_LETIFY_UDP_PUNCH` (`on` or `off`) and `EMBER_LETIFY_ADVERTISE` (comma separated
+    /// `ip:port`), and the polling intervals
     /// `EMBER_LETIFY_POLL_MS`, `EMBER_LETIFY_IDLE_POLL_MS` and `EMBER_LETIFY_FAST_WINDOW_MS`
     /// (milliseconds). Unusable values are logged and ignored.
     pub fn from_env() -> Self {
@@ -199,6 +208,13 @@ impl LetifyConfig {
         }
         if let Some(d) = millis("EMBER_LETIFY_FAST_WINDOW_MS") {
             cfg.fast_window = d;
+        }
+        if let Some(v) = var("EMBER_LETIFY_UDP_PUNCH") {
+            match v.to_ascii_lowercase().as_str() {
+                "0" | "off" | "false" | "no" => cfg.udp_punch = false,
+                "1" | "on" | "true" | "yes" => cfg.udp_punch = true,
+                _ => tracing::warn!(value = %v, "EMBER_LETIFY_UDP_PUNCH is not on or off"),
+            }
         }
         if let Some(v) = var("EMBER_LETIFY_ADVERTISE") {
             cfg.advertise = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();

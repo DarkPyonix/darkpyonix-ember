@@ -422,6 +422,7 @@ impl EditorSession {
         let commands = crate::commands::parse_contributed_commands(&extensions);
         let mut core = SessionCore::new(LanguageRegistry::from_extensions(&extensions), config.core.clone(), Instant::now());
         core.set_settings(settings.clone());
+        core.set_workspace_folder(workspace.folders[0].uri.clone());
         core.set_grammar_catalog(crate::textmate::GrammarCatalog::from_extensions(&extensions));
         core.set_workspace_trust(crate::trust::WorkspaceTrust::new(config.workspace_trusted, extensions.clone()));
         core.set_storage_roots(storage_roots);
@@ -818,6 +819,22 @@ impl EditorSession {
     /// `WebviewDriver::set_view_state`; answered with [`SessionUpdate::Webview`].
     pub fn webview(&self, event: crate::webview::WebviewEvent) -> Result<(), Error> {
         self.send(Command::Input(Input::Webview(event)))
+    }
+
+    /// A request of the debugging window; answered with [`SessionUpdate::Debug`].
+    pub fn debug(&self, request: crate::debugger::DebugRequest) -> Result<(), Error> {
+        self.send(Command::Input(Input::Debug(request)))
+    }
+
+    /// Start the configuration of `.vscode/launch.json` that `selector` names. Answered with
+    /// [`crate::debugger::DebugUpdate::Sessions`], or [`crate::debugger::DebugUpdate::StartFailed`].
+    pub fn start_debugging(&self, selector: crate::debugger::ConfigSelector) -> Result<(), Error> {
+        self.debug(crate::debugger::DebugRequest::Start { selector })
+    }
+
+    /// Stop one debug session, or all of them with `None`.
+    pub fn stop_debugging(&self, session: Option<String>) -> Result<(), Error> {
+        self.debug(crate::debugger::DebugRequest::Stop { session })
     }
 
     /// After [`SessionUpdate::Desync`]: re-send the session's text as a new generation.

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::terminal_list::{self, TermTab, TerminalTabs};
-use crate::terminal_stream::{self, ChangeCallback, TerminalHandle};
+use crate::terminal_stream::{self, ChangeCallback, TermReach, TerminalHandle};
 
 /// Where the first list of the folder's terminals is.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,7 +26,8 @@ struct Remote {
 }
 
 struct Panel {
-    base: String,
+    /// The server's terminal relay: HTTP, or the transport when the app is a device (FR-N9).
+    reach: TermReach,
     computer: String,
     folder: String,
     project: String,
@@ -57,7 +58,7 @@ pub struct StripView {
 
 /// Start the panel for a folder on first use: list the node's terminals for it and reattach to
 /// those that survived, or create the first one when there are none.
-pub fn ensure(base: &str, computer: &str, folder: &str, project: &str, on_change: ChangeCallback) {
+pub fn ensure(reach: TermReach, computer: &str, folder: &str, project: &str, on_change: ChangeCallback) {
     PANEL.with(|p| {
         let mut slot = p.borrow_mut();
         if slot.is_some() {
@@ -65,7 +66,7 @@ pub fn ensure(base: &str, computer: &str, folder: &str, project: &str, on_change
         }
         let remote = Arc::new(Mutex::new(Remote { tabs: TerminalTabs::default(), load: Load::Loading, error: None }));
         let panel = Panel {
-            base: base.to_owned(),
+            reach,
             computer: computer.to_owned(),
             folder: folder.to_owned(),
             project: project.to_owned(),
@@ -74,13 +75,13 @@ pub fn ensure(base: &str, computer: &str, folder: &str, project: &str, on_change
             handles: HashMap::new(),
             renaming: None,
         };
-        let (b, c, f, pr) = (panel.base.clone(), panel.computer.clone(), panel.folder.clone(), panel.project.clone());
+        let (b, c, f, pr) = (panel.reach.clone(), panel.computer.clone(), panel.folder.clone(), panel.project.clone());
         crate::services::services().rt.spawn(async move {
             let result = async {
-                let list = terminal_list::list(&b, &c, &pr).await?;
+                let list = terminal_list::list_on(&b, &c, &pr).await?;
                 let mut tabs = TerminalTabs::from_list(&list, &pr, &f);
                 if tabs.is_empty() {
-                    let info = terminal_list::create(&b, &c, &f, &pr, terminal_list::tab_key(&pr, &f, 0)).await?;
+                    let info = terminal_list::create_on(&b, &c, &f, &pr, terminal_list::tab_key(&pr, &f, 0)).await?;
                     tabs.push(TermTab::from_info(&info));
                 }
                 Ok::<_, terminal_stream::ClientError>(tabs)
@@ -125,12 +126,12 @@ pub fn active_handle() -> Option<TerminalHandle> {
         let mut p = p.borrow_mut();
         let panel = p.as_mut()?;
         let id = lock(&panel.remote).tabs.active_id()?.to_owned();
-        let (base, computer, on_change) = (panel.base.clone(), panel.computer.clone(), panel.on_change.clone());
+        let (reach, computer, on_change) = (panel.reach.clone(), panel.computer.clone(), panel.on_change.clone());
         Some(
             panel
                 .handles
                 .entry(id.clone())
-                .or_insert_with(|| terminal_stream::attach_existing(&base, &computer, &id, Some(on_change)))
+                .or_insert_with(|| terminal_stream::attach_existing_with(reach, &computer, &id, Some(on_change)))
                 .clone(),
         )
     })
@@ -167,10 +168,10 @@ pub fn new_terminal() {
             r.error = None;
             r.tabs.next_key(&panel.project, &panel.folder)
         };
-        let (b, c, f, pr) = (panel.base.clone(), panel.computer.clone(), panel.folder.clone(), panel.project.clone());
+        let (b, c, f, pr) = (panel.reach.clone(), panel.computer.clone(), panel.folder.clone(), panel.project.clone());
         let (remote, on_change) = (panel.remote.clone(), panel.on_change.clone());
         crate::services::services().rt.spawn(async move {
-            let result = terminal_list::create(&b, &c, &f, &pr, key).await;
+            let result = terminal_list::create_on(&b, &c, &f, &pr, key).await;
             {
                 let mut r = lock(&remote);
                 match result {
@@ -194,10 +195,10 @@ pub fn kill(id: &str) {
         if panel.renaming.as_ref().is_some_and(|(r, _)| r == id) {
             panel.renaming = None;
         }
-        let (b, c, term) = (panel.base.clone(), panel.computer.clone(), id.to_owned());
+        let (b, c, term) = (panel.reach.clone(), panel.computer.clone(), id.to_owned());
         let (remote, on_change) = (panel.remote.clone(), panel.on_change.clone());
         crate::services::services().rt.spawn(async move {
-            if let Err(e) = terminal_list::kill(&b, &c, &term).await {
+            if let Err(e) = terminal_list::kill_on(&b, &c, &term).await {
                 lock(&remote).error = Some(terminal_list::panel_error(terminal_list::TermAction::Kill, &e));
             }
             on_change();

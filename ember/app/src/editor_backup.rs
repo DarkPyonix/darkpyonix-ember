@@ -9,9 +9,12 @@
 //! - [`view`] is the small part the window calls: it feeds the tracker, sends the restore commands
 //!   and starts the debounced write. [`flush_on_exit`] is called on the exit path of `FR-L31.1`.
 //!
-//! As in Code-OSS, the backup is written while the window is open (after a pause in typing), not
-//! only on close: the toolkit gives the editor's single window no close-request event, and a quit
-//! ends the process inside its run loop.
+//! As in Code-OSS, the backup is written while the window is open, not only on close: the toolkit
+//! gives the editor's single window no close-request event (the `Window` element has one, but the
+//! editor is the application's root, and no application-will-terminate hook exists), and a quit ends
+//! the process inside its run loop. So the write follows the edit closely ([`WriteSchedule`]): a
+//! short pause after the last change, and never later than [`BACKUP_DEBOUNCE_MS`] after the first
+//! change that is not in the file yet, so continuous typing cannot push the write out.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -25,8 +28,46 @@ use crate::ui::editor_states::{reopen_plan, Reopen};
 pub const BACKUP_VERSION: u32 = 1;
 /// How long a backup is kept when the prefs say nothing (`Prefs::hot_exit_backup_days`).
 pub const DEFAULT_BACKUP_DAYS: u32 = 30;
-/// The pause after the last change before the backup is written.
+/// The longest the backup file may be behind the window: the write is due this long after the first
+/// change that is not in the file, however long the typing goes on.
 pub const BACKUP_DEBOUNCE_MS: u64 = 1000;
+/// The pause after the last change before the backup is written (a burst of keys is one write).
+pub const BACKUP_QUIET_MS: u64 = 200;
+
+/// When the next backup write is due. A pure clock-free core: callers pass `now_ms`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WriteSchedule {
+    /// When the first change not yet written happened.
+    first: Option<u64>,
+    last: u64,
+    /// A task is waiting for the write to come due.
+    running: bool,
+}
+
+impl WriteSchedule {
+    /// A change happened. True when the caller has to start the waiting task (none is running).
+    pub fn note_change(&mut self, now_ms: u64) -> bool {
+        self.first.get_or_insert(now_ms);
+        self.last = now_ms;
+        !std::mem::replace(&mut self.running, true)
+    }
+
+    /// Milliseconds until the write is due, `Some(0)` when it is due now, `None` when nothing is
+    /// waiting (the task ends, and is started again by the next change).
+    pub fn due_in(&mut self, now_ms: u64) -> Option<u64> {
+        let Some(first) = self.first else {
+            self.running = false;
+            return None;
+        };
+        let due = (self.last + BACKUP_QUIET_MS).min(first + BACKUP_DEBOUNCE_MS);
+        Some(due.saturating_sub(now_ms))
+    }
+
+    /// The write is starting: what it covers is no longer waiting. A change during the write is a new wait.
+    pub fn written(&mut self) {
+        self.first = None;
+    }
+}
 
 const DAY_MS: u64 = 86_400_000;
 
@@ -750,11 +791,14 @@ pub mod view {
 
     use dioxus_compose::html::prelude::dioxus_signals::{ReadableExt, WritableExt};
 
-    use super::{backup_dir, collect_for_key, live, live_marker_name, marker_is_live, prune_dir, restore_failed_notice, touch_marker, unix_ms, unreadable_notice, window_file_name, BackupKey, DocView, Live, Tracker, BACKUP_DEBOUNCE_MS, HEARTBEAT_MS};
+    use super::{backup_dir, collect_for_key, live, live_marker_name, marker_is_live, prune_dir, restore_failed_notice, touch_marker, unix_ms, unreadable_notice, window_file_name, BackupKey, DocView, Live, Tracker, WriteSchedule, HEARTBEAT_MS};
     use crate::editor_host::HostCommand;
     use crate::ui::editor::{base_name, display_name, file_failure_reason};
     use crate::ui::editor_states::Reopen;
     use crate::ui::editor_workbench::Shared;
+
+    /// When the next write is due; the waiting task runs on the app runtime.
+    static SCHEDULE: std::sync::Mutex<WriteSchedule> = std::sync::Mutex::new(WriteSchedule { first: None, last: 0, running: false });
 
     thread_local! {
         /// The backup of this window was looked for (once per process: one editor window each).
@@ -868,7 +912,7 @@ pub mod view {
                 }
             }
         }
-        let (observed, seq) = {
+        let observed = {
             let tab_paths: Vec<String> = s.tabs.read().paths().into_iter().map(str::to_owned).collect();
             let current = s.tabs.read().current_path().map(str::to_owned);
             let bridge = s.bridge.borrow();
@@ -886,8 +930,7 @@ pub mod view {
                 .collect();
             let mut guard = live();
             let Some(live) = guard.as_mut() else { return };
-            let observed = live.tracker.observe(&docs, current.as_deref());
-            (observed, live.tracker.seq())
+            live.tracker.observe(&docs, current.as_deref())
         };
         for path in &observed.conflicts {
             let Some(uri) = s.uris.borrow().get(path).cloned() else { continue };
@@ -897,10 +940,19 @@ pub mod view {
                 let _ = s.bridge.borrow_mut().apply(ember_editor::SessionUpdate::ExternalChange { uri, change: ember_editor::ExternalChange::ChangedWhileDirty });
             }
         }
-        if observed.changed {
+        if observed.changed && SCHEDULE.lock().unwrap_or_else(|e| e.into_inner()).note_change(unix_ms()) {
             crate::services::services().rt.spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(BACKUP_DEBOUNCE_MS)).await;
-                super::flush_live(Some(seq));
+                loop {
+                    let wait = SCHEDULE.lock().unwrap_or_else(|e| e.into_inner()).due_in(unix_ms());
+                    match wait {
+                        None => break,
+                        Some(0) => {
+                            SCHEDULE.lock().unwrap_or_else(|e| e.into_inner()).written();
+                            super::flush_live(None);
+                        }
+                        Some(ms) => tokio::time::sleep(std::time::Duration::from_millis(ms)).await,
+                    }
+                }
             });
         }
     }

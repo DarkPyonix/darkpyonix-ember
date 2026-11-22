@@ -72,6 +72,7 @@ pub mod storage;
 pub mod watch;
 pub mod webview;
 pub mod widget;
+pub mod writes;
 
 pub use crate::bridge::{apply_text_change, BridgeAction, DocumentWidgetState, SyntaxRuns, WidgetBridge};
 pub use crate::folding::{compute_indent_folds, merge_folds, parse_provider_folds, FoldRange, FoldRegion};

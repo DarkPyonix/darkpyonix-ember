@@ -876,6 +876,9 @@ async fn read_user_file(path: std::path::PathBuf) -> Result<Vec<u8>, String> {
     read.await.unwrap_or_else(|e| Err(e.to_string()))
 }
 
+/// How long shutdown waits for file writes already started.
+pub const SHUTDOWN_WRITE_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// Writes one of the caller's settings files on the client machine, making its folder first.
 async fn write_user_file(path: std::path::PathBuf, bytes: Vec<u8>) -> Result<(), String> {
     let write = tokio::task::spawn_blocking(move || {
@@ -1087,6 +1090,10 @@ impl Driver {
             let effects = self.core.handle(Instant::now(), input);
             self.execute(effects, &internal_tx);
         }
+        // A save still on the wire finishes before the connections close under it.
+        if !crate::writes::wait_settled(SHUTDOWN_WRITE_WAIT).await {
+            tracing::warn!("ember-editor: {} file write(s) still unfinished at shutdown", crate::writes::in_flight());
+        }
         exthost::terminate(self.peer.connection());
         self.ipc.connection().close();
     }
@@ -1204,7 +1211,9 @@ impl Driver {
                 Effect::WriteFile { uri, bytes, token } => {
                     if let Some(local) = self.user_file(&uri) {
                         let tx = internal.clone();
+                        let guard = crate::writes::WriteGuard::new();
                         tokio::spawn(async move {
+                            let _guard = guard;
                             let result = match local {
                                 Ok(path) => write_user_file(path, bytes).await,
                                 Err(refused) => Err(refused),
@@ -1214,7 +1223,9 @@ impl Driver {
                         continue;
                     }
                     let (fs, tx) = (Arc::clone(&self.fs), internal.clone());
+                    let guard = crate::writes::WriteGuard::new();
                     tokio::spawn(async move {
+                        let _guard = guard;
                         let result = fs.write_file(&uri, bytes, &WriteOptions::default()).await.map_err(|e| e.to_string());
                         let _ = tx.send(Input::FileWritten { uri, token, result });
                     });

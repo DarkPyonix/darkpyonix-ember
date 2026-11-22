@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use ember_app::editor_backup::{
     backup_dir, backup_file_name, collect_for_key, decode, live_marker_name, marker_is_live, merge_backups, touch_marker, window_file_name, encode, expired, load, prune_dir, restore_failed_notice, unreadable_notice, write_atomic,
-    BackupEntry, BackupError, BackupFile, BackupKey, BaseMark, DocView, Flush, Loaded, Tracker, BACKUP_DEBOUNCE_MS, BACKUP_VERSION,
+    BackupEntry, BackupError, BackupFile, BackupKey, BaseMark, DocView, Flush, Loaded, Tracker, WriteSchedule, BACKUP_DEBOUNCE_MS, BACKUP_QUIET_MS, BACKUP_VERSION,
     DEFAULT_BACKUP_DAYS,
 };
 use ember_app::prefs::{self, Prefs};
@@ -532,4 +532,40 @@ fn fr_l31_6_b7_a_window_counts_as_running_while_its_marker_is_fresh() {
     let later = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
     assert!(!marker_is_live(&marker, later));
     assert!(!marker_is_live(&dir.path().join(live_marker_name(&key(), 999)), std::time::SystemTime::now()));
+}
+
+#[test]
+fn fr_l31_6_b8_the_backup_follows_an_edit_without_waiting_for_a_pause() {
+    // One edit: written after the short quiet pause, not after a second.
+    let mut schedule = WriteSchedule::default();
+    assert!(schedule.note_change(10_000), "the first change starts the waiting task");
+    assert_eq!(schedule.due_in(10_000), Some(BACKUP_QUIET_MS));
+    assert_eq!(schedule.due_in(10_000 + BACKUP_QUIET_MS), Some(0));
+    schedule.written();
+    assert_eq!(schedule.due_in(10_300), None, "nothing waits after the write");
+    assert!(schedule.note_change(20_000), "the task ended, so the next change starts one again");
+
+    // Continuous typing, a key every 50 ms for ten seconds: the write still comes due within the
+    // limit of the first unwritten change, over and over, instead of being pushed out for ever.
+    let mut schedule = WriteSchedule::default();
+    let (mut first_unwritten, mut writes, mut worst_lag) = (None::<u64>, 0, 0);
+    for now in (0..10_000u64).step_by(50) {
+        schedule.note_change(now);
+        first_unwritten.get_or_insert(now);
+        if schedule.due_in(now) == Some(0) {
+            worst_lag = worst_lag.max(now - first_unwritten.take().unwrap());
+            schedule.written();
+            writes += 1;
+        }
+    }
+    assert!(writes >= 9, "{writes} writes in ten seconds of typing");
+    assert!(worst_lag <= BACKUP_DEBOUNCE_MS, "the file was {worst_lag} ms behind the typing");
+
+    // The last edit before the quit is in the file: the tracker the write reads holds it.
+    let dir = scratch();
+    let mut tracker = Tracker::new(key(), None);
+    tracker.observe(&[doc("/w/a.rs", 1, 9, true, "last keystroke\n")], Some("/w/a.rs"));
+    tracker.flush(dir.path(), NOW).unwrap();
+    let read = decode(&std::fs::read(backup_path(dir.path())).unwrap()).unwrap();
+    assert_eq!(read.entries[0].text, "last keystroke\n");
 }

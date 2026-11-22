@@ -1014,6 +1014,7 @@ fn IdeMenu(b: &ProjectBox, ui: &SharedUi, compact: bool) {
     // `computer:~/project` (mockup `ideMenu`), not the raw folder (review r8).
     let ide_sub = crate::ui::session::ide_menu_subtitle(computer.get().as_deref(), &cwd);
     let rows = crate::ui::cr::session::ide_pop_rows(&choices, remembered);
+    let rows = crate::ui::cr::session::with_ember_notice(rows, &choices, ide.get().as_ref());
     let (close, ui2, ide2) = (open.clone(), ui.clone(), ide.clone());
     // The chooser hangs from the IDE button, lined up with its end (FR-L10.4, #888, review P10).
     PopoverMenu(

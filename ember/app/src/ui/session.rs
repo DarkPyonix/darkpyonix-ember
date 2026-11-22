@@ -924,6 +924,31 @@ pub fn ide_description(kind: IdeKind) -> &'static str {
     }
 }
 
+/// What the chooser says under the Ember entry before it is picked, when the editor server the
+/// session's computer runs is not one Ember's editor supports: the editor window would only show
+/// its fallback and offer VS Code. `None` when the launch is not loaded, failed, has no Ember
+/// target, or reports no commit (an older server leaves it out; unknown is not unsupported, and the
+/// window handles that case itself).
+pub fn ember_ide_notice(launch: Option<&Result<crate::server::IdeLaunch, String>>) -> Option<String> {
+    let commit = launch?
+        .as_ref()
+        .ok()?
+        .target(IdeKind::Ember.key())?
+        .launch
+        .as_ref()?
+        .ose
+        .as_ref()?
+        .ose_commit
+        .as_deref()?;
+    if ember_editor_conn::is_supported_commit(commit) {
+        return None;
+    }
+    let short: String = commit.trim().chars().take(12).collect();
+    Some(format!(
+        "이 컴퓨터의 편집기 서버(Code-OSS {short})는 지원하지 않는 버전이라 VS Code에서 열기를 안내합니다."
+    ))
+}
+
 /// The IDE the menu marks as current: the remembered one, else Ember's own editor, which the
 /// mockup names on the button and checks in the menu before anything is chosen (`ideMenu`,
 /// `on = s.ide || "ember"`; review r8: a fresh profile showed no current row).
@@ -2063,6 +2088,38 @@ mod tests {
                 assert!(!l.contains(banned));
             }
         }
+    }
+
+    fn launch_with_commit(commit: Option<&str>) -> crate::server::IdeLaunch {
+        crate::demo::ide_launch_with(
+            "s",
+            "p",
+            "/w",
+            Some(ember_client::wire::EmberOseConnection {
+                endpoint: "http://127.0.0.1:9000".into(),
+                relay: None,
+                connection_token: String::new(),
+                ose_commit: commit.map(String::from),
+            }),
+        )
+    }
+
+    #[test]
+    fn fr_e10_chooser_notes_an_unsupported_ose_commit_in_advance() {
+        let other = "0036dcb6c18a603d2168c00fa578be600987ac7b";
+        let unsupported = Ok(launch_with_commit(Some(other)));
+        let n = ember_ide_notice(Some(&unsupported)).expect("an unsupported commit is noted");
+        assert!(n.contains(&other[..12]) && !n.contains(&other[..13]) && n.contains("VS Code"));
+        let pinned = Ok(launch_with_commit(Some(ember_editor_conn::PINNED_COMMIT)));
+        assert_eq!(ember_ide_notice(Some(&pinned)), None);
+        let unknown = Ok(launch_with_commit(None));
+        assert_eq!(ember_ide_notice(Some(&unknown)), None);
+        let failed: Result<crate::server::IdeLaunch, String> = Err("down".into());
+        assert_eq!(ember_ide_notice(Some(&failed)), None);
+        assert_eq!(ember_ide_notice(None), None);
+        let mut no_ember = launch_with_commit(Some(other));
+        no_ember.targets.retain(|t| t.kind != "ember");
+        assert_eq!(ember_ide_notice(Some(&Ok(no_ember))), None);
     }
 
     #[test]

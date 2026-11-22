@@ -6559,7 +6559,7 @@ mod tests {
 
         // 1. Click "로컬 전용" filter chip -> filters out remote-only commit
         let (node, handler) = tracker.find("로컬 전용");
-        let (bytes, _) = host.dispatch(HostEvent { node_id: node, handler_id: handler, payload: EventPayload::Clicked }).expect("click 로컬 전용");
+        let (bytes, _) = host.dispatch(HostEvent::new(node, handler, EventPayload::Clicked)).expect("click 로컬 전용");
         let local_batch = decode_batch(bytes).expect("decode");
         tracker.scan(&local_batch);
         let local_text: String = local_batch.iter().map(|m| format!("{m:?}")).collect();
@@ -6567,7 +6567,7 @@ mod tests {
 
         // 2. Click "모든 브랜치" filter chip -> brings back all commits including remote-only
         let (node, handler) = tracker.find("모든 브랜치");
-        let (bytes, _) = host.dispatch(HostEvent { node_id: node, handler_id: handler, payload: EventPayload::Clicked }).expect("click 모든 브랜치");
+        let (bytes, _) = host.dispatch(HostEvent::new(node, handler, EventPayload::Clicked)).expect("click 모든 브랜치");
         let all_batch = decode_batch(bytes).expect("decode");
         tracker.scan(&all_batch);
         let all_text: String = all_batch.iter().map(|m| format!("{m:?}")).collect();
@@ -6576,7 +6576,7 @@ mod tests {
 
         // 3. Click "여기서 브랜치" -> toggles form open
         let (node, handler) = tracker.find("여기서 브랜치");
-        let (bytes, _) = host.dispatch(HostEvent { node_id: node, handler_id: handler, payload: EventPayload::Clicked }).expect("click 여기서 브랜치");
+        let (bytes, _) = host.dispatch(HostEvent::new(node, handler, EventPayload::Clicked)).expect("click 여기서 브랜치");
         let form_batch = decode_batch(bytes).expect("decode");
         tracker.scan(&form_batch);
         let form_text: String = form_batch.iter().map(|m| format!("{m:?}")).collect();
@@ -6585,7 +6585,7 @@ mod tests {
 
         // 4. Click "되돌리기" -> two-step arming: label becomes "정말 되돌립니다"
         let (node, handler) = tracker.find("되돌리기");
-        let (bytes, _) = host.dispatch(HostEvent { node_id: node, handler_id: handler, payload: EventPayload::Clicked }).expect("click 되돌리기");
+        let (bytes, _) = host.dispatch(HostEvent::new(node, handler, EventPayload::Clicked)).expect("click 되돌리기");
         let arm_batch = decode_batch(bytes).expect("decode");
         tracker.scan(&arm_batch);
         let arm_text: String = arm_batch.iter().map(|m| format!("{m:?}")).collect();
@@ -6593,7 +6593,7 @@ mod tests {
 
         // 5. Click "Cherry-pick" -> two-step arming: label becomes "정말 가져옵니다"
         let (node, handler) = tracker.find("Cherry-pick");
-        let (bytes, _) = host.dispatch(HostEvent { node_id: node, handler_id: handler, payload: EventPayload::Clicked }).expect("click Cherry-pick");
+        let (bytes, _) = host.dispatch(HostEvent::new(node, handler, EventPayload::Clicked)).expect("click Cherry-pick");
         let cp_batch = decode_batch(bytes).expect("decode");
         tracker.scan(&cp_batch);
         let cp_text: String = cp_batch.iter().map(|m| format!("{m:?}")).collect();
@@ -6602,7 +6602,7 @@ mod tests {
         // 6. Click "SHA 복사" -> copies the SHA and says so; only when the clipboard refuses it
         // (a headless runner) is the selectable SHA field shown instead (compose-rust#471).
         let (node, handler) = tracker.find("SHA 복사");
-        let (bytes, _) = host.dispatch(HostEvent { node_id: node, handler_id: handler, payload: EventPayload::Clicked }).expect("click SHA 복사");
+        let (bytes, _) = host.dispatch(HostEvent::new(node, handler, EventPayload::Clicked)).expect("click SHA 복사");
         let sha_batch = decode_batch(bytes).expect("decode");
         tracker.scan(&sha_batch);
         let sha_text: String = sha_batch.iter().map(|m| format!("{m:?}")).collect();
@@ -6688,7 +6688,7 @@ mod tests {
 
         // Click on first commit row overlay
         let (node, handler) = tracker.find("커밋 a1b2c3d Feat: attach the session shim before routing");
-        let (bytes, _) = host.dispatch(HostEvent { node_id: node, handler_id: handler, payload: EventPayload::Clicked }).expect("click commit row");
+        let (bytes, _) = host.dispatch(HostEvent::new(node, handler, EventPayload::Clicked)).expect("click commit row");
         let detail_batch = decode_batch(bytes).expect("decode");
         tracker.scan(&detail_batch);
 
@@ -6700,7 +6700,7 @@ mod tests {
 
         // Click "목록으로" to navigate back to list
         let (node, handler) = tracker.find("목록으로");
-        let (bytes, _) = host.dispatch(HostEvent { node_id: node, handler_id: handler, payload: EventPayload::Clicked }).expect("click 목록으로");
+        let (bytes, _) = host.dispatch(HostEvent::new(node, handler, EventPayload::Clicked)).expect("click 목록으로");
         let back_batch = decode_batch(bytes).expect("decode");
         tracker.scan(&back_batch);
         let back_text: String = back_batch.iter().map(|m| format!("{m:?}")).collect();
@@ -6905,11 +6905,7 @@ mod tests {
                 None
             }).unwrap_or_else(|| panic!("button '{label}' not found (known: {:?})", self.texts));
 
-            let bytes = self.host.dispatch(HostEvent {
-                node_id,
-                handler_id,
-                payload: EventPayload::Clicked,
-            }).expect("dispatch").0.to_vec();
+            let bytes = self.host.dispatch(HostEvent::new(node_id, handler_id, EventPayload::Clicked)).expect("dispatch").0.to_vec();
             let batch = decode_batch(&bytes).expect("decode");
             self.absorb(&batch);
             batch.iter().map(|m| format!("{m:?}")).collect()
@@ -7137,7 +7133,7 @@ mod tests {
             .collect();
         assert_eq!(targets.len(), 1, "the row has exactly one tap target named by its path");
         let (node_id, handler_id) = targets[0];
-        let after = host.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("dispatch").0.to_vec();
+        let after = host.dispatch(HostEvent::new(node_id, handler_id, EventPayload::Clicked)).expect("dispatch").0.to_vec();
         let after: String = decode_batch(&after).expect("decode").iter().map(|m| format!("{m:?}")).collect();
         assert!(after.contains("고른 파일 docs/SPEC.md"), "the tap selects the file: {after}");
     }
@@ -7994,7 +7990,7 @@ mod tests {
             Mutation::SetProp { node_id, property: PropertyKind::OnDismiss, value: PropertyValue::Integer(h) } => Some((*node_id, *h as u64)),
             _ => None,
         }).expect("VCS sheet dismiss handler");
-        host.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("dispatch dismiss");
+        host.dispatch(HostEvent::new(node_id, handler_id, EventPayload::Clicked)).expect("dispatch dismiss");
         assert_eq!(VCS_DISMISSES.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
@@ -8177,10 +8173,7 @@ mod tests {
             .iter()
             .map(|m| format!("{m:?}"))
             .collect();
-        let event = HostEvent {
-            node_id: 0,
-            handler_id: 0,
-            payload: EventPayload::WindowSizeChanged {
+        let event = HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
                 width_dp: 1440.0,
                 height_dp: 900.0,
                 class: WindowSizeClass::Expanded,
@@ -8189,8 +8182,7 @@ mod tests {
                 safe_area_leading: 0.0,
                 safe_area_trailing: 0.0,
                 safe_area_bottom: 0.0,
-            },
-        };
+            });
         let (bytes, _) = host.dispatch(event).expect("dispatch");
         text.extend(decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")));
         assert!(text.contains("feat/session-shim"));
@@ -8209,10 +8201,7 @@ mod tests {
             .iter()
             .map(|m| format!("{m:?}"))
             .collect();
-        let event = HostEvent {
-            node_id: 0,
-            handler_id: 0,
-            payload: EventPayload::WindowSizeChanged {
+        let event = HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
                 width_dp: 1440.0,
                 height_dp: 900.0,
                 class: WindowSizeClass::Expanded,
@@ -8221,8 +8210,7 @@ mod tests {
                 safe_area_leading: 0.0,
                 safe_area_trailing: 0.0,
                 safe_area_bottom: 0.0,
-            },
-        };
+            });
         let (bytes, _) = host.dispatch(event).expect("dispatch");
         text.extend(decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")));
         assert!(text.contains("커밋"), "the commit button is in the wide layout");
@@ -8338,10 +8326,7 @@ mod tests {
             .iter()
             .map(|m| format!("{m:?}"))
             .collect();
-        let event = HostEvent {
-            node_id: 0,
-            handler_id: 0,
-            payload: EventPayload::WindowSizeChanged {
+        let event = HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
                 width_dp: 390.0,
                 height_dp: 844.0,
                 class: WindowSizeClass::Compact,
@@ -8350,8 +8335,7 @@ mod tests {
                 safe_area_leading: 0.0,
                 safe_area_trailing: 0.0,
                 safe_area_bottom: 0.0,
-            },
-        };
+            });
         let (bytes, _) = host.dispatch(event).expect("dispatch");
         text.extend(decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")));
         assert!(text.contains("파일"));
@@ -8435,10 +8419,7 @@ mod tests {
         };
         scan(&decode_batch(host.rebuild().expect("rebuild")).expect("decode"));
         
-        let event = HostEvent {
-            node_id: 0,
-            handler_id: 0,
-            payload: EventPayload::WindowSizeChanged {
+        let event = HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
                 width_dp: 1440.0,
                 height_dp: 900.0,
                 class: WindowSizeClass::Expanded,
@@ -8447,8 +8428,7 @@ mod tests {
                 safe_area_leading: 0.0,
                 safe_area_trailing: 0.0,
                 safe_area_bottom: 0.0,
-            },
-        };
+            });
         let (bytes, _) = host.dispatch(event).expect("dispatch");
         scan(&decode_batch(bytes).expect("decode"));
 
@@ -8517,10 +8497,7 @@ mod tests {
         };
         scan(&decode_batch(host.rebuild().expect("rebuild")).expect("decode"));
 
-        let event = HostEvent {
-            node_id: 0,
-            handler_id: 0,
-            payload: EventPayload::WindowSizeChanged {
+        let event = HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
                 width_dp: 390.0,
                 height_dp: 844.0,
                 class: WindowSizeClass::Compact,
@@ -8529,8 +8506,7 @@ mod tests {
                 safe_area_leading: 0.0,
                 safe_area_trailing: 0.0,
                 safe_area_bottom: 0.0,
-            },
-        };
+            });
         let (bytes, _) = host.dispatch(event).expect("dispatch");
         scan(&decode_batch(bytes).expect("decode"));
 
@@ -8909,7 +8885,7 @@ mod tests {
         assert!(texts_matched.values().any(|t| t == "#100 통과"), "should render '#100 통과' chip");
         let pr_btn = texts_matched.iter().find(|(id, t)| *t == "#100 통과" && clickables.contains_key(id)).map(|(id, _)| *id).expect("clickable PR chip");
         let pr_handler = clickables[&pr_btn];
-        host_matched.dispatch(HostEvent { node_id: pr_btn, handler_id: pr_handler, payload: EventPayload::Clicked }).expect("dispatch PR click");
+        host_matched.dispatch(HostEvent::new(pr_btn, pr_handler, EventPayload::Clicked)).expect("dispatch PR click");
         assert_eq!(clicked_pr.get(), Some(100), "clicking PR chip must pass its PR number");
     }
 
@@ -9005,7 +8981,7 @@ mod tests {
 
         if let Some(node_id) = br_button {
             if let Some(&handler_id) = clickables.get(&node_id) {
-                host.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("dispatch");
+                host.dispatch(HostEvent::new(node_id, handler_id, EventPayload::Clicked)).expect("dispatch");
                 assert_eq!(sec.get(), Section::Branches, "clicking '브랜치 보기' should navigate to Section::Branches");
             }
         }
@@ -9015,7 +8991,7 @@ mod tests {
         assert!(pr_chip.is_some(), "expected clickable '#409 ...' PR chip in sample team pane");
         if let Some(node_id) = pr_chip {
             if let Some(&handler_id) = clickables.get(&node_id) {
-                host.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("dispatch PR chip");
+                host.dispatch(HostEvent::new(node_id, handler_id, EventPayload::Clicked)).expect("dispatch PR chip");
                 assert_eq!(selected_pr.get(), Some(409), "clicking PR chip should set selected_pr to 409");
                 assert_eq!(sec.get(), Section::PullRequests, "clicking PR chip should navigate to Section::PullRequests");
             }

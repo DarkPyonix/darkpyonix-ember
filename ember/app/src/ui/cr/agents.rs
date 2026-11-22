@@ -3715,10 +3715,7 @@ mod tests {
             .iter()
             .map(|m| format!("{m:?}"))
             .collect();
-        let event = HostEvent {
-            node_id: 0,
-            handler_id: 0,
-            payload: EventPayload::WindowSizeChanged {
+        let event = HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
                 width_dp: width,
                 height_dp: 900.0,
                 class,
@@ -3727,8 +3724,7 @@ mod tests {
                 safe_area_leading: 0.0,
                 safe_area_trailing: 0.0,
                 safe_area_bottom: 0.0,
-            },
-        };
+            });
         let (bytes, _) = host.dispatch(event).expect("dispatch");
         text.extend(decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")));
         compose_rust::window::reset_window_size();
@@ -4299,10 +4295,7 @@ mod tests {
             }
         };
         scan(&decode_batch(host.rebuild().expect("rebuild")).expect("decode"));
-        let event = HostEvent {
-            node_id: 0,
-            handler_id: 0,
-            payload: EventPayload::WindowSizeChanged {
+        let event = HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
                 width_dp: width,
                 height_dp: 900.0,
                 class,
@@ -4311,8 +4304,7 @@ mod tests {
                 safe_area_leading: 0.0,
                 safe_area_trailing: 0.0,
                 safe_area_bottom: 0.0,
-            },
-        };
+            });
         let (bytes, _) = host.dispatch(event).expect("dispatch");
         scan(&decode_batch(bytes).expect("decode"));
         compose_rust::window::reset_window_size();

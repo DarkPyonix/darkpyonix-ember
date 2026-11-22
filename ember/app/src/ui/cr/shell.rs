@@ -936,10 +936,7 @@ mod tests {
         // Nothing reported yet: the phone layout.
         assert!(has_text(&first, "BottomTabs"));
         let mut report = |width: f32, class: WindowSizeClass| {
-            let event = HostEvent {
-                node_id: 0,
-                handler_id: 0,
-                payload: EventPayload::WindowSizeChanged {
+            let event = HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
                     width_dp: width,
                     height_dp: 900.0,
                     class,
@@ -948,8 +945,7 @@ mod tests {
                     safe_area_leading: 0.0,
                     safe_area_trailing: 0.0,
                     safe_area_bottom: 0.0,
-                },
-            };
+                });
             let (bytes, _) = host.dispatch(event).expect("dispatch");
             decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")).collect::<String>()
         };
@@ -972,10 +968,7 @@ mod tests {
         assert!(has_text(&first, "Sidebar"));
         assert!(!has_text(&first, "BottomTabs"));
         let mut report = |width: f32, height: f32, class: WindowSizeClass| {
-            let event = HostEvent {
-                node_id: 0,
-                handler_id: 0,
-                payload: EventPayload::WindowSizeChanged {
+            let event = HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
                     width_dp: width,
                     height_dp: height,
                     class,
@@ -984,8 +977,7 @@ mod tests {
                     safe_area_leading: 0.0,
                     safe_area_trailing: 0.0,
                     safe_area_bottom: 0.0,
-                },
-            };
+                });
             let (bytes, _) = host.dispatch(event).expect("dispatch");
             decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")).collect::<String>()
         };
@@ -1020,10 +1012,7 @@ mod tests {
         let first = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
         assert!(has_text(&first, "inset 0 strip 0"), "nothing reported yet");
         let mut report = |width: f32, top: f32, leading: f32| {
-            let event = HostEvent {
-                node_id: 0,
-                handler_id: 0,
-                payload: EventPayload::WindowSizeChanged {
+            let event = HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
                     width_dp: width,
                     height_dp: 900.0,
                     class: WindowSizeClass::from_width_dp(width),
@@ -1032,8 +1021,7 @@ mod tests {
                     safe_area_leading: leading,
                     safe_area_trailing: 0.0,
                     safe_area_bottom: 0.0,
-                },
-            };
+                });
             let (bytes, _) = host.dispatch(event).expect("dispatch");
             decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")).collect::<String>()
         };
@@ -1113,7 +1101,7 @@ mod tests {
         let ui = shared_ui();
         ui.go(Route::Projects);
         let (node_id, handler_id) = handlers[index];
-        sidebar.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("click sidebar search");
+        sidebar.dispatch(HostEvent::new(node_id, handler_id, EventPayload::Clicked)).expect("click sidebar search");
         assert_eq!(ui.route.get_untracked(), Route::Search);
 
         let mut rail = Host::new(|| Box::new(Recomposer::new(rail_probe)));
@@ -1125,7 +1113,7 @@ mod tests {
         assert_eq!(rail_handlers.len(), handlers.len());
         ui.go(Route::Projects);
         let (node_id, handler_id) = rail_handlers[index];
-        rail.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("click rail search");
+        rail.dispatch(HostEvent::new(node_id, handler_id, EventPayload::Clicked)).expect("click rail search");
         assert_eq!(ui.route.get_untracked(), Route::Search);
         ui.go(Route::Projects);
     }
@@ -1209,7 +1197,7 @@ mod tests {
             ui.go(Route::Projects);
             ui.set_menu(other);
             let (node_id, handler_id) = handlers[index];
-            sidebar.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("click sidebar row");
+            sidebar.dispatch(HostEvent::new(node_id, handler_id, EventPayload::Clicked)).expect("click sidebar row");
             assert_eq!(ui.menu.get_untracked(), menu, "the sidebar row {} changes the menu", menu.label());
 
             let mut rail = Host::new(|| Box::new(Recomposer::new(rail_probe)));
@@ -1221,7 +1209,7 @@ mod tests {
             ui.go(Route::Projects);
             ui.set_menu(other);
             let (node_id, handler_id) = rail_handlers[index];
-            rail.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("click rail item");
+            rail.dispatch(HostEvent::new(node_id, handler_id, EventPayload::Clicked)).expect("click rail item");
             assert_eq!(ui.menu.get_untracked(), menu, "the rail item {} changes the menu", menu.label());
         }
         // 프로젝트 also leaves a conversation for the project list (the issue's completion check).
@@ -1234,7 +1222,7 @@ mod tests {
             (handlers, index)
         };
         let (node_id, handler_id) = handlers[index.expect("the 프로젝트 row")];
-        sidebar.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("click 프로젝트");
+        sidebar.dispatch(HostEvent::new(node_id, handler_id, EventPayload::Clicked)).expect("click 프로젝트");
         assert_eq!(ui.route.get_untracked(), Route::Projects);
         assert_eq!(ui.menu.get_untracked(), NavMenu::Projects);
         ui.go(Route::Projects);
@@ -1257,7 +1245,7 @@ mod tests {
         };
         ui.go(Route::Projects);
         let (node_id, handler_id) = handlers[index.expect("the phone menu 검색 row is clickable")];
-        host.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("click 검색");
+        host.dispatch(HostEvent::new(node_id, handler_id, EventPayload::Clicked)).expect("click 검색");
         assert_eq!(ui.route.get_untracked(), Route::Search);
         ui.go(Route::Projects);
     }

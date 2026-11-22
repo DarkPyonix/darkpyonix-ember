@@ -1611,12 +1611,14 @@ pub enum Choice {
     Radio,
 }
 
-/// A 40 px (or 32 px) circle with a 1 px border and a glyph.
+/// A 40 px (or 32 px) circle with a 1 px border and a glyph, with a 44 dp touch target
+/// (`Modifier::min_touch_target`, FR-L34.3, #1070).
 pub fn IconButton(icon: IconRole, small: bool, on_click: impl FnMut() + 'static) {
     let theme = ember_theme();
     let size = if small { H_CTL } else { H_BTN };
     let ring = Modifier::new()
         .size(size, size)
+        .min_touch_target(super::vcs::ICON_TOUCH_TARGET)
         .background(paint(theme.palette.surface))
         .border(1.0, paint(theme.palette.line))
         .shape_role(ShapeRole::Full);
@@ -1652,6 +1654,7 @@ pub fn BackButton(on_click: impl FnMut() + 'static) {
         super::a11y::BACK,
         Modifier::new()
             .size(H_CTL, H_CTL)
+            .min_touch_target(super::vcs::ICON_TOUCH_TARGET)
             .background(paint(p.surface))
             .border(1.0, paint(p.line))
             .corner_radius(BACK_BTN_RADIUS),
@@ -1947,6 +1950,7 @@ pub fn CloseButton(on_click: impl FnMut() + 'static) {
         super::a11y::CLOSE,
         Modifier::new()
             .size(H_CTL, H_CTL)
+            .min_touch_target(super::vcs::ICON_TOUCH_TARGET)
             .background(paint(p.surface))
             .border(1.0, paint(p.line))
             .shape_role(ShapeRole::Full),
@@ -5057,5 +5061,28 @@ mod tests {
         }
 
         crate::ui::window_size::set_opened_for_test(None);
+    }
+
+    #[test]
+    fn fr_l34_3_icon_back_and_close_buttons_emit_44_dp_touch_target_without_growing_drawn_size() {
+        // FR-L34.3 (#1070): IconButton (32/40 dp), BackButton (32 dp) and CloseButton (32 dp)
+        // emit MinTouchTarget(44.0) while keeping their drawn width and height unchanged.
+        let _guard = crate::services::test_guard();
+        let cases: [(&str, f32, fn()); 4] = [
+            ("IconButton small", H_CTL, || IconButton(IconRole::Close, true, || {})),
+            ("IconButton default", H_BTN, || IconButton(IconRole::Close, false, || {})),
+            ("BackButton", H_CTL, || BackButton(|| {})),
+            ("CloseButton", H_CTL, || CloseButton(|| {})),
+        ];
+        let want_touch = format!("{:?}", compose_rust::schema::Modifier::MinTouchTarget { size: 44.0 });
+        for (name, size, content) in cases {
+            let nodes = emitted_nodes(content);
+            let node = clicked(&nodes);
+            let want_w = format!("{:?}", compose_rust::schema::Modifier::Width(size));
+            let want_h = format!("{:?}", compose_rust::schema::Modifier::Height(size));
+            assert!(node.mods.iter().any(|m| m == &want_w), "{name}: {want_w} missing in {:?}", node.mods);
+            assert!(node.mods.iter().any(|m| m == &want_h), "{name}: {want_h} missing in {:?}", node.mods);
+            assert!(node.mods.iter().any(|m| m == &want_touch), "{name}: {want_touch} missing in {:?}", node.mods);
+        }
     }
 }

@@ -80,10 +80,14 @@ pub enum Action {
     SettingsJson,
     /// The user's keybindings.json as a document (FR-L31.17).
     KeybindingsJson,
+    /// Switch to the next open editor tab.
+    NextTab,
+    /// Switch to the previous open editor tab.
+    PrevTab,
 }
 
 impl Action {
-    pub const ALL: [Action; 30] = [
+    pub const ALL: [Action; 32] = [
         Action::Project,
         Action::Commit,
         Action::Git,
@@ -114,6 +118,8 @@ impl Action {
         Action::Settings,
         Action::SettingsJson,
         Action::KeybindingsJson,
+        Action::NextTab,
+        Action::PrevTab,
     ];
 
     pub fn label(self) -> &'static str {
@@ -148,6 +154,8 @@ impl Action {
             Action::Settings => "설정",
             Action::SettingsJson => "사용자 설정 열기 (JSON)",
             Action::KeybindingsJson => "키보드 단축키 열기 (JSON)",
+            Action::NextTab => "다음 탭",
+            Action::PrevTab => "이전 탭",
         }
     }
 }
@@ -275,7 +283,7 @@ impl Chord {
 /// `(action, macOS chord, other chord)`; an empty chord means no default binding.
 type Row = (Action, &'static str, &'static str);
 
-const VSCODE: [Row; 30] = [
+const VSCODE: [Row; 32] = [
     (Action::Project, "\u{21E7}\u{2318}E", "Ctrl+Shift+E"),
     // VS Code has no default for a commit window; the source control view shares Git's chord.
     (Action::Commit, "", ""),
@@ -309,9 +317,11 @@ const VSCODE: [Row; 30] = [
     // Code-OSS binds neither JSON file by default (the keyboard shortcuts editor is a two-stroke chord).
     (Action::SettingsJson, "", ""),
     (Action::KeybindingsJson, "", ""),
+    (Action::NextTab, "\u{2303}Tab", "Ctrl+Tab"),
+    (Action::PrevTab, "\u{2303}\u{21E7}Tab", "Ctrl+Shift+Tab"),
 ];
 
-const JETBRAINS: [Row; 30] = [
+const JETBRAINS: [Row; 32] = [
     (Action::Project, "\u{2318}1", "Alt+1"),
     (Action::Commit, "\u{2318}0", "Alt+0"),
     (Action::Git, "\u{2318}9", "Alt+9"),
@@ -345,6 +355,8 @@ const JETBRAINS: [Row; 30] = [
     (Action::Settings, "\u{2318},", "Ctrl+Alt+S"),
     (Action::SettingsJson, "", ""),
     (Action::KeybindingsJson, "", ""),
+    (Action::NextTab, "\u{2303}Tab", "Ctrl+Tab"),
+    (Action::PrevTab, "\u{2303}\u{21E7}Tab", "Ctrl+Shift+Tab"),
 ];
 
 impl Keymap {
@@ -372,7 +384,7 @@ impl Keymap {
         }
     }
 
-    fn table(self) -> &'static [Row; 30] {
+    fn table(self) -> &'static [Row; 32] {
         match self {
             Keymap::VsCode => &VSCODE,
             Keymap::JetBrains => &JETBRAINS,
@@ -452,6 +464,18 @@ mod tests {
                     1,
                     "{a:?}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn ctrl_tab_switches_tabs_in_every_keymap_and_os() {
+        let next = Chord::Keys { ctrl: true, shift: false, alt: false, meta: false, key: "Tab".into() };
+        let prev = Chord::Keys { ctrl: true, shift: true, alt: false, meta: false, key: "Tab".into() };
+        for keymap in Keymap::ALL {
+            for os in [Os::Mac, Os::Other] {
+                assert_eq!(keymap.action_for(&next, os), Some(Action::NextTab), "{keymap:?} {os:?}");
+                assert_eq!(keymap.action_for(&prev, os), Some(Action::PrevTab), "{keymap:?} {os:?}");
             }
         }
     }

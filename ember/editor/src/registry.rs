@@ -11,7 +11,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use ember_editor_conn::exthost::{DocumentFilter, MainThreadCall, SemanticTokensLegend};
+use ember_editor_conn::exthost::{DocumentFilter, SemanticTokensLegend};
 use ember_editor_conn::language::LanguageFeature;
 use ember_editor_conn::uri::UriComponents;
 use serde_json::Value;
@@ -49,6 +49,27 @@ impl InlineMeta {
             excludes: strs(raw.get(9)),
         }
     }
+}
+
+/// What a `MainThread*` registration call asks the registry to do. The actor implementations
+/// build these from decoded arguments.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RegistryCall {
+    RegisterHoverProvider { handle: i64, selector: Vec<DocumentFilter> },
+    RegisterCodeLensSupport { handle: i64, selector: Vec<DocumentFilter>, event_handle: Option<i64> },
+    EmitCodeLensEvent { event_handle: i64 },
+    RegisterFoldingRangeProvider { handle: i64, selector: Vec<DocumentFilter>, event_handle: Option<i64> },
+    EmitFoldingRangeEvent { event_handle: i64 },
+    RegisterDocumentSemanticTokensProvider { handle: i64, selector: Vec<DocumentFilter>, legend: SemanticTokensLegend, event_handle: Option<i64> },
+    EmitDocumentSemanticTokensEvent { event_handle: i64 },
+    RegisterInlineCompletionsSupport { handle: i64, selector: Vec<DocumentFilter>, meta: InlineMeta },
+    EmitInlineCompletionsChange { handle: i64 },
+    /// Completion, definition, references, rename, code actions, formatting, signature help or
+    /// document symbols.
+    RegisterLanguageFeature { handle: i64, selector: Vec<DocumentFilter>, feature: LanguageFeature },
+    Unregister { handle: i64 },
+    RegisterCommand { id: String },
+    UnregisterCommand { id: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -160,52 +181,51 @@ impl Registry {
         RegistryChange::Registered { handle, kind: tag }
     }
 
-    /// Apply a decoded extension-host call. Calls that are not about registrations return
-    /// [`RegistryChange::None`].
-    pub fn apply(&mut self, call: &MainThreadCall) -> RegistryChange {
+    /// Apply a registration call. Emits for an unknown event handle return [`RegistryChange::None`].
+    pub fn apply(&mut self, call: &RegistryCall) -> RegistryChange {
         match call {
-            MainThreadCall::RegisterHoverProvider { handle, selector } => {
+            RegistryCall::RegisterHoverProvider { handle, selector } => {
                 self.insert(*handle, selector.clone(), ProviderKind::Hover)
             }
-            MainThreadCall::RegisterCodeLensSupport { handle, selector, event_handle } => {
+            RegistryCall::RegisterCodeLensSupport { handle, selector, event_handle } => {
                 self.insert(*handle, selector.clone(), ProviderKind::CodeLens { event_handle: *event_handle })
             }
-            MainThreadCall::RegisterFoldingRangeProvider { handle, selector, event_handle } => {
+            RegistryCall::RegisterFoldingRangeProvider { handle, selector, event_handle } => {
                 self.insert(*handle, selector.clone(), ProviderKind::FoldingRange { event_handle: *event_handle })
             }
-            MainThreadCall::RegisterDocumentSemanticTokensProvider { handle, selector, legend, event_handle } => {
+            RegistryCall::RegisterDocumentSemanticTokensProvider { handle, selector, legend, event_handle } => {
                 self.insert(
                     *handle,
                     selector.clone(),
                     ProviderKind::DocumentSemanticTokens { legend: legend.clone(), event_handle: *event_handle },
                 )
             }
-            MainThreadCall::RegisterInlineCompletionsSupport { handle, selector, raw, .. } => {
-                self.insert(*handle, selector.clone(), ProviderKind::InlineCompletions(InlineMeta::from_raw(raw)))
+            RegistryCall::RegisterInlineCompletionsSupport { handle, selector, meta } => {
+                self.insert(*handle, selector.clone(), ProviderKind::InlineCompletions(meta.clone()))
             }
-            MainThreadCall::RegisterLanguageFeature { handle, selector, feature } => {
+            RegistryCall::RegisterLanguageFeature { handle, selector, feature } => {
                 self.insert(*handle, selector.clone(), ProviderKind::Language(feature.clone()))
             }
-            MainThreadCall::EmitCodeLensEvent { event_handle } => match self.event_handles.get(event_handle) {
+            RegistryCall::EmitCodeLensEvent { event_handle } => match self.event_handles.get(event_handle) {
                 Some(&handle) => RegistryChange::CodeLensChanged { handle },
                 None => RegistryChange::None,
             },
-            MainThreadCall::EmitFoldingRangeEvent { event_handle } => match self.event_handles.get(event_handle) {
+            RegistryCall::EmitFoldingRangeEvent { event_handle } => match self.event_handles.get(event_handle) {
                 Some(&handle) => RegistryChange::FoldingRangeChanged { handle },
                 None => RegistryChange::None,
             },
-            MainThreadCall::EmitDocumentSemanticTokensEvent { event_handle } => match self.event_handles.get(event_handle) {
+            RegistryCall::EmitDocumentSemanticTokensEvent { event_handle } => match self.event_handles.get(event_handle) {
                 Some(&handle) => RegistryChange::SemanticTokensChanged { handle },
                 None => RegistryChange::None,
             },
-            MainThreadCall::EmitInlineCompletionsChange { handle } => {
+            RegistryCall::EmitInlineCompletionsChange { handle } => {
                 if self.providers.contains_key(handle) {
                     RegistryChange::InlineCompletionsChanged { handle: *handle }
                 } else {
                     RegistryChange::None
                 }
             }
-            MainThreadCall::Unregister { handle } => {
+            RegistryCall::Unregister { handle } => {
                 // Upstream `$unregister` is also called for event handles (they live in the same
                 // `_registrations` map); those just drop the mapping.
                 if self.event_handles.remove(handle).is_some() {
@@ -221,15 +241,14 @@ impl Registry {
                     None => RegistryChange::None,
                 }
             }
-            MainThreadCall::RegisterCommand { id } => {
+            RegistryCall::RegisterCommand { id } => {
                 self.commands.insert(id.clone());
                 RegistryChange::CommandsChanged
             }
-            MainThreadCall::UnregisterCommand { id } => {
+            RegistryCall::UnregisterCommand { id } => {
                 self.commands.remove(id);
                 RegistryChange::CommandsChanged
             }
-            _ => RegistryChange::None,
         }
     }
 
@@ -269,11 +288,11 @@ mod tests {
     fn matching_orders_by_score_then_newest() {
         let mut r = Registry::new();
         let u = UriComponents::remote("h", "/w/a.json");
-        r.apply(&MainThreadCall::RegisterHoverProvider { handle: 1, selector: sel(json!([{"language": "*"}])) });
-        r.apply(&MainThreadCall::RegisterHoverProvider { handle: 2, selector: sel(json!([{"language": "json"}])) });
-        r.apply(&MainThreadCall::RegisterHoverProvider { handle: 3, selector: sel(json!([{"language": "json"}])) });
-        r.apply(&MainThreadCall::RegisterHoverProvider { handle: 4, selector: sel(json!([{"language": "rust"}])) });
-        r.apply(&MainThreadCall::RegisterCodeLensSupport { handle: 5, selector: sel(json!([{"language": "json"}])), event_handle: None });
+        r.apply(&RegistryCall::RegisterHoverProvider { handle: 1, selector: sel(json!([{"language": "*"}])) });
+        r.apply(&RegistryCall::RegisterHoverProvider { handle: 2, selector: sel(json!([{"language": "json"}])) });
+        r.apply(&RegistryCall::RegisterHoverProvider { handle: 3, selector: sel(json!([{"language": "json"}])) });
+        r.apply(&RegistryCall::RegisterHoverProvider { handle: 4, selector: sel(json!([{"language": "rust"}])) });
+        r.apply(&RegistryCall::RegisterCodeLensSupport { handle: 5, selector: sel(json!([{"language": "json"}])), event_handle: None });
         let order: Vec<i64> = r.matching(KindTag::Hover, &u, "json").iter().map(|p| p.handle).collect();
         assert_eq!(order, vec![3, 2, 1]);
         assert_eq!(r.matching(KindTag::CodeLens, &u, "json").len(), 1);
@@ -286,31 +305,31 @@ mod tests {
         let u = UriComponents::remote("h", "/w/a.rs");
         let feature = LanguageFeature::Completion { trigger_characters: vec![".".into()], supports_resolve: true };
         assert_eq!(
-            r.apply(&MainThreadCall::RegisterLanguageFeature { handle: 9, selector: sel(json!([{"language": "rust"}])), feature: feature.clone() }),
+            r.apply(&RegistryCall::RegisterLanguageFeature { handle: 9, selector: sel(json!([{"language": "rust"}])), feature: feature.clone() }),
             RegistryChange::Registered { handle: 9, kind: KindTag::Completion }
         );
-        r.apply(&MainThreadCall::RegisterLanguageFeature { handle: 10, selector: sel(json!([{"language": "rust"}])), feature: LanguageFeature::Definition });
+        r.apply(&RegistryCall::RegisterLanguageFeature { handle: 10, selector: sel(json!([{"language": "rust"}])), feature: LanguageFeature::Definition });
         let found = r.matching(KindTag::Completion, &u, "rust");
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].kind, ProviderKind::Language(feature));
         assert_eq!(r.matching(KindTag::Definition, &u, "rust").len(), 1);
         assert!(r.matching(KindTag::Completion, &u, "json").is_empty());
         assert!(r.matching(KindTag::Rename, &u, "rust").is_empty());
-        assert_eq!(r.apply(&MainThreadCall::Unregister { handle: 9 }), RegistryChange::Unregistered { handle: 9, kind: KindTag::Completion });
+        assert_eq!(r.apply(&RegistryCall::Unregister { handle: 9 }), RegistryChange::Unregistered { handle: 9, kind: KindTag::Completion });
         assert!(r.matching(KindTag::Completion, &u, "rust").is_empty());
     }
 
     #[test]
     fn code_lens_event_handles_and_unregister() {
         let mut r = Registry::new();
-        r.apply(&MainThreadCall::RegisterCodeLensSupport { handle: 7, selector: vec![], event_handle: Some(8) });
-        assert_eq!(r.apply(&MainThreadCall::EmitCodeLensEvent { event_handle: 8 }), RegistryChange::CodeLensChanged { handle: 7 });
-        assert_eq!(r.apply(&MainThreadCall::EmitCodeLensEvent { event_handle: 99 }), RegistryChange::None);
+        r.apply(&RegistryCall::RegisterCodeLensSupport { handle: 7, selector: vec![], event_handle: Some(8) });
+        assert_eq!(r.apply(&RegistryCall::EmitCodeLensEvent { event_handle: 8 }), RegistryChange::CodeLensChanged { handle: 7 });
+        assert_eq!(r.apply(&RegistryCall::EmitCodeLensEvent { event_handle: 99 }), RegistryChange::None);
         // Unregistering the event handle only drops the mapping.
-        assert_eq!(r.apply(&MainThreadCall::Unregister { handle: 8 }), RegistryChange::None);
+        assert_eq!(r.apply(&RegistryCall::Unregister { handle: 8 }), RegistryChange::None);
         assert!(r.get(7).is_some());
         assert_eq!(
-            r.apply(&MainThreadCall::Unregister { handle: 7 }),
+            r.apply(&RegistryCall::Unregister { handle: 7 }),
             RegistryChange::Unregistered { handle: 7, kind: KindTag::CodeLens }
         );
         assert!(r.get(7).is_none());
@@ -347,9 +366,9 @@ mod tests {
     #[test]
     fn commands_are_tracked() {
         let mut r = Registry::new();
-        r.apply(&MainThreadCall::RegisterCommand { id: "__vsc123".into() });
+        r.apply(&RegistryCall::RegisterCommand { id: "__vsc123".into() });
         assert!(r.has_command("__vsc123"));
-        r.apply(&MainThreadCall::UnregisterCommand { id: "__vsc123".into() });
+        r.apply(&RegistryCall::UnregisterCommand { id: "__vsc123".into() });
         assert!(!r.has_command("__vsc123"));
     }
 
@@ -358,7 +377,7 @@ mod tests {
         let mut r = Registry::new();
         let u = UriComponents::remote("h", "/w/src/lib.rs");
         assert_eq!(
-            r.apply(&MainThreadCall::RegisterFoldingRangeProvider {
+            r.apply(&RegistryCall::RegisterFoldingRangeProvider {
                 handle: 10,
                 selector: sel(json!([{"language": "rust"}])),
                 event_handle: Some(11),
@@ -367,7 +386,7 @@ mod tests {
         );
         assert_eq!(r.matching(KindTag::FoldingRange, &u, "rust").len(), 1);
         assert_eq!(
-            r.apply(&MainThreadCall::EmitFoldingRangeEvent { event_handle: 11 }),
+            r.apply(&RegistryCall::EmitFoldingRangeEvent { event_handle: 11 }),
             RegistryChange::FoldingRangeChanged { handle: 10 }
         );
 
@@ -376,7 +395,7 @@ mod tests {
             token_modifiers: vec!["declaration".into()],
         };
         assert_eq!(
-            r.apply(&MainThreadCall::RegisterDocumentSemanticTokensProvider {
+            r.apply(&RegistryCall::RegisterDocumentSemanticTokensProvider {
                 handle: 20,
                 selector: sel(json!([{"language": "rust"}])),
                 legend: legend.clone(),
@@ -391,15 +410,15 @@ mod tests {
             ProviderKind::DocumentSemanticTokens { legend, event_handle: Some(21) }
         );
         assert_eq!(
-            r.apply(&MainThreadCall::EmitDocumentSemanticTokensEvent { event_handle: 21 }),
+            r.apply(&RegistryCall::EmitDocumentSemanticTokensEvent { event_handle: 21 }),
             RegistryChange::SemanticTokensChanged { handle: 20 }
         );
         assert_eq!(
-            r.apply(&MainThreadCall::Unregister { handle: 20 }),
+            r.apply(&RegistryCall::Unregister { handle: 20 }),
             RegistryChange::Unregistered { handle: 20, kind: KindTag::DocumentSemanticTokens }
         );
         assert_eq!(
-            r.apply(&MainThreadCall::EmitDocumentSemanticTokensEvent { event_handle: 21 }),
+            r.apply(&RegistryCall::EmitDocumentSemanticTokensEvent { event_handle: 21 }),
             RegistryChange::None
         );
     }

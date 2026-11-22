@@ -1605,6 +1605,7 @@ pub mod page {
                                 onclick: move |_| {
                                     if let Err(e) = crate::ide::open_ide_window(&url) {
                                         tracing::warn!("could not open the VS Code target: {e}");
+                                        notice(format!("VS Code: 열지 못했습니다: {e}"));
                                     }
                                 },
                                 "{fallback_button}"

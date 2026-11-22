@@ -7,7 +7,7 @@ use ember_bridge::{
     HANDLER_NAME,
 };
 
-use crate::cli::resolve_detached_url;
+use crate::cli::{resolve_detached_url, ChromeMode, DARKPYONIX_BG_HEX};
 
 /// A validated request to create a sibling native window in the event loop.
 #[derive(Debug, Clone, PartialEq)]
@@ -88,6 +88,10 @@ impl<B: WebviewBridge> WindowRegistry<B> {
         self.windows.insert(window_id.into(), bridge);
     }
 
+    pub fn get(&self, window_id: &str) -> Option<&B> {
+        self.windows.get(window_id)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.windows.is_empty()
     }
@@ -124,18 +128,33 @@ impl<B: WebviewBridge> WindowRegistry<B> {
 /// Initialization script injected before page scripts run.
 ///
 /// Sets the logical window id in `sessionStorage` so `detach.js` reports the
-/// host-assigned id, and exposes `window.webkit.messageHandlers.emberBridge`
-/// forwarding to `window.ipc.postMessage` so every platform webview routes
-/// `detach.js` messages into the native IPC handler.
-pub fn bridge_init_script(window_id: &str) -> String {
+/// host-assigned id, exposes `window.webkit.messageHandlers.emberBridge`
+/// forwarding to `window.ipc.postMessage`, and tags the document with the
+/// native chrome mode and DarkPyonix dark pre-paint background.
+pub fn bridge_init_script(window_id: &str, chrome_mode: ChromeMode) -> String {
     let id_json = serde_json::to_string(window_id).expect("window id serializes as JSON");
     let handler_json = serde_json::to_string(HANDLER_NAME).expect("handler name serializes as JSON");
+    let chrome_attr = match chrome_mode {
+        ChromeMode::Integrated => "integrated",
+        ChromeMode::Native => "native",
+    };
+    let chrome_json = serde_json::to_string(chrome_attr).expect("chrome mode serializes as JSON");
+    let bg_json = serde_json::to_string(DARKPYONIX_BG_HEX).expect("bg color serializes as JSON");
     format!(
         "(function () {{\n\
            if (typeof window === 'undefined') return;\n\
            var winId = {id_json};\n\
            var handlerName = {handler_json};\n\
            window.__emberWindowId = winId;\n\
+           window.__emberNativeChrome = {chrome_json};\n\
+           try {{\n\
+             if (typeof document !== 'undefined' && document.documentElement) {{\n\
+               document.documentElement.dataset.emberNativeChrome = {chrome_json};\n\
+               if (!document.documentElement.style.backgroundColor) {{\n\
+                 document.documentElement.style.backgroundColor = {bg_json};\n\
+               }}\n\
+             }}\n\
+           }} catch (e) {{}}\n\
            try {{\n\
              if (window.sessionStorage && !window.sessionStorage.getItem('ember_window_id')) {{\n\
                window.sessionStorage.setItem('ember_window_id', winId);\n\
@@ -277,10 +296,12 @@ mod tests {
 
     #[test]
     fn fr_l7_scripts_embed_handler_name_and_escape_payload() {
-        let init = bridge_init_script("win-42");
+        let init = bridge_init_script("win-42", ChromeMode::Integrated);
         assert!(init.contains(HANDLER_NAME));
         assert!(init.contains("win-42"));
         assert!(init.contains("window.ipc.postMessage"));
+        assert!(init.contains("integrated"));
+        assert!(init.contains(DARKPYONIX_BG_HEX));
 
         let eval = receive_eval_script(r#"{"kind":"sibling_window_closed","windowId":"win-2"}"#);
         assert!(eval.contains("window.__emberBridge.receive("));

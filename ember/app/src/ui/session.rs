@@ -912,14 +912,14 @@ pub fn ide_menu_subtitle(computer: Option<&str>, cwd: &str) -> Option<String> {
     })
 }
 
-/// The line under an IDE's name in the menu: what this client does with it (FR-L7, FR-L10.4).
-/// The mockup's wording is kept where the client does the same: the Ember editor opens its own
-/// window, VS Code opens the server's web IDE address in the browser, and Gateway gets a
-/// `jetbrains-gateway://` link through the OS (`crate::ide::plan`).
+/// The line under an IDE's name in the menu: what this client does with it.
+/// The Ember editor opens its own window, VS Code opens the server's web IDE address in the
+/// standalone IDE window, and Gateway gets a `jetbrains-gateway://` link through the OS
+/// (`crate::ide::plan`).
 pub fn ide_description(kind: IdeKind) -> &'static str {
     match kind {
         IdeKind::Ember => "Ember 자체 에디터 창으로 엽니다",
-        IdeKind::VsCode => "그 컴퓨터의 웹 IDE를 브라우저로 엽니다",
+        IdeKind::VsCode => "그 컴퓨터의 VS Code 웹 IDE를 전용 창으로 엽니다",
         IdeKind::Gateway => "JetBrains Gateway에 열기 링크를 보냅니다",
     }
 }
@@ -2165,7 +2165,7 @@ mod tests {
             assert!(!ide_description(k).is_empty(), "{k:?}");
         }
         // What each one does in this client, not the mockup's wording where the client differs.
-        assert_eq!(ide_description(IdeKind::VsCode), "그 컴퓨터의 웹 IDE를 브라우저로 엽니다");
+        assert_eq!(ide_description(IdeKind::VsCode), "그 컴퓨터의 VS Code 웹 IDE를 전용 창으로 엽니다");
         assert_eq!(ide_description(IdeKind::Gateway), "JetBrains Gateway에 열기 링크를 보냅니다");
     }
 

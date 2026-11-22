@@ -1,16 +1,21 @@
 //! Native `tao` window and `wry` webview event loop.
 
 use std::collections::HashMap;
+use std::process::Command;
 use std::time::Duration;
 
 use ember_bridge::{BridgeError, BridgeHost, HostOutcome, WebviewBridge};
 use tao::dpi::{LogicalPosition, LogicalSize};
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy, EventLoopWindowTarget};
-use tao::window::{Window, WindowBuilder, WindowId};
-use wry::{WebView, WebViewBuilder};
+use tao::window::{Theme, Window, WindowBuilder, WindowId};
+use wry::{WebContext, WebView, WebViewBuilder};
 
-use crate::cli::Config;
+use crate::cli::{
+    classify_navigation, format_document_title, ChromeMode, Config, NavigationDecision,
+    DARKPYONIX_BG_RGBA, DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_WIDTH, MIN_WINDOW_HEIGHT,
+    MIN_WINDOW_WIDTH,
+};
 use crate::opener::{
     bridge_init_script, receive_eval_script, OpenWindowCommand, QueuedWindowOpener, WindowRegistry,
 };
@@ -21,12 +26,17 @@ pub enum UserEvent {
         source_window_id: String,
         payload: String,
     },
+    TitleChanged {
+        logical_id: String,
+        title: String,
+    },
     SmokeExit,
 }
 
 struct ManagedWindow {
     logical_id: String,
-    _window: Window,
+    fallback_title: String,
+    window: Window,
     webview: WebView,
 }
 
@@ -45,14 +55,46 @@ impl WebviewBridge for ManagedWindow {
     }
 }
 
+/// Opens an external `http://` or `https://` link in the OS default browser.
+fn open_external_link(url: &str) {
+    let argv: Vec<&str> = if cfg!(target_os = "macos") {
+        vec!["open", url]
+    } else if cfg!(target_os = "windows") {
+        vec!["rundll32", "url.dll,FileProtocolHandler", url]
+    } else {
+        vec!["xdg-open", url]
+    };
+    if let Err(err) = Command::new(argv[0]).args(&argv[1..]).spawn() {
+        tracing::warn!(url = %url, error = %err, "failed to open external link");
+    }
+}
+
 fn spawn_window(
     target: &EventLoopWindowTarget<UserEvent>,
     proxy: EventLoopProxy<UserEvent>,
+    web_context: &mut WebContext,
+    session_origin: &str,
+    chrome_mode: ChromeMode,
     cmd: &OpenWindowCommand,
 ) -> Result<(WindowId, ManagedWindow), String> {
     let mut wb = WindowBuilder::new()
         .with_title(&cmd.title)
-        .with_inner_size(LogicalSize::new(1280.0, 840.0));
+        .with_inner_size(LogicalSize::new(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT))
+        .with_min_inner_size(LogicalSize::new(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT))
+        .with_theme(Some(Theme::Dark));
+
+    #[cfg(target_os = "macos")]
+    if chrome_mode == ChromeMode::Integrated {
+        use tao::platform::macos::WindowBuilderExtMacOS;
+        wb = wb
+            .with_titlebar_transparent(true)
+            .with_fullsize_content_view(true)
+            .with_title_hidden(true);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    let _ = chrome_mode;
+
     if let Some(pos) = cmd.screen {
         wb = wb.with_position(LogicalPosition::new(pos.x.max(0.0), pos.y.max(0.0)));
     }
@@ -62,13 +104,54 @@ fn spawn_window(
     let tao_id = window.id();
 
     let source_id = cmd.window_id.clone();
-    let init_js = bridge_init_script(&cmd.window_id);
-    let builder = WebViewBuilder::new()
+    let title_logical_id = cmd.window_id.clone();
+    let ipc_proxy = proxy.clone();
+    let title_proxy = proxy;
+    let nav_origin = session_origin.to_owned();
+    let popup_origin = session_origin.to_owned();
+    let init_js = bridge_init_script(&cmd.window_id, chrome_mode);
+
+    let builder = WebViewBuilder::with_web_context(web_context)
         .with_url(&cmd.url)
+        .with_background_color(DARKPYONIX_BG_RGBA)
+        .with_clipboard(true)
+        .with_focused(true)
         .with_initialization_script(&init_js)
+        .with_navigation_handler(move |target_url| match classify_navigation(&nav_origin, &target_url) {
+            NavigationDecision::Allow => true,
+            NavigationDecision::OpenExternal => {
+                tracing::info!(url = %target_url, "opening external link outside IDE window");
+                open_external_link(&target_url);
+                false
+            }
+            NavigationDecision::Block => {
+                tracing::warn!(url = %target_url, "blocked disallowed navigation in IDE window");
+                false
+            }
+        })
+        .with_new_window_req_handler(move |target_url| {
+            match classify_navigation(&popup_origin, &target_url) {
+                NavigationDecision::Allow => true,
+                NavigationDecision::OpenExternal => {
+                    tracing::info!(url = %target_url, "opening external popup outside IDE window");
+                    open_external_link(&target_url);
+                    false
+                }
+                NavigationDecision::Block => {
+                    tracing::warn!(url = %target_url, "blocked disallowed popup in IDE window");
+                    false
+                }
+            }
+        })
+        .with_document_title_changed_handler(move |title| {
+            let _ = title_proxy.send_event(UserEvent::TitleChanged {
+                logical_id: title_logical_id.clone(),
+                title,
+            });
+        })
         .with_ipc_handler(move |req| {
             let payload = req.into_body();
-            let _ = proxy.send_event(UserEvent::Ipc {
+            let _ = ipc_proxy.send_event(UserEvent::Ipc {
                 source_window_id: source_id.clone(),
                 payload,
             });
@@ -95,7 +178,8 @@ fn spawn_window(
         tao_id,
         ManagedWindow {
             logical_id: cmd.window_id.clone(),
-            _window: window,
+            fallback_title: cmd.title.clone(),
+            window,
             webview,
         },
     ))
@@ -104,14 +188,33 @@ fn spawn_window(
 pub fn run(config: Config) -> Result<(), String> {
     if config.validate_only {
         println!(
-            "ember-ide-webview ok: window_id={} origin={} url={}",
-            config.window_id, config.origin, config.url
+            "ember-ide-webview ok: window_id={} origin={} url={} chrome={:?} data_dir={}",
+            config.window_id,
+            config.origin,
+            config.url,
+            config.chrome_mode,
+            config
+                .data_dir
+                .as_deref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "<ephemeral>".to_owned())
         );
         return Ok(());
     }
 
+    if let Some(dir) = config.data_dir.as_deref() {
+        if let Err(err) = std::fs::create_dir_all(dir) {
+            tracing::warn!(
+                dir = %dir.display(),
+                error = %err,
+                "could not create webview data directory; continuing with platform default"
+            );
+        }
+    }
+
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
+    let mut web_context = WebContext::new(config.data_dir.clone());
 
     let initial = OpenWindowCommand {
         window_id: config.window_id.clone(),
@@ -120,9 +223,19 @@ pub fn run(config: Config) -> Result<(), String> {
         screen: None,
     };
 
+    let session_origin = config.origin.clone();
+    let chrome_mode = config.chrome_mode;
+
     let mut registry: WindowRegistry<ManagedWindow> = WindowRegistry::new();
     let mut tao_to_logical: HashMap<WindowId, String> = HashMap::new();
-    let (first_tao_id, first_win) = spawn_window(&event_loop, proxy.clone(), &initial)?;
+    let (first_tao_id, first_win) = spawn_window(
+        &event_loop,
+        proxy.clone(),
+        &mut web_context,
+        &session_origin,
+        chrome_mode,
+        &initial,
+    )?;
     tao_to_logical.insert(first_tao_id, first_win.logical_id.clone());
     registry.insert(first_win.logical_id.clone(), first_win);
 
@@ -144,6 +257,12 @@ pub fn run(config: Config) -> Result<(), String> {
             Event::UserEvent(UserEvent::SmokeExit) => {
                 tracing::info!("smoke timer elapsed; exiting");
                 *control_flow = ControlFlow::Exit;
+            }
+            Event::UserEvent(UserEvent::TitleChanged { logical_id, title }) => {
+                if let Some(managed) = registry.get(&logical_id) {
+                    let next = format_document_title(&title, &managed.fallback_title);
+                    managed.window.set_title(&next);
+                }
             }
             Event::UserEvent(UserEvent::Ipc {
                 source_window_id,
@@ -183,7 +302,14 @@ pub fn run(config: Config) -> Result<(), String> {
                 }
 
                 for cmd in host.opener_mut().take_pending() {
-                    match spawn_window(target, proxy.clone(), &cmd) {
+                    match spawn_window(
+                        target,
+                        proxy.clone(),
+                        &mut web_context,
+                        &session_origin,
+                        chrome_mode,
+                        &cmd,
+                    ) {
                         Ok((tao_id, managed)) => {
                             tao_to_logical.insert(tao_id, managed.logical_id.clone());
                             registry.insert(managed.logical_id.clone(), managed);

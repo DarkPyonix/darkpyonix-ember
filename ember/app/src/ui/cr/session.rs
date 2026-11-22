@@ -195,7 +195,7 @@ pub fn launch_ide_shared(
                 tokio::task::spawn_blocking(move || open_ide_window(&url))
                     .await
                     .map_err(|e| e.to_string())
-                    .and_then(|r| r.map_err(|e| e.to_string()))
+                    .and_then(|r| r)
             },
             move |r| match r {
                 Ok(()) => notice::post(format!("{label}: 여는 중입니다")),

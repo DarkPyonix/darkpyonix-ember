@@ -1,10 +1,9 @@
 //! "Open IDE": what each target does once the server has said how to reach it
 //! (`GET /api/sessions/{id}/ide`).
 //!
-//! - **VS Code**: the wrapped VS Code Web URL, opened in the standalone
-//!   `ember-ide-webview` child process (falling back to the OS URL handler if the
-//!   helper binary is not installed). This launcher process never embeds a browser
-//!   engine directly.
+//! - **VS Code**: the wrapped VS Code Web URL, opened strictly in the standalone
+//!   `ember-ide-webview` child process (never falling back to an external browser).
+//!   This launcher process never embeds a browser engine directly.
 //! - **Gateway**: the `jetbrains-gateway://` link, handed to the OS URL handler, which starts
 //!   JetBrains Gateway on this machine.
 //! - **Ember**: the editor screen.
@@ -161,39 +160,74 @@ pub fn ide_window_command(bin: &Path, url: &str) -> (PathBuf, Vec<String>) {
     )
 }
 
-/// Spawn `bin --url <url>` when present, or invoke `fallback` when the binary is absent.
-pub fn open_ide_window_with(
-    bin: Option<&Path>,
-    url: &str,
-    fallback: impl FnOnce(&str) -> std::io::Result<()>,
-) -> std::io::Result<()> {
-    match bin {
-        Some(exe) => {
-            let (program, args) = ide_window_command(exe, url);
-            Command::new(program).args(args).spawn().map(|_| ())
-        }
-        None => {
-            tracing::warn!(
-                url = %url,
-                "ember-ide-webview binary not found; falling back to system browser"
-            );
-            fallback(url)
-        }
+/// Format a clear error naming the missing standalone IDE window binary and every
+/// location that was checked.
+pub fn missing_ide_webview_error(
+    env_override: Option<&str>,
+    current_exe: Option<&Path>,
+    path_var: Option<&std::ffi::OsStr>,
+) -> String {
+    let mut searched = Vec::new();
+    match env_override.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(p) => searched.push(format!("{IDE_WEBVIEW_BIN_ENV}={p}")),
+        None => searched.push(format!("{IDE_WEBVIEW_BIN_ENV} (unset)")),
     }
+    if let Some(dir) = current_exe.and_then(Path::parent) {
+        searched.push(format!("sibling {}", dir.join(IDE_WEBVIEW_BIN_NAME).display()));
+    }
+    if path_var.is_some_and(|p| !p.is_empty()) {
+        searched.push("PATH".to_owned());
+    } else {
+        searched.push("PATH (unset)".to_owned());
+    }
+    format!(
+        "{IDE_WEBVIEW_BIN_NAME} binary was not found (checked: {}). Install or build {IDE_WEBVIEW_BIN_NAME}, or set {IDE_WEBVIEW_BIN_ENV}.",
+        searched.join(", ")
+    )
 }
 
-/// Open `url` in the standalone `ember-ide-webview` binary, falling back to `open_external`
-/// if the helper binary is not installed.
-pub fn open_ide_window(url: &str) -> std::io::Result<()> {
+/// Resolve and spawn `ember-ide-webview --url <url>`.
+///
+/// Never falls back to an external browser: if the helper binary is missing or
+/// fails to start, returns an error naming `ember-ide-webview` and where it was
+/// looked for.
+pub fn open_ide_window_with(
+    env_override: Option<&str>,
+    current_exe: Option<&Path>,
+    path_var: Option<&std::ffi::OsStr>,
+    url: &str,
+    spawn: impl FnOnce(&Path, &[String]) -> std::io::Result<()>,
+) -> Result<(), String> {
+    let Some(exe) = resolve_ide_webview_bin(env_override, current_exe, path_var) else {
+        let msg = missing_ide_webview_error(env_override, current_exe, path_var);
+        tracing::warn!(url = %url, "{msg}");
+        return Err(msg);
+    };
+    let (program, args) = ide_window_command(&exe, url);
+    spawn(&program, &args).map_err(|e| {
+        let msg = format!(
+            "failed to launch {} ({}): {e}",
+            IDE_WEBVIEW_BIN_NAME,
+            program.display()
+        );
+        tracing::warn!(url = %url, "{msg}");
+        msg
+    })
+}
+
+/// Open `url` in the standalone `ember-ide-webview` binary. Never falls back to
+/// an external browser.
+pub fn open_ide_window(url: &str) -> Result<(), String> {
     let env_override = std::env::var(IDE_WEBVIEW_BIN_ENV).ok();
     let current_exe = std::env::current_exe().ok();
     let path_var = std::env::var_os("PATH");
-    let bin = resolve_ide_webview_bin(
+    open_ide_window_with(
         env_override.as_deref(),
         current_exe.as_deref(),
         path_var.as_deref(),
-    );
-    open_ide_window_with(bin.as_deref(), url, open_external)
+        url,
+        |program, args| Command::new(program).args(args).spawn().map(|_| ()),
+    )
 }
 
 /// CLI flag that launches this binary directly into the editor, which runs as its own HTML-mode window (FR-L31).
@@ -411,32 +445,73 @@ mod tests {
     }
 
     #[test]
-    fn fr_l7_open_ide_window_spawns_helper_or_falls_back() {
-        let mut fallback_called_with = None;
-        open_ide_window_with(None, "http://127.0.0.1:8890/?folder=%2Fw", |u| {
-            fallback_called_with = Some(u.to_owned());
-            Ok(())
-        })
-        .expect("fallback succeeds");
+    fn fr_l7_open_ide_window_errors_without_browser_fallback_when_missing() {
+        let missing_exe = Path::new("/nonexistent/ember-dir/ember-app");
+        let mut spawn_called = false;
+        let err = open_ide_window_with(
+            None,
+            Some(missing_exe),
+            None,
+            "http://127.0.0.1:8890/?folder=%2Fw",
+            |_, _| {
+                spawn_called = true;
+                Ok(())
+            },
+        )
+        .expect_err("missing helper binary must return an error instead of falling back");
+        assert!(
+            !spawn_called,
+            "spawner or external browser opener must never be invoked when binary is missing"
+        );
+        assert!(
+            err.contains(IDE_WEBVIEW_BIN_NAME),
+            "error should name {IDE_WEBVIEW_BIN_NAME}, got: {err}"
+        );
+        assert!(
+            err.contains(IDE_WEBVIEW_BIN_ENV),
+            "error should mention {IDE_WEBVIEW_BIN_ENV}, got: {err}"
+        );
+        assert!(
+            err.contains("ember-dir"),
+            "error should include searched sibling directory, got: {err}"
+        );
+    }
+
+    #[test]
+    fn fr_l7_open_ide_window_spawns_helper_and_reports_spawn_error() {
+        let mut captured: Option<(PathBuf, Vec<String>)> = None;
+        open_ide_window_with(
+            Some("/custom/ember-ide-webview"),
+            None,
+            None,
+            "http://127.0.0.1:8890/?folder=%2Fw",
+            |prog, args| {
+                captured = Some((prog.to_path_buf(), args.to_vec()));
+                Ok(())
+            },
+        )
+        .expect("spawn helper succeeds");
         assert_eq!(
-            fallback_called_with.as_deref(),
-            Some("http://127.0.0.1:8890/?folder=%2Fw")
+            captured,
+            Some((
+                PathBuf::from("/custom/ember-ide-webview"),
+                vec![
+                    "--url".to_owned(),
+                    "http://127.0.0.1:8890/?folder=%2Fw".to_owned(),
+                ]
+            ))
         );
 
-        #[cfg(unix)]
-        {
-            let mut fallback_hit = false;
-            open_ide_window_with(
-                Some(Path::new("/usr/bin/true")),
-                "http://127.0.0.1:8890/?folder=%2Fw",
-                |_| {
-                    fallback_hit = true;
-                    Ok(())
-                },
-            )
-            .expect("spawn helper succeeds");
-            assert!(!fallback_hit, "fallback must not run when helper binary exists");
-        }
+        let err = open_ide_window_with(
+            Some("/custom/ember-ide-webview"),
+            None,
+            None,
+            "http://127.0.0.1:8890/?folder=%2Fw",
+            |_, _| Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no such file")),
+        )
+        .expect_err("spawn failure must return an error");
+        assert!(err.contains(IDE_WEBVIEW_BIN_NAME));
+        assert!(err.contains("/custom/ember-ide-webview"));
     }
 
     #[test]

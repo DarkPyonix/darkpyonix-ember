@@ -3001,17 +3001,17 @@ pub mod page {
     }
 
     /// Mounted elements by name, kept to move keyboard focus to one.
-    type Mounts = RefCell<HashMap<String, Rc<dioxus_elements::MountedData>>>;
+    type Mounts = std::cell::RefCell<std::collections::HashMap<String, std::rc::Rc<dioxus_elements::MountedData>>>;
 
     thread_local! {
         /// The project tree's rows, by path: focus follows the arrow keys' selection (#302).
-        static ROW_MOUNTS: Mounts = RefCell::new(HashMap::new());
+        static ROW_MOUNTS: Mounts = std::cell::RefCell::new(Default::default());
         /// The tab strip's tabs, by position in the strip.
-        static TAB_MOUNTS: Mounts = RefCell::new(HashMap::new());
+        static TAB_MOUNTS: Mounts = std::cell::RefCell::new(Default::default());
     }
 
     /// An element's `onmounted`: kept under `name` for [`focus_mount`].
-    fn remember_mount(mounts: &'static std::thread::LocalKey<Mounts>, name: String, data: Rc<dioxus_elements::MountedData>) {
+    fn remember_mount(mounts: &'static std::thread::LocalKey<Mounts>, name: String, data: std::rc::Rc<dioxus_elements::MountedData>) {
         mounts.with(|m| { m.borrow_mut().insert(name, data); });
     }
 

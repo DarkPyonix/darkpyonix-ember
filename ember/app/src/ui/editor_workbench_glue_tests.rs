@@ -1197,6 +1197,7 @@ fn fr_l31_tabs_arrow_keys_move_focus_with_the_selection() {
     let _guard = crate::services::test_guard();
     let mut page = Page::open_two_files();
     {
+        use dioxus_compose::html::prelude::dioxus_signals::WritableExt;
         let mut tabs = super::shared().tabs;
         let mut tabs = tabs.write();
         tabs.open(&format!("{ROOT}/a.rs"));

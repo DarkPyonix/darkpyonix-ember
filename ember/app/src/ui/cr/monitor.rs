@@ -137,7 +137,8 @@ pub fn MonitorSheet(chip: Option<&ComputerChip>, boxes: &[ProjectBox], on_close:
             { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
         }
     };
-    EmberSheetSized(title, true, SHEET_WIDTH_MONITOR, true, on_close.clone(), Some(&mut actions), || {
+    #[allow(clippy::needless_borrows_for_generic_args)]
+    EmberSheetSized(&title, true, SHEET_WIDTH_MONITOR, true, on_close.clone(), Some(&mut actions), || {
         { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().fill_max_width().height(body_height).background(paint(p.bg)), {
                 { use ::compose_rust::ui::Column; Column!(space_role = SpaceRole::Md, modifier = Modifier::new().fill_max_width().padding(scroll_pad), {
                     let Some(c) = chip else {

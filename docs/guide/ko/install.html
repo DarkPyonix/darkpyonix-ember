@@ -215,6 +215,32 @@ ember-server owner call POST /api/accounts <span class="s">'{"agent": "claude-co
       </p>
     </div>
 
+    <h3 id="server-wsl">WSL의 서버와 Windows의 앱</h3>
+    <p>
+      <span class="pill partial">부분</span> (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/982">#982</a>, Windows 컴퓨터에서는 아직 확인하지 않았습니다)
+      WSL에서 시작한 서버는 토큰을 Linux 안의 <code>~/.ember/server-token</code> 에 씁니다.
+      Windows 앱은 그곳을 보지 않습니다. WSL은 8740 포트를 Windows의 <code>127.0.0.1</code> 로
+      전달하므로, 앱은 기본 주소로 서버에 닿고 토큰만 있으면 됩니다. PowerShell에서 토큰을 앱의
+      데이터 폴더인 <code>%APPDATA%\ember</code> (<code>device.key</code> 와 <code>prefs.json</code> 이
+      있는 곳)에 복사합니다.
+    </p>
+    <figure class="codeblock" data-copy="복사" data-copied="복사됨">
+      <figcaption>PowerShell</figcaption>
+<pre><code>New-Item -ItemType Directory -Force "$env:APPDATA\ember" | Out-Null
+wsl sh -c 'cat ~/.ember/server-token' | Set-Content -Encoding ascii "$env:APPDATA\ember\server-token"</code></pre>
+    </figure>
+    <p>
+      그다음 앱을 다시 시작합니다. 앱은 다음 순서로 토큰을 찾고 처음 찾은 것을 씁니다.
+      <code>EMBER_SERVER_TOKEN</code>, <code>EMBER_DATA_DIR</code> 이 설정되어 있으면
+      <code>$EMBER_DATA_DIR/server-token</code> (이때는 다른 곳을 보지 않습니다), 아니면
+      <code>~/.ember/server-token</code> (<code>~</code> 는 <code>HOME</code>, <code>HOME</code> 이
+      없으면 <code>%USERPROFILE%</code>), 그다음 <code>%APPDATA%\ember\server-token</code> 입니다.
+      서버를 <code>EMBER_DATA_DIR</code> 로 시작했다면 토큰은 <code>~/.ember</code> 가 아니라 그
+      폴더에 있습니다. 서버가 토큰을 바꾸면 파일을 다시 복사합니다. 서버가 토큰을 거부하면 배너가
+      그 사실과 앱이 찾아본 곳을 보여 주고, 30초마다 다시 시도하지 않습니다. 같은 토큰은 다시
+      거부되기 때문입니다.
+    </p>
+
     <h3 id="mount-build">프로젝트 마운트를 넣어 빌드하기</h3>
     <p>
       <span class="pill partial">부분</span> Claude Code 세션이 다른 컴퓨터에서 일할 때, 그 파일

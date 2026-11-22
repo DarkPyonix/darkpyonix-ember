@@ -390,6 +390,16 @@ impl A2aStore {
         Ok(n > 0)
     }
 
+    /// The time of the latest mention of `to` in `channel` (a person's or a guest's), if any
+    /// (FR-T12, the open mention thread).
+    pub fn latest_channel_mention(&self, to: &str, channel: &str) -> anyhow::Result<Option<i64>> {
+        Ok(self.conn.lock().unwrap().query_row(
+            "SELECT MAX(created_at) FROM a2a_messages WHERE to_session = ?1 AND origin_channel = ?2",
+            params![to, channel],
+            |r| r.get(0),
+        )?)
+    }
+
     /// Messages between `a` and `b`, in either direction, since `since_ms`.
     pub fn pair_since(&self, a: &str, b: &str, since_ms: i64) -> anyhow::Result<u32> {
         Ok(self.conn.lock().unwrap().query_row(

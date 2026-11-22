@@ -141,7 +141,7 @@ button.ed-sbi{cursor:pointer}button.ed-sbi:hover{background:var(--hover)}
  .ed-debug-picker>.ed-pj{max-width:110px}
  .ed{grid-template-rows:52px minmax(0,1fr) 220px var(--sbh)}
 }
-@media (max-width:560px){.ed-pj:nth-of-type(2){display:none}.ed-find{display:none}.ed-runcfg{margin:0}}
+@media (max-width:560px){.ed-top>.ed-pj:nth-of-type(2){display:none}.ed-find{display:none}.ed-runcfg{margin:0}}
 .ed-twh .chev{transform:rotate(90deg)}
 .ed-top .logo-img{background:none;border-radius:0;object-fit:contain}
 .ed-msep{height:1px;background:var(--line);margin:var(--sp1) 0}

@@ -1327,13 +1327,8 @@ pub fn apply_suggestion(_draft: &str, suggestion: &str) -> String {
     suggestion.to_string()
 }
 
-/// Window width (dp) under which the Home composer puts the mode and computer chips and the send
-/// button on a second line. The split is by width from before the toolkit had a wrapping row.
-/// TODO(#673): the toolkit's `FlowRow` (compose-rust#521) can wrap the chips by their measured
-/// width, but it would wrap the send button with them; the chips need a `FlowRow` in a weighted
-/// box with the send button after it, which moves the button at every width, so it waits for
-/// a capture of the composer at 1440, 1100, 1024 and 390 with the button at the end of the
-/// last line.
+/// Window width (dp) breakpoint for [`split_chip_rows`] and [`suggestion_lines`]. The Home
+/// composer itself now wraps chips by measured width via [`composer_chip_line`].
 pub const CHIP_WRAP_WIDTH: f32 = 1100.0;
 
 pub fn split_chip_rows(width_dp: f32) -> bool {

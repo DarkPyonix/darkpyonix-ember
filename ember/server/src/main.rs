@@ -92,6 +92,7 @@ use ember_server::store::Store;
 ///   only the guest routes and `/join`, never the owner API. `EMBER_GUEST_LISTEN_ALLOW_REMOTE=1`
 ///   is required for a non-loopback address; `EMBER_GUEST_ALLOWED_HOSTS` and
 ///   `EMBER_GUEST_PUBLIC_URL` name the hosts guests use. See `guest_door`.
+///
 /// `ember-server __keep-pty …` is the local node's PTY keeper (FR-P6): dispatched before any
 /// runtime or logging starts, as in `ember-node`, so a keeper holds one fd and little memory.
 fn main() -> anyhow::Result<()> {

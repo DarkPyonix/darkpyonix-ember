@@ -1114,3 +1114,123 @@ fn fr_e3_a_hover_draws_the_card_where_the_editor_says_the_word_is() {
     assert!(page.find("data-ed", "hover-card").is_none(), "the card goes with the hover");
     super::set_hover_rect((0, 0, 0), None);
 }
+
+impl Page {
+    /// The page with `a.rs` and `b.rs` listed under the project folder.
+    fn open_two_files() -> Page {
+        let mut page = Page::open();
+        page.host().state.lock().unwrap().listings.insert(
+            ROOT.to_string(),
+            vec![
+                ("a.rs".to_string(), ember_editor_conn::remote_fs::file_type::FILE),
+                ("b.rs".to_string(), ember_editor_conn::remote_fs::file_type::FILE),
+            ],
+        );
+        page.redraw();
+        page
+    }
+
+    fn tree_row(&self, name: &str) -> NodeId {
+        self.find_where(&format!("the {name} tree row"), |id| {
+            self.attr(id, "role").as_deref() == Some("treeitem") && self.attr(id, "aria-label").as_deref() == Some(name)
+        })
+        .unwrap_or_else(|| panic!("the {name} row in the project tree"))
+    }
+
+    fn tab_of(&self, path: &str) -> NodeId {
+        self.find_where(&format!("the tab of {path}"), |id| {
+            self.attr(id, "role").as_deref() == Some("tab") && self.attr(id, "title").as_deref() == Some(path)
+        })
+        .unwrap_or_else(|| panic!("the tab of {path}"))
+    }
+
+    fn press(&mut self, node: Option<NodeId>, key: Key, code: Code) {
+        let input = dioxus_compose::html::KeyInput::new(key, code, Modifiers::empty());
+        self.dom.key_down_input(node, &input);
+        self.dom.render();
+    }
+}
+
+// FR-L31.5 (#302): Down from a.rs, then Enter, opens b.rs, the row the arrow key selected, and never
+// a.rs, the row that had focus before it.
+#[test]
+fn fr_l31_tree_enter_opens_the_row_the_arrow_keys_selected() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_two_files();
+    page.click_row();
+    page.sent();
+
+    let a = page.tree_row("a.rs");
+    page.press(Some(a), Key::ArrowDown, Code::ArrowDown);
+    assert_eq!(page.attr(page.tree_row("b.rs"), "aria-selected").as_deref(), Some("true"));
+    page.sent();
+
+    // The key goes to whichever row holds focus, as the window delivers it.
+    page.press(None, Key::Enter, Code::Enter);
+    let sent = page.sent();
+    assert!(sent.contains(&format!("open {ROOT}/b.rs")), "{sent:?}");
+    assert!(!sent.contains(&format!("open {ROOT}/a.rs")), "{sent:?}");
+}
+
+// FR-L31.5 (#302): an arrow key moves keyboard focus to the row it selected, as Code-OSS does, so
+// the row with `tabindex="0"`, the selected row and the focused row are one.
+#[test]
+fn fr_l31_tree_focus_follows_the_arrow_selection() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_two_files();
+    page.click_row();
+
+    let a = page.tree_row("a.rs");
+    page.press(Some(a), Key::ArrowDown, Code::ArrowDown);
+    assert_eq!(page.dom.focused(), Some(page.tree_row("b.rs")), "Down moves focus to b.rs");
+    assert_eq!(page.attr(page.tree_row("b.rs"), "tabindex").as_deref(), Some("0"));
+
+    let b = page.tree_row("b.rs");
+    page.press(Some(b), Key::ArrowUp, Code::ArrowUp);
+    assert_eq!(page.dom.focused(), Some(page.tree_row("a.rs")), "Up moves focus back to a.rs");
+}
+
+// FR-L31.5 (#302): the arrow keys in the tab strip move focus to the tab they activated, as they do
+// in the tree.
+#[test]
+fn fr_l31_tabs_arrow_keys_move_focus_with_the_selection() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_two_files();
+    {
+        let mut tabs = super::shared().tabs;
+        let mut tabs = tabs.write();
+        tabs.open(&format!("{ROOT}/a.rs"));
+        tabs.open(&format!("{ROOT}/b.rs"));
+        tabs.activate(&format!("{ROOT}/a.rs"));
+    }
+    page.redraw();
+
+    let a = page.tab_of(&format!("{ROOT}/a.rs"));
+    page.press(Some(a), Key::ArrowRight, Code::ArrowRight);
+    assert!(page.current_tab_is(&format!("{ROOT}/b.rs")));
+    assert_eq!(page.dom.focused(), Some(page.tab_of(&format!("{ROOT}/b.rs"))), "Right moves focus to b.rs");
+
+    let b = page.tab_of(&format!("{ROOT}/b.rs"));
+    page.press(Some(b), Key::ArrowLeft, Code::ArrowLeft);
+    assert_eq!(page.dom.focused(), Some(page.tab_of(&format!("{ROOT}/a.rs"))), "Left moves focus back to a.rs");
+}
+
+// FR-L31.7 (#302): the tab width is a button with a name, as the line ending, the encoding and the
+// language are; it opens the settings view on the tab size setting, the only indentation control
+// there is.
+#[test]
+fn fr_l31_status_tab_width_is_a_button_with_a_name() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open();
+    page.click_row();
+    page.deliver(opened(1));
+
+    let item = page.find("aria-label", "들여쓰기 선택: 4칸").expect("the tab width item is named");
+    let tag = page.dom.document().get_node(item).and_then(|n| n.element_data().map(|e| e.name.local.to_string()));
+    assert_eq!(tag.as_deref(), Some("button"), "the tab width is a button, not static text");
+    assert_eq!(page.attr(item, "title").as_deref(), Some("들여쓰기 선택"));
+
+    page.click("aria-label", "들여쓰기 선택: 4칸");
+    assert_eq!(crate::ui::editor_settings::view::query_text(), crate::ui::editor_status::TAB_WIDTH_SETTING);
+    assert!(page.find("aria-label", "설정 검색").is_some(), "the settings view is open");
+}

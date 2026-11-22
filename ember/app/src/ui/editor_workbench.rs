@@ -2421,6 +2421,7 @@ pub mod page {
                             event.stop_propagation();
                             match action {
                                 crate::ui::editor::TreeKeyOutcome::Select(p, is_dir) => {
+                                    focus_mount(&ROW_MOUNTS, &p);
                                     tree_multi_sel.set(vec![(p.clone(), is_dir)]);
                                     tree_sel.set(Some((p, is_dir)));
                                 }
@@ -2537,6 +2538,7 @@ pub mod page {
                             rsx! { div { key: "{row.path}", class, role: "treeitem", "aria-label": "{row_label}", "aria-selected": "{chosen}", tabindex: "{row_ti}", style: "{row_style}",
                                 "aria-expanded": if is_dir { "{row.open}" } else { "" },
                                 draggable: "true",
+                                onmounted: { let mount_path = row.path.clone(); move |event| remember_mount(&ROW_MOUNTS, mount_path.clone(), event.data()) },
                                 ondragstart: move |_| {
                                     tree_drag_src.set(Some(drag_path.clone()));
                                 },
@@ -2727,6 +2729,9 @@ pub mod page {
                         event.stop_propagation();
                         match action {
                             crate::ui::editor::TabKeyOutcome::Activate(path) => {
+                                if let Some(i) = crate::ui::editor::tab_key_focus(&paths_owned, &crate::ui::editor::TabKeyOutcome::Activate(path.clone())) {
+                                    focus_mount(&TAB_MOUNTS, &i.to_string());
+                                }
                                 scm.close_diff();
                                 tabs.write().activate(&path);
                                 if let Some(handle) = webview_handle_from_tab(&path) {
@@ -2799,6 +2804,7 @@ pub mod page {
                             ondoubleclick: move |_| {
                                 tabs.write().keep_open(&keep_path);
                             },
+                            onmounted: move |event| remember_mount(&TAB_MOUNTS, i.to_string(), event.data()),
                             oncontextmenu: move |event| {
                                 event.prevent_default();
                                 event.stop_propagation();
@@ -2992,6 +2998,30 @@ pub mod page {
             }
             {crate::ui::editor_language::view::symbol_crumbs(s, path)}
         } }
+    }
+
+    /// Mounted elements by name, kept to move keyboard focus to one.
+    type Mounts = RefCell<HashMap<String, Rc<dioxus_elements::MountedData>>>;
+
+    thread_local! {
+        /// The project tree's rows, by path: focus follows the arrow keys' selection (#302).
+        static ROW_MOUNTS: Mounts = RefCell::new(HashMap::new());
+        /// The tab strip's tabs, by position in the strip.
+        static TAB_MOUNTS: Mounts = RefCell::new(HashMap::new());
+    }
+
+    /// An element's `onmounted`: kept under `name` for [`focus_mount`].
+    fn remember_mount(mounts: &'static std::thread::LocalKey<Mounts>, name: String, data: Rc<dioxus_elements::MountedData>) {
+        mounts.with(|m| { m.borrow_mut().insert(name, data); });
+    }
+
+    /// Asks for keyboard focus on the element kept under `name`. The request is applied after the
+    /// next render, which the selection change that goes with it asks for.
+    fn focus_mount(mounts: &'static std::thread::LocalKey<Mounts>, name: &str) {
+        use futures_util::FutureExt;
+        if let Some(data) = mounts.with(|m| m.borrow().get(name).cloned()) {
+            let _ = data.set_focus(true).now_or_never();
+        }
     }
 
     thread_local! {
@@ -3504,7 +3534,7 @@ pub mod page {
         let format = active_format(s).and_then(|(_, f, _)| f);
         let crate::ui::editor_status::StatusTexts { eol: eol_t, encoding: enc_t, language: lang_t } =
             crate::ui::editor_status::status_texts(format.as_ref());
-        let (eol_s, enc_s, lang_s) = (s.clone(), s.clone(), s.clone());
+        let (eol_s, enc_s, lang_s, tab_s) = (s.clone(), s.clone(), s.clone(), s.clone());
         let goto_s = s.clone();
         let git_s = s.clone();
         // FR-L31.8: the cursor line's blame, as Code-OSS's git.blame.statusBarItem.
@@ -3523,7 +3553,8 @@ pub mod page {
                         onclick: move |_| open_picker(&eol_s, crate::ui::palette::Mode::Eol), "{eol_t}" }
                     button { class: "ed-sbi hide-md", title: "인코딩 선택", "aria-label": "인코딩 선택: {enc_t}",
                         onclick: move |_| open_picker(&enc_s, crate::ui::palette::Mode::EncodingAction), "{enc_t}" }
-                    span { class: "ed-sbi hide-md", "{tab_w}" }
+                    button { class: "ed-sbi hide-md", title: "들여쓰기 선택", "aria-label": "들여쓰기 선택: {tab_w}",
+                        onclick: move |_| crate::ui::editor_settings::view::open_matching(&tab_s, crate::ui::editor_status::TAB_WIDTH_SETTING), "{tab_w}" }
                     button { class: "ed-sbi hide-md", title: "언어 모드 선택", "aria-label": "언어 모드 선택: {lang_t}",
                         onclick: move |_| open_picker(&lang_s, crate::ui::palette::Mode::Language), "{lang_t}" }
                 }

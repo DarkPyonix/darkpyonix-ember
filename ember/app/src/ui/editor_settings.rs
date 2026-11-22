@@ -610,6 +610,20 @@ pub mod view {
         focus.set(next);
     }
 
+    /// Show the settings view with `query` in its search field, so one setting is the whole list.
+    pub fn open_matching(s: &Shared, query: &str) {
+        let mut q = ui().query;
+        q.set(query.to_string());
+        let mut limit = ui().limit;
+        limit.set(SETTINGS_PAGE);
+        open(s);
+    }
+
+    /// What the settings view's search field holds.
+    pub fn query_text() -> String {
+        ui().query.read().clone()
+    }
+
     /// Open a settings file as a document in a tab. The host makes the file first when it is not there.
     pub fn open_file(s: &Shared, file: SettingsFile) {
         let path = file_tab_path(&s.host.state.lock().unwrap().settings, file);

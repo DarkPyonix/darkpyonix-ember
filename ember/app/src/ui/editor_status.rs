@@ -7,6 +7,10 @@ use ember_editor::{DocumentFormat, Encoding, EncodingMode, Eol, LanguageInfo};
 
 use super::palette::{Item, Mode, Payload};
 
+/// The setting the tab width item opens in the settings view. There is no indentation picker yet:
+/// the width is the `editor.tabSize` setting, so the item leads to it.
+pub const TAB_WIDTH_SETTING: &str = "editor.tabSize";
+
 /// What the status bar shows for an encoding it does not know.
 pub const UNKNOWN: &str = "알 수 없음";
 

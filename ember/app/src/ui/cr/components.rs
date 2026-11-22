@@ -1773,18 +1773,17 @@ pub fn EmberCardSized(
         .background(paint(fill))
         .border(1.0, paint(border))
         .corner_radius(CORNER_LG);
-    // A Box rather than `Card`, whose design-system shape ignores `corner_radius`.
-    // TODO(compose-rust#826): the mockup's 16/20 padding is asymmetric and `Modifier::padding`
-    // is uniform, so 16 is used on all sides unless the caller passes one. The side spacers go
-    // when the toolkit takes a padding per side.
-    // The 4 dp spacers raise the uniform 16 to the mockup's 20 on the sides (`--pad-card`).
-    let side = if padding.is_some() { 0.0 } else { PAD_CARD_H - PAD_CARD_V };
-    { use ::compose_rust::ui::Box; Box!(modifier = m.padding(padding.unwrap_or(PAD_CARD_V)), {
+    // A Box rather than `Card`, whose design-system shape ignores `corner_radius`. The mockup's
+    // `--pad-card` is 16 at the top and bottom and 20 at the sides (`Modifier::padding_xy`,
+    // compose-rust#826); a caller's own padding is the same on every side.
+    let m = match padding {
+        Some(pad) => m.padding(pad),
+        None => m.padding_xy(PAD_CARD_H, PAD_CARD_V),
+    };
+    { use ::compose_rust::ui::Box; Box!(modifier = m, {
         // The row fills the card, so the card does not shrink to its content (FR-L18).
         { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width_if(fill_max_width || weight.is_some()), {
-            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(side)) };
             { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), content = content) };
-            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(side)) };
         }) };
     }) };
 }
@@ -1793,6 +1792,10 @@ pub fn EmberCardSized(
 pub fn InsetPanel(fill_max_width: bool, content: impl FnOnce()) {
     InsetPanelSized(fill_max_width, false, content);
 }
+
+/// The side padding of an [`InsetPanel`] (`.inset` padding 12 16): 4 more than its 12 at the
+/// top and bottom.
+pub const INSET_PAD_H: f32 = PAD_ROW_V + SP[0];
 
 /// [`InsetPanel`] that can also fill the height its parent gives it, with its content centred
 /// in that height (`.ag-acc{align-items:center}`): a tile in an `equal_height` row is as tall as
@@ -1803,24 +1806,21 @@ pub fn InsetPanelSized(fill_max_width: bool, fill_max_height: bool, content: imp
     if fill_max_height {
         m = m.fill_max_height();
     }
-    // TODO(compose-rust#826): the mockup's 12/16 padding is asymmetric; 12 on all sides and the
-    // 4 dp spacers below until the toolkit takes one per side.
+    // The mockup's `.inset` padding: 12 at the top and bottom, 16 at the sides
+    // (`Modifier::padding_xy`, compose-rust#826).
     let alignment = if fill_max_height { Some(Alignment::CenterStart) } else { None };
     { use ::compose_rust::ui::Box; Box!(
-        modifier = m.background(paint(theme.palette.surface_2)).corner_radius(CORNER_MD).padding(PAD_ROW_V),
+        modifier = m.background(paint(theme.palette.surface_2)).corner_radius(CORNER_MD).padding_xy(INSET_PAD_H, PAD_ROW_V),
         alignment = alignment,
         content = || {
-            // 4 dp more on each side makes the mockup's 12 16 (`.inset`).
             // The Row and the Column take the panel's width (a Column with no weight shrinks to
             // its widest word, which broke the routine prompt into one word per line, #492).
             { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width_if(fill_max_width), {
-                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[0])) };
                 if fill_max_width {
                     { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), content = content) };
                 } else {
                     { use ::compose_rust::ui::Column; Column!(content = content) };
                 }
-                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[0])) };
             }) };
         },
     ) };
@@ -3722,6 +3722,26 @@ mod tests {
         for screen in [include_str!("monitor.rs"), include_str!("routines.rs")] {
             assert!(!screen.contains(concat!("TODO(compose-rust#", "443)")));
         }
+    }
+
+    #[test]
+    fn fr_l18_cards_and_inset_panels_pad_each_side_on_the_node() {
+        // compose-rust#826: `padding_xy` puts the mockup's 16/20 (`--pad-card`) and 12/16
+        // (`.inset`) on the node itself; no 4 dp spacers stand in for the wider sides.
+        let card = emitted_nodes(|| EmberCard(false, true, None, None, None, || Label("a", Fs::Sm, Weight::Regular, None, None)));
+        let frame = card.iter().find(|n| n.widget == "Box" && n.mods.iter().any(|m| m.starts_with("Border"))).expect("the card");
+        assert!(frame.mods.iter().any(|m| m == "PaddingEach { start: 20.0, top: 16.0, end: 20.0, bottom: 16.0 }"), "{:?}", frame.mods);
+        assert!(!card.iter().any(|n| n.widget == "Spacer"), "no side spacers in a card");
+        let own = emitted_nodes(|| EmberCard(false, true, None, Some(0.0), None, || Label("a", Fs::Sm, Weight::Regular, None, None)));
+        let frame = own.iter().find(|n| n.widget == "Box" && n.mods.iter().any(|m| m.starts_with("Border"))).expect("the card");
+        assert!(frame.mods.iter().any(|m| m == "Padding(0.0)"), "a caller's padding is uniform: {:?}", frame.mods);
+        assert!(!own.iter().any(|n| n.widget == "Spacer"));
+        let inset = emitted_nodes(|| InsetPanel(true, || Label("a", Fs::Sm, Weight::Regular, None, None)));
+        let panel = inset.iter().find(|n| n.widget == "Box" && n.mods.iter().any(|m| m.starts_with("Background"))).expect("the panel");
+        assert!(panel.mods.iter().any(|m| m == "PaddingEach { start: 16.0, top: 12.0, end: 16.0, bottom: 12.0 }"), "{:?}", panel.mods);
+        assert!(!inset.iter().any(|n| n.widget == "Spacer"), "no side spacers in an inset panel");
+        let production = include_str!("components.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(!production.contains(concat!("TODO(compose-rust#", "826")));
     }
 
     #[test]

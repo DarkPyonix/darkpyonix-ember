@@ -924,9 +924,9 @@ dependencies = [
 
 [[package]]
 name = "letify-link"
-version = "3.0.5"
+version = "3.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ce957f16ef0f2b4e13a9a68aa94924eeaefd4a05d6b0f6f841dc83c87d87a21"
+checksum = "9ce719071423b3ff2eec1f7038e1f67a305b0fa673456f41074e56e821160e40"
 dependencies = [
  "ed25519-dalek 2.2.0",
  "getrandom 0.2.17",

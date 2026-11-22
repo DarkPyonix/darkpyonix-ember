@@ -590,6 +590,7 @@ package_json = {
     "engines": {"vscode": "^1.80.0"},
     "main": "./extension.js",
     "activationEvents": [
+        "*",
         "onCommand:emberStorageProbe.write",
         "onCommand:emberStorageProbe.report"
     ],
@@ -605,15 +606,13 @@ extension_js = r'''
 const vscode = require('vscode');
 
 exports.activate = function (context) {
-  const ch = vscode.window.createOutputChannel('ember-storage-probe');
-  context.subscriptions.push(ch);
   context.subscriptions.push(vscode.commands.registerCommand('emberStorageProbe.write', async (gVal, wVal) => {
     await context.globalState.update('gKey', gVal);
     await context.workspaceState.update('wKey', wVal);
-    ch.appendLine('WROTE:' + JSON.stringify({ g: context.globalState.get('gKey', null), w: context.workspaceState.get('wKey', null) }));
+    vscode.window.showInformationMessage('WROTE:' + JSON.stringify({ g: context.globalState.get('gKey', null), w: context.workspaceState.get('wKey', null) }));
   }));
   context.subscriptions.push(vscode.commands.registerCommand('emberStorageProbe.report', async () => {
-    ch.appendLine('REPORT:' + JSON.stringify({ g: context.globalState.get('gKey', null), w: context.workspaceState.get('wKey', null) }));
+    vscode.window.showInformationMessage('REPORT:' + JSON.stringify({ g: context.globalState.get('gKey', null), w: context.workspaceState.get('wKey', null) }));
   }));
 };
 
@@ -702,6 +701,43 @@ async fn live_session_main_thread_storage_persists_across_restarts() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
+    // Helper: invoke a probe command, retrying briefly while the extension finishes registering
+    // its runtime command handler after activation.
+    async fn run_probe_cmd(
+        session: &EditorSession,
+        rx: &mut mpsc::UnboundedReceiver<SessionUpdate>,
+        cmd: &str,
+        args: Vec<serde_json::Value>,
+        prefix: &str,
+    ) -> String {
+        tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                session.execute_command(cmd, args.clone()).unwrap();
+                let until = tokio::time::Instant::now() + Duration::from_secs(2);
+                while let Ok(Some(u)) = tokio::time::timeout_at(until, rx.recv()).await {
+                    match u {
+                        SessionUpdate::ExtensionMessage(m) if m.message.starts_with(prefix) => {
+                            return m.message;
+                        }
+                        SessionUpdate::CommandFailed { id, error } => {
+                            panic!("command {id} failed: {error}");
+                        }
+                        SessionUpdate::ConnectionLost { reason } => {
+                            panic!("connection lost while running {cmd}: {reason}");
+                        }
+                        SessionUpdate::RunCommand { command } if command.id == cmd => {
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {prefix} from {cmd}"))
+    }
+
     // Session 1 (ws-a): write both globalState and workspaceState.
     let (s1, mut rx1) = tokio::time::timeout(
         Duration::from_secs(120),
@@ -710,15 +746,15 @@ async fn live_session_main_thread_storage_persists_across_restarts() {
     .await
     .expect("connect s1 timed out")
     .unwrap_or_else(|e| panic!("connect s1: {e}"));
-    s1.execute_command("emberStorageProbe.write", vec![serde_json::json!("g-persisted"), serde_json::json!("w-alpha")])
-        .unwrap();
-    wait_for("WROTE output in s1", 60, &mut rx1, |u| match u {
-        SessionUpdate::OutputChannels { channels, .. } => channels
-            .iter()
-            .find_map(|c| c.text.lines().find(|l| l.starts_with("WROTE:")).map(str::to_owned)),
-        _ => None,
-    })
+    let wrote = run_probe_cmd(
+        &s1,
+        &mut rx1,
+        "emberStorageProbe.write",
+        vec![serde_json::json!("g-persisted"), serde_json::json!("w-alpha")],
+        "WROTE:",
+    )
     .await;
+    println!("[live-session] s1 {wrote}");
     s1.shutdown().await;
 
     // Session 2 (ws-a): both globalState and workspaceState must be restored.
@@ -729,14 +765,8 @@ async fn live_session_main_thread_storage_persists_across_restarts() {
     .await
     .expect("connect s2 timed out")
     .unwrap_or_else(|e| panic!("connect s2: {e}"));
-    s2.execute_command("emberStorageProbe.report", vec![]).unwrap();
-    let report_a = wait_for("REPORT output in s2", 60, &mut rx2, |u| match u {
-        SessionUpdate::OutputChannels { channels, .. } => channels
-            .iter()
-            .find_map(|c| c.text.lines().find(|l| l.starts_with("REPORT:")).map(str::to_owned)),
-        _ => None,
-    })
-    .await;
+    let report_a = run_probe_cmd(&s2, &mut rx2, "emberStorageProbe.report", vec![], "REPORT:").await;
+    println!("[live-session] s2 {report_a}");
     let payload_a: serde_json::Value = serde_json::from_str(report_a.trim_start_matches("REPORT:")).unwrap();
     assert_eq!(payload_a["g"], "g-persisted");
     assert_eq!(payload_a["w"], "w-alpha");
@@ -750,14 +780,8 @@ async fn live_session_main_thread_storage_persists_across_restarts() {
     .await
     .expect("connect s3 timed out")
     .unwrap_or_else(|e| panic!("connect s3: {e}"));
-    s3.execute_command("emberStorageProbe.report", vec![]).unwrap();
-    let report_b = wait_for("REPORT output in s3", 60, &mut rx3, |u| match u {
-        SessionUpdate::OutputChannels { channels, .. } => channels
-            .iter()
-            .find_map(|c| c.text.lines().find(|l| l.starts_with("REPORT:")).map(str::to_owned)),
-        _ => None,
-    })
-    .await;
+    let report_b = run_probe_cmd(&s3, &mut rx3, "emberStorageProbe.report", vec![], "REPORT:").await;
+    println!("[live-session] s3 {report_b}");
     let payload_b: serde_json::Value = serde_json::from_str(report_b.trim_start_matches("REPORT:")).unwrap();
     assert_eq!(payload_b["g"], "g-persisted");
     assert!(payload_b["w"].is_null(), "workspaceState leaked across workspaces: {payload_b}");

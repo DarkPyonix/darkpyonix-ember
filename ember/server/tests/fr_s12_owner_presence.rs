@@ -317,7 +317,7 @@ fn logged(logs: &LogBuf) -> String {
 /// Enforce is now the default (#784): with nothing set, an owner route called with the server
 /// token alone gets 403 `owner_required`; explicit `warn` logs and serves the call.
 #[tokio::test]
-async fn fr_s12_the_default_is_warn_and_the_call_is_logged() {
+async fn fr_s12_the_default_is_enforce_and_warn_logs_the_call() {
     assert_eq!(Presence::from_value(None), Presence::Enforce);
     assert_eq!(Presence::from_value(Some("enforce")), Presence::Enforce);
     assert_eq!(Presence::from_value(Some("warn")), Presence::Warn);

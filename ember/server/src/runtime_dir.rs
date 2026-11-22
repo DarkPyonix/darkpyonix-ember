@@ -19,6 +19,17 @@ pub const MOVED: &[&str] = &["agy", "ose-data"];
 /// manager, which `ember-node` runs too (#896).
 pub use ember_node::ose::runtime_dir;
 
+/// The server's data folder over the variables `var` returns (an empty value counts as unset):
+/// `EMBER_DATA_DIR`, else `<home>/.ember` where `<home>` is `HOME`, or `USERPROFILE` when `HOME`
+/// is unset or empty (a Windows program started from the Start menu has no `HOME`). It is the
+/// folder the app looks in for `server-token` and the owner door (FR-S11, FR-S12, #1042). With
+/// neither set it is the relative `.ember`, as before.
+pub fn data_dir_from_vars(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> std::path::PathBuf {
+    let path = |name: &str| var(name).filter(|v| !v.is_empty()).map(std::path::PathBuf::from);
+    path("EMBER_DATA_DIR")
+        .unwrap_or_else(|| path("HOME").or_else(|| path("USERPROFILE")).unwrap_or_default().join(".ember"))
+}
+
 /// What [`migrate`] did with one entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Moved {
@@ -89,6 +100,19 @@ mod tests {
     fn fr_a11_runtime_dir_is_the_data_dir_sibling() {
         assert_eq!(runtime_dir(Path::new("/h/.ember")), PathBuf::from("/h/.ember-runtime"));
         assert_eq!(runtime_dir(Path::new("/srv/e")), PathBuf::from("/srv/e-runtime"));
+    }
+
+    #[test]
+    fn fr_s12_data_dir_uses_userprofile_without_home() {
+        use std::ffi::OsString;
+        let vars = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| pairs.iter().find(|(k, _)| *k == name).map(|(_, v)| OsString::from(*v))
+        };
+        assert_eq!(data_dir_from_vars(vars(&[("EMBER_DATA_DIR", "/d"), ("HOME", "/h")])), PathBuf::from("/d"));
+        assert_eq!(data_dir_from_vars(vars(&[("HOME", "/h"), ("USERPROFILE", "/u")])), PathBuf::from("/h/.ember"));
+        assert_eq!(data_dir_from_vars(vars(&[("HOME", ""), ("USERPROFILE", "/u")])), PathBuf::from("/u/.ember"));
+        assert_eq!(data_dir_from_vars(vars(&[("EMBER_DATA_DIR", ""), ("USERPROFILE", "/u")])), PathBuf::from("/u/.ember"));
+        assert_eq!(data_dir_from_vars(vars(&[])), PathBuf::from(".ember"));
     }
 
     #[test]

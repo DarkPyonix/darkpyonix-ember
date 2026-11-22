@@ -283,6 +283,10 @@ reimplement the Extension Host (E4): without Node there is no Node extension hos
 extensions that ship a web build (VS Code's browser web-worker extension host, as on `vscode.dev`)
 run there. Extensions that need Node require a VS Code server on a computer.
 
+*[Note, 2026-11-22]* #80 is 1.0 work by the owner's decision of 2026-11-22 (relayed by the leader):
+the mobile client without Node, plus the phone webview part of #10. iOS waits on the owner's answer
+to Q-M9. The online path is D53.
+
 ### D11: The 09-22 VS Code decisions still hold, inside the IDE window
 
 These were decided for the IDE window and are unchanged in substance. Their full reasoning is in the
@@ -856,6 +860,8 @@ silhouette rounder. It is not scheduled; it starts only when the owner asks agai
 
 **Main server defaults** *[provisional, #229]*. The relay and the address observer start with the server on port 7443 (TCP and UDP), overridable by environment; nodes read the relay URL from the main server's hub device record first, with `EMBER_RELAY_URL` as the explicit override; `derive_relay_url` and the `relay.<host>` derivation are removed from `ember-hub`.
 
+**Punching with letify-link's public driver** *[provisional, #10, leader and the letify infra side, 2026-11-22 and 2026-11-23]*. Ember pins `letify-link = "=3.0.6"` from crates.io and runs every punch with its public driver, `letify_link::driver` (TCP simultaneous open first, UDP beside it, the offer and answer over Ember's existing rendezvous, `SignalAdapter`). Ember's module `ember/transport/src/letify/punching.rs` only routes the driver's rendezvous messages, chooses the options and puts the punched path into the peer's session: on the dialing side the punch (`driver::punch` as initiator, then `Punched::vet`) is a candidate of the same path manager as TCP and the relay, and on the answering side every punched path goes to the acceptor (`Punched::accept_with`), so admission and revocation (`FR-N3`) are unchanged and the relay is used only while no direct path is live. `driver::punch_session` is not used: it opens a session of its own, which would be a second session to a peer that already has one over the relay, and its responder drops a path that joins a live session. The relay fallback stays in Ember: a `PunchError` fails only the punch candidate, and the relay candidate (`RelayDialer`) keeps or redials the relay. This fulfils the infra side's earlier advice not to reimplement the driver in Ember: the stand-in driver written for 3.0.5 (`punch_driver.rs`) is gone. Rejected: (1) keeping the git rev pin (c66d017a) or letify's develop head: a published release is what letify supports; (2) copying letify's private `op_punch`, and later keeping Ember's own stand-in once a public driver shipped: a second copy of the punch drifts; (3) `punch_session` as the whole dial (punch first, relay after a failure): every relayed peer would wait the punch window (about 6 s) for its first byte, against `NFR-N1`'s 1.5 s. The driver classifies a NAT only with three STUN servers; an Ember endpoint has one QAD observer, so it passes its observed public IP (`PunchOptions::public_ip`) and no observers, and each socket is offered on that IP with its bound port. The letify signalling Worker at `letify.darkpyonix.dev` may be used as an auxiliary rendezvous (owner, 2026-11-23: "써도 된다고"); it is not wired yet (#10). **On by default** *[provisional, leader, 2026-11-22]*: with no `EMBER_LETIFY_OBSERVER`, the public IP is observed through the main server's relay host on UDP 7443 (the default observer port, pinned to the relay's id), so punching needs no setting; `EMBER_LETIFY_UDP_PUNCH=off` turns it off, a dial to the main server itself never punches, and after a failed punch the next offer to that peer waits 30 s, doubling up to 5 minutes. An endpoint with no relay of another endpoint and no observer punches nothing, which keeps loopback setups without a main server as they were.
+
 ### D37: The server API is authenticated by device key and local token
 
 **Decision.** [user, 2026-11-06, relayed by the supervisor for issue #338: the model is "기기 키 + 로컬 토큰" (device key plus local token)] Three parts, applied to every HTTP and WebSocket route of the server:
@@ -1132,3 +1138,13 @@ What trust does not protect. Under D37 agents and terminals run with the full au
 **Rejected.** Auto-creating a new leader session (Q5 B/C); refusing to delete non-empty projects (`409 project_not_empty`) or moving deleted projects' sessions to `기본 프로젝트` (Q2); force-stopping running sessions on archive or allowing direct deletion of unarchived projects (Q3/Q4); showing archived projects in search results (Q6).
 
 **Status.** Spec updated (#327, #384); implementation and tests landing in the same PR (`FR-L26`, `FR-S4`).
+
+### D53: The phone reaches the IDE through the per-node OSE relay
+
+**Decision.** [provisional, `docs/design/POST-1-0-MOBILE-NO-NODE.md` section 7, Q-M1, Q-M4..Q-M8, Q-M10, Q-M11 decided by the leader 2026-11-20; 1.0 work by the owner's decision of 2026-11-22, #80] The phone's two online IDE modes ("Open IDE → VS Code" and "Open IDE → Ember 에디터") use D42's per-node OSE relay and D37's device key. A small Rust gateway in the app process joins loopback connections to relay streams, so the phone reaches the computer's real OSE and Node runs only on the computer. This fills the D10 mobile-without-Node decision [user] for the online case; it does not change it.
+
+**Rejected** *[provisional]*. A `serve-web` protocol server on the phone (an internal protocol that changes with each commit, and an extension-host connection that E4 forbids us to answer). Reaching `ide_url` from a phone (that URL has no transport relay, and the proxy's own login would overlap the device key of D37). Node file operations as the editor's file path (a second path unlike the desktop editor's, with no language features, short of D38). Language servers run by the node for the editor core (the editor talks to OSE's extension host directly, D9a and D42, so language features come from extensions).
+
+**Why.** The relay, the stream type and the device key exist and are tested on the desktop. What is new is a small gateway crate and one Android Activity.
+
+**Status.** Not built (#80, 1.0 work). SPEC `FR-W5a`–`FR-W5i`, `NFR-W5a`.

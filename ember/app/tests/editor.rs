@@ -2056,7 +2056,7 @@ mod design_placement {
 // FR-L31.25 (#766): editor agent tool window and 에이전트에게 묻기 (Action::Ask)
 #[test]
 fn fr_l31_25_action_ask_attaches_file_and_selection_context() {
-    use ember_app::ui::editor_agent::{format_context, format_file_context, format_selection_context, AgentState};
+    use ember_app::ui::editor_agent::{format_context, format_file_context, format_selection_context, sample_sessions_for, AgentState};
 
     let file_ctx = format_file_context("/repo/src/lib.rs", "/repo");
     assert_eq!(file_ctx, "#file:src/lib.rs");
@@ -2070,7 +2070,7 @@ fn fr_l31_25_action_ask_attaches_file_and_selection_context() {
     let auto_ctx_sel = format_context("/repo/src/main.rs", "/repo", Some((1, 5)));
     assert_eq!(auto_ctx_sel, "#selection:src/main.rs:1-5");
 
-    let mut state = AgentState::new("proj-1", "/repo");
+    let mut state = AgentState::connected("proj-1", "/repo", sample_sessions_for("proj-1"));
     assert!(!state.sessions.is_empty());
     assert!(state.selected_session().is_some());
 

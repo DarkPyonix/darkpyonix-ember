@@ -141,22 +141,73 @@ impl ImeInput {
     }
 }
 
-/// The Korean notice for a paste chord while the editor window does not read the clipboard.
-/// The toolkit reads it (`compose_rust::clipboard::read_text`, compose-rust#546); what is
-/// missing is Ember's multi-line paste confirmation, see the `TODO(#673)` at the chord in
-/// `ui/editor_workbench.rs`.
-pub const PASTE_UNAVAILABLE: &str = "이 창에서는 아직 붙여넣기를 할 수 없습니다. 여러 줄 붙여넣기 확인이 준비되지 않았습니다.";
+impl MultiLinePasteWarning {
+    /// The setting's value. Code-OSS still takes the old boolean: `true` is `auto`, `false` is
+    /// `never` (`terminalConfiguration.ts` migration).
+    pub fn from_setting(value: Option<&serde_json::Value>) -> Self {
+        match value {
+            Some(serde_json::Value::String(v)) if v == "always" => Self::Always,
+            Some(serde_json::Value::String(v)) if v == "never" => Self::Never,
+            Some(serde_json::Value::Bool(false)) => Self::Never,
+            _ => Self::Auto,
+        }
+    }
+}
+
+/// What a paste does with the clipboard's text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PastePlan {
+    /// Send these bytes now.
+    Send(Vec<u8>),
+    /// Ask first ([`multiline_warning_text`]); the text waits for the answer.
+    Ask(String),
+}
+
+/// The plan for pasting `text` (Code-OSS `terminalInstance.paste`): ask when the warning applies,
+/// else send it, bracketed while the program asked for bracketed paste.
+pub fn plan_paste(text: &str, setting: MultiLinePasteWarning, bracketed: bool) -> PastePlan {
+    if needs_multiline_warning(text, setting, bracketed) {
+        PastePlan::Ask(text.to_owned())
+    } else {
+        PastePlan::Send(paste_bytes(text, bracketed))
+    }
+}
+
+/// The notice when the clipboard holds more text than one read may carry: nothing is pasted,
+/// rather than a part of it.
+pub const PASTE_TOO_LONG: &str = "클립보드의 텍스트가 너무 길어 붙여넣지 않았습니다.";
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn fr_l31_21_the_paste_notice_gives_the_true_reason() {
-        // The toolkit reads the clipboard (compose-rust#546); what is not built is the
-        // multi-line paste confirmation, so the notice says that and not that the read fails.
-        assert!(PASTE_UNAVAILABLE.contains("여러 줄 붙여넣기 확인"), "{PASTE_UNAVAILABLE}");
-        assert!(!PASTE_UNAVAILABLE.contains("클립보드를 읽을 수 없"), "{PASTE_UNAVAILABLE}");
+    fn fr_l31_21_paste_sends_or_asks_as_code_oss_does() {
+        use serde_json::json;
+        let auto = MultiLinePasteWarning::from_setting(None);
+        assert_eq!(auto, MultiLinePasteWarning::Auto);
+        assert_eq!(MultiLinePasteWarning::from_setting(Some(&json!("always"))), MultiLinePasteWarning::Always);
+        assert_eq!(MultiLinePasteWarning::from_setting(Some(&json!("never"))), MultiLinePasteWarning::Never);
+        assert_eq!(MultiLinePasteWarning::from_setting(Some(&json!(false))), MultiLinePasteWarning::Never);
+        assert_eq!(MultiLinePasteWarning::from_setting(Some(&json!(true))), MultiLinePasteWarning::Auto);
+        assert_eq!(plan_paste("ls -la", auto, false), PastePlan::Send(b"ls -la".to_vec()));
+        assert_eq!(plan_paste("make\n", auto, false), PastePlan::Send(b"make\r".to_vec()));
+        assert_eq!(plan_paste("a\nb", auto, false), PastePlan::Ask("a\nb".into()));
+        assert_eq!(plan_paste("a\nb", auto, true), PastePlan::Send(b"\x1b[200~a\rb\x1b[201~".to_vec()));
+        assert_eq!(plan_paste("a\nb", MultiLinePasteWarning::Always, true), PastePlan::Ask("a\nb".into()));
+        assert_eq!(plan_paste("a\nb", MultiLinePasteWarning::Never, false), PastePlan::Send(b"a\rb".to_vec()));
+    }
+
+    #[test]
+    fn fr_l31_21_the_terminal_paste_chord_reads_the_clipboard() {
+        // The chord in the panel reads the clipboard and follows the plan; it no longer only
+        // posts a notice.
+        let page = include_str!("ui/editor_workbench.rs");
+        let chord = &page[page.find("is_paste_chord(&name").unwrap()..];
+        let chord = &chord[..chord.find("return;").unwrap()];
+        assert!(chord.contains("compose_rust::clipboard::read_text"), "{chord}");
+        assert!(page.contains("plan_paste("));
+        assert!(page.contains("WARN_SINGLE_LINE") && page.contains("WARN_CANCEL"), "no multi-line confirmation");
     }
 
     #[test]

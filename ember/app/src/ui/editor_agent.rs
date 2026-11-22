@@ -84,11 +84,32 @@ pub struct AgentState {
     pub attached_context: Option<String>,
     pub draft_prompt: String,
     pub status_note: Option<String>,
+    /// The sessions are the server's (FR-L31.25 (2)): a prompt goes to the server. `false` for the
+    /// sample sessions of a detached window, which nothing is sent to.
+    pub live: bool,
 }
 
+/// The note when a detached window is asked to send.
+pub const NOT_CONNECTED_NOTE: &str = "서버에 연결되지 않아 보내지 않았습니다.";
+/// The notes of a prompt on its way, delivered, and refused.
+pub const SENDING_NOTE: &str = "보내는 중입니다";
+pub const SENT_NOTE: &str = "전송했습니다";
+pub const SEND_FAILED_NOTE: &str = "보내지 못했습니다. 다시 시도하세요.";
+/// The list's line when the connected project has no session.
+pub const NO_SESSIONS_NOTE: &str = "이 프로젝트에 에이전트 세션이 없습니다.";
+
 impl AgentState {
+    /// A detached window: the sample sessions.
     pub fn new(project: &str, folder: &str) -> Self {
-        let sessions = sample_sessions_for(project);
+        Self::with_sessions(project, folder, sample_sessions_for(project), false)
+    }
+
+    /// A connected window with the server's sessions of the project, none included.
+    pub fn connected(project: &str, folder: &str, sessions: Vec<AgentSession>) -> Self {
+        Self::with_sessions(project, folder, sessions, true)
+    }
+
+    fn with_sessions(project: &str, folder: &str, sessions: Vec<AgentSession>, live: bool) -> Self {
         let selected_session_id = sessions.first().map(|s| s.id.clone());
         Self {
             project: project.to_string(),
@@ -98,7 +119,19 @@ impl AgentState {
             attached_context: None,
             draft_prompt: String::new(),
             status_note: None,
+            live,
         }
+    }
+
+    /// The outcome of sending to the server: the note says whether it arrived.
+    pub fn finish_send(&mut self, result: Result<(), String>) {
+        self.status_note = Some(match result {
+            Ok(()) => SENT_NOTE.to_string(),
+            Err(e) => {
+                tracing::warn!("editor agent prompt was not sent: {e}");
+                SEND_FAILED_NOTE.to_string()
+            }
+        });
     }
 
     pub fn selected_session(&self) -> Option<&AgentSession> {
@@ -140,6 +173,11 @@ impl AgentState {
         if full.is_empty() {
             return None;
         }
+        if !self.live {
+            // The samples stand for a server that is not there: nothing is recorded as sent.
+            self.status_note = Some(NOT_CONNECTED_NOTE.to_string());
+            return None;
+        }
         let session_id = self
             .selected_session_id
             .clone()
@@ -159,7 +197,7 @@ impl AgentState {
 
         self.draft_prompt.clear();
         self.attached_context = None;
-        self.status_note = Some("전송했습니다".to_string());
+        self.status_note = Some(SENDING_NOTE.to_string());
         Some(full)
     }
 }
@@ -236,9 +274,11 @@ pub fn sample_sessions_for(project: &str) -> Vec<AgentSession> {
     ]
 }
 
-/// Loads sessions from the live server client if connected, or uses sample sessions.
-pub fn load_project_sessions(project: &str) -> Vec<AgentSession> {
-    if let Some(services) = crate::services::try_services() {
+/// The project's sessions from the server client, or `None` in a detached window (no services, or
+/// the app serving its own demo data), which shows the samples instead.
+pub fn load_project_sessions(project: &str) -> Option<Vec<AgentSession>> {
+    let services = crate::services::try_services().filter(|s| s.demo.is_none())?;
+    {
         let loaded: Vec<AgentSession> = services.client.read(|st| {
             let empty_labels = std::collections::HashMap::new();
             let cx = crate::model::RowContext {
@@ -267,11 +307,17 @@ pub fn load_project_sessions(project: &str) -> Vec<AgentSession> {
                 })
                 .collect()
         });
-        if !loaded.is_empty() {
-            return loaded;
-        }
+        Some(loaded)
     }
-    sample_sessions_for(project)
+}
+
+/// The state for `project`: the server's sessions when connected (an empty list stays empty),
+/// else the samples.
+pub fn state_for(project: &str, folder: &str, loaded: Option<Vec<AgentSession>>) -> AgentState {
+    match loaded {
+        Some(sessions) => AgentState::connected(project, folder, sessions),
+        None => AgentState::new(project, folder),
+    }
 }
 
 /// Handle to the Agent tool state for the editor workbench.
@@ -283,11 +329,7 @@ pub struct AgentTool {
 
 impl AgentTool {
     pub fn new(project: &str, folder: &str, revision: SyncSignal<u64>) -> Self {
-        let mut st = AgentState::new(project, folder);
-        st.sessions = load_project_sessions(project);
-        if let Some(first) = st.sessions.first() {
-            st.selected_session_id = Some(first.id.clone());
-        }
+        let st = state_for(project, folder, load_project_sessions(project));
         Self {
             state: Arc::new(Mutex::new(st)),
             revision,
@@ -335,9 +377,12 @@ impl AgentTool {
         if let Some(services) = crate::services::try_services() {
             let sid = session_id.clone();
             let msg = full_prompt.clone();
+            let tool = self.clone();
             services.spawn(async move {
                 let s = crate::services::services();
-                let _ = s.client.send_message(&sid, &msg).await;
+                let result = s.client.send_message(&sid, &msg).await.map_err(|e| e.to_string());
+                tool.state.lock().unwrap_or_else(|e| e.into_inner()).finish_send(result);
+                tool.bump();
             });
             services.drive_outbox(&session_id);
         }
@@ -362,14 +407,17 @@ impl AgentTool {
     }
 
     pub fn refresh(&self) {
-        let project = self.state.lock().unwrap().project.clone();
-        let sessions = load_project_sessions(&project);
+        let (project, folder) = {
+            let st = self.state.lock().unwrap();
+            (st.project.clone(), st.folder.clone())
+        };
+        let fresh = state_for(&project, &folder, load_project_sessions(&project));
         {
             let mut st = self.state.lock().unwrap();
-            st.sessions = sessions;
-            if st.selected_session_id.is_none() {
-                st.selected_session_id = st.sessions.first().map(|s| s.id.clone());
-            }
+            let keep = st.selected_session_id.clone().filter(|id| fresh.sessions.iter().any(|s| &s.id == id));
+            st.sessions = fresh.sessions;
+            st.live = fresh.live;
+            st.selected_session_id = keep.or_else(|| st.sessions.first().map(|s| s.id.clone()));
             st.status_note = Some("세션 목록을 새로 고쳤습니다".to_string());
         }
         self.bump();
@@ -502,6 +550,9 @@ pub mod view {
 
                 div { class: "ed-mlab", style: "padding:6px var(--sp3) 2px;", "팀원 세션" }
                 div { role: "list", style: "{LIST_BOX}", "aria-label": "팀원 세션 목록",
+                    if st.sessions.is_empty() {
+                        div { role: "status", style: "color:var(--muted); font-size:var(--fs-xs); padding:var(--sp2);", "{super::NO_SESSIONS_NOTE}" }
+                    }
                     for session in &st.sessions {
                         {session_item(session, Some(&session.id) == selected_id.as_ref(), s)}
                     }
@@ -630,8 +681,32 @@ mod tests {
     }
 
     #[test]
+    fn fr_l31_25_samples_only_when_detached_and_nothing_is_sent_from_them() {
+        let detached = state_for("p", "/ws", None);
+        assert!(!detached.live && !detached.sessions.is_empty());
+        let mut detached = detached;
+        assert_eq!(detached.send_prompt("hi"), None);
+        assert_eq!(detached.status_note.as_deref(), Some(NOT_CONNECTED_NOTE));
+        assert!(detached.sessions.iter().all(|s| s.turns.iter().all(|t| !t.is_user)), "nothing recorded as sent");
+        // Connected with no session: the list stays empty, the samples do not come back.
+        let empty = state_for("p", "/ws", Some(Vec::new()));
+        assert!(empty.live && empty.sessions.is_empty() && empty.selected_session().is_none());
+    }
+
+    #[test]
+    fn fr_l31_25_the_note_says_whether_the_prompt_arrived() {
+        let mut st = AgentState::connected("p", "/ws", sample_sessions_for("p"));
+        st.send_prompt("hi").unwrap();
+        assert_eq!(st.status_note.as_deref(), Some(SENDING_NOTE));
+        st.finish_send(Err("404".into()));
+        assert_eq!(st.status_note.as_deref(), Some(SEND_FAILED_NOTE));
+        st.finish_send(Ok(()));
+        assert_eq!(st.status_note.as_deref(), Some(SENT_NOTE));
+    }
+
+    #[test]
     fn agent_state_sends_prompt_and_records_turn() {
-        let mut st = AgentState::new("test-proj", "/ws");
+        let mut st = AgentState::connected("test-proj", "/ws", sample_sessions_for("test-proj"));
         let first_id = st.sessions.first().unwrap().id.clone();
         st.attach_context("#selection:src/lib.rs:1-10".to_string());
 
@@ -642,7 +717,7 @@ mod tests {
         );
         assert_eq!(st.attached_context, None);
         assert_eq!(st.draft_prompt, "");
-        assert_eq!(st.status_note.as_deref(), Some("전송했습니다"));
+        assert_eq!(st.status_note.as_deref(), Some(SENDING_NOTE));
 
         let session = st.sessions.iter().find(|s| s.id == first_id).unwrap();
         assert!(session.turns.iter().any(|t| t.text.contains("리팩터링 제안해줘")));

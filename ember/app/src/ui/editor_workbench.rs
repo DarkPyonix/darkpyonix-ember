@@ -3032,6 +3032,8 @@ pub mod page {
         static TERM_FIT: std::cell::RefCell<crate::ui::term_fit::PanelFit> = std::cell::RefCell::new(Default::default());
         /// IME composition state of the terminal panel (FR-L31.21): only committed text is sent.
         static TERMINAL_IME: std::cell::RefCell<crate::terminal_input::ImeInput> = std::cell::RefCell::new(crate::terminal_input::ImeInput::default());
+        /// A multi-line paste waiting for the user's answer (FR-L31.21).
+        static PASTE_ASK: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
     }
 
     /// Fits the PTY to the panel on every render (FR-L31.20, #334): the panel's size from the last
@@ -3057,6 +3059,20 @@ pub mod page {
                 *revision.write() += 1;
             });
         }
+    }
+
+    /// The answer to the multi-line paste question (FR-L31.21): the waiting text, as chosen, to
+    /// the terminal, bracketed if the program asks for it now.
+    fn answer_paste(handle: &TerminalHandle, revision: dioxus_compose::prelude::SyncSignal<u64>, choice: crate::terminal_input::PasteChoice) {
+        let waiting = PASTE_ASK.with(|p| p.borrow_mut().take());
+        if let Some(text) = waiting.and_then(|t| crate::terminal_input::resolve_paste(&t, choice)) {
+            let state = handle.snapshot();
+            if sends_input(&state) {
+                handle.send_input(&crate::terminal_input::paste_bytes(&text, state.bracketed_paste));
+            }
+        }
+        let mut revision = revision;
+        *revision.write() += 1;
     }
 
     /// The active terminal tab's attachment (FR-P6, FR-L31.23). The panel lists the folder's
@@ -3213,6 +3229,9 @@ pub mod page {
         let offer_control = offers_take_control(&handle.snapshot());
         let offer_reconnect = handle.snapshot().needs_reconnect();
         let revision = s.revision;
+        let paste_s = s.clone();
+        let paste_question = PASTE_ASK.with(|p| p.borrow().as_deref().map(crate::terminal_input::multiline_warning_text));
+        let answer_handles = (handle.clone(), handle.clone(), handle.clone());
         rsx! {
             {strip}
             div { class: "ed-term", role: "log", "aria-label": "터미널 출력", tabindex: "0", style: "outline:none;",
@@ -3231,13 +3250,30 @@ pub mod page {
                     if crate::terminal_input::is_paste_chord(&name, m.contains(Modifiers::CONTROL), m.contains(Modifiers::ALT), m.contains(Modifiers::SHIFT), m.contains(Modifiers::META)) {
                         event.stop_propagation();
                         event.prevent_default();
-                        // TODO(#673): `compose_rust::clipboard::read_text` (compose-rust#546) is in the pin
-                        // and answers on the HTML path (dioxus-compose's own Cmd+V uses it), but a
-                        // multi-line paste must first ask (`needs_multiline_warning`, Code-OSS's
-                        // dialog) and the window has no confirmation for it yet. Then read the
-                        // clipboard and send `paste_bytes(text, state.bracketed_paste)`; until then the
-                        // chord only says why nothing is pasted.
-                        notice(crate::terminal_input::PASTE_UNAVAILABLE);
+                        // Code-OSS `terminalInstance.paste`: read the clipboard, then send it or ask
+                        // first (`terminal.integrated.enableMultiLinePasteWarning`).
+                        let setting = crate::terminal_input::MultiLinePasteWarning::from_setting(
+                            paste_s.host.state.lock().unwrap().settings.scopes
+                                .value("terminal.integrated.enableMultiLinePasteWarning", None).as_ref(),
+                        );
+                        let paste_handle = key_handle.clone();
+                        compose_rust::clipboard::read_text(move |result| match result {
+                            Ok(Some(text)) => {
+                                let state = paste_handle.snapshot();
+                                match crate::terminal_input::plan_paste(&text, setting, state.bracketed_paste) {
+                                    crate::terminal_input::PastePlan::Send(bytes) => {
+                                        if sends_input(&state) { paste_handle.send_input(&bytes); }
+                                    }
+                                    crate::terminal_input::PastePlan::Ask(text) => {
+                                        PASTE_ASK.with(|p| *p.borrow_mut() = Some(text));
+                                        let mut revision = revision;
+                                        *revision.write() += 1;
+                                    }
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(_) => notice(crate::terminal_input::PASTE_TOO_LONG),
+                        });
                         return;
                     }
                     let bytes = terminal_input(&name, m.contains(Modifiers::CONTROL), m.contains(Modifiers::ALT), m.contains(Modifiers::SHIFT), m.contains(Modifiers::META));
@@ -3258,6 +3294,21 @@ pub mod page {
                         ime_handle.send_input(&bytes);
                     }
                 },
+                if let Some(question) = paste_question {
+                    {
+                        let (paste_h, line_h, cancel_h) = answer_handles;
+                        use crate::terminal_input::{PasteChoice, WARN_CANCEL, WARN_PASTE, WARN_SINGLE_LINE};
+                        rsx! {
+                            div { id: "terminal-paste-question", role: "alertdialog", "aria-label": "{question}",
+                                style: "display:flex; align-items:center; gap:var(--sp2); padding:var(--sp1) var(--sp3); margin-bottom:var(--sp2); background:var(--surface-2); border:1px solid var(--line); border-radius:var(--r-sm);",
+                                div { style: "flex:1;", "{question}" }
+                                button { id: "terminal-paste-yes", class: "ed-pj", onclick: move |_| answer_paste(&paste_h, revision, PasteChoice::Paste), "{WARN_PASTE}" }
+                                button { id: "terminal-paste-line", class: "ed-pj", onclick: move |_| answer_paste(&line_h, revision, PasteChoice::SingleLine), "{WARN_SINGLE_LINE}" }
+                                button { id: "terminal-paste-cancel", class: "ed-pj", onclick: move |_| answer_paste(&cancel_h, revision, PasteChoice::Cancel), "{WARN_CANCEL}" }
+                            }
+                        }
+                    }
+                }
                 if let Some(banner) = view.banner {
                     div { style: "display:flex; align-items:center; gap:var(--sp2); padding:var(--sp1) var(--sp3); margin-bottom:var(--sp2); background:var(--c-orange-soft); color:var(--c-orange); border-radius:var(--r-sm);",
                         div { style: "flex:1;", "{banner}" }

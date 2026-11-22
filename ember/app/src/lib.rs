@@ -343,6 +343,58 @@ fn launch_builder() -> LaunchBuilder {
 
 #[cfg(test)]
 mod shutdown_tests {
+    /// Set in the child process of [`fr_l31_1_closing_the_editor_runs_shutdown_and_exits`]: the
+    /// data folder its services use.
+    const CHILD_DIR: &str = "EMBER_TEST_CLOSE_EDITOR_DIR";
+
+    /// The child half: services on their own data folder, a standalone editor window, a pref
+    /// changed in memory only, then 에디터 닫기. `close_editor` exits the process.
+    #[test]
+    #[ignore = "run by fr_l31_1_closing_the_editor_runs_shutdown_and_exits in a child process"]
+    fn fr_l31_1_child_closes_the_editor() {
+        let Ok(dir) = std::env::var(CHILD_DIR) else { return };
+        let data = std::path::PathBuf::from(dir);
+        let config = crate::config::AppConfig::from_values(Some("http://127.0.0.1:9".to_string()), Some(data), None);
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+        let client = rt.block_on(ember_client::Client::new(config.client_config())).unwrap();
+        let server = crate::server::ServerApi::new(&config.server_url).unwrap();
+        let initial_prefs = crate::prefs::Prefs::default();
+        let s = crate::services::install(crate::services::Services {
+            config,
+            rt,
+            client,
+            server,
+            demo: None,
+            outbox: std::sync::Arc::new(std::sync::Mutex::new(crate::model::Outbox::default())),
+            ui: crate::ui::coexist::SharedUi::new(initial_prefs.clone()),
+            initial_prefs,
+        });
+        s.ui.standalone_editor.set(true);
+        // In memory only (`update_prefs` would save at once): only the exit path writes it.
+        let mut prefs = s.ui.prefs.get_untracked();
+        prefs.keymap = crate::ui::keymap::Keymap::JetBrains;
+        s.ui.prefs.set(prefs);
+        s.ui.close_editor();
+        unreachable!("closing a standalone editor exits the process");
+    }
+
+    #[test]
+    fn fr_l31_1_closing_the_editor_runs_shutdown_and_exits() {
+        let scratch = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let dir = tempfile::tempdir_in(scratch).unwrap();
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "shutdown_tests::fr_l31_1_child_closes_the_editor", "--include-ignored", "--nocapture"])
+            .env(CHILD_DIR, dir.path())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "the child did not exit cleanly: {:?}\n{stderr}", out.status);
+        assert!(!stderr.contains("unreachable"), "{stderr}");
+        let saved = crate::prefs::load(&dir.path().join("prefs.json"));
+        assert_eq!(saved.keymap, crate::ui::keymap::Keymap::JetBrains, "prefs were not flushed on close");
+    }
+
     #[test]
     fn fr_l31_1_editor_close_flushes_prefs_and_cache_before_exit() {
         let scratch = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.scratch");

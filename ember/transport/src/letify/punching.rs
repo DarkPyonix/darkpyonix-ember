@@ -26,6 +26,10 @@
 //!   its bound port.
 //! - **Backoff.** Each offer is a rendezvous message (pkarr requests on the hub, SPEC `FR-N2`
 //!   budget), so after a failed punch the next offer to that peer waits.
+//! - **The Worker** (`super::worker`, on by default): when it is ready, the dialing side runs the
+//!   punch over letify's signalling Worker and wakes the peer through Ember's own rendezvous; a
+//!   woken peer answers over the Worker. A Worker failure falls back to the punch over Ember's
+//!   own rendezvous, in the same dial.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -39,6 +43,8 @@ use letify_link::driver::{self, PunchError, PunchErrorKind, PunchOptions, Punche
 use letify_link::observe::AddressObserver;
 use letify_link::rendezvous::{Message, Proto, Rendezvous};
 use letify_link::{BoxTransport, Candidate, NodeId};
+
+use super::worker::{self, Worker};
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, Semaphore};
 
@@ -178,9 +184,11 @@ struct Backoff {
     until: Instant,
 }
 
-/// Runs punches with letify-link's driver over the shared rendezvous `R`.
-pub(crate) struct Puncher<R> {
+/// Runs punches with letify-link's driver over the shared rendezvous `R`, and over the
+/// signalling Worker `W` when it is on.
+pub(crate) struct Puncher<R, W> {
     shared: Arc<R>,
+    worker: Option<Worker<W>>,
     /// Asked in turn for this side's public IP.
     observers: Vec<Arc<dyn AddressObserver>>,
     routes: Routes,
@@ -189,11 +197,13 @@ pub(crate) struct Puncher<R> {
     answering: Arc<Semaphore>,
 }
 
-impl<R: Rendezvous + 'static> Puncher<R> {
-    /// Punches over `shared`, learning this side's public IP from `observers`.
-    pub(crate) fn new(shared: Arc<R>, observers: Vec<Arc<dyn AddressObserver>>) -> Arc<Self> {
+impl<R: Rendezvous + 'static, W: Rendezvous + 'static> Puncher<R, W> {
+    /// Punches over `shared` (and over `worker` when given), learning this side's public IP
+    /// from `observers`.
+    pub(crate) fn new(shared: Arc<R>, observers: Vec<Arc<dyn AddressObserver>>, worker: Option<W>) -> Arc<Self> {
         Arc::new(Self {
             shared,
+            worker: worker.map(Worker::new),
             observers,
             routes: Arc::new(Mutex::new(HashMap::new())),
             next_id: AtomicU64::new(1),
@@ -274,14 +284,84 @@ impl<R: Rendezvous + 'static> Puncher<R> {
         });
     }
 
+    /// The answering side, woken through Ember's own rendezvous: `from` punches through the
+    /// Worker, with the wake-up `nonce`. Polls the Worker for one punch at most
+    /// ([`worker::ANSWER_POLL`]) and hands every punched path to `handler`. The caller checks that
+    /// it admits `from` first. Does nothing with the Worker off or not ready, for a nonce already
+    /// seen, or while [`MAX_ANSWERING`] punches are answered.
+    pub(crate) fn answer_woken<F, Fut>(self: &Arc<Self>, from: NodeId, nonce: [u8; 16], handler: F)
+    where
+        F: Fn(PunchedPath) -> Fut + Clone + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let Some(worker) = &self.worker else { return };
+        if !worker.first_sight(nonce) {
+            return;
+        }
+        let Some(busy) = worker.ready() else {
+            tracing::debug!(peer = %from, "the signalling Worker is busy or rate limited; ignoring a wake-up");
+            return;
+        };
+        let Ok(permit) = self.answering.clone().try_acquire_owned() else { return };
+        let puncher = self.clone();
+        tokio::spawn(async move {
+            let _permits = (busy, permit);
+            let Some(worker) = &puncher.worker else { return };
+            let public_ip = match puncher.public_ip().await {
+                Ok(ip) => ip,
+                Err(e) => {
+                    tracing::debug!(peer = %from, error = %e, "no public address to answer a punch with");
+                    return;
+                }
+            };
+            let exchange = worker.exchange::<R>(None);
+            let opts = options(public_ip);
+            match tokio::time::timeout(worker::ANSWER_POLL, driver::punch(&exchange, from, Role::Responder, &opts)).await {
+                Ok(Ok(punched)) => {
+                    drop(exchange);
+                    if let Err(e) = punched.accept_with(handler) {
+                        let _ = punch_failed(from, e);
+                    }
+                }
+                Ok(Err(e)) => {
+                    if let Some(failure) = exchange.failure() {
+                        worker.note_failure(&failure);
+                    }
+                    let _ = punch_failed(from, e);
+                }
+                Err(_) => tracing::debug!(peer = %from, "no punch offer came through the signalling Worker after a wake-up"),
+            }
+        });
+    }
+
     async fn initiate(&self, peer: NodeId) -> io::Result<BoxTransport> {
         self.check_backoff(peer)?;
         let public_ip = self.public_ip().await?;
         let rdv = self
             .register(peer, false)
             .ok_or_else(|| io::Error::new(io::ErrorKind::WouldBlock, "a punch with this peer is already running"))?;
-        let punched = driver::punch(&rdv, peer, Role::Initiator, &options(public_ip)).await.map_err(|e| punch_failed(peer, e))?;
+        let opts = options(public_ip);
+        if let Some((worker, _permit)) = self.worker.as_ref().and_then(|w| Some((w, w.ready()?))) {
+            let mut nonce = [0u8; 16];
+            getrandom::fill(&mut nonce).map_err(|e| io::Error::other(e.to_string()))?;
+            let exchange = worker.exchange(Some((&*self.shared, peer, worker::wake_up(nonce))));
+            match driver::punch(&exchange, peer, Role::Initiator, &opts).await {
+                Ok(punched) => return self.finish(peer, punched).await,
+                Err(e) => match exchange.failure() {
+                    // The Worker failed: punch over Ember's own rendezvous instead.
+                    Some(failure) => worker.note_failure(&failure),
+                    // The Worker carried the exchange and the network did not allow a path.
+                    None => return Err(punch_failed(peer, e)),
+                },
+            }
+        }
+        let punched = driver::punch(&rdv, peer, Role::Initiator, &opts).await.map_err(|e| punch_failed(peer, e))?;
         drop(rdv);
+        self.finish(peer, punched).await
+    }
+
+    /// Vets the punched paths and returns the first usable one.
+    async fn finish(&self, peer: NodeId, punched: driver::Punched) -> io::Result<BoxTransport> {
         let vetting = punched.vet("punch").await.map_err(|e| punch_failed(peer, e))?;
         let report = vetting.report();
         let dropped = vetting.dropped_message();
@@ -367,8 +447,10 @@ mod tests {
         Punch { proto, token: [1; 16], start_at_ms: 1, until_ms: 2, mappings: vec!["127.0.0.1:9".parse().unwrap()] }
     }
 
-    fn puncher(me: NodeId) -> Arc<Puncher<letify_link::rendezvous::MemoryRendezvous>> {
-        Puncher::new(Arc::new(MemoryHub::new().endpoint(me)), Vec::new())
+    type Mem = letify_link::rendezvous::MemoryRendezvous;
+
+    fn puncher(me: NodeId) -> Arc<Puncher<Mem, Mem>> {
+        Puncher::new(Arc::new(MemoryHub::new().endpoint(me)), Vec::new(), None)
     }
 
     #[test]

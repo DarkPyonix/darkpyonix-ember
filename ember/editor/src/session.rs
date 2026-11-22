@@ -736,7 +736,14 @@ impl EditorSession {
     /// Show `text` as the buffer of `uri`, opening the file if needed (FR-L31.6): the window's buffer
     /// kept across a reconnect. Dirty unless it equals the file on disk.
     pub fn restore(&self, uri: UriComponents, text: String) -> Result<(), Error> {
-        self.send(Command::Input(Input::Restore { uri, text }))
+        self.restore_with_base(uri, text, None)
+    }
+
+    /// [`EditorSession::restore`] with the file text the buffer was based on (the bridge's
+    /// `DocumentWidgetState::disk_base`). If the file no longer holds it, a buffer with edits is put
+    /// back with the conflict raised, and a buffer without edits is not put back over the newer file.
+    pub fn restore_with_base(&self, uri: UriComponents, text: String, base: Option<String>) -> Result<(), Error> {
+        self.send(Command::Input(Input::Restore { uri, text, base }))
     }
 
     /// The editor showing `uri` got focus.
@@ -1088,6 +1095,7 @@ impl Driver {
                     Some(WatchEvent::Changes(list)) => Some(Input::FilesChanged(list)),
                     Some(WatchEvent::Error(e)) => {
                         tracing::warn!("ember-editor: file watcher error: {e}");
+                        let _ = self.updates.send(SessionUpdate::FileNotice { uri: None, kind: crate::engine::FileNoticeKind::WatcherError, detail: e });
                         None
                     }
                     None => {
@@ -1233,7 +1241,7 @@ impl Driver {
                         let _ = tx.send(Input::FileRead { uri, purpose, result });
                     });
                 }
-                Effect::WriteFile { uri, bytes, token } => {
+                Effect::WriteFile { uri, bytes, token, expect } => {
                     if let Some(local) = self.user_file(&uri) {
                         let tx = internal.clone();
                         tokio::spawn(async move {
@@ -1247,6 +1255,23 @@ impl Driver {
                     }
                     let (fs, tx) = (Arc::clone(&self.fs), internal.clone());
                     tokio::spawn(async move {
+                        // A save writes over whatever is there: first see that it is what the buffer was
+                        // based on. A file that is gone passes (the save makes it again).
+                        if let Some(base) = &expect {
+                            match fs.read_file(&uri).await {
+                                Ok(disk) if !base.holds(&disk) => {
+                                    let _ = tx.send(Input::SaveStale { uri, token });
+                                    return;
+                                }
+                                Ok(_) => {}
+                                Err(e) if is_not_found(&e) => {}
+                                Err(e) => {
+                                    let result = Err(format!("could not check the file before saving: {e}"));
+                                    let _ = tx.send(Input::FileWritten { uri, token, result });
+                                    return;
+                                }
+                            }
+                        }
                         let result = fs.write_file(&uri, bytes, &WriteOptions::default()).await.map_err(|e| e.to_string());
                         let _ = tx.send(Input::FileWritten { uri, token, result });
                     });
@@ -1302,13 +1327,21 @@ impl Driver {
                     if self.workspace_watch.as_deref().is_some_and(|ws| crate::watch::covered_by_workspace_watch(ws, &uri.path)) {
                         continue;
                     }
-                    let (fs, watches) = (Arc::clone(&self.fs), Arc::clone(&self.watches));
+                    let (fs, watches, updates) = (Arc::clone(&self.fs), Arc::clone(&self.watches), self.updates.clone());
                     tokio::spawn(async move {
                         match fs.watch(&uri, &WatchOptions::default()).await {
                             Ok(req) => {
                                 watches.lock().unwrap().insert(uri.key(), req);
                             }
-                            Err(e) => tracing::warn!("ember-editor: cannot watch {}: {e}", uri.path),
+                            Err(e) => {
+                                tracing::warn!("ember-editor: cannot watch {}: {e}", uri.path);
+                                // Nothing reports a change to this file now: the window says so.
+                                let _ = updates.send(SessionUpdate::FileNotice {
+                                    uri: Some(uri),
+                                    kind: crate::engine::FileNoticeKind::WatchRefused,
+                                    detail: e.to_string(),
+                                });
+                            }
                         }
                     });
                 }

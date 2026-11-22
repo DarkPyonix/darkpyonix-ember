@@ -1,5 +1,5 @@
 {
-  "_todo": "Approved by the leader on 2026-11-15 (#84): five extensions covering two language servers, the most used language extension, a debugger and a webview panel. Versions of the first three were read from open-vsx.org on 2026-11-15 and are not yet proven by a run; debugpy and git-graph are pinned from their first resolving run (the run prints the installed version). Deeper checks: the `deep` fields (#929).",
+  "_todo": "Approved by the leader on 2026-11-15 (#84): five extensions covering two language servers, the most used language extension, a debugger and a webview panel. Versions of the first three were read from open-vsx.org on 2026-11-15. The first real run (Ember CI 44946499791, 2026-11-21) installed all five on every target and resolved debugpy to 2026.6.0 and git-graph to 1.30.0, now pinned. Deeper checks: the `deep` fields (#929).",
   "_fields": "id: publisher.name on Open VSX. version: the exact version installed (id@version), or null to take the newest one the OSE accepts (the run prints it; pin it afterwards). open: a file of workspace/ whose language triggers the extension, or null when it activates at startup. deep: an optional deeper check made by the deep run (OSE_REGRESS_MODE=deep, #929): {check: webview, command, send, reply} runs `command`, sends the JSON `send` to the panel it opens and waits for a message whose `command` is `reply`; {check: debug, program, line} debugs `program` of workspace/ with a breakpoint at `line`.",
   "extensions": [
     {
@@ -19,7 +19,7 @@
     },
     {
       "id": "ms-python.debugpy",
-      "version": null,
+      "version": "2026.6.0",
       "open": "sample.py",
       "deep": {
         "check": "debug",
@@ -29,7 +29,7 @@
     },
     {
       "id": "mhutchie.git-graph",
-      "version": null,
+      "version": "1.30.0",
       "open": null,
       "deep": {
         "check": "webview",

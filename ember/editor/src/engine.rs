@@ -1555,8 +1555,10 @@ impl SessionCore {
             }
             Ok(MainThreadCall::ExecuteCommand { id, args }) => {
                 // The extension host runs its own commands locally; what reaches us is a workbench
-                // command. `setContext` (context keys) is a no-op for Ember for now.
-                if id != "setContext" && !self.registry.has_command(&id) {
+                // command. Setting a context key is a no-op for Ember for now: the API name is
+                // `setContext`, and the extension host at 1.139.1 sends it as `_setContext` (seen
+                // from mhutchie.git-graph in the first NFR-W1 deep run, #84).
+                if !matches!(id.as_str(), "setContext" | "_setContext") && !self.registry.has_command(&id) {
                     let arguments = match args {
                         Value::Array(a) => a,
                         Value::Null => Vec::new(),

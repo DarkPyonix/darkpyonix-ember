@@ -309,15 +309,78 @@ pub fn projects() -> Vec<Project> {
             name: "demo-project".into(),
             created_at: 0,
             computers: vec!["local".into()],
+            leader_session: Some("demo-s1".into()),
             ..Default::default()
         },
         Project {
             name: "second-project".into(),
             created_at: 0,
             computers: vec!["local".into()],
+            leader_session: Some("demo-s3".into()),
             ..Default::default()
         },
     ]
+}
+
+/// Sample routines for demo mode, including a routine linked to `demo-project` so the project
+/// settings `연결` section and full project view show real linked items in captures.
+pub fn demo_routines() -> Vec<crate::ui::routines::Entry> {
+    use crate::ui::home::{default_mode, default_option, Harness, Selection};
+    use crate::ui::routines::{next_run, Entry, Routine, Run, RunStatus, Trigger};
+    let now = crate::ui::cr::routines::now_local();
+    let mut entries = crate::ui::cr::routines::sample_entries();
+    entries.push(Entry {
+        routine: Routine {
+            id: "demo-rt1".into(),
+            name: "데모 CI 상태 점검".into(),
+            trigger: Trigger::Time,
+            cron: "0 9 * * *".into(),
+            prompt: "demo-project의 최근 빌드 상태를 확인하고 실패 원인을 요약합니다.".into(),
+            enabled: true,
+            sel: Selection {
+                project: "demo-project".into(),
+                option: default_option(Harness::ClaudeCode),
+                mode: default_mode(Harness::ClaudeCode),
+                computer: Some("local".into()),
+            },
+            continue_session: None,
+        },
+        runs: vec![Run {
+            at: now - 120,
+            status: RunStatus::Done,
+            session: Some("demo-s1".into()),
+        }],
+        next_at: next_run("0 9 * * *", now),
+    });
+    entries
+}
+
+/// Sample channels for demo mode, including a channel linked to `demo-project` so the project
+/// settings `연결` section and full project view show real linked items in captures.
+pub fn demo_channels() -> Vec<crate::ui::channels::Room> {
+    use crate::ui::channels::{Member as ChannelMember, Message as ChannelMessage, Room};
+    let now = crate::model::now_ms() / 1000;
+    let mut rooms = crate::ui::cr::channels::sample_rooms();
+    rooms.push(Room {
+        id: "demo-r1".into(),
+        name: "데모 개발방".into(),
+        project: "demo-project".into(),
+        members: vec![
+            ChannelMember { id: "me".into(), name: "나".into(), is_agent: false, harness: String::new() },
+            ChannelMember { id: "demo-s1".into(), name: "demo-project-claude-code".into(), is_agent: true, harness: "claude-code".into() },
+        ],
+        messages: vec![ChannelMessage {
+            id: "demo-m1".into(),
+            from: "demo-s1".into(),
+            text: "포트 설정 변경 사항을 정리해 두었습니다.".into(),
+            at: now - 300,
+            unread: 0,
+            author_name: String::new(),
+            author_kind: String::new(),
+        }],
+        unread: 0,
+    });
+    rooms
 }
 
 /// A plausible metrics sample for the demo computer (FR-L21, `GET /api/computers/{id}/metrics`).
@@ -3153,5 +3216,19 @@ mod tests {
             assert!(!ev.is_empty(), "{} has a transcript", s.id);
             assert_eq!(ev.len() as i64, s.last_seq, "{}", s.id);
         }
+    }
+
+    #[test]
+    fn demo_project_seeds_leader_and_linked_routines_and_channels() {
+        let list = projects();
+        let primary = list.iter().find(|p| p.name == "demo-project").expect("demo-project");
+        assert_eq!(primary.leader_session.as_deref(), Some("demo-s1"));
+        let links = crate::ui::project::project_links_from(
+            "demo-project",
+            &demo_routines(),
+            &demo_channels(),
+        );
+        assert_eq!(links.routine_button_label(), "루틴 (1)");
+        assert_eq!(links.channel_button_label(), "채널 (1)");
     }
 }

@@ -139,6 +139,13 @@ async fn pump(rx: &mut UnboundedReceiver<SessionUpdate>, seen: &mut Seen, until:
 }
 
 fn install(bin: &Path, root: &Path, extensions: &Path, spec: &str) {
+    // The server checks an extension's signature with a native verifier that a stock OSE server
+    // build does not ship, and the install then fails with `SignatureVerificationInternal`. The
+    // CLI reads this setting from the server data dir, so switch the check off for the test
+    // install only.
+    let user = root.join("data").join("data").join("User");
+    std::fs::create_dir_all(&user).expect("create the server user settings dir");
+    std::fs::write(user.join("settings.json"), r#"{"extensions.verifySignature": false}"#).expect("write the server user settings");
     let out = Command::new(bin)
         .args(["--install-extension", spec, "--extensions-dir"])
         .arg(extensions)

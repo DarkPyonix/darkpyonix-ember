@@ -205,6 +205,11 @@
           "default": 20,
           "minimum": 3,
           "description": "Release the edit lock on a cell after this many seconds without typing."
+        },
+        "darkpyonix.quarkdown.cliPath": {
+          "type": "string",
+          "default": "quarkdown",
+          "description": "Path to the local Quarkdown CLI used in a separate process to render text/vnd.darkpyonix.quarkdown cell outputs (SPEC FR-F14). Falls back to text/plain when absent."
         }
       }
     }

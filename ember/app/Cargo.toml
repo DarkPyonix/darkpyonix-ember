@@ -34,7 +34,8 @@ compose-rust = { git = "https://github.com/DarkPyonix/compose-rust", rev = "e52f
 dioxus-compose = { git = "https://github.com/DarkPyonix/dioxus-compose", rev = "5b6f707c531246d71cc3a34cd41662b1375b1513" }
 
 # Everything below the UI: sync engine, state reducer, transcript, cache.
-ember-client = { path = "../client" }
+# `tls`: the push and file watch sockets reach an https server over wss (FR-S11, #1048).
+ember-client = { path = "../client", features = ["tls"] }
 ember-editor = { path = "../editor" }
 ember-editor-conn = { path = "../editor-conn" }
 # The peer-to-peer transport, so the app can join a server as a device (SPEC FR-N9, #856): its

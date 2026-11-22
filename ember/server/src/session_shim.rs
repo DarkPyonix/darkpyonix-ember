@@ -20,6 +20,9 @@
 //! - shim to client: `O <start> <len>\n<bytes>` (stdout bytes at absolute offset `start`) and
 //!   `X <reason>\n` (the agent ended; reason is `exit:<code>`, `signal:<n>` or `memory-limit`).
 //!
+//! Start-up: the shim writes [`READY_LINE`] on its stdout once its socket listens, and
+//! [`spawn_shim`] waits for that line (#924).
+//!
 //! A new `ATTACH` supersedes the previous connection. The buffer is bounded
 //! ([`BUFFER_CAP`]); bytes older than the cap and not acknowledged are dropped, and the frame
 //! start offset tells the client about the gap.
@@ -54,6 +57,26 @@ const LOG_LINE_MAX: usize = 64 * 1024;
 
 /// Most unacknowledged stdout bytes a shim keeps.
 pub const BUFFER_CAP: usize = 64 * 1024 * 1024;
+
+/// The line a shim writes on its stdout once its socket listens (#924). [`spawn_shim`] waits for
+/// it instead of trying to connect for a fixed time.
+pub const READY_LINE: &str = "ember-shim ready";
+
+/// How long [`spawn_shim`] waits for [`READY_LINE`] before it kills the shim. Only a hung shim
+/// reaches it: a slow one is waited for, and one that ends first is reported at once.
+pub const READY_LIMIT: Duration = Duration::from_secs(60);
+
+/// After the agent's process group is gone, how long the shim waits for the end of its stdout
+/// before it reports the exit anyway (a process outside the group may still hold the pipe).
+#[cfg(unix)]
+const STDOUT_END_LIMIT: Duration = Duration::from_secs(5);
+
+/// How long a shim stays after an agent it was asked to `KILL` ended, when nobody acknowledges
+/// the end. The one who killed it does not need the output kept for a later server, so the shim
+/// does not linger the hour of [`linger_secs`]; this is only room to read the `X` line. Without it
+/// a client that stopped waiting for the end (the stdout limit and its own wait racing under load)
+/// left the shim running for an hour (#923, `fr_s8_acp_mid_turn_output_drained_and_persisted_after_server_crash`).
+pub const KILLED_LINGER: Duration = Duration::from_secs(10);
 
 /// What to run, written by the server and read by the shim.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -254,9 +277,7 @@ pub async fn run_shim(dir: &Path, id: &str) -> anyhow::Result<()> {
     let agent_pid = child.id().unwrap_or(0);
     let stdout = child.stdout.take().expect("stdout is piped");
     let stdin = child.stdin.take();
-    if let Some(stderr) = child.stderr.take() {
-        tokio::spawn(copy_stderr_redacted(stderr, log));
-    }
+    let stderr_copy = child.stderr.take().map(|stderr| tokio::spawn(copy_stderr_redacted(stderr, log)));
 
     let (tx, _rx) = watch::channel(0u64);
     let shared = Arc::new(Shared {
@@ -271,9 +292,10 @@ pub async fn run_shim(dir: &Path, id: &str) -> anyhow::Result<()> {
     std::fs::write(meta_path(dir, id), serde_json::to_vec(&meta)?)?;
     let _ = std::fs::remove_file(sock_path(dir, id));
     let listener = UnixListener::bind(sock_path(dir, id))?;
+    signal_ready();
 
     // stdout reader
-    {
+    let reader = {
         let shared = shared.clone();
         tokio::spawn(async move {
             let mut out = stdout;
@@ -295,8 +317,8 @@ pub async fn run_shim(dir: &Path, id: &str) -> anyhow::Result<()> {
                     }
                 }
             }
-        });
-    }
+        })
+    };
 
     // waiter: records the exit, honours KILL
     let linger = Duration::from_secs(linger_secs(spec.linger_secs, std::env::var("EMBER_SHIM_LINGER_SECS").ok().as_deref()));
@@ -305,15 +327,30 @@ pub async fn run_shim(dir: &Path, id: &str) -> anyhow::Result<()> {
         let dir = dir.to_path_buf();
         let id = id.to_string();
         tokio::spawn(async move {
-            let status = tokio::select! {
-                s = child.wait() => s,
+            let (status, killed) = tokio::select! {
+                s = child.wait() => (s, false),
                 _ = shared.kill.notified() => {
                     kill_group(agent_pid);
-                    child.wait().await
+                    (child.wait().await, true)
                 }
             };
-            // Let the stdout reader drain what the agent wrote last.
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            // The main process ended, on its own, by KILL or by the memory limit: end the rest of
+            // its process group too, so a background job it started does not outlive the session,
+            // and close its stdin (#923).
+            kill_group(agent_pid);
+            shared.stdin.lock().await.take();
+            // Report the end only after the last byte of output is in the buffer: wait for the
+            // stdout reader to reach the end of the pipe (which the group held) instead of a
+            // fixed time, bounded for a process outside the group that still holds the pipe.
+            // The same for stderr: the shim may exit as soon as the end is acknowledged, so the
+            // log must be complete before the end is reported (#923).
+            let ends = async {
+                let _ = reader.await;
+                if let Some(copy) = stderr_copy {
+                    let _ = copy.await;
+                }
+            };
+            let _ = tokio::time::timeout(STDOUT_END_LIMIT, ends).await;
             let reason = {
                 let mut g = shared.inner.lock().unwrap();
                 let r = if g.memory_killed {
@@ -333,7 +370,8 @@ pub async fn run_shim(dir: &Path, id: &str) -> anyhow::Result<()> {
             };
             let _ = reason;
             shared.bump();
-            tokio::time::sleep(linger).await;
+            // An end that was asked for (`KILL`) is not kept for a later server (#923).
+            tokio::time::sleep(if killed { KILLED_LINGER.min(linger) } else { linger }).await;
             cleanup(&dir, &id);
             std::process::exit(0);
         });
@@ -370,6 +408,26 @@ pub async fn run_shim(dir: &Path, id: &str) -> anyhow::Result<()> {
         tokio::spawn(async move {
             let _ = serve(stream, shared, gen, dir, id).await;
         });
+    }
+}
+
+/// Tell [`spawn_shim`] that the socket listens: [`READY_LINE`] on stdout, then stdout is pointed
+/// at `/dev/null`, which also ends the server's pipe. Nothing else is written there, so a server
+/// that has gone away cannot make a later write fail.
+#[cfg(unix)]
+fn signal_ready() {
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+    {
+        let mut out = std::io::stdout().lock();
+        let _ = out.write_all(format!("{READY_LINE}\n").as_bytes());
+        let _ = out.flush();
+    }
+    if let Ok(null) = std::fs::OpenOptions::new().write(true).open("/dev/null") {
+        // SAFETY: dup2 onto the process's own stdout descriptor.
+        unsafe {
+            libc::dup2(null.as_raw_fd(), libc::STDOUT_FILENO);
+        }
     }
 }
 
@@ -694,7 +752,8 @@ pub async fn spawn_shim(
         .arg("--id")
         .arg(&id)
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
+        // The shim writes READY_LINE here once its socket listens (#924).
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
     // SAFETY: setsid is async-signal-safe and runs between fork and exec.
     unsafe {
@@ -706,17 +765,41 @@ pub async fn spawn_shim(
     let mut child = cmd
         .spawn()
         .map_err(|e| anyhow::anyhow!("failed to start {}: {e}", shim_bin.display()))?;
+    let shim_pid = child.id();
+    let stdout = child.stdout.take();
     // Reap the shim if it ends while this server is still alive.
     std::thread::spawn(move || {
         let _ = child.wait();
     });
-    for _ in 0..100 {
-        if let Ok(c) = attach(dir, &id, 0).await {
-            return Ok(c);
+    // Wait for the shim to say its socket listens, not for a fixed time (#924): a slow start
+    // under load is waited for, and a shim that ends first closes the pipe, which is an error at
+    // once. Only a shim that hangs reaches READY_LIMIT.
+    let ready = tokio::task::spawn_blocking(move || {
+        let mut line = String::new();
+        match stdout {
+            Some(out) => std::io::BufRead::read_line(&mut std::io::BufReader::new(out), &mut line).map(|_| line),
+            None => Ok(line),
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+    });
+    let log = log_path(dir, &id);
+    match tokio::time::timeout(READY_LIMIT, ready).await {
+        Ok(Ok(Ok(line))) if line.trim_end() == READY_LINE => {}
+        Ok(Ok(Ok(_))) | Ok(Ok(Err(_))) | Ok(Err(_)) => {
+            anyhow::bail!("shim for session {id} ended before it was ready (see {})", log.display())
+        }
+        Err(_) => {
+            // SAFETY: plain signal to the shim this call started.
+            unsafe {
+                libc::kill(shim_pid as libc::pid_t, libc::SIGKILL);
+            }
+            anyhow::bail!(
+                "shim for session {id} was not ready within {} s and was stopped (see {})",
+                READY_LIMIT.as_secs(),
+                log.display()
+            )
+        }
     }
-    anyhow::bail!("shim for session {id} did not come up (see {})", log_path(dir, &id).display())
+    attach(dir, &id, 0).await
 }
 
 #[cfg(not(unix))]

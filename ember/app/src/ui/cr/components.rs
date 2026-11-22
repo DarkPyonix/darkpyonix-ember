@@ -597,10 +597,12 @@ pub struct PopMenu<'a> {
 /// the box inside the window and gives focus back to the control when it closes
 /// (`HostPopover.kt` `PopoverContent`). A row tap calls `on_dismiss` and then `on_choose(i)`.
 /// `footer` is drawn under a line below the rows (`.sdrop-f`). At 560 and below a mode menu is a
-/// bottom sheet with the same rows ([`pop_presentation`]).
-/// (TODO(compose-rust#810, in v0.0.11): `HostPopover.kt` moves focus between `Role::MenuItem`
-/// rows with the arrow keys and focuses the `selected(true)` row when the popover opens, and
-/// `Modifier::has_popup(true)` marks the control; waits for a display check.)
+/// bottom sheet with the same rows ([`pop_presentation`]), inside a menu named `menu.name`.
+/// The keyboard is the toolkit's (compose-rust#810): the box declares `Role::Menu` and its rows
+/// `Role::MenuItem`, so opening focuses the `selected(true)` row (the first when none is),
+/// `ArrowDown` and `ArrowUp` move between the rows and wrap, `Home` and `End` jump to the ends,
+/// and `Enter` and `Space` press the focused row. The bottom sheet has no such keyboard: the
+/// toolkit runs it only in a `Popover` or a `Menu`, not in a `Sheet`.
 pub fn PopoverMenu(
     open: bool,
     menu: PopMenu<'_>,
@@ -658,7 +660,8 @@ pub fn PopoverMenuWith(
                         PopPlainSheetBody(&menu, &m, &extra, on_dismiss, on_choose);
                         return;
                     }
-                    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width().padding(SP[1]), {
+                    // A menu named by the caller, as the popover box is (#888, compose-rust#838).
+                    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width().padding(SP[1]).role(Role::Menu).label(menu.name), {
                         if let Some(sub) = menu.sub {
                             { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width().padding(SP[1]), {
                                 Label(sub, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
@@ -770,10 +773,11 @@ pub fn pop_anchor_weight(weight: Option<f32>, modifier: Modifier) -> Modifier {
 }
 
 /// The body of a [`PopExtra::plain_sheet`]: the head and the padded rows of the popover box,
-/// with no title bar above it. The column itself says nothing to assistive technology: named
-/// as a menu, the macOS tree turned it into one static text (`value=menu`) and dropped every
-/// row under it at 390 (review st, A FAIL 1), so the rows sit straight in the sheet as the old
-/// option sheet's did, each a named menu item that says whether it is the current one.
+/// with no title bar above it. The column is a menu named `menu.name`, as the popover box is, so
+/// a screen reader says which menu the rows belong to (#888). Review st (A FAIL 1) found such a
+/// named menu turned into one static text (`value=menu`) with no rows under it at 390; since
+/// compose-rust#838 a container role is a group that keeps its children, so each row stays a
+/// named menu item that says whether it is the current one.
 fn PopPlainSheetBody(
     menu: &PopMenu<'_>,
     m: &PopMetrics,
@@ -781,7 +785,7 @@ fn PopPlainSheetBody(
     on_dismiss: impl FnMut() + Clone + 'static,
     on_choose: impl FnMut(usize) + Clone + 'static,
 ) {
-    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), {
+    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width().role(Role::Menu).label(menu.name), {
         if !menu.head.is_empty() {
             PopHead(menu.kind, menu.head, menu.sub, m);
         }
@@ -3980,8 +3984,8 @@ mod tests {
     #[test]
     fn fr_l10_4_plain_sheet_rows_are_named_menu_items_with_their_selected_state() {
         // Review st, A FAIL 1: at 390 the sheet's column was a named menu, which macOS turned
-        // into one static text (`value=menu`) with no rows under it. The rows now sit in the
-        // sheet with nothing between them that names itself, each a menu item named by its title.
+        // into one static text (`value=menu`) with no rows under it. Each row is a menu item
+        // named by its title.
         let _guard = crate::services::test_guard();
         crate::ui::window_size::set_opened_for_test(Some((390.0, 844.0)));
         let nodes = emitted_nodes(plain_sheet_menu);
@@ -4001,19 +4005,80 @@ mod tests {
         for (row, title) in rows.iter().zip(["Ember 에디터", "VS Code", "JetBrains Gateway"]) {
             assert!(is_under(&nodes, text_node(&nodes, title), row.id), "{title} names its row");
         }
-        // Nothing between the sheet and a row names itself or claims a role: a named node there
-        // is what swallowed the rows.
-        for row in &rows {
+        // #888: the rows sit in one menu named by the caller, the only node between the sheet
+        // and a row that names itself or claims a role (since compose-rust#838 a container
+        // role keeps its rows as separate nodes; before, macOS read it as one static text).
+        assert_sheet_rows_in_one_named_menu(&nodes, sheet, &rows, "IDE 고르기");
+    }
+
+    /// Every row's ancestors up to the sheet: exactly one says anything to assistive technology,
+    /// and it is the same `Role::Menu` node for every row, named `name`.
+    fn assert_sheet_rows_in_one_named_menu(nodes: &[EmittedNode], sheet: &EmittedNode, rows: &[&EmittedNode], name: &str) {
+        let sem = |n: &EmittedNode| n.mods.iter().find(|m| m.starts_with("Semantics")).cloned();
+        let named = |n: &EmittedNode| n.props.iter().chain(n.mods.iter()).any(|p| p.contains(name));
+        let mut menus = std::collections::BTreeSet::new();
+        for row in rows {
+            let mut speaking = Vec::new();
             let mut at = row.parent;
             while let Some(id) = at {
                 if id == sheet.id {
                     break;
                 }
                 let n = nodes.iter().find(|n| n.id == id).expect("ancestor");
-                assert!(sem(n).is_none(), "ancestor {} says {:?}", n.widget, sem(n));
-                assert!(!n.props.iter().any(|p| p.starts_with("AccessibleName")), "ancestor {} is named: {:?}", n.widget, n.props);
+                if sem(n).is_some() || n.props.iter().any(|p| p.starts_with("AccessibleName")) {
+                    speaking.push(n);
+                }
                 at = n.parent;
             }
+            assert_eq!(speaking.len(), 1, "one menu between the sheet and the row: {:?}", speaking.iter().map(|n| (&n.widget, sem(n))).collect::<Vec<_>>());
+            let menu = speaking[0];
+            assert!(sem(menu).is_some_and(|m| m.contains("role: Menu,")), "{:?}", sem(menu));
+            assert!(named(menu), "the menu is named {name}: props {:?} mods {:?}", menu.props, menu.mods);
+            menus.insert(menu.id);
+        }
+        assert_eq!(menus.len(), 1, "every row is in the same menu");
+    }
+
+    #[test]
+    fn fr_l10_4_a_titled_phone_sheet_holds_its_rows_in_a_named_menu() {
+        // #888: the bottom sheet of a mode menu without `plain_sheet` gave its rows no menu.
+        let _guard = crate::services::test_guard();
+        crate::ui::window_size::set_opened_for_test(Some((390.0, 844.0)));
+        let nodes = emitted_nodes(mode_menu);
+        crate::ui::window_size::set_opened_for_test(None);
+        let sheet = the(&nodes, "Sheet");
+        let rows: Vec<&EmittedNode> = nodes
+            .iter()
+            .filter(|n| is_under(&nodes, n, sheet.id) && n.mods.iter().any(|m| m.starts_with("Semantics") && m.contains("role: MenuItem,")))
+            .collect();
+        assert_eq!(rows.len(), 3, "one menu item per option");
+        assert_sheet_rows_in_one_named_menu(&nodes, sheet, &rows, "IDE 고르기");
+    }
+
+    #[test]
+    fn fr_l10_4_a_popover_menu_gives_the_toolkit_its_keyboard_entries() {
+        // #888, compose-rust#810: the toolkit runs the menu keyboard in a `Popover` that
+        // declares `Role::Menu`, over its `Role::MenuItem` nodes, and focuses the one marked
+        // selected when it opens. Both looks hand it the box as a menu, every option as one
+        // item outside the control, and the current option alone as selected.
+        let _guard = crate::services::test_guard();
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+        let looks = [("drop", emitted_nodes(drop_menu)), ("mode", emitted_nodes(mode_menu))];
+        crate::ui::window_size::set_opened_for_test(None);
+        for (look, nodes) in &looks {
+            let pop = the(nodes, "Popover");
+            assert!(pop.mods.iter().any(|m| m.starts_with("Semantics") && m.contains("role: Menu,")), "{look}: {:?}", pop.mods);
+            let anchor = nodes.iter().find(|n| n.parent == Some(pop.id) && n.index == 0).expect("anchor child");
+            let items: Vec<&EmittedNode> = nodes
+                .iter()
+                .filter(|n| n.mods.iter().any(|m| m.starts_with("Semantics") && m.contains("role: MenuItem,")))
+                .collect();
+            assert_eq!(items.len(), 3, "{look}: one item per option");
+            assert!(items.iter().all(|n| is_under(nodes, n, pop.id) && !is_under(nodes, n, anchor.id)), "{look}: the items are the box's");
+            let sem = |n: &EmittedNode| n.mods.iter().find(|m| m.starts_with("Semantics")).cloned().unwrap();
+            assert_ne!(sem(items[1]), sem(items[0]), "{look}: the current option (VS Code) is the one focused on open");
+            assert_eq!(sem(items[0]), sem(items[2]), "{look}: no other option is selected");
+            assert!(is_under(nodes, text_node(nodes, "VS Code"), items[1].id), "{look}");
         }
     }
 

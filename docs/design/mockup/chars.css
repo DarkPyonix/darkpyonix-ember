@@ -1,0 +1,52 @@
+/* Ember agent characters (chars.js). Shared by every screen that draws a member. */
+.ec{display:inline-block;flex:none;position:relative;vertical-align:middle;--ec-cream:#f4ecdc}
+:root[data-theme=dark] .ec{--ec-cream:#e9dfcc}
+.ec svg{display:block;width:100%;height:100%;overflow:visible}
+.ec .ec-sh{fill:rgba(28,27,25,.13)}
+:root[data-theme=dark] .ec .ec-sh{fill:rgba(0,0,0,.35)}
+:root[data-theme=dark] .ec .ec-bd{filter:brightness(.93) saturate(.95)}
+.ec .ec-bd,.ec .ec-fc,.ec .ec-ey,.ec .ec-sh,.ec .ec-legs{transform-box:fill-box}
+.ec .ec-arm{transform-box:view-box}
+.ec .ec-bd{transform-origin:50% 100%}
+.ec .ec-fc,.ec .ec-ey,.ec .ec-sh{transform-origin:50% 50%}
+.ec-s-idle .ec-bd{animation:ecBreath 3.6s ease-in-out infinite}
+.ec-s-idle .ec-ey{animation:ecBlink 5s infinite}
+.ec-s-run .ec-bd{animation:ecBounce .62s cubic-bezier(.3,0,.4,1) infinite}
+.ec-s-run .ec-sh{animation:ecShadow .62s cubic-bezier(.3,0,.4,1) infinite}
+.ec-s-wait .ec-bd{animation:ecSway 2.6s ease-in-out infinite}
+.ec-s-wait .ec-fc{animation:ecLook 2.6s ease-in-out infinite}
+.ec-s-fail .ec-bd{transform:scale(1.12,.8);filter:saturate(.35) brightness(.97)}
+.ec-s-fail .ec-fc{transform:translateY(3px)}
+.ec-s-done .ec-bd{animation:ecHop 2.4s cubic-bezier(.3,0,.3,1) infinite}
+.ec-s-done .ec-sh{animation:ecHopSh 2.4s cubic-bezier(.3,0,.3,1) infinite}
+.ec-float .ec-bd{animation-name:ecFloat;animation-duration:3.2s;animation-timing-function:ease-in-out;animation-iteration-count:infinite}
+.ec-swing .ec-bd{transform-origin:50% 0%;animation:ecSwing 2.8s ease-in-out infinite}
+.ec-swing.ec-s-fail .ec-bd{animation:none;transform:rotate(8deg) scale(1,.9)}
+.ec .ec-wave{transform-box:view-box;animation:ecWave .9s ease-in-out infinite}
+.ec .ec-busy circle{animation:ecPop 1s ease-in-out infinite}
+.ec .ec-busy circle:nth-child(2){animation-delay:.3s}
+/* crew limbs */
+.ec-crew.ec-s-run .ec-arm-l{animation:ecArmL .5s ease-in-out infinite alternate}
+.ec-crew.ec-s-run .ec-arm-r{animation:ecArmR .5s ease-in-out infinite alternate}
+.ec-crew.ec-s-wait .ec-arm-r{animation:ecWaveArm .9s ease-in-out infinite}
+.ec-crew.ec-s-done .ec-arm-l{transform:rotate(150deg)}
+.ec-crew.ec-s-done .ec-arm-r{transform:rotate(-150deg)}
+.ec-crew.ec-s-fail .ec-arm-l{transform:rotate(18deg)}
+.ec-crew.ec-s-fail .ec-arm-r{transform:rotate(-18deg)}
+@keyframes ecBreath{0%,100%{transform:scale(1,1)}50%{transform:scale(1.035,.965)}}
+@keyframes ecBlink{0%,92%,100%{transform:scaleY(1)}95%{transform:scaleY(.1)}}
+@keyframes ecBounce{0%,100%{transform:translateY(0) scale(1.08,.9)}35%{transform:translateY(-7px) scale(.95,1.06)}60%{transform:translateY(-8px) scale(1,1)}}
+@keyframes ecShadow{0%,100%{transform:scale(1.05);opacity:1}50%{transform:scale(.7);opacity:.5}}
+@keyframes ecSway{0%,100%{transform:rotate(0)}25%{transform:rotate(-4deg)}70%{transform:rotate(4deg)}}
+@keyframes ecLook{0%,15%,100%{transform:translateX(0)}25%,45%{transform:translateX(-3px)}60%,80%{transform:translateX(3px)}}
+@keyframes ecHop{0%,55%,100%{transform:translateY(0) scale(1,1)}62%{transform:translateY(0) scale(1.08,.92)}72%{transform:translateY(-9px) scale(.96,1.05)}84%{transform:translateY(0) scale(1.06,.94)}92%{transform:scale(1,1)}}
+@keyframes ecHopSh{0%,62%,100%{transform:scale(1)}72%{transform:scale(.72)}}
+@keyframes ecFloat{0%,100%{transform:translateY(0)}50%{transform:translateY(-4px)}}
+@keyframes ecSwing{0%,100%{transform:rotate(-5deg)}50%{transform:rotate(5deg)}}
+@keyframes ecWave{0%,100%{transform:rotate(-16deg)}50%{transform:rotate(20deg)}}
+@keyframes ecPop{0%,100%{opacity:.2}50%{opacity:1}}
+@keyframes ecArmL{from{transform:rotate(-20deg)}to{transform:rotate(20deg)}}
+@keyframes ecArmR{from{transform:rotate(20deg)}to{transform:rotate(-20deg)}}
+@keyframes ecWaveArm{0%,100%{transform:rotate(-150deg)}50%{transform:rotate(-115deg)}}
+@media (prefers-reduced-motion:reduce){.ec *{animation:none!important}}
+@supports (corner-shape: squircle){.ec{corner-shape:round}}

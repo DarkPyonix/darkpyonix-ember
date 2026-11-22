@@ -93,11 +93,16 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           mkdir -p dist
+          # install-ose.sh and OSE_VERSION name and fetch the OSE release that matches this
+          # build (SPEC FR-W4 acceptance step 6, #83): both programs start OSE for the editor.
+          ose_release="ose-v$(tr -d '[:space:]' < ember/ose/VERSION)"
           pack() { # crate, program...
             crate="$1"; shift
             name="ember-${crate}-${TAG}-${TARGET}"
             mkdir -p "stage/$name"
             for p in "$@"; do cp "ember/$crate/target/release/$p" "stage/$name/"; done
+            cp ember/server/scripts/install-ose.sh "stage/$name/"
+            echo "$ose_release" > "stage/$name/OSE_VERSION"
             tar -C stage -czf "dist/$name.tar.gz" "$name"
             (cd dist && if command -v sha256sum >/dev/null; then sha256sum "$name.tar.gz"; else shasum -a 256 "$name.tar.gz"; fi > "$name.tar.gz.sha256")
           }
@@ -416,6 +421,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      # ember/ose/VERSION names the OSE release in the notes (#83).
+      - uses: actions/checkout@v5
+        with:
+          sparse-checkout: ember/ose/VERSION
+          sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@v5
         with:
           pattern: dpx-ember-*
@@ -441,11 +451,12 @@ jobs:
             debug) android="The Android APK (arm64-v8a) is debug-signed: it cannot be upgraded by a later release signed with another key; uninstall first (this deletes the app's data and device key)." ;;
             *) android="" ;;
           esac
+          ose_release="ose-v$(tr -d '[:space:]' < ember/ose/VERSION)"
           gh release create "$TAG" "${files[@]}" \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --title "Ember ${TAG#v}" \
-            --notes "ember-server and ember-node for macOS arm64, Linux x86_64 and Linux aarch64, and the client app when built, by run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}. macOS builds are ad hoc signed, not notarized: clear quarantine with xattr -dr com.apple.quarantine. Setup.exe is unsigned. ${android} Installed with Setup.exe, the Velopack .dmg or the Velopack .AppImage, the app updates itself from this feed. See the install guide."
+            --notes "ember-server and ember-node for macOS arm64, Linux x86_64 and Linux aarch64, and the client app when built, by run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}. macOS builds are ad hoc signed, not notarized: clear quarantine with xattr -dr com.apple.quarantine. Setup.exe is unsigned. ${android} Installed with Setup.exe, the Velopack .dmg or the Velopack .AppImage, the app updates itself from this feed. The editor needs DarkPyonix OSE ${ose_release}: run ./install-ose.sh from the ember-server or ember-node folder (https://github.com/${GITHUB_REPOSITORY}/releases/tag/${ose_release}). See the install guide."
 
   dry-run:
     # Lists every packed file with size and sha256 and fails when a target or channel lacks one a

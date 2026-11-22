@@ -105,7 +105,15 @@ fn review_sources() -> (Vec<String>, Vec<AgentChoice>) {
 
 fn project_names() -> Vec<String> {
     crate::services::try_services()
-        .map(|s| s.client.read(|st| st.projects().into_iter().map(|p| p.name).collect()))
+        .map(|s| {
+            s.client.read(|st| {
+                st.projects()
+                    .into_iter()
+                    .filter(|p| !st.project(&p.name).is_some_and(|pr| pr.archived))
+                    .map(|p| p.name)
+                    .collect()
+            })
+        })
         .unwrap_or_default()
 }
 

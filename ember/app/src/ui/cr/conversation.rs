@@ -1123,16 +1123,15 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                                             },
                                                         );
                                                     });
-                                                } else {
-                                                    let send_btn = send.clone();
-                                                    let draft_btn = draft.clone();
-                                                    super::session::SendCircleButton(
-                                                        32.0,
-                                                        move || {
-                                                            send_btn(draft_btn.get_untracked());
-                                                        },
-                                                    );
                                                 }
+                                                let send_btn = send.clone();
+                                                let draft_btn = draft.clone();
+                                                super::session::SendCircleButton(
+                                                    32.0,
+                                                    move || {
+                                                        send_btn(draft_btn.get_untracked());
+                                                    },
+                                                );
                                             }) };
                                     }) };
                             }) };
@@ -2560,5 +2559,52 @@ mod tests {
             assert!(mods.contains(&surface), "root box {mods:?} lacks {surface}");
             assert!(mods.iter().any(|m| m == "FillMaxWidth") && mods.iter().any(|m| m == "FillMaxHeight"), "{mods:?}");
         }
+    }
+
+    #[Composable]
+    fn host_conversation_s2_embedded() {
+        ConversationView("demo-s2", true);
+    }
+
+    #[Composable]
+    fn host_conversation_s3_embedded() {
+        ConversationView("demo-s3", true);
+    }
+
+    #[test]
+    fn fr_l6_embedded_composer_shows_send_beside_stop_when_busy() {
+        // FR-L6: while the agent is busy, the embedded composer renders both StopCircleButton and
+        // SendCircleButton in the same row so the user can queue a follow-up by tap as well as Enter.
+        let _guard = crate::services::test_guard();
+        let p = ember_theme().palette;
+        let stop_bg = format!("{:?}", compose_rust::schema::Modifier::Background(paint(p.red.strong)));
+        let send_bg = format!("{:?}", compose_rust::schema::Modifier::Background(paint(p.ink)));
+        let is_stop = |n: &Emitted| {
+            n.mods.contains(&stop_bg)
+                && n.mods.iter().any(|m| m == "Width(30.0)")
+                && n.mods.iter().any(|m| m == "Height(30.0)")
+                && n.props.iter().any(|prop| prop.starts_with("OnClick="))
+        };
+        let is_send = |n: &Emitted| {
+            n.mods.contains(&send_bg)
+                && n.mods.iter().any(|m| m == "Width(32.0)")
+                && n.mods.iter().any(|m| m == "Height(32.0)")
+                && n.props.iter().any(|prop| prop.starts_with("OnClick="))
+                && (n.mods.iter().any(|m| m.contains(crate::ui::cr::a11y::SEND))
+                    || n.props.iter().any(|prop| prop.contains(crate::ui::cr::a11y::SEND)))
+        };
+
+        // Busy session (SessionStatus::Running): both stop and send sit in the composer row.
+        services().open_session("demo-s3");
+        let busy_nodes = emitted(host_conversation_s3_embedded);
+        let stop = busy_nodes.iter().find(|n| is_stop(n)).expect("StopCircleButton while busy");
+        let send = busy_nodes.iter().find(|n| is_send(n)).expect("SendCircleButton while busy");
+        assert!(stop.parent.is_some() && stop.parent == send.parent, "stop and send share the composer row");
+
+        // Idle/finished session: send is shown and stop is not.
+        services().open_session("demo-s2");
+        let idle_nodes = emitted(host_conversation_s2_embedded);
+        assert!(idle_nodes.iter().any(is_send), "SendCircleButton when idle");
+        assert!(!idle_nodes.iter().any(is_stop), "no StopCircleButton when idle");
     }
 }

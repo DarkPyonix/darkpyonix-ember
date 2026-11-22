@@ -95,6 +95,7 @@ impl From<ClientError> for Failure {
 
 type R<T> = Result<T, Failure>;
 
+#[expect(clippy::result_large_err, reason = "return the Axum error response directly without boxing it")]
 fn node(c: &Computers, id: &str) -> R<NodeClient> {
     if id == super::LOCAL {
         return Ok(c.local_node_client()?);
@@ -102,24 +103,29 @@ fn node(c: &Computers, id: &str) -> R<NodeClient> {
     Ok(c.client(id)?)
 }
 
+#[expect(clippy::result_large_err, reason = "return the Axum error response directly without boxing it")]
 async fn list(State(c): S, Path(id): Path<String>, Query(q): Query<TermListQuery>) -> R<Json<Vec<TermInfo>>> {
     Ok(Json(node(&c, &id)?.terms(&q).await?))
 }
 
+#[expect(clippy::result_large_err, reason = "return the Axum error response directly without boxing it")]
 async fn create(State(c): S, Path(id): Path<String>, Json(r): Json<TermCreateRequest>) -> R<Response> {
     let res = node(&c, &id)?.term_create(&r).await?;
     let status = if res.created { StatusCode::CREATED } else { StatusCode::OK };
     Ok((status, Json(res)).into_response())
 }
 
+#[expect(clippy::result_large_err, reason = "return the Axum error response directly without boxing it")]
 async fn one(State(c): S, Path((id, tid)): Path<(String, String)>) -> R<Json<TermInfo>> {
     Ok(Json(node(&c, &id)?.term(&tid).await?))
 }
 
+#[expect(clippy::result_large_err, reason = "return the Axum error response directly without boxing it")]
 async fn snapshot(State(c): S, Path((id, tid)): Path<(String, String)>) -> R<Json<TermSnapshot>> {
     Ok(Json(node(&c, &id)?.term_snapshot(&tid).await?))
 }
 
+#[expect(clippy::result_large_err, reason = "return the Axum error response directly without boxing it")]
 async fn control(
     State(c): S,
     Path((id, tid)): Path<(String, String)>,
@@ -129,6 +135,7 @@ async fn control(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[expect(clippy::result_large_err, reason = "return the Axum error response directly without boxing it")]
 async fn kill(
     State(c): S,
     Path((id, tid)): Path<(String, String)>,
@@ -138,11 +145,13 @@ async fn kill(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[expect(clippy::result_large_err, reason = "return the Axum error response directly without boxing it")]
 async fn remove(State(c): S, Path((id, tid)): Path<(String, String)>) -> R<StatusCode> {
     node(&c, &id)?.term_remove(&tid).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[expect(clippy::result_large_err, reason = "return the Axum error response directly without boxing it")]
 async fn attach(
     State(c): S,
     Path((id, tid)): Path<(String, String)>,

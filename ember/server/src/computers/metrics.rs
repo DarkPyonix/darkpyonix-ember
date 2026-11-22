@@ -33,6 +33,7 @@ fn plain(code: StatusCode, msg: String) -> Response {
     (code, Json(json!({ "error": msg }))).into_response()
 }
 
+#[expect(clippy::result_large_err, reason = "return the Axum error response directly without boxing it")]
 async fn metrics(
     State(c): State<Arc<Computers>>,
     Path(id): Path<String>,

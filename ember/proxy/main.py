@@ -167,13 +167,13 @@ def _serve_our_page(request: Request, path: str, xmo: str) -> Response | None:
     if request.method != "GET" or "text/html" not in request.headers.get("accept", ""):
         return None
     if path == "/login":
-        return assets.page("workspace_login.html")
+        return assets.page("workspace_login.html", request=request)
     if path == "/":
         if "folder" not in request.query_params:
-            return assets.page("home.html")          # home launcher (folders → convos → transcript)
+            return assets.page("home.html", request=request)  # home launcher (folders → convos → transcript)
         if xmo != "embed":
             workspaces.record(request.query_params.get("folder"))
-            return assets.page("frame.html")         # workspace = parent page + iframe
+            return assets.page("frame.html", request=request)  # workspace = parent page + iframe
     return None
 
 
@@ -249,7 +249,8 @@ async def route_request(request: Request, call_next):
         return await inject.workbench_html(request, path)
 
     # 7. Everything else falls through to the catch-all route below.
-    return await call_next(request)
+    response = await call_next(request)
+    return assets.maybe_not_modified(request, response)
 
 
 # =============================================================================

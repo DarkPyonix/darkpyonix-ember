@@ -40,9 +40,26 @@ pub enum ConnEvent {
     Lost(LostReason),
 }
 
+/// Protocol state and active writer channel, locked together so frame id assignment
+/// and channel enqueueing are atomic across threads.
+struct State {
+    protocol: PersistentProtocol,
+    writer: Option<mpsc::UnboundedSender<Vec<Frame>>>,
+}
+
+impl State {
+    fn write(&self, frames: Vec<Frame>) {
+        if frames.is_empty() {
+            return;
+        }
+        if let Some(tx) = self.writer.as_ref() {
+            let _ = tx.send(frames);
+        }
+    }
+}
+
 struct Inner {
-    state: Mutex<PersistentProtocol>,
-    writer: Mutex<Option<mpsc::UnboundedSender<Vec<Frame>>>>,
+    state: Mutex<State>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
     generation: AtomicU64,
     events_tx: mpsc::UnboundedSender<ConnEvent>,
@@ -71,8 +88,10 @@ impl Connection {
         let (events_tx, events) = mpsc::unbounded_channel();
         let (control_tx, control_rx) = mpsc::unbounded_channel();
         let inner = Arc::new(Inner {
-            state: Mutex::new(PersistentProtocol::new(Instant::now())),
-            writer: Mutex::new(None),
+            state: Mutex::new(State {
+                protocol: PersistentProtocol::new(Instant::now()),
+                writer: None,
+            }),
             tasks: Mutex::new(Vec::new()),
             generation: AtomicU64::new(0),
             events_tx,
@@ -80,7 +99,7 @@ impl Connection {
             control_rx: tokio::sync::Mutex::new(control_rx),
         });
         let handle = ConnectionHandle { inner };
-        handle.attach(stream, initial);
+        handle.attach(stream, initial, false);
         Connection { handle, events }
     }
 }
@@ -88,14 +107,16 @@ impl Connection {
 impl ConnectionHandle {
     /// Send a regular (counted, acknowledged, replayable) message.
     pub fn send(&self, data: Vec<u8>) {
-        let frames = self.inner.state.lock().unwrap().send(data, Instant::now());
-        self.write(frames);
+        let mut st = self.inner.state.lock().unwrap();
+        let frames = st.protocol.send(data, Instant::now());
+        st.write(frames);
     }
 
     /// Send a control (handshake) message.
     pub fn send_control(&self, data: Vec<u8>) {
-        let frames = self.inner.state.lock().unwrap().send_control(data);
-        self.write(frames);
+        let mut st = self.inner.state.lock().unwrap();
+        let frames = st.protocol.send_control(data);
+        st.write(frames);
     }
 
     /// Wait for the next control message.
@@ -111,11 +132,14 @@ impl ConnectionHandle {
 
     /// Send `Disconnect` and stop all tasks.
     pub fn close(&self) {
-        let frames = self.inner.state.lock().unwrap().send_disconnect();
-        self.write(frames);
-        // Dropping the writer's sender lets it flush what is queued (including the Disconnect)
-        // and exit; the reader and ticker are aborted.
-        self.inner.writer.lock().unwrap().take();
+        {
+            let mut st = self.inner.state.lock().unwrap();
+            let frames = st.protocol.send_disconnect();
+            st.write(frames);
+            // Dropping the writer's sender lets it flush what is queued (including the Disconnect)
+            // and exit; no later frame can be enqueued after Disconnect.
+            st.writer.take();
+        }
         self.inner.generation.fetch_add(1, Ordering::SeqCst);
         for t in self.inner.tasks.lock().unwrap().drain(..) {
             t.abort();
@@ -128,30 +152,21 @@ impl ConnectionHandle {
     where
         S: AsyncRead + AsyncWrite + Send + 'static,
     {
-        self.inner.state.lock().unwrap().begin_reconnect(Instant::now());
-        self.attach(stream, initial);
+        self.attach(stream, initial, true);
     }
 
     /// The reconnect handshake succeeded: re-ack and replay unacknowledged messages.
     pub fn finish_reconnect(&self) {
-        let frames = self.inner.state.lock().unwrap().end_reconnect(Instant::now());
-        self.write(frames);
+        let mut st = self.inner.state.lock().unwrap();
+        let frames = st.protocol.end_reconnect(Instant::now());
+        st.write(frames);
     }
 
     pub fn is_reconnecting(&self) -> bool {
-        self.inner.state.lock().unwrap().is_reconnecting()
+        self.inner.state.lock().unwrap().protocol.is_reconnecting()
     }
 
-    fn write(&self, frames: Vec<Frame>) {
-        if frames.is_empty() {
-            return;
-        }
-        if let Some(tx) = self.inner.writer.lock().unwrap().as_ref() {
-            let _ = tx.send(frames);
-        }
-    }
-
-    fn attach<S>(&self, stream: S, initial: Vec<u8>)
+    fn attach<S>(&self, stream: S, initial: Vec<u8>, reconnect: bool)
     where
         S: AsyncRead + AsyncWrite + Send + 'static,
     {
@@ -162,8 +177,14 @@ impl ConnectionHandle {
 
         let (mut rd, mut wr) = tokio::io::split(stream);
         let (wtx, mut wrx) = mpsc::unbounded_channel::<Vec<Frame>>();
-        // Replacing the sender ends the previous writer once it has drained its queue.
-        *self.inner.writer.lock().unwrap() = Some(wtx);
+        {
+            let mut st = self.inner.state.lock().unwrap();
+            if reconnect {
+                st.protocol.begin_reconnect(Instant::now());
+            }
+            // Replacing the sender ends the previous writer once it has drained its queue.
+            st.writer = Some(wtx);
+        }
 
         // Writer: encode and write batches of frames. Detached: it ends when its sender is
         // dropped (transport replaced or connection closed), after flushing what was queued.
@@ -188,7 +209,6 @@ impl ConnectionHandle {
 
         // Reader: decode frames, run them through the state machine.
         let inner_r = Arc::clone(&self.inner);
-        let this = self.clone();
         let reader = tokio::spawn(async move {
             let mut dec = FrameDecoder::new();
             dec.push(&initial);
@@ -206,8 +226,12 @@ impl ConnectionHandle {
                             return;
                         }
                     };
-                    let (inbound, out) = inner_r.state.lock().unwrap().receive(frame, Instant::now());
-                    this.write(out);
+                    let inbound = {
+                        let mut st = inner_r.state.lock().unwrap();
+                        let (inbound, out) = st.protocol.receive(frame, Instant::now());
+                        st.write(out);
+                        inbound
+                    };
                     match inbound {
                         Some(Inbound::Regular(d)) => {
                             let _ = inner_r.events_tx.send(ConnEvent::Message(d));
@@ -245,17 +269,22 @@ impl ConnectionHandle {
                 if inner_t.generation.load(Ordering::SeqCst) != gen {
                     return;
                 }
-                let this_t = ConnectionHandle { inner: Arc::clone(&inner_t) };
                 let now = Instant::now();
-                let (mut out, dead) = inner_t.state.lock().unwrap().tick(now);
-                if now.duration_since(last_keep_alive) >= KEEP_ALIVE_SEND_TIME {
+                let send_keep_alive = if now.duration_since(last_keep_alive) >= KEEP_ALIVE_SEND_TIME {
                     last_keep_alive = now;
+                    true
+                } else {
+                    false
+                };
+                let dead = {
                     let mut st = inner_t.state.lock().unwrap();
-                    if !st.is_reconnecting() {
-                        out.extend(st.keep_alive());
+                    let (mut out, dead) = st.protocol.tick(now);
+                    if send_keep_alive && !st.protocol.is_reconnecting() {
+                        out.extend(st.protocol.keep_alive());
                     }
-                }
-                this_t.write(out);
+                    st.write(out);
+                    dead
+                };
                 if dead {
                     let _ = inner_t.events_tx.send(ConnEvent::Lost(LostReason::Timeout));
                 }
@@ -263,5 +292,60 @@ impl ConnectionHandle {
         });
 
         self.inner.tasks.lock().unwrap().extend([reader, ticker]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::frame::MessageType;
+    use tokio::sync::Barrier;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_sends_preserve_strict_frame_id_order() {
+        const TASKS: usize = 4;
+        const PER_TASK: usize = 250;
+        const TOTAL: u32 = (TASKS * PER_TASK) as u32;
+
+        let (client, mut peer) = tokio::io::duplex(64 * 1024);
+        let conn = Connection::new(client, Vec::new());
+
+        let barrier = Arc::new(Barrier::new(TASKS));
+        let mut senders = Vec::with_capacity(TASKS);
+        for t in 0..TASKS {
+            let handle = conn.handle.clone();
+            let barrier = Arc::clone(&barrier);
+            senders.push(tokio::spawn(async move {
+                barrier.wait().await;
+                for i in 0..PER_TASK {
+                    handle.send(format!("task-{t}-msg-{i}").into_bytes());
+                }
+            }));
+        }
+
+        let mut dec = FrameDecoder::new();
+        let mut chunk = vec![0u8; 16 * 1024];
+        let mut expected_id = 1u32;
+
+        while expected_id <= TOTAL {
+            let n = peer.read(&mut chunk).await.expect("duplex read");
+            assert!(n > 0, "peer EOF after {} of {TOTAL} frames", expected_id - 1);
+            dec.push(&chunk[..n]);
+            while let Some(frame) = dec.next_frame().expect("decode frame") {
+                if frame.ty == MessageType::Regular {
+                    assert_eq!(
+                        frame.id, expected_id,
+                        "out-of-order Regular frame: got id {}, expected {}",
+                        frame.id, expected_id
+                    );
+                    expected_id += 1;
+                }
+            }
+        }
+
+        for s in senders {
+            s.await.expect("sender task panicked");
+        }
+        conn.handle.close();
     }
 }

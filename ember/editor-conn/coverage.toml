@@ -393,8 +393,8 @@
 "$registerTextEditorProvider" = "bridged"
 "$registerCustomEditorProvider" = "bridged"
 "$unregisterEditorProvider" = "bridged"
-"$onDidEdit" = "todo"
-"$onContentChange" = "todo"
+"$onDidEdit" = "bridged"
+"$onContentChange" = "bridged"
 
 [MainThreadUrls]
 "$registerUriHandler" = "todo"

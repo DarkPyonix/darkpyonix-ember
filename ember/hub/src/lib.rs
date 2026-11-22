@@ -18,6 +18,8 @@
 //!   timed conditional poll as the fallback).
 //! - [`HubConfig::discover`]: the relay and directory from `GET /config`, falling back to
 //!   `https://relay.<host>` and `<hub>/pkarr` when the hub does not serve it.
+//! - [`pairing`]: a client device lists the account's main servers and pairs with one, taking
+//!   its peer id and relay from the hub record (FR-N9, #1044).
 //! - `fake` (feature `fake`): an in-process hub for tests.
 //!
 //! Address publishing and resolving are not HTTP calls made here: the hub's `/pkarr` endpoint is
@@ -27,6 +29,7 @@
 mod client;
 mod config;
 mod link;
+pub mod pairing;
 pub mod paths;
 mod registration;
 mod types;

@@ -19,6 +19,7 @@ pub mod bridge;
 pub mod config;
 pub mod demo;
 pub mod device_link;
+pub mod hub_pairing;
 pub mod export;
 pub mod fs_watch;
 pub mod editor_backup;

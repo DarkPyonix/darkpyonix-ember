@@ -41,6 +41,9 @@ ember-editor-conn = { path = "../editor-conn" }
 # device key, the bind, and the dialer `Api::over_transport` takes. The same features the client
 # tests and the server use: the default backend (`letify`) and HTTP over streams.
 ember-transport = { path = "../transport", default-features = false, features = ["http", "letify"] }
+# The darkpyonix.dev hub client, so the app can register its device key with the account and pair
+# with a server from the account's list (SPEC FR-N9, FR-N2, #1044).
+ember-hub = { path = "../hub" }
 alacritty_terminal = { version = "0.26", default-features = false }
 base64 = "0.22"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }

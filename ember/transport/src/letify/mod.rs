@@ -27,8 +27,9 @@
 //! - Rekeying and resumption are letify-link's own: Noise IK, key epochs, resume on a new path.
 //!
 //! Not done yet (TODO in the SPEC): UDP paths and hole punching (TCP dialing plus the relay only),
-//! NAT classification beyond the QAD mapping, and discovering the main server's relay address from
-//! the hub (it is configured with `EMBER_RELAY_URL` for now).
+//! NAT classification beyond the QAD mapping, and a node discovering the main server's relay
+//! address from the hub (it is configured with `EMBER_RELAY_URL` for now). The main server names
+//! its relay in its published record, and the app's hub pairing reads it there (#1044).
 
 mod link;
 mod pkarr;
@@ -59,7 +60,7 @@ pub use pkarr::HttpPkarrStore;
 
 use link::{run_demux, run_path_watch, Cmd, OpenError, PeerLink};
 use pkarr::PkarrNode;
-pub use pkarr::{direct_addresses_from_txt, is_record_label};
+pub use pkarr::{direct_addresses_from_txt, is_record_label, relay_url_from_txt};
 use relay_url::{parse_relay_url, RelayTarget};
 
 use crate::{
@@ -481,18 +482,27 @@ impl Inner {
         out
     }
 
+    /// The port of our own relay role when it is the relay in use.
+    fn own_relay_port(&self) -> Option<u16> {
+        match self.relay_target() {
+            Some(t) if self.own_relay.as_ref().is_some_and(|own| own.url == t.url) => {
+                Some(t.addr.parse::<SocketAddr>().map(|a| a.port()).unwrap_or(0))
+            }
+            _ => None,
+        }
+    }
+
     fn local_addr(&self) -> PeerAddr {
         let direct = self.advertised();
-        let relays = match self.relay_target() {
+        let relays = match (self.own_relay_port(), self.relay_target()) {
             // This endpoint is the relay: other endpoints reach it where it advertises its TCP
             // address, on the relay's port.
-            Some(t) if self.own_relay.as_ref().is_some_and(|own| own.url == t.url) => {
-                let port = t.addr.parse::<SocketAddr>().map(|a| a.port()).unwrap_or(0);
+            (Some(port), _) => {
                 let ip = direct.first().map(|a| a.ip()).unwrap_or_else(|| [127, 0, 0, 1].into());
                 vec![format!("letify://{}@{}", self.me, SocketAddr::new(ip, port))]
             }
-            Some(t) => vec![t.url],
-            None => Vec::new(),
+            (None, Some(t)) => vec![t.url],
+            (None, None) => Vec::new(),
         };
         PeerAddr { peer: self.me, relays, direct }
     }
@@ -507,6 +517,14 @@ impl Inner {
         let mut rec = AddressRecord::new(node_of(self.me), version);
         if self.publish_direct.load(Ordering::Relaxed) {
             rec.tcp = self.advertised();
+            // The main server names its own relay in its record, at the first address it
+            // advertises (the same address `local_addr` reports), so a node or client finds the
+            // relay in the server's hub record (SPEC FR-N2 Defaults, INTENT D36, #1044). Only an
+            // advertised address is published, never the loopback fallback, and only with direct
+            // addresses on, because the relay's address is the server's address.
+            if let (Some(port), Some(first)) = (self.own_relay_port().filter(|p| *p != 0), rec.tcp.first()) {
+                rec.relay = Some(SocketAddr::new(first.ip(), port));
+            }
         }
         rec.udp = self.observed.lock().unwrap().iter().copied().collect();
         rec.transports = vec![LETIFY_TRANSPORT_ID.to_string()];

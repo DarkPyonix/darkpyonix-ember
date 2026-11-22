@@ -31,5 +31,6 @@ pub mod vcs;
 pub mod settings;
 pub mod device_scope;
 pub mod this_device;
+pub mod hub_pair;
 pub mod self_update;
 pub mod owner_claim;

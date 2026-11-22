@@ -474,13 +474,26 @@ impl Drop for PkarrNode {
 /// valid signed record. A directory view such as the fake hub's reads published addresses
 /// with this, without naming the backend library (FR-N5).
 pub fn direct_addresses_from_txt(joined: &str) -> Option<Vec<std::net::SocketAddr>> {
+    Some(record_from_txt(joined)?.tcp)
+}
+
+/// The relay URL (`letify://<peer id>@host:port`) a letify address record names, given the
+/// record's TXT text, as [`direct_addresses_from_txt`]. `None` when the text is not a valid
+/// signed record or names no relay. A main server with the relay role names its own relay
+/// (SPEC FR-N2 Defaults, #1044).
+pub fn relay_url_from_txt(joined: &str) -> Option<String> {
+    let rec = record_from_txt(joined)?;
+    let relay = rec.relay?;
+    Some(format!("letify://{}@{relay}", PeerId::from_bytes(*rec.node.as_bytes()).ok()?))
+}
+
+fn record_from_txt(joined: &str) -> Option<AddressRecord> {
     let strings: Vec<&str> = joined
         .as_bytes()
         .chunks(255)
         .map(|c| std::str::from_utf8(c).ok())
         .collect::<Option<_>>()?;
-    let rec = AddressRecord::decode_txt(strings.as_slice(), record::unix_now()).ok()?;
-    Some(rec.tcp)
+    AddressRecord::decode_txt(strings.as_slice(), record::unix_now()).ok()
 }
 
 /// Whether a DNS name is the `_letify` address record label.

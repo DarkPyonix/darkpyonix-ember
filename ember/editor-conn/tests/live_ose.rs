@@ -365,9 +365,11 @@ async fn respond_loop(
             }
             RpcEvent::Cancel(_) => {}
             RpcEvent::Lost(reason) => {
+                eprintln!("[live-ose] ext-host connection lost: {reason:?}");
                 let _ = diag.send(DiagEvent::Gone(format!("lost ({reason:?})")));
             }
             RpcEvent::Disconnected => {
+                eprintln!("[live-ose] ext-host connection disconnected");
                 let _ = diag.send(DiagEvent::Gone("disconnected".into()));
                 break;
             }

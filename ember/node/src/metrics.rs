@@ -2,9 +2,9 @@
 //!
 //! One call to [`sample`] returns the CPU per core, memory, disks, network counters,
 //! temperatures and the busiest processes, read through the `sysinfo` crate (macOS and Linux).
-//! A metric the OS does not expose is `None` or an empty list, never an estimate. The GPU is
-//! reported empty with a reason: no GPU API is verified on this node yet, and the node does
-//! not shell out to a tool on a guess.
+//! A metric the OS does not expose is `None` or an empty list. Linux reads the AMDGPU driver's
+//! sysfs counters when available. GPU and temperature reads run only while serving a sample
+//! request, which the monitor sends while it is open.
 //!
 //! The sampler keeps one `sysinfo` state between calls, because CPU percent is the change
 //! since the previous refresh. The first call primes it and waits the minimum interval.
@@ -161,12 +161,51 @@ pub fn rank_processes(mut all: Vec<ProcessMetrics>, top: usize) -> Vec<ProcessMe
 
 /// The GPU part of a sample.
 pub fn gpu_report() -> GpuReport {
-    GpuReport { devices: Vec::new(), reason: Some(GPU_UNAVAILABLE.into()) }
+    #[cfg(target_os = "linux")]
+    {
+        gpu_report_at(std::path::Path::new("/sys/class/drm"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        GpuReport { devices: Vec::new(), reason: Some(GPU_UNAVAILABLE.into()) }
+    }
 }
 
 #[cfg(any(test, target_os = "linux"))]
-fn gpu_report_at(_drm: &std::path::Path) -> GpuReport {
-    GpuReport { devices: Vec::new(), reason: Some(GPU_UNAVAILABLE.into()) }
+fn gpu_report_at(drm: &std::path::Path) -> GpuReport {
+    let mut devices: Vec<_> = std::fs::read_dir(drm)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            // A connector such as card0-HDMI-A-1 belongs to a card, but is not a GPU.
+            let index = name.strip_prefix("card")?.parse::<u32>().ok()?;
+            let device = entry.path().join("device");
+            let read = |name| std::fs::read_to_string(device.join(name)).ok();
+            if read("vendor")?.trim() != "0x1002" {
+                return None;
+            }
+            let counter = |name| read(name)?.trim().parse::<u64>().ok();
+            // The driver documents this as a percent, and the two VRAM counters as bytes.
+            let utilization_percent = counter("gpu_busy_percent").filter(|n| *n <= 100).map(|n| n as f32);
+            let memory_total_bytes = counter("mem_info_vram_total");
+            let memory_used_bytes = counter("mem_info_vram_used");
+            if utilization_percent.is_none() && memory_total_bytes.is_none() && memory_used_bytes.is_none() {
+                return None;
+            }
+            Some((index, GpuMetrics {
+                name: format!("AMD GPU ({name})"),
+                utilization_percent,
+                memory_total_bytes,
+                memory_used_bytes,
+            }))
+        })
+        .collect();
+    devices.sort_by_key(|(index, _)| *index);
+    let reason = devices.is_empty().then(|| "no readable AMDGPU counters on this Linux node".into());
+    GpuReport { devices: devices.into_iter().map(|(_, device)| device).collect(), reason }
 }
 
 /// Why power is empty, `None` when some process has a value.

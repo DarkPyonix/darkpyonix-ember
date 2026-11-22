@@ -19,7 +19,8 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use ember_editor::{
-    DecorationKind, EditorSession, SessionConfig, SessionUpdate, Severity, WidgetCommand, WidgetEvent, WidgetPos, WidgetRange,
+    DecorationKind, EditorSession, HoverPhase, SessionConfig, SessionUpdate, Severity, WidgetCommand, WidgetEvent, WidgetPos,
+    WidgetRange,
 };
 use tokio::sync::mpsc;
 
@@ -36,6 +37,11 @@ struct Server {
 
 impl Server {
     fn start(bin: &Path, root: &Path) -> Self {
+        Self::start_with(bin, root, None)
+    }
+
+    /// As [`Server::start`], with `--extensions-dir` when `extensions` is given (the probe case).
+    fn start_with(bin: &Path, root: &Path, extensions: Option<&Path>) -> Self {
         let data = root.join("data");
         let machine = data.join("data").join("Machine");
         std::fs::create_dir_all(&machine).unwrap();
@@ -48,6 +54,7 @@ impl Server {
             .arg("--server-data-dir")
             .arg(&data)
             .args(["--telemetry-level", "off"])
+            .args(extensions.map(|e| vec!["--extensions-dir".into(), e.as_os_str().to_owned()]).unwrap_or_default())
             .stdin(Stdio::null())
             .stdout(log)
             .stderr(log_err);
@@ -446,4 +453,126 @@ async fn live_session_explorer_create_rename_delete() {
     assert!(ws.is_dir());
     assert!(!root.join("escape.txt").exists());
     session.shutdown().await;
+}
+
+/// SPEC FR-E12 (#32 phase A step 2): hover, CodeLens and inline completion from a real extension
+/// reach the session through the extension host and Ember's bridges. The probe extension
+/// (`ember/ose/regression/probe/`, packed by `pack.py`) answers each with a fixed marker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a real OSE server: EMBER_OSE_SERVER=<unpacked build>/bin/dpx-ose-server, and python3"]
+async fn live_session_probe_hover_codelens_inline() {
+    let Some(bin) = std::env::var_os("EMBER_OSE_SERVER").map(PathBuf::from) else {
+        eprintln!("[live-session] EMBER_OSE_SERVER not set; skipping");
+        return;
+    };
+    let root = std::env::temp_dir().join(format!("ember-probe-{}", uuid_short()));
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(&root).unwrap();
+    let ws = root.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let doc_path = ws.join("probe.txt");
+    std::fs::write(&doc_path, "hello probe world\nsecond line\n").unwrap();
+
+    // Pack and install the probe the way the regression harness installs extensions.
+    let vsix = root.join("ember-probe.vsix");
+    let pack = Path::new(env!("CARGO_MANIFEST_DIR")).join("../ose/regression/probe/pack.py");
+    let st = Command::new("python3").arg("-I").arg(&pack).arg(&vsix).status().expect("python3");
+    assert!(st.success(), "pack.py failed");
+    let ext = root.join("ext");
+    let data = root.join("data");
+    let out = Command::new(&bin)
+        .arg("--install-extension")
+        .arg(&vsix)
+        .arg("--extensions-dir")
+        .arg(&ext)
+        .arg("--server-data-dir")
+        .arg(&data)
+        .arg("--accept-server-license-terms")
+        .stdin(Stdio::null())
+        .output()
+        .expect("install the probe");
+    assert!(out.status.success(), "install failed: {}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+
+    let server = Server::start_with(&bin, &root, Some(&ext));
+    let addr = format!("127.0.0.1:{}", server.port);
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while tokio::net::TcpStream::connect(&addr).await.is_err() {
+        assert!(Instant::now() < deadline, "server not listening on {addr}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let config = SessionConfig::new(addr.clone(), ws.to_str().unwrap());
+    let (session, mut rx) = tokio::time::timeout(Duration::from_secs(120), EditorSession::connect_tcp(config))
+        .await
+        .expect("connect timed out")
+        .unwrap_or_else(|e| panic!("connect: {e}"));
+
+    let uri = session.uri(doc_path.to_str().unwrap());
+    session.open(uri.clone()).unwrap();
+    let generation = wait_for("Opened", 30, &mut rx, |u| match u {
+        SessionUpdate::Opened { generation, language_id, .. } => {
+            assert_eq!(language_id, "plaintext");
+            Some(*generation)
+        }
+        SessionUpdate::OpenFailed { error, .. } => panic!("open failed: {error}"),
+        _ => None,
+    })
+    .await;
+
+    // CodeLens: asked for when the document opens and its provider registers.
+    let t = Instant::now();
+    wait_for("the probe's CodeLens", 120, &mut rx, |u| match u {
+        SessionUpdate::Decorations { uri: du, decorations, .. } if du.path == uri.path => decorations
+            .iter()
+            .any(|d| d.kind == DecorationKind::CodeLens && d.text.contains("ember-probe lens"))
+            .then_some(()),
+        _ => None,
+    })
+    .await;
+    println!("[live-session] CodeLens after {:.1} s", t.elapsed().as_secs_f64());
+
+    // Hover: rest on `probe` (line 0, column 7) until the provider answers.
+    let t = Instant::now();
+    let hover = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let rest = WidgetEvent::CodeHovered { decoration: 0, pos: WidgetPos::new(0, 7), phase: HoverPhase::Rest };
+            session.widget_event(uri.clone(), generation, rest).unwrap();
+            let until = tokio::time::Instant::now() + Duration::from_secs(3);
+            while let Ok(Some(u)) = tokio::time::timeout_at(until, rx.recv()).await {
+                if let SessionUpdate::Hover(h) = &u {
+                    if let Some(m) = h.contents.iter().find(|m| m.value.contains("ember-probe hover")) {
+                        return m.value.clone();
+                    }
+                }
+            }
+        }
+    })
+    .await
+    .expect("no hover from the probe");
+    assert_eq!(hover, "ember-probe hover: probe");
+    println!("[live-session] hover after {:.1} s", t.elapsed().as_secs_f64());
+
+    // Inline completion: ask at the end of line 1 until ghost text arrives.
+    let t = Instant::now();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            session.trigger_inline_completion(uri.clone(), generation, WidgetPos::new(1, 11)).unwrap();
+            let until = tokio::time::Instant::now() + Duration::from_secs(3);
+            while let Ok(Some(u)) = tokio::time::timeout_at(until, rx.recv()).await {
+                if let SessionUpdate::Decorations { uri: du, decorations, .. } = &u {
+                    if du.path == uri.path
+                        && decorations.iter().any(|d| d.kind == DecorationKind::GhostText && d.text.contains("ember-probe-ghost"))
+                    {
+                        return;
+                    }
+                }
+            }
+        }
+    })
+    .await
+    .expect("no ghost text from the probe");
+    println!("[live-session] ghost text after {:.1} s", t.elapsed().as_secs_f64());
+
+    session.close(uri).unwrap();
+    session.shutdown().await;
+    drop(server);
 }

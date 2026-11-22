@@ -124,6 +124,7 @@ where
         var(EDITOR_SERVER_ENV),
         var(EDITOR_COMPUTER_ENV),
         var(EDITOR_RELAY_ENV),
+        var(EDITOR_VSCODE_ENV),
     )
 }
 
@@ -136,6 +137,9 @@ pub const EDITOR_COMPUTER_ENV: &str = "EMBER_EDITOR_COMPUTER";
 /// Environment variable carrying the server's relay route to the OSE (FR-N9.1), which the
 /// editor dials instead of the endpoint when it is set.
 pub const EDITOR_RELAY_ENV: &str = "EMBER_EDITOR_RELAY";
+/// Environment variable carrying the project's VS Code target URL, which the editor window offers
+/// when the server is a Code-OSS commit it does not support (SPEC FR-E10, #32).
+pub const EDITOR_VSCODE_ENV: &str = "EMBER_EDITOR_VSCODE";
 
 fn parse_editor_args_with_env<I, S>(
     args: I,
@@ -143,6 +147,7 @@ fn parse_editor_args_with_env<I, S>(
     server_url: String,
     computer: String,
     relay: String,
+    vscode_url: String,
 ) -> Option<EditorTarget>
 where
     I: IntoIterator<Item = S>,
@@ -157,7 +162,7 @@ where
                 .map(|s| s.as_ref().to_string())
                 .unwrap_or_default();
             let endpoint = it.next().map(|s| s.as_ref().to_string()).unwrap_or_default();
-            return Some(EditorTarget { project, folder, endpoint, token, server_url, computer, relay });
+            return Some(EditorTarget { project, folder, endpoint, token, server_url, computer, relay, vscode_url });
         }
     }
     None
@@ -192,6 +197,7 @@ pub fn spawn_editor_target(exe: &Path, target: &EditorTarget) -> std::io::Result
         .env(EDITOR_SERVER_ENV, &target.server_url)
         .env(EDITOR_COMPUTER_ENV, &target.computer)
         .env(EDITOR_RELAY_ENV, &target.relay)
+        .env(EDITOR_VSCODE_ENV, &target.vscode_url)
         .spawn()
 }
 
@@ -313,6 +319,7 @@ mod tests {
             "http://srv:1".into(),
             "node-a".into(),
             String::new(),
+            String::new(),
         )
         .unwrap();
         assert_eq!(target.endpoint, "localhost:8000");
@@ -333,10 +340,28 @@ mod tests {
             "peer:abc".into(),
             "local".into(),
             relay.into(),
+            String::new(),
         )
         .unwrap();
         assert_eq!(target.relay, relay);
         assert_eq!(target.endpoint, "127.0.0.1:9000");
         assert_eq!(EDITOR_RELAY_ENV, "EMBER_EDITOR_RELAY");
+    }
+
+    /// SPEC FR-E10 (#32): the VS Code target the fallback offers travels in the environment.
+    #[test]
+    fn fr_e10_editor_args_carry_the_vscode_url_in_the_environment() {
+        let (_, args) = editor_command(Path::new("ember"), "project", "/work", "127.0.0.1:9000");
+        let target = parse_editor_args_with_env(
+            std::iter::once("ember".to_owned()).chain(args),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            "http://node:8890/?folder=%2Fwork".into(),
+        )
+        .unwrap();
+        assert_eq!(target.vscode_url, "http://node:8890/?folder=%2Fwork");
+        assert_eq!(EDITOR_VSCODE_ENV, "EMBER_EDITOR_VSCODE");
     }
 }

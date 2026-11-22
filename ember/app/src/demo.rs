@@ -67,6 +67,7 @@ fn demo_ose_from_env() -> Option<ember_client::wire::EmberOseConnection> {
         // The demo's OSE is dialed directly: there is no server relay in demo mode.
         relay: None,
         connection_token: String::new(),
+        ose_commit: None,
     })
 }
 
@@ -2227,6 +2228,7 @@ mod tests {
             endpoint: "http://127.0.0.1:18765".into(),
             relay: None,
             connection_token: String::new(),
+            ose_commit: None,
         };
         let l = ide_launch_with("s", "p", "/w", Some(ose));
         let c = crate::server::IdeLaunch::editor_connection(Some(&Ok(l)));

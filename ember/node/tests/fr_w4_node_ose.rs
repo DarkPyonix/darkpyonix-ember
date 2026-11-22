@@ -485,3 +485,27 @@ esac
     assert!(v["error"].as_str().unwrap().starts_with("install timed out"), "{v}");
     assert!(started.elapsed() < Duration::from_secs(30), "took {:?}", started.elapsed());
 }
+
+/// SPEC FR-E10 (#32): the node's launch answer carries the Code-OSS commit of its OSE build,
+/// read from the `product.json` beside the launcher's `bin/`.
+#[cfg(unix)]
+#[tokio::test]
+async fn fr_w4_ide_reports_ose_commit() {
+    if python3_missing("fr_w4_ide_reports_ose_commit") {
+        return;
+    }
+    const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+    let f = start(|dir, data| {
+        let build = dir.join("dpx-ose-test");
+        std::fs::create_dir_all(build.join("bin")).unwrap();
+        std::fs::write(build.join("product.json"), format!(r#"{{"commit":"{COMMIT}"}}"#)).unwrap();
+        let fake = fake_ose_binary(&build.join("bin"), data);
+        drop(fake);
+        OseManager::with_data_root(Some(build.join("bin").join("fake-ose")), data.to_path_buf())
+    })
+    .await;
+    let launch = f.client.ide_ose(&f.root).await.unwrap();
+    assert_eq!(launch.ose_commit.as_deref(), Some(COMMIT));
+    let again = f.client.ide_ose(&f.root).await.unwrap();
+    assert_eq!(again.ose_commit.as_deref(), Some(COMMIT), "a reused OSE reports it too");
+}

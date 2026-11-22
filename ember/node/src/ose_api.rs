@@ -63,6 +63,9 @@ pub struct OseLaunchResponse {
     pub endpoint: String,
     /// The placeholder token, never the real one: the relay puts the real token in its place.
     pub connection_token: String,
+    /// The Code-OSS commit of this node's OSE build (SPEC FR-E10, #32); absent from older nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ose_commit: Option<String>,
 }
 
 pub(crate) fn routes() -> Router<Node> {
@@ -95,6 +98,7 @@ async fn launch(State(n): State<Node>, Json(r): Json<OseLaunchRequest>) -> Resul
             launch_id: l.launch_id,
             endpoint: l.connection.endpoint,
             connection_token: l.connection.connection_token,
+            ose_commit: l.connection.ose_commit,
         })),
         Err(m) if m == NOT_INSTALLED => Err(ApiError::new(StatusCode::SERVICE_UNAVAILABLE, ErrorCode::Internal, m)),
         Err(m) => Err(internal(m)),

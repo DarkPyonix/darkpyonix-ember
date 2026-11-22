@@ -579,6 +579,7 @@ async fn node_ose_connection(computers: &Computers, id: &str, folder: &str) -> R
             endpoint: launch.endpoint,
             relay: Some(format!("/api/computers/{id}/ide/relay/{}", launch.launch_id)),
             connection_token: launch.connection_token,
+            ose_commit: launch.ose_commit,
         }),
         Ok(_) => Err("the node answered an invalid OSE launch id".into()),
         Err(ClientError::Api { body, .. }) => Err(body.error),
@@ -809,6 +810,7 @@ mod tests {
                 endpoint: "http://localhost:9000".into(),
                 relay: Some("/api/computers/local/ide/relay/abc".into()),
                 connection_token: "secret".into(),
+                ose_commit: None,
             }),
         };
         let value = serde_json::to_value(launch).unwrap();

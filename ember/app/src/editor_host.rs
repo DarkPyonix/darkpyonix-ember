@@ -1,7 +1,7 @@
 //! Runtime owner for a remote editor session.
 use std::sync::{Arc, Mutex};
 use dioxus_compose::prelude::*;
-use ember_editor::{EditorSession, SessionConfig, SessionUpdate, WidgetEvent};
+use ember_editor::{ConnectOutcome, EditorSession, SessionConfig, SessionUpdate, WidgetEvent};
 use ember_editor_conn::uri::UriComponents;
 use tokio::sync::mpsc;
 use crate::ui::editor::EditorTarget;
@@ -118,6 +118,10 @@ pub struct HostState {
     pub updates: Vec<SessionUpdate>,
     /// Workspace trust of the folder: the prompt and the restricted-mode banner (FR-L31.18).
     pub trust: crate::ui::workspace_trust::TrustState,
+    /// The server is a Code-OSS commit this editor does not support (or one it cannot read), so the
+    /// window does not connect and offers VS Code instead (SPEC FR-E10, #32). Never set for a
+    /// network or auth error, which stay [`HostState::error`].
+    pub fallback: Option<ember_editor::fallback::FallbackTarget>,
 }
 
 const CONNECT_ERROR: &str = "서버에 연결할 수 없습니다";
@@ -126,6 +130,15 @@ impl HostState {
     /// State for a target whose endpoint is empty: nothing to connect to.
     pub fn missing_endpoint() -> Self {
         Self { error: Some(CONNECT_ERROR.into()), ..Self::default() }
+    }
+
+    /// The server is not a supported Code-OSS commit: the window shows the fallback instead of
+    /// the editor (SPEC FR-E10). It does not retry: another attempt meets the same server.
+    pub fn fall_back(&mut self, target: ember_editor::fallback::FallbackTarget) {
+        self.connected = false;
+        self.reconnecting = false;
+        self.error = None;
+        self.fallback = Some(target);
     }
 
     /// The initial connection failed.
@@ -359,21 +372,30 @@ impl EditorHost {
                 config.user_settings = user_layer;
                 config.user_files = user_files.paths();
                 config.server_settings = true;
+                // The VS Code target the fallback offers (SPEC FR-E10).
+                config.vscode_url = (!target.vscode_url.trim().is_empty()).then(|| target.vscode_url.clone());
                 // With a relay path every socket goes through the server's relay route, over the transport or
                 // HTTP as the app reaches the server (FR-N9.1); direct TCP only without one (the demo endpoint).
+                // The server's commit is checked at connect; an unsupported one is a fallback, not an
+                // error (SPEC FR-E10, #32).
                 let connected = if target.relay.trim().is_empty() {
-                    EditorSession::connect_tcp(config).await
+                    EditorSession::connect_tcp_or_fallback(config).await
                 } else {
                     let reach = crate::editor_reach::reach_for(&target.server_url);
                     let relay = target.relay.clone();
-                    EditorSession::connect(config, move || {
+                    EditorSession::connect_or_fallback(config, move || {
                         let (reach, relay) = (reach.clone(), relay.clone());
                         async move { crate::editor_reach::dial(&reach, &relay).await }
                     })
                     .await
                 };
                 let (session, mut updates) = match connected {
-                    Ok(pair) => pair,
+                    Ok(ConnectOutcome::Connected { session, updates }) => (session, updates),
+                    Ok(ConnectOutcome::Fallback(fallback)) => {
+                        shared.lock().unwrap().fall_back(fallback);
+                        *revision.write() += 1;
+                        return;
+                    }
                     Err(error) => {
                         if attempt == 1 {
                             shared.lock().unwrap().connect_failed(error);
@@ -723,6 +745,22 @@ mod tests {
         assert!(state.connected);
         assert_eq!(state.lost, None);
         assert_eq!(state.reconnects, 1);
+    }
+
+    /// SPEC FR-E10 (#32 phase A step 5): an unsupported server commit reaches the window state as a
+    /// fallback (the window shows the sentence and the button), never as an error; a network error
+    /// stays an error with no fallback.
+    #[test]
+    fn fr_e10_host_state_carries_fallback() {
+        use ember_editor::{Fallback, FallbackTarget};
+        let mut state = HostState { reconnecting: true, ..Default::default() };
+        state.connect_failed("connection refused");
+        assert!(state.fallback.is_none(), "a network error is not a fallback");
+        let target = FallbackTarget { fallback: Fallback::OpenInVsCode { server_commit: Some("abc123".into()) }, vscode_url: None };
+        state.fall_back(target.clone());
+        assert_eq!(state.fallback, Some(target));
+        assert!(state.error.is_none(), "the fallback replaces the connect error");
+        assert!(!state.connected && !state.reconnecting);
     }
 
     #[test]

@@ -285,7 +285,7 @@ run there. Extensions that need Node require a VS Code server on a computer.
 
 *[Note, 2026-11-22]* #80 is 1.0 work by the owner's decision of 2026-11-22 (relayed by the leader):
 the mobile client without Node, plus the phone webview part of #10. iOS waits on the owner's answer
-to Q-M9. The online path is D52.
+to Q-M9. The online path is D53.
 
 ### D11: The 09-22 VS Code decisions still hold, inside the IDE window
 
@@ -1123,7 +1123,7 @@ What trust does not protect. Under D37 agents and terminals run with the full au
 
 **Status.** Written, not yet compiled or run (#380). SPEC `FR-T12` (open mention thread).
 
-### D52: The phone reaches the IDE through the per-node OSE relay
+### D53: The phone reaches the IDE through the per-node OSE relay
 
 **Decision.** [provisional, `docs/design/POST-1-0-MOBILE-NO-NODE.md` section 7, Q-M1, Q-M4..Q-M8, Q-M10, Q-M11 decided by the leader 2026-11-20; 1.0 work by the owner's decision of 2026-11-22, #80] The phone's two online IDE modes ("Open IDE → VS Code" and "Open IDE → Ember 에디터") use D42's per-node OSE relay and D37's device key. A small Rust gateway in the app process joins loopback connections to relay streams, so the phone reaches the computer's real OSE and Node runs only on the computer. This fills the D10 mobile-without-Node decision [user] for the online case; it does not change it.
 

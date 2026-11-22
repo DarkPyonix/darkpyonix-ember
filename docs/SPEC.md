@@ -710,7 +710,7 @@ Status: **Draft**, partly built (issue #491, follow-up #526). `FR-C1` (the admin
 > **`FR-W5a`–`FR-W5i`, `NFR-W5a`** come from `docs/design/MOBILE-NO-NODE.md` (2026-10-03) and its
 > rebaseline in `docs/design/POST-1-0-MOBILE-NO-NODE.md` (2026-11-20, PR #980). They are 1.0 work by
 > the owner's decision of 2026-11-22, not built yet. The phone's online path is the per-node OSE relay
-> (`INTENT.md` D52): the IDE screen loads the computer's OSE through the in-app gateway (`FR-W5a`,
+> (`INTENT.md` D53): the IDE screen loads the computer's OSE through the in-app gateway (`FR-W5a`,
 > `FR-W5b`), or the Ember editor talks to it over the same relay (`FR-W5c`); offline it edits a local
 > working copy (`FR-W5d`, `FR-W5e`), optionally in VS Code Web with web extensions only (`FR-W5f`).
 > **Rejected:** a `serve-web`-protocol-compatible server on the phone: the web workbench always opens

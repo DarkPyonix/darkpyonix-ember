@@ -19,6 +19,10 @@ pub struct EditorTarget {
     /// The server's relay route to the OSE (`/api/computers/{id}/ide/relay/{launch}`, FR-W4),
     /// dialed instead of `endpoint` when set (FR-N9.1). Empty when unknown.
     pub relay: String,
+    /// The VS Code target of the same project (`IdeLaunch`'s `vscode` URL), which the window offers
+    /// when the server is a Code-OSS commit the editor does not support (SPEC FR-E10, #32). Empty
+    /// when the server offered none.
+    pub vscode_url: String,
 }
 
 impl std::fmt::Debug for EditorTarget {
@@ -32,9 +36,67 @@ impl std::fmt::Debug for EditorTarget {
             .field("server_url", &self.server_url)
             .field("computer", &self.computer)
             .field("relay", &self.relay)
+            .field("vscode_url", &self.vscode_url)
             .finish()
     }
 }
+
+/// The one sentence the window shows instead of the editor when the server is not a supported
+/// Code-OSS commit (SPEC FR-E10, Q-E2: a sentence and a button, never an automatic switch).
+/// `has_vscode` says whether a VS Code target exists for the button.
+pub fn fallback_sentence(fallback: &ember_editor::Fallback, has_vscode: bool) -> String {
+    let ember_editor::Fallback::OpenInVsCode { server_commit } = fallback;
+    let what = match server_commit {
+        Some(c) => format!(
+            "이 컴퓨터의 편집기 서버(Code-OSS {})는 Ember 에디터가 지원하지 않는 버전입니다.",
+            c.chars().take(12).collect::<String>()
+        ),
+        None => "이 컴퓨터의 편집기 서버 버전을 알 수 없어 Ember 에디터로 열 수 없습니다.".to_string(),
+    };
+    if has_vscode {
+        format!("{what} VS Code에서 열 수 있습니다.")
+    } else {
+        format!("{what} 이 프로젝트에는 열 수 있는 VS Code 대상도 없습니다.")
+    }
+}
+
+/// What the hover card shows (SPEC FR-E3, #32 phase A step 7): the diagnostics at the position
+/// first, as Code-OSS's hover does, then each provider's Markdown as text. `None` when there is
+/// nothing to show.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HoverCard {
+    pub diagnostics: Vec<String>,
+    pub contents: Vec<String>,
+}
+
+/// The card for `hover`, or `None` when it has no diagnostic and no non-empty content. Markdown is
+/// shown as its text for now (rendering it is a later step of the editor parity work).
+pub fn hover_card(hover: &ember_editor::hover::HoverPopup) -> Option<HoverCard> {
+    let diagnostics: Vec<String> = hover.diagnostics.iter().map(|d| d.message.clone()).filter(|m| !m.trim().is_empty()).collect();
+    let contents: Vec<String> = hover.contents.iter().map(|m| m.value.trim().to_string()).filter(|v| !v.is_empty()).collect();
+    (!diagnostics.is_empty() || !contents.is_empty()).then_some(HoverCard { diagnostics, contents })
+}
+
+/// Which position the card is anchored to: the start of the hovered range when a provider gave
+/// one (the word), else where the pointer rests; with the document generation.
+pub fn hover_key(generation: u64, hover: &ember_editor::hover::HoverPopup) -> (u64, u32, u32) {
+    let at = hover.range.map(|r| r.start).unwrap_or(hover.pos);
+    (generation, at.line, at.col)
+}
+
+/// Where the card goes: under the hovered line, or above it when it is in the lower part of the
+/// window. `rect` is the position's rectangle in the window's dp.
+pub fn hover_card_style(rect: compose_rust::code::CodeRect) -> String {
+    let frame = format!("position:fixed; z-index:41; left:{:.0}px; max-width:480px; max-height:320px; overflow:auto; padding:var(--sp1);", rect.x.max(0.0));
+    if rect.y > 360.0 {
+        format!("{frame} top:auto; bottom:calc(100vh - {:.0}px);", rect.y - 2.0)
+    } else {
+        format!("{frame} top:{:.0}px;", rect.y + rect.height + 2.0)
+    }
+}
+
+/// The label of the fallback button (SPEC FR-E10).
+pub const FALLBACK_BUTTON: &str = "VS Code에서 열기";
 
 /// The status bar's cursor position, "N행 M열".
 pub fn position_text(line: usize, column: usize) -> String {
@@ -2027,6 +2089,56 @@ pub fn first_diff_line(old_text: &str, new_text: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
+
+    fn hover(range: Option<ember_editor::WidgetRange>, diag: &[&str], contents: &[&str]) -> ember_editor::hover::HoverPopup {
+        ember_editor::hover::HoverPopup {
+            doc: "d".into(),
+            generation: 3,
+            pos: ember_editor::WidgetPos::new(1, 9),
+            range,
+            diagnostics: diag
+                .iter()
+                .map(|m| ember_editor::diagnostics::HoverDiagnostic { owner: "o".into(), severity: ember_editor::Severity::Error, message: (*m).into(), source: None, code: None })
+                .collect(),
+            contents: contents.iter().map(|v| ember_editor::hover::MarkdownString { value: (*v).into(), is_trusted: false, support_theme_icons: false, support_html: false, raw: serde_json::Value::Null }).collect(),
+            complete: true,
+        }
+    }
+
+    /// SPEC FR-E3 (#32 phase A step 7): the card lists diagnostics first, then the providers' text;
+    /// it anchors at the hovered word's start when a range came back, else at the pointer; it goes
+    /// under the line near the top of the window and above it lower down.
+    #[test]
+    fn fr_e3_hover_card_text_anchor_and_placement() {
+        assert_eq!(hover_card(&hover(None, &[], &["  ", ""])), None, "nothing to show");
+        let h = hover(Some(ember_editor::WidgetRange::new(ember_editor::WidgetPos::new(1, 6), ember_editor::WidgetPos::new(1, 11))), &["expected ','"], &["**probe**", ""]);
+        assert_eq!(hover_card(&h), Some(HoverCard { diagnostics: vec!["expected ','".into()], contents: vec!["**probe**".into()] }));
+        assert_eq!(hover_key(3, &h), (3, 1, 6));
+        assert_eq!(hover_key(3, &hover(None, &[], &["x"])), (3, 1, 9));
+        let high = hover_card_style(compose_rust::code::CodeRect::new(100.0, 80.0, 2.0, 18.0));
+        assert!(high.contains("left:100px;") && high.contains("top:100px;"), "{high}");
+        let low = hover_card_style(compose_rust::code::CodeRect::new(-5.0, 600.0, 2.0, 18.0));
+        assert!(low.contains("left:0px;") && low.contains("bottom:calc(100vh - 598px);"), "{low}");
+    }
+
+    /// SPEC FR-E10, Q-E2 (#32 phase A step 6): one sentence for the fallback, in 합니다체, naming a
+    /// short commit or saying it is unknown, and offering VS Code only when a target exists.
+    #[test]
+    fn fr_e10_fallback_sentence_names_the_commit_and_the_way_out() {
+        use ember_editor::Fallback;
+        let known = Fallback::OpenInVsCode { server_commit: Some("0123456789abcdef0123".into()) };
+        assert_eq!(
+            fallback_sentence(&known, true),
+            "이 컴퓨터의 편집기 서버(Code-OSS 0123456789ab)는 Ember 에디터가 지원하지 않는 버전입니다. VS Code에서 열 수 있습니다."
+        );
+        let unknown = Fallback::OpenInVsCode { server_commit: None };
+        assert_eq!(
+            fallback_sentence(&unknown, false),
+            "이 컴퓨터의 편집기 서버 버전을 알 수 없어 Ember 에디터로 열 수 없습니다. 이 프로젝트에는 열 수 있는 VS Code 대상도 없습니다."
+        );
+        assert_eq!(FALLBACK_BUTTON, "VS Code에서 열기");
+    }
+
     use super::*;
 
     #[test]
@@ -2248,6 +2360,7 @@ mod tests {
             server_url: "http://srv:1".into(),
             computer: "node-a".into(),
             relay: "/api/computers/node-a/ide/relay/l1".into(),
+            vscode_url: String::new(),
         };
         let text = format!("{target:?}");
         assert!(text.contains("/api/computers/node-a/ide/relay/l1"), "{text}");

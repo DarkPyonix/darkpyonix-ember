@@ -50,7 +50,11 @@ pub enum DapMessage {
 
 impl DapMessage {
     pub fn request(seq: i64, command: &str, arguments: Value) -> Self {
-        Self::Request { seq, command: command.to_owned(), arguments }
+        Self::Request {
+            seq,
+            command: command.to_owned(),
+            arguments,
+        }
     }
 
     /// The answer to a request of the adapter (a reverse request such as `runInTerminal`).
@@ -182,11 +186,17 @@ pub enum RegisteredBreakpoint {
 }
 
 fn text(v: &Value, key: &str) -> Option<String> {
-    v.get(key).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned)
+    v.get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
 }
 
 fn number(v: &Value, key: &str) -> u32 {
-    v.get(key).and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok()).unwrap_or(0)
+    v.get(key)
+        .and_then(Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .unwrap_or(0)
 }
 
 /// Read the DTOs of `$registerBreakpoints` (`ISourceMultiBreakpointDto`, `IFunctionBreakpointDto`;
@@ -197,8 +207,18 @@ pub fn parse_registered_breakpoints(dtos: &[Value]) -> Vec<RegisteredBreakpoint>
     for dto in dtos {
         match dto.get("type").and_then(Value::as_str) {
             Some("sourceMulti") => {
-                let Some(uri) = dto.get("uri").and_then(|u| serde_json::from_value::<UriComponents>(u.clone()).ok()) else { continue };
-                for l in dto.get("lines").and_then(Value::as_array).into_iter().flatten() {
+                let Some(uri) = dto
+                    .get("uri")
+                    .and_then(|u| serde_json::from_value::<UriComponents>(u.clone()).ok())
+                else {
+                    continue;
+                };
+                for l in dto
+                    .get("lines")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
                     let Some(id) = text(l, "id") else { continue };
                     out.push(RegisteredBreakpoint::Source {
                         id,
@@ -213,7 +233,9 @@ pub fn parse_registered_breakpoints(dtos: &[Value]) -> Vec<RegisteredBreakpoint>
                 }
             }
             Some("function") => {
-                let Some(name) = text(dto, "functionName") else { continue };
+                let Some(name) = text(dto, "functionName") else {
+                    continue;
+                };
                 out.push(RegisteredBreakpoint::Function {
                     id: text(dto, "id"),
                     name,
@@ -241,7 +263,11 @@ fn folder_arg(folder: Option<&UriComponents>) -> Arg {
 /// `$startDASession(handle, session)` (L3323): the extension host creates the adapter of the
 /// session's type and starts it. The reply resolves once the adapter runs.
 pub fn start_da_session(handle: i64, session: &SessionRef) -> Call {
-    Call::new(PROXY, "$startDASession", vec![Arg::Json(handle.into()), session.arg()])
+    Call::new(
+        PROXY,
+        "$startDASession",
+        vec![Arg::Json(handle.into()), session.arg()],
+    )
 }
 
 /// `$stopDASession(handle)` (L3324).
@@ -251,26 +277,46 @@ pub fn stop_da_session(handle: i64) -> Call {
 
 /// `$sendDAMessage(handle, message)` (L3325): one DAP message to the adapter.
 pub fn send_da_message(handle: i64, message: &DapMessage) -> Call {
-    Call::new(PROXY, "$sendDAMessage", vec![Arg::Json(handle.into()), Arg::Json(message.to_value())])
+    Call::new(
+        PROXY,
+        "$sendDAMessage",
+        vec![Arg::Json(handle.into()), Arg::Json(message.to_value())],
+    )
 }
 
 /// `$resolveDebugConfiguration(handle, folder, config, token)` (L3326). The reply is the
 /// configuration, or `null` / `undefined` when the provider cancels the launch.
-pub fn resolve_debug_configuration(handle: i64, folder: Option<&UriComponents>, config: &Value) -> Call {
+pub fn resolve_debug_configuration(
+    handle: i64,
+    folder: Option<&UriComponents>,
+    config: &Value,
+) -> Call {
     Call::new(
         PROXY,
         "$resolveDebugConfiguration",
-        vec![Arg::Json(handle.into()), folder_arg(folder), Arg::Json(config.clone())],
+        vec![
+            Arg::Json(handle.into()),
+            folder_arg(folder),
+            Arg::Json(config.clone()),
+        ],
     )
     .cancellable()
 }
 
 /// `$resolveDebugConfigurationWithSubstitutedVariables(handle, folder, config, token)` (L3327).
-pub fn resolve_debug_configuration_with_substituted_variables(handle: i64, folder: Option<&UriComponents>, config: &Value) -> Call {
+pub fn resolve_debug_configuration_with_substituted_variables(
+    handle: i64,
+    folder: Option<&UriComponents>,
+    config: &Value,
+) -> Call {
     Call::new(
         PROXY,
         "$resolveDebugConfigurationWithSubstitutedVariables",
-        vec![Arg::Json(handle.into()), folder_arg(folder), Arg::Json(config.clone())],
+        vec![
+            Arg::Json(handle.into()),
+            folder_arg(folder),
+            Arg::Json(config.clone()),
+        ],
     )
     .cancellable()
 }
@@ -278,7 +324,12 @@ pub fn resolve_debug_configuration_with_substituted_variables(handle: i64, folde
 /// `$provideDebugConfigurations(handle, folder, token)` (L3328): the configurations a provider
 /// offers for the "add configuration" and dynamic-configuration lists.
 pub fn provide_debug_configurations(handle: i64, folder: Option<&UriComponents>) -> Call {
-    Call::new(PROXY, "$provideDebugConfigurations", vec![Arg::Json(handle.into()), folder_arg(folder)]).cancellable()
+    Call::new(
+        PROXY,
+        "$provideDebugConfigurations",
+        vec![Arg::Json(handle.into()), folder_arg(folder)],
+    )
+    .cancellable()
 }
 
 /// `$acceptDebugSessionStarted(session)` (L3330).
@@ -293,13 +344,21 @@ pub fn accept_debug_session_terminated(session: &SessionRef) -> Call {
 
 /// `$acceptDebugSessionActiveChanged(session | undefined)` (L3332).
 pub fn accept_debug_session_active_changed(session: Option<&SessionRef>) -> Call {
-    Call::new(PROXY, "$acceptDebugSessionActiveChanged", session.map(|s| vec![s.arg()]).unwrap_or_default())
+    Call::new(
+        PROXY,
+        "$acceptDebugSessionActiveChanged",
+        session.map(|s| vec![s.arg()]).unwrap_or_default(),
+    )
 }
 
 /// `$acceptDebugSessionCustomEvent(session, event)` (L3333): a DAP event the renderer does not
 /// know, for `debug.onDidReceiveDebugSessionCustomEvent`.
 pub fn accept_debug_session_custom_event(session: &SessionRef, event: &Value) -> Call {
-    Call::new(PROXY, "$acceptDebugSessionCustomEvent", vec![session.arg(), Arg::Json(event.clone())])
+    Call::new(
+        PROXY,
+        "$acceptDebugSessionCustomEvent",
+        vec![session.arg(), Arg::Json(event.clone())],
+    )
 }
 
 /// `$acceptBreakpointsDelta(delta)` (L3334): keeps `debug.breakpoints` in step.
@@ -309,19 +368,34 @@ pub fn accept_breakpoints_delta(delta: &BreakpointsDelta) -> Call {
 
 /// `$acceptDebugSessionNameChanged(session, name)` (L3335).
 pub fn accept_debug_session_name_changed(session: &SessionRef, name: &str) -> Call {
-    Call::new(PROXY, "$acceptDebugSessionNameChanged", vec![session.arg(), Arg::Json(name.into())])
+    Call::new(
+        PROXY,
+        "$acceptDebugSessionNameChanged",
+        vec![session.arg(), Arg::Json(name.into())],
+    )
 }
 
 /// `$acceptStackFrameFocus(focus | undefined)` (L3336): `IThreadFocusDto` or `IStackFrameFocusDto`.
 pub fn accept_stack_frame_focus(session_id: &str, thread_id: i64, frame_id: Option<i64>) -> Call {
     let mut focus = Map::new();
-    focus.insert("kind".into(), json!(if frame_id.is_some() { "stackFrame" } else { "thread" }));
+    focus.insert(
+        "kind".into(),
+        json!(if frame_id.is_some() {
+            "stackFrame"
+        } else {
+            "thread"
+        }),
+    );
     focus.insert("sessionId".into(), json!(session_id));
     focus.insert("threadId".into(), json!(thread_id));
     if let Some(frame) = frame_id {
         focus.insert("frameId".into(), json!(frame));
     }
-    Call::new(PROXY, "$acceptStackFrameFocus", vec![Arg::Json(Value::Object(focus))])
+    Call::new(
+        PROXY,
+        "$acceptStackFrameFocus",
+        vec![Arg::Json(Value::Object(focus))],
+    )
 }
 
 #[cfg(test)]
@@ -332,28 +406,56 @@ mod tests {
     fn fr_l31_42_dap_message_round_trips_as_the_wire_spells_it() {
         let event = json!({"type": "event", "seq": 3, "event": "stopped", "body": {"reason": "breakpoint", "threadId": 1}});
         let parsed = DapMessage::from_value(&event).unwrap();
-        assert_eq!(parsed, DapMessage::Event { seq: 3, event: "stopped".into(), body: json!({"reason": "breakpoint", "threadId": 1}) });
+        assert_eq!(
+            parsed,
+            DapMessage::Event {
+                seq: 3,
+                event: "stopped".into(),
+                body: json!({"reason": "breakpoint", "threadId": 1})
+            }
+        );
         assert_eq!(parsed.to_value(), event);
 
         let response = json!({"type": "response", "request_seq": 2, "success": false, "command": "launch", "message": "no"});
-        let DapMessage::Response { seq, request_seq, success, message, body, .. } = DapMessage::from_value(&response).unwrap() else {
+        let DapMessage::Response {
+            seq,
+            request_seq,
+            success,
+            message,
+            body,
+            ..
+        } = DapMessage::from_value(&response).unwrap()
+        else {
             panic!("not a response")
         };
-        assert_eq!((seq, request_seq, success, message.as_deref(), body), (0, 2, false, Some("no"), Value::Null));
+        assert_eq!(
+            (seq, request_seq, success, message.as_deref(), body),
+            (0, 2, false, Some("no"), Value::Null)
+        );
 
         let request = DapMessage::request(7, "threads", Value::Null);
-        assert_eq!(request.to_value(), json!({"type": "request", "seq": 7, "command": "threads"}));
+        assert_eq!(
+            request.to_value(),
+            json!({"type": "request", "seq": 7, "command": "threads"})
+        );
         assert!(DapMessage::from_value(&json!({"type": "nonsense"})).is_err());
     }
 
     #[test]
     fn fr_l31_42_calls_name_the_pinned_methods() {
         let sent = send_da_message(4, &DapMessage::request(1, "initialize", json!({})));
-        assert_eq!((sent.proxy, sent.method, sent.cancellable), ("ExtHostDebugService", "$sendDAMessage", false));
+        assert_eq!(
+            (sent.proxy, sent.method, sent.cancellable),
+            ("ExtHostDebugService", "$sendDAMessage", false)
+        );
         assert!(crate::rpc_ids::id_of(PROXY).is_some());
         let resolve = resolve_debug_configuration(2, None, &json!({"type": "x"}));
         assert!(resolve.cancellable);
-        assert_eq!(resolve.args[1], Arg::Undefined, "no folder is `undefined`, not `null`");
+        assert_eq!(
+            resolve.args[1],
+            Arg::Undefined,
+            "no folder is `undefined`, not `null`"
+        );
         let focus = accept_stack_frame_focus("s", 1, Some(9));
         assert_eq!(focus.args[0].as_json().unwrap()["kind"], "stackFrame");
         assert!(accept_debug_session_active_changed(None).args.is_empty());
@@ -361,7 +463,8 @@ mod tests {
 
     #[test]
     fn fr_l31_42_registered_breakpoints_are_read_from_the_dtos() {
-        let uri = json!({"$mid": 1, "scheme": "vscode-remote", "authority": "a", "path": "/w/m.py"});
+        let uri =
+            json!({"$mid": 1, "scheme": "vscode-remote", "authority": "a", "path": "/w/m.py"});
         let dtos = vec![
             json!({"type": "sourceMulti", "uri": uri, "lines": [
                 {"id": "b1", "enabled": true, "line": 1, "character": 0, "condition": "x > 1"},
@@ -372,9 +475,15 @@ mod tests {
         ];
         let parsed = parse_registered_breakpoints(&dtos);
         assert_eq!(parsed.len(), 3);
-        assert!(matches!(&parsed[0], RegisteredBreakpoint::Source { id, line: 1, condition: Some(c), .. } if id == "b1" && c == "x > 1"));
-        assert!(matches!(&parsed[1], RegisteredBreakpoint::Source { enabled: false, character: 2, log_message: Some(m), .. } if m == "hi"));
-        assert!(matches!(&parsed[2], RegisteredBreakpoint::Function { name, .. } if name == "main"));
+        assert!(
+            matches!(&parsed[0], RegisteredBreakpoint::Source { id, line: 1, condition: Some(c), .. } if id == "b1" && c == "x > 1")
+        );
+        assert!(
+            matches!(&parsed[1], RegisteredBreakpoint::Source { enabled: false, character: 2, log_message: Some(m), .. } if m == "hi")
+        );
+        assert!(
+            matches!(&parsed[2], RegisteredBreakpoint::Function { name, .. } if name == "main")
+        );
     }
 
     #[test]

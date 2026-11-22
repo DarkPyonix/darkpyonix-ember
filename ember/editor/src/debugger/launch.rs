@@ -44,7 +44,12 @@ impl LaunchFile {
 /// Read the text of a `launch.json`. An empty file has no configurations. Entries that are not
 /// objects are skipped, as the workbench skips them.
 pub fn parse_launch_json(text: &str) -> Result<LaunchFile, String> {
-    let root = parse_jsonc(text).map_err(|e| format!("cannot read launch.json at line {}, column {}: {}", e.line, e.column, e.message))?;
+    let root = parse_jsonc(text).map_err(|e| {
+        format!(
+            "cannot read launch.json at line {}, column {}: {}",
+            e.line, e.column, e.message
+        )
+    })?;
     let configurations = root
         .get("configurations")
         .and_then(Value::as_array)
@@ -63,16 +68,24 @@ pub fn parse_launch_json(text: &str) -> Result<LaunchFile, String> {
                         .iter()
                         .filter_map(|e| match e {
                             Value::String(s) => Some(s.clone()),
-                            Value::Object(o) => o.get("name").and_then(Value::as_str).map(str::to_owned),
+                            Value::Object(o) => {
+                                o.get("name").and_then(Value::as_str).map(str::to_owned)
+                            }
                             _ => None,
                         })
                         .collect();
-                    Some(Compound { name, configurations })
+                    Some(Compound {
+                        name,
+                        configurations,
+                    })
                 })
                 .collect()
         })
         .unwrap_or_default();
-    Ok(LaunchFile { configurations, compounds })
+    Ok(LaunchFile {
+        configurations,
+        compounds,
+    })
 }
 
 /// What the substitution may answer with.
@@ -85,7 +98,10 @@ pub struct VarContext {
 }
 
 fn basename(path: &str) -> &str {
-    path.trim_end_matches('/').rsplit('/').next().unwrap_or(path)
+    path.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or(path)
 }
 
 fn dirname(path: &str) -> &str {
@@ -125,7 +141,9 @@ impl VarContext {
             }),
             "fileDirname" => file.map(|f| dirname(f).to_owned()),
             "fileExtname" => file.map(|f| extname(basename(f)).to_owned()),
-            "relativeFile" => file.map(|f| folder.and_then(|d| relative(f, d)).unwrap_or(f).to_owned()),
+            "relativeFile" => {
+                file.map(|f| folder.and_then(|d| relative(f, d)).unwrap_or(f).to_owned())
+            }
             "relativeFileDirname" => file.map(|f| {
                 let rel = folder.and_then(|d| relative(f, d)).unwrap_or(f);
                 match rel.rsplit_once('/') {
@@ -206,16 +224,25 @@ mod tests {
         assert_eq!(file.configurations.len(), 2);
         assert_eq!(config_name(&file.configurations[1]), "Attach");
         assert_eq!(file.find("Run").unwrap()["program"], "${file}");
-        assert_eq!(file.compound("Both").unwrap().configurations, vec!["Run".to_owned(), "Attach".to_owned()]);
+        assert_eq!(
+            file.compound("Both").unwrap().configurations,
+            vec!["Run".to_owned(), "Attach".to_owned()]
+        );
         assert_eq!(parse_launch_json("").unwrap(), LaunchFile::default());
-        assert_eq!(parse_launch_json("// only a comment\n").unwrap(), LaunchFile::default());
+        assert_eq!(
+            parse_launch_json("// only a comment\n").unwrap(),
+            LaunchFile::default()
+        );
         let err = parse_launch_json("{ \"configurations\": [").unwrap_err();
         assert!(err.contains("launch.json"), "{err}");
     }
 
     #[test]
     fn fr_l31_42_variables_are_replaced_and_unknown_ones_are_left() {
-        let ctx = VarContext { workspace_folder: Some("/w/proj".into()), file: Some("/w/proj/src/app.py".into()) };
+        let ctx = VarContext {
+            workspace_folder: Some("/w/proj".into()),
+            file: Some("/w/proj/src/app.py".into()),
+        };
         let sub = |s: &str| ctx.substitute_str(s);
         assert_eq!(sub("${workspaceFolder}/x"), "/w/proj/x");
         assert_eq!(sub("${workspaceFolderBasename}"), "proj");
@@ -227,16 +254,25 @@ mod tests {
         assert_eq!(sub("${relativeFile}"), "src/app.py");
         assert_eq!(sub("${relativeFileDirname}"), "src");
         assert_eq!(sub("a${/}b"), "a/b");
-        assert_eq!(sub("${env:HOME} ${config:a.b} ${command:x} ${input:y}"), "${env:HOME} ${config:a.b} ${command:x} ${input:y}");
+        assert_eq!(
+            sub("${env:HOME} ${config:a.b} ${command:x} ${input:y}"),
+            "${env:HOME} ${config:a.b} ${command:x} ${input:y}"
+        );
         assert_eq!(sub("open ${ brace"), "open ${ brace");
         assert_eq!(sub("no variables"), "no variables");
         let none = VarContext::default();
-        assert_eq!(none.substitute_str("${file} ${workspaceFolder}"), "${file} ${workspaceFolder}");
+        assert_eq!(
+            none.substitute_str("${file} ${workspaceFolder}"),
+            "${file} ${workspaceFolder}"
+        );
     }
 
     #[test]
     fn fr_l31_42_substitution_reaches_nested_strings_and_keeps_other_values() {
-        let ctx = VarContext { workspace_folder: Some("/w".into()), file: Some("/w/m.py".into()) };
+        let ctx = VarContext {
+            workspace_folder: Some("/w".into()),
+            file: Some("/w/m.py".into()),
+        };
         let config = json!({"program": "${file}", "args": ["${workspaceFolder}", 3, true], "env": {"P": "${fileBasename}"}, "n": null});
         assert_eq!(
             ctx.substitute(&config),

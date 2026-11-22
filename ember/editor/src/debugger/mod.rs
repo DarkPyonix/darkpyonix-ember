@@ -36,14 +36,16 @@ pub mod launch;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
-use ember_editor_conn::debug::{self as wire, BreakpointsDelta, DapMessage, SessionDto, SessionRef};
+use ember_editor_conn::debug::{
+    self as wire, BreakpointsDelta, DapMessage, SessionDto, SessionRef,
+};
 use ember_editor_conn::exthost::{self, Call};
 use ember_editor_conn::rpc::{js_error, Reply};
 use ember_editor_conn::uri::UriComponents;
 use serde_json::{json, Map, Value};
 
-pub use breakpoints::{ExceptionFilter, FunctionBreakpoint, SourceBreakpoint};
 use breakpoints::{set_breakpoints_args, set_function_breakpoints_args, Breakpoints, Touched};
+pub use breakpoints::{ExceptionFilter, FunctionBreakpoint, SourceBreakpoint};
 use launch::{config_name, parse_launch_json, LaunchFile, VarContext, LAUNCH_JSON};
 
 /// How long a `disconnect` may stay unanswered before the session is ended anyway
@@ -57,7 +59,12 @@ pub enum SessionState {
     /// The adapter is starting, or has not answered `launch` yet.
     Initializing,
     Running,
-    Stopped { reason: String, thread_id: Option<i64>, description: Option<String>, text: Option<String> },
+    Stopped {
+        reason: String,
+        thread_id: Option<i64>,
+        description: Option<String>,
+        text: Option<String>,
+    },
     Terminated,
 }
 
@@ -142,21 +149,58 @@ pub struct ConfigInfo {
 #[derive(Debug, Clone, PartialEq)]
 pub enum DebugUpdate {
     /// The configurations of `launch.json`, answering [`DebugRequest::ListConfigurations`].
-    Configurations { configurations: Vec<ConfigInfo>, error: Option<String> },
+    Configurations {
+        configurations: Vec<ConfigInfo>,
+        error: Option<String>,
+    },
     /// What a provider offers for a type, answering [`DebugRequest::ProvideConfigurations`].
-    ProvidedConfigurations { debug_type: String, configurations: Vec<Value> },
+    ProvidedConfigurations {
+        debug_type: String,
+        configurations: Vec<Value>,
+    },
     /// Every session with its state, and the one the window shows. Sent when a session starts,
     /// changes state, changes thread or frame, or ends (the ended one is in the list once).
-    Sessions { sessions: Vec<SessionInfo>, active: Option<String> },
-    Threads { session: String, threads: Vec<ThreadInfo> },
-    CallStack { session: String, thread_id: i64, frames: Vec<FrameInfo>, total_frames: Option<i64> },
-    Scopes { session: String, frame_id: i64, scopes: Vec<ScopeInfo> },
-    Variables { session: String, reference: i64, variables: Vec<VariableInfo>, error: Option<String> },
+    Sessions {
+        sessions: Vec<SessionInfo>,
+        active: Option<String>,
+    },
+    Threads {
+        session: String,
+        threads: Vec<ThreadInfo>,
+    },
+    CallStack {
+        session: String,
+        thread_id: i64,
+        frames: Vec<FrameInfo>,
+        total_frames: Option<i64>,
+    },
+    Scopes {
+        session: String,
+        frame_id: i64,
+        scopes: Vec<ScopeInfo>,
+    },
+    Variables {
+        session: String,
+        reference: i64,
+        variables: Vec<VariableInfo>,
+        error: Option<String>,
+    },
     /// The answer to [`DebugRequest::Evaluate`] with the same `id`.
-    Evaluated { id: u64, session: String, result: Result<EvalResult, String> },
-    Console { session: Option<String>, entry: ConsoleEntry },
+    Evaluated {
+        id: u64,
+        session: String,
+        result: Result<EvalResult, String>,
+    },
+    Console {
+        session: Option<String>,
+        entry: ConsoleEntry,
+    },
     /// The whole breakpoint registry, with what the adapters said about it.
-    Breakpoints { source: Vec<SourceBreakpoint>, functions: Vec<FunctionBreakpoint>, exception_filters: Vec<ExceptionFilter> },
+    Breakpoints {
+        source: Vec<SourceBreakpoint>,
+        functions: Vec<FunctionBreakpoint>,
+        exception_filters: Vec<ExceptionFilter>,
+    },
     /// A session could not start: the message to show.
     StartFailed { message: String },
 }
@@ -199,24 +243,69 @@ impl EvalContext {
 pub enum DebugRequest {
     ListConfigurations,
     /// Configurations the providers of `debug_type` offer.
-    ProvideConfigurations { debug_type: String },
-    Start { selector: ConfigSelector },
+    ProvideConfigurations {
+        debug_type: String,
+    },
+    Start {
+        selector: ConfigSelector,
+    },
     /// Stop a session, or every session with `None`.
-    Stop { session: Option<String> },
-    Restart { session: String },
-    Continue { session: String, thread_id: i64 },
-    Pause { session: String, thread_id: i64 },
-    StepOver { session: String, thread_id: i64 },
-    StepInto { session: String, thread_id: i64 },
-    StepOut { session: String, thread_id: i64 },
+    Stop {
+        session: Option<String>,
+    },
+    Restart {
+        session: String,
+    },
+    Continue {
+        session: String,
+        thread_id: i64,
+    },
+    Pause {
+        session: String,
+        thread_id: i64,
+    },
+    StepOver {
+        session: String,
+        thread_id: i64,
+    },
+    StepInto {
+        session: String,
+        thread_id: i64,
+    },
+    StepOut {
+        session: String,
+        thread_id: i64,
+    },
     /// Show another thread: its stack is loaded.
-    SelectThread { session: String, thread_id: i64 },
+    SelectThread {
+        session: String,
+        thread_id: i64,
+    },
     /// Show another frame: its scopes are loaded.
-    SelectFrame { session: String, thread_id: i64, frame_id: i64 },
-    Scopes { session: String, frame_id: i64 },
-    Variables { session: String, reference: i64 },
-    Evaluate { id: u64, session: String, frame_id: Option<i64>, expression: String, context: EvalContext },
-    ToggleBreakpoint { uri: UriComponents, line: u32 },
+    SelectFrame {
+        session: String,
+        thread_id: i64,
+        frame_id: i64,
+    },
+    Scopes {
+        session: String,
+        frame_id: i64,
+    },
+    Variables {
+        session: String,
+        reference: i64,
+    },
+    Evaluate {
+        id: u64,
+        session: String,
+        frame_id: Option<i64>,
+        expression: String,
+        context: EvalContext,
+    },
+    ToggleBreakpoint {
+        uri: UriComponents,
+        line: u32,
+    },
     AddBreakpoint {
         uri: UriComponents,
         line: u32,
@@ -226,10 +315,23 @@ pub enum DebugRequest {
         log_message: Option<String>,
     },
     /// Replace the condition, hit condition, log message and enabled flag of a breakpoint.
-    EditBreakpoint { id: String, condition: Option<String>, hit_condition: Option<String>, log_message: Option<String>, enabled: bool },
-    RemoveBreakpoint { id: String },
-    AddFunctionBreakpoint { name: String },
-    SetExceptionFilter { filter: String, enabled: bool },
+    EditBreakpoint {
+        id: String,
+        condition: Option<String>,
+        hit_condition: Option<String>,
+        log_message: Option<String>,
+        enabled: bool,
+    },
+    RemoveBreakpoint {
+        id: String,
+    },
+    AddFunctionBreakpoint {
+        name: String,
+    },
+    SetExceptionFilter {
+        filter: String,
+        enabled: bool,
+    },
 }
 
 /// What the core knows that a request may need.
@@ -255,10 +357,16 @@ pub enum Out {
     Rpc(Call),
     RpcWith(Call, Pending),
     /// Answer extension-host request `req`.
-    Respond { req: u32, result: Result<Reply, Option<Value>> },
+    Respond {
+        req: u32,
+        result: Result<Reply, Option<Value>>,
+    },
     Ui(DebugUpdate),
     /// Read `.vscode/launch.json`; the answer goes to [`DebugState::on_launch_json`].
-    ReadLaunchJson { uri: UriComponents, start: u64 },
+    ReadLaunchJson {
+        uri: UriComponents,
+        start: u64,
+    },
 }
 
 // ---- state ------------------------------------------------------------------------------------
@@ -334,19 +442,40 @@ struct Start {
 enum Dap {
     Initialize,
     Launch,
-    SetBreakpoints { ids: Vec<String>, initial: bool },
-    SetFunctionBreakpoints { ids: Vec<String>, initial: bool },
-    SetExceptionBreakpoints { initial: bool },
+    SetBreakpoints {
+        ids: Vec<String>,
+        initial: bool,
+    },
+    SetFunctionBreakpoints {
+        ids: Vec<String>,
+        initial: bool,
+    },
+    SetExceptionBreakpoints {
+        initial: bool,
+    },
     ConfigurationDone,
     Threads,
-    StackTrace { thread_id: i64, epoch: u64 },
-    Scopes { frame_id: i64 },
-    Variables { reference: i64 },
-    Evaluate { id: u64 },
+    StackTrace {
+        thread_id: i64,
+        epoch: u64,
+    },
+    Scopes {
+        frame_id: i64,
+    },
+    Variables {
+        reference: i64,
+    },
+    Evaluate {
+        id: u64,
+    },
     /// `continue`, `next`, `stepIn` or `stepOut` sent while the session was stopped at `epoch`.
-    Step { epoch: u64 },
+    Step {
+        epoch: u64,
+    },
     Disconnect,
-    Custom { req: u32 },
+    Custom {
+        req: u32,
+    },
     Other,
 }
 
@@ -418,7 +547,9 @@ fn str_of(v: &Value, key: &str) -> Option<String> {
 }
 
 fn u32_of(v: &Value, key: &str) -> Option<u32> {
-    v.get(key).and_then(Value::as_i64).and_then(|n| u32::try_from(n).ok())
+    v.get(key)
+        .and_then(Value::as_i64)
+        .and_then(|n| u32::try_from(n).ok())
 }
 
 fn merge_caps(caps: &mut Map<String, Value>, body: &Value) {
@@ -437,14 +568,29 @@ fn send_dap(s: &mut Session, command: &str, arguments: Value, tag: Dap, out: &mu
     s.seq += 1;
     let seq = s.seq;
     s.pending.insert(seq, tag);
-    out.push(Out::Rpc(wire::send_da_message(s.handle, &DapMessage::request(seq, command, arguments))));
+    out.push(Out::Rpc(wire::send_da_message(
+        s.handle,
+        &DapMessage::request(seq, command, arguments),
+    )));
 }
 
-fn send_file(s: &mut Session, bps: &Breakpoints, uri: &UriComponents, initial: bool, out: &mut Vec<Out>) {
+fn send_file(
+    s: &mut Session,
+    bps: &Breakpoints,
+    uri: &UriComponents,
+    initial: bool,
+    out: &mut Vec<Out>,
+) {
     let enabled = bps.enabled_in(uri);
     let args = set_breakpoints_args(uri, &enabled);
     let ids: Vec<String> = enabled.iter().map(|b| b.id.clone()).collect();
-    send_dap(s, "setBreakpoints", args, Dap::SetBreakpoints { ids, initial }, out);
+    send_dap(
+        s,
+        "setBreakpoints",
+        args,
+        Dap::SetBreakpoints { ids, initial },
+        out,
+    );
 }
 
 /// Whether a request was sent: an adapter without function breakpoints gets none.
@@ -455,7 +601,13 @@ fn send_functions(s: &mut Session, bps: &Breakpoints, initial: bool, out: &mut V
     let enabled = bps.enabled_functions();
     let args = set_function_breakpoints_args(&enabled);
     let ids: Vec<String> = enabled.iter().map(|b| b.id.clone()).collect();
-    send_dap(s, "setFunctionBreakpoints", args, Dap::SetFunctionBreakpoints { ids, initial }, out);
+    send_dap(
+        s,
+        "setFunctionBreakpoints",
+        args,
+        Dap::SetFunctionBreakpoints { ids, initial },
+        out,
+    );
     true
 }
 
@@ -466,13 +618,25 @@ fn send_exceptions(s: &mut Session, bps: &Breakpoints, initial: bool, out: &mut 
         return false;
     }
     let args = bps.exception_args(s.cap("supportsExceptionFilterOptions"));
-    send_dap(s, "setExceptionBreakpoints", args, Dap::SetExceptionBreakpoints { initial }, out);
+    send_dap(
+        s,
+        "setExceptionBreakpoints",
+        args,
+        Dap::SetExceptionBreakpoints { initial },
+        out,
+    );
     true
 }
 
 fn request_stack(s: &mut Session, thread_id: i64, out: &mut Vec<Out>) {
     let epoch = s.stop_epoch;
-    send_dap(s, "stackTrace", json!({ "threadId": thread_id, "startFrame": 0, "levels": 20 }), Dap::StackTrace { thread_id, epoch }, out);
+    send_dap(
+        s,
+        "stackTrace",
+        json!({ "threadId": thread_id, "startFrame": 0, "levels": 20 }),
+        Dap::StackTrace { thread_id, epoch },
+        out,
+    );
 }
 
 fn initialize_args(debug_type: &str) -> Value {
@@ -571,7 +735,9 @@ impl DebugState {
 
     /// The threads the adapter of a session last listed.
     pub fn threads(&self, session: &str) -> Vec<ThreadInfo> {
-        self.idx(session).map(|i| self.sessions[i].threads.clone()).unwrap_or_default()
+        self.idx(session)
+            .map(|i| self.sessions[i].threads.clone())
+            .unwrap_or_default()
     }
 
     pub fn sessions(&self) -> Vec<SessionInfo> {
@@ -597,7 +763,9 @@ impl DebugState {
     }
 
     fn uri_of(&self, path: &str) -> Option<UriComponents> {
-        self.workspace.as_ref().map(|w| UriComponents::new(w.scheme.clone(), w.authority.clone(), path))
+        self.workspace
+            .as_ref()
+            .map(|w| UriComponents::new(w.scheme.clone(), w.authority.clone(), path))
     }
 
     fn session_ref(&self, i: usize) -> SessionRef {
@@ -617,7 +785,10 @@ impl DebugState {
     }
 
     fn emit_sessions(&self, out: &mut Vec<Out>) {
-        out.push(Out::Ui(DebugUpdate::Sessions { sessions: self.sessions(), active: self.active.clone() }));
+        out.push(Out::Ui(DebugUpdate::Sessions {
+            sessions: self.sessions(),
+            active: self.active.clone(),
+        }));
     }
 
     fn emit_breakpoints(&self, out: &mut Vec<Out>) {
@@ -629,17 +800,34 @@ impl DebugState {
     }
 
     fn console(&self, session: Option<&str>, category: &str, text: String, out: &mut Vec<Out>) {
-        let entry = ConsoleEntry { category: category.to_owned(), text, uri: None, line: None };
-        out.push(Out::Ui(DebugUpdate::Console { session: session.map(str::to_owned), entry }));
+        let entry = ConsoleEntry {
+            category: category.to_owned(),
+            text,
+            uri: None,
+            line: None,
+        };
+        out.push(Out::Ui(DebugUpdate::Console {
+            session: session.map(str::to_owned),
+            entry,
+        }));
     }
 
     fn resolve_notify(&self, notify: Notify, ok: bool, out: &mut Vec<Out>) {
         match notify {
             Notify::Nobody => {}
-            Notify::Ext { req } => out.push(Out::Respond { req, result: Ok(Reply::Json(Value::Bool(ok))) }),
-            Notify::Dap { handle, request_seq } => {
+            Notify::Ext { req } => out.push(Out::Respond {
+                req,
+                result: Ok(Reply::Json(Value::Bool(ok))),
+            }),
+            Notify::Dap {
+                handle,
+                request_seq,
+            } => {
                 let error = (!ok).then_some("Failed to start debugging");
-                out.push(Out::Rpc(wire::send_da_message(handle, &DapMessage::response(request_seq, "startDebugging", error, Value::Null))));
+                out.push(Out::Rpc(wire::send_da_message(
+                    handle,
+                    &DapMessage::response(request_seq, "startDebugging", error, Value::Null),
+                )));
             }
         }
     }
@@ -657,24 +845,43 @@ impl DebugState {
             DebugRequest::ListConfigurations => self.begin_list(env, &mut out),
             DebugRequest::ProvideConfigurations { debug_type } => {
                 let folder = self.workspace.clone();
-                let calls: Vec<(i64, String)> =
-                    self.providers.iter().filter(|p| p.has_provide && p.debug_type == debug_type).map(|p| (p.handle, p.debug_type.clone())).collect();
+                let calls: Vec<(i64, String)> = self
+                    .providers
+                    .iter()
+                    .filter(|p| p.has_provide && p.debug_type == debug_type)
+                    .map(|p| (p.handle, p.debug_type.clone()))
+                    .collect();
                 for (handle, debug_type) in calls {
-                    out.push(Out::RpcWith(wire::provide_debug_configurations(handle, folder.as_ref()), Pending::Provide { debug_type }));
+                    out.push(Out::RpcWith(
+                        wire::provide_debug_configurations(handle, folder.as_ref()),
+                        Pending::Provide { debug_type },
+                    ));
                 }
             }
             DebugRequest::Start { selector } => {
                 let origin = self.origin(None, Notify::Nobody, None, false, env);
                 self.begin_selected(selector, origin, &mut out);
             }
-            DebugRequest::Stop { session: Some(id) } => self.disconnect(&id, None, None, None, &mut out),
+            DebugRequest::Stop { session: Some(id) } => {
+                self.disconnect(&id, None, None, None, &mut out)
+            }
             DebugRequest::Stop { session: None } => self.stop_all(&mut out),
             DebugRequest::Restart { session } => self.restart(&session, &mut out),
-            DebugRequest::Continue { session, thread_id } => self.thread_command(&session, "continue", thread_id, true, &mut out),
-            DebugRequest::Pause { session, thread_id } => self.thread_command(&session, "pause", thread_id, false, &mut out),
-            DebugRequest::StepOver { session, thread_id } => self.thread_command(&session, "next", thread_id, true, &mut out),
-            DebugRequest::StepInto { session, thread_id } => self.thread_command(&session, "stepIn", thread_id, true, &mut out),
-            DebugRequest::StepOut { session, thread_id } => self.thread_command(&session, "stepOut", thread_id, true, &mut out),
+            DebugRequest::Continue { session, thread_id } => {
+                self.thread_command(&session, "continue", thread_id, true, &mut out)
+            }
+            DebugRequest::Pause { session, thread_id } => {
+                self.thread_command(&session, "pause", thread_id, false, &mut out)
+            }
+            DebugRequest::StepOver { session, thread_id } => {
+                self.thread_command(&session, "next", thread_id, true, &mut out)
+            }
+            DebugRequest::StepInto { session, thread_id } => {
+                self.thread_command(&session, "stepIn", thread_id, true, &mut out)
+            }
+            DebugRequest::StepOut { session, thread_id } => {
+                self.thread_command(&session, "stepOut", thread_id, true, &mut out)
+            }
             DebugRequest::SelectThread { session, thread_id } => {
                 if let Some(i) = self.idx(&session) {
                     let s = &mut self.sessions[i];
@@ -684,36 +891,78 @@ impl DebugState {
                     self.emit_sessions(&mut out);
                 }
             }
-            DebugRequest::SelectFrame { session, thread_id, frame_id } => {
+            DebugRequest::SelectFrame {
+                session,
+                thread_id,
+                frame_id,
+            } => {
                 if let Some(i) = self.idx(&session) {
                     let s = &mut self.sessions[i];
                     s.thread_id = Some(thread_id);
                     s.frame_id = Some(frame_id);
-                    send_dap(s, "scopes", json!({ "frameId": frame_id }), Dap::Scopes { frame_id }, &mut out);
-                    out.push(Out::Rpc(wire::accept_stack_frame_focus(&session, thread_id, Some(frame_id))));
+                    send_dap(
+                        s,
+                        "scopes",
+                        json!({ "frameId": frame_id }),
+                        Dap::Scopes { frame_id },
+                        &mut out,
+                    );
+                    out.push(Out::Rpc(wire::accept_stack_frame_focus(
+                        &session,
+                        thread_id,
+                        Some(frame_id),
+                    )));
                     self.emit_sessions(&mut out);
                 }
             }
             DebugRequest::Scopes { session, frame_id } => {
                 if let Some(i) = self.idx(&session) {
-                    send_dap(&mut self.sessions[i], "scopes", json!({ "frameId": frame_id }), Dap::Scopes { frame_id }, &mut out);
+                    send_dap(
+                        &mut self.sessions[i],
+                        "scopes",
+                        json!({ "frameId": frame_id }),
+                        Dap::Scopes { frame_id },
+                        &mut out,
+                    );
                 }
             }
             DebugRequest::Variables { session, reference } => {
                 if let Some(i) = self.idx(&session) {
                     let args = json!({ "variablesReference": reference });
-                    send_dap(&mut self.sessions[i], "variables", args, Dap::Variables { reference }, &mut out);
+                    send_dap(
+                        &mut self.sessions[i],
+                        "variables",
+                        args,
+                        Dap::Variables { reference },
+                        &mut out,
+                    );
                 }
             }
-            DebugRequest::Evaluate { id, session, frame_id, expression, context } => match self.idx(&session) {
+            DebugRequest::Evaluate {
+                id,
+                session,
+                frame_id,
+                expression,
+                context,
+            } => match self.idx(&session) {
                 Some(i) => {
                     let mut args = json!({ "expression": expression, "context": context.as_str() });
                     if let Some(frame) = frame_id {
                         args["frameId"] = json!(frame);
                     }
-                    send_dap(&mut self.sessions[i], "evaluate", args, Dap::Evaluate { id }, &mut out);
+                    send_dap(
+                        &mut self.sessions[i],
+                        "evaluate",
+                        args,
+                        Dap::Evaluate { id },
+                        &mut out,
+                    );
                 }
-                None => out.push(Out::Ui(DebugUpdate::Evaluated { id, session, result: Err("debug session not found".to_owned()) })),
+                None => out.push(Out::Ui(DebugUpdate::Evaluated {
+                    id,
+                    session,
+                    result: Err("debug session not found".to_owned()),
+                })),
             },
             DebugRequest::ToggleBreakpoint { uri, line } => {
                 let (id, added, touched) = self.breakpoints.toggle(&uri, line);
@@ -725,14 +974,46 @@ impl DebugState {
                 }
                 self.breakpoints_changed(delta, touched, &mut out);
             }
-            DebugRequest::AddBreakpoint { uri, line, column, condition, hit_condition, log_message } => {
-                let id = self.breakpoints.add_source(None, uri.clone(), line, column, condition, hit_condition, log_message, true);
+            DebugRequest::AddBreakpoint {
+                uri,
+                line,
+                column,
+                condition,
+                hit_condition,
+                log_message,
+            } => {
+                let id = self.breakpoints.add_source(
+                    None,
+                    uri.clone(),
+                    line,
+                    column,
+                    condition,
+                    hit_condition,
+                    log_message,
+                    true,
+                );
                 let mut delta = BreakpointsDelta::default();
                 delta.added.extend(self.breakpoints.dto(&id));
-                self.breakpoints_changed(delta, Touched { files: vec![uri], ..Default::default() }, &mut out);
+                self.breakpoints_changed(
+                    delta,
+                    Touched {
+                        files: vec![uri],
+                        ..Default::default()
+                    },
+                    &mut out,
+                );
             }
-            DebugRequest::EditBreakpoint { id, condition, hit_condition, log_message, enabled } => {
-                if let Some(touched) = self.breakpoints.edit(&id, condition, hit_condition, log_message, enabled) {
+            DebugRequest::EditBreakpoint {
+                id,
+                condition,
+                hit_condition,
+                log_message,
+                enabled,
+            } => {
+                if let Some(touched) =
+                    self.breakpoints
+                        .edit(&id, condition, hit_condition, log_message, enabled)
+                {
                     let mut delta = BreakpointsDelta::default();
                     delta.changed.extend(self.breakpoints.dto(&id));
                     self.breakpoints_changed(delta, touched, &mut out);
@@ -740,42 +1021,95 @@ impl DebugState {
             }
             DebugRequest::RemoveBreakpoint { id } => {
                 if let Some(touched) = self.breakpoints.remove(&id) {
-                    let delta = BreakpointsDelta { removed: vec![id], ..Default::default() };
+                    let delta = BreakpointsDelta {
+                        removed: vec![id],
+                        ..Default::default()
+                    };
                     self.breakpoints_changed(delta, touched, &mut out);
                 }
             }
             DebugRequest::AddFunctionBreakpoint { name } => {
-                let id = self.breakpoints.add_function(None, name, None, None, None, true);
+                let id = self
+                    .breakpoints
+                    .add_function(None, name, None, None, None, true);
                 let mut delta = BreakpointsDelta::default();
                 delta.added.extend(self.breakpoints.dto(&id));
-                self.breakpoints_changed(delta, Touched { functions: true, ..Default::default() }, &mut out);
+                self.breakpoints_changed(
+                    delta,
+                    Touched {
+                        functions: true,
+                        ..Default::default()
+                    },
+                    &mut out,
+                );
             }
             DebugRequest::SetExceptionFilter { filter, enabled } => {
                 if self.breakpoints.set_filter_enabled(&filter, enabled) {
-                    self.breakpoints_changed(BreakpointsDelta::default(), Touched { exceptions: true, ..Default::default() }, &mut out);
+                    self.breakpoints_changed(
+                        BreakpointsDelta::default(),
+                        Touched {
+                            exceptions: true,
+                            ..Default::default()
+                        },
+                        &mut out,
+                    );
                 }
             }
         }
         out
     }
 
-    fn origin(&self, parent: Option<String>, notify: Notify, folder: Option<UriComponents>, no_debug: bool, env: &Env) -> Origin {
+    fn origin(
+        &self,
+        parent: Option<String>,
+        notify: Notify,
+        folder: Option<UriComponents>,
+        no_debug: bool,
+        env: &Env,
+    ) -> Origin {
         let folder = folder.or_else(|| self.workspace.clone());
-        let vars = VarContext { workspace_folder: folder.as_ref().map(|f| f.path.clone()), file: env.active_file.clone() };
-        Origin { parent, folder, notify, no_debug, vars }
+        let vars = VarContext {
+            workspace_folder: folder.as_ref().map(|f| f.path.clone()),
+            file: env.active_file.clone(),
+        };
+        Origin {
+            parent,
+            folder,
+            notify,
+            no_debug,
+            vars,
+        }
     }
 
-    fn thread_command(&mut self, session: &str, command: &str, thread_id: i64, step: bool, out: &mut Vec<Out>) {
+    fn thread_command(
+        &mut self,
+        session: &str,
+        command: &str,
+        thread_id: i64,
+        step: bool,
+        out: &mut Vec<Out>,
+    ) {
         let Some(i) = self.idx(session) else { return };
         let s = &mut self.sessions[i];
-        let tag = if step { Dap::Step { epoch: s.stop_epoch } } else { Dap::Other };
+        let tag = if step {
+            Dap::Step {
+                epoch: s.stop_epoch,
+            }
+        } else {
+            Dap::Other
+        };
         send_dap(s, command, json!({ "threadId": thread_id }), tag, out);
     }
 
     // ---- breakpoint changes -------------------------------------------------------------------
 
     /// A change of the registry: tell the window, the extension host and the running sessions.
-    fn breakpoints_changed(&mut self, delta: BreakpointsDelta, touched: Touched, out: &mut Vec<Out>) {
+    fn breakpoints_changed(
+        &mut self,
+        delta: BreakpointsDelta,
+        touched: Touched,
+        out: &mut Vec<Out>,
+    ) {
         self.emit_breakpoints(out);
         if !delta.is_empty() {
             out.push(Out::Rpc(wire::accept_breakpoints_delta(&delta)));
@@ -799,7 +1133,9 @@ impl DebugState {
     /// `$registerBreakpoints`: breakpoints from `debug.addBreakpoints`.
     pub fn register_breakpoints(&mut self, dtos: &[Value]) -> Vec<Out> {
         let mut out = Vec::new();
-        let (ids, touched) = self.breakpoints.add_registered(wire::parse_registered_breakpoints(dtos));
+        let (ids, touched) = self
+            .breakpoints
+            .add_registered(wire::parse_registered_breakpoints(dtos));
         let mut delta = BreakpointsDelta::default();
         for id in &ids {
             delta.added.extend(self.breakpoints.dto(id));
@@ -830,16 +1166,33 @@ impl DebugState {
         self.next_start
     }
 
-    fn read_launch_json(&mut self, purpose: Purpose, selector: Option<ConfigSelector>, origin: Origin, out: &mut Vec<Out>) {
+    fn read_launch_json(
+        &mut self,
+        purpose: Purpose,
+        selector: Option<ConfigSelector>,
+        origin: Origin,
+        out: &mut Vec<Out>,
+    ) {
         let Some(folder) = origin.folder.clone() else {
             if purpose == Purpose::List {
-                out.push(Out::Ui(DebugUpdate::Configurations { configurations: Vec::new(), error: Some("no folder is open".to_owned()) }));
+                out.push(Out::Ui(DebugUpdate::Configurations {
+                    configurations: Vec::new(),
+                    error: Some("no folder is open".to_owned()),
+                }));
             } else {
-                self.start_failed(origin.notify, "There is no open folder, so there is no launch.json to read.".to_owned(), out);
+                self.start_failed(
+                    origin.notify,
+                    "There is no open folder, so there is no launch.json to read.".to_owned(),
+                    out,
+                );
             }
             return;
         };
-        let uri = UriComponents::new(folder.scheme.clone(), folder.authority.clone(), format!("{}/{}", folder.path.trim_end_matches('/'), LAUNCH_JSON));
+        let uri = UriComponents::new(
+            folder.scheme.clone(),
+            folder.authority.clone(),
+            format!("{}/{}", folder.path.trim_end_matches('/'), LAUNCH_JSON),
+        );
         let id = self.next_start_id();
         self.starts.insert(
             id,
@@ -875,9 +1228,15 @@ impl DebugState {
     }
 
     /// The answer to a [`Out::ReadLaunchJson`]: the file's bytes, `None` for a missing file.
-    pub fn on_launch_json(&mut self, start: u64, result: Result<Option<Vec<u8>>, String>) -> Vec<Out> {
+    pub fn on_launch_json(
+        &mut self,
+        start: u64,
+        result: Result<Option<Vec<u8>>, String>,
+    ) -> Vec<Out> {
         let mut out = Vec::new();
-        let Some(st) = self.starts.remove(&start) else { return out };
+        let Some(st) = self.starts.remove(&start) else {
+            return out;
+        };
         let parsed: Result<LaunchFile, String> = match result {
             Ok(Some(bytes)) => match String::from_utf8(bytes) {
                 Ok(text) => parse_launch_json(&text),
@@ -909,7 +1268,10 @@ impl DebugState {
                 }
                 Err(e) => (Vec::new(), Some(e)),
             };
-            out.push(Out::Ui(DebugUpdate::Configurations { configurations, error }));
+            out.push(Out::Ui(DebugUpdate::Configurations {
+                configurations,
+                error,
+            }));
             return out;
         }
         let file = match parsed {
@@ -930,7 +1292,13 @@ impl DebugState {
                 if let Some(c) = file.find(n) {
                     configs.push(c.clone());
                 } else if let Some(compound) = file.compound(n) {
-                    configs.extend(compound.configurations.iter().filter_map(|name| file.find(name)).cloned());
+                    configs.extend(
+                        compound
+                            .configurations
+                            .iter()
+                            .filter_map(|name| file.find(name))
+                            .cloned(),
+                    );
                 }
             }
             Some(ConfigSelector::Index(i)) => configs.extend(file.configurations.get(*i).cloned()),
@@ -945,7 +1313,10 @@ impl DebugState {
         for config in configs {
             // Only the first configuration of a compound answers the caller.
             let notify = std::mem::take(&mut origin.notify);
-            let each = Origin { notify, ..origin.clone() };
+            let each = Origin {
+                notify,
+                ..origin.clone()
+            };
             self.begin_config(config, each, &mut out);
         }
         out
@@ -986,7 +1357,14 @@ impl DebugState {
     fn provider_handles(&self, debug_type: &str, substituted: bool) -> VecDeque<i64> {
         self.providers
             .iter()
-            .filter(|p| p.debug_type == debug_type && if substituted { p.has_resolve2 } else { p.has_resolve })
+            .filter(|p| {
+                p.debug_type == debug_type
+                    && if substituted {
+                        p.has_resolve2
+                    } else {
+                        p.has_resolve
+                    }
+            })
             .map(|p| p.handle)
             .collect()
     }
@@ -1000,17 +1378,28 @@ impl DebugState {
                     let ty = config_type(&st.config);
                     if ty.is_empty() {
                         let notify = std::mem::take(&mut st.origin.notify);
-                        self.start_failed(notify, "Missing property 'type' in the chosen debug configuration.".to_owned(), out);
+                        self.start_failed(
+                            notify,
+                            "Missing property 'type' in the chosen debug configuration.".to_owned(),
+                            out,
+                        );
                         st.phase = Phase::Done;
                         return;
                     }
                     st.current_type = ty.clone();
                     st.seen.push(ty.clone());
                     st.group = 0;
-                    let events = ["onDebugResolve".to_owned(), "onDebug".to_owned(), format!("onDebugResolve:{ty}")];
+                    let events = [
+                        "onDebugResolve".to_owned(),
+                        "onDebug".to_owned(),
+                        format!("onDebugResolve:{ty}"),
+                    ];
                     st.waiting = events.len();
                     for event in &events {
-                        out.push(Out::RpcWith(exthost::activate_by_event(event), Pending::Activation { start: st.id }));
+                        out.push(Out::RpcWith(
+                            exthost::activate_by_event(event),
+                            Pending::Activation { start: st.id },
+                        ));
                     }
                     st.phase = Phase::Activating;
                     return;
@@ -1019,7 +1408,9 @@ impl DebugState {
                     if let Some(handle) = st.todo.pop_front() {
                         let folder = st.origin.folder.as_ref();
                         let call = if st.substituted {
-                            wire::resolve_debug_configuration_with_substituted_variables(handle, folder, &st.config)
+                            wire::resolve_debug_configuration_with_substituted_variables(
+                                handle, folder, &st.config,
+                            )
                         } else {
                             wire::resolve_debug_configuration(handle, folder, &st.config)
                         };
@@ -1082,7 +1473,8 @@ impl DebugState {
             return;
         }
         if let Some(task) = str_of(&configuration, "preLaunchTask") {
-            let text = format!("The preLaunchTask '{task}' was not run: this window has no task runner.");
+            let text =
+                format!("The preLaunchTask '{task}' was not run: this window has no task runner.");
             self.console(None, "important", text, out);
         }
         let id = uuid::Uuid::new_v4().to_string();
@@ -1132,7 +1524,13 @@ impl DebugState {
         if self.active.is_none() || st.origin.parent.is_none() {
             self.active = Some(id.clone());
         }
-        out.push(Out::RpcWith(wire::start_da_session(handle, &dto), Pending::StartDa { session: id, handle }));
+        out.push(Out::RpcWith(
+            wire::start_da_session(handle, &dto),
+            Pending::StartDa {
+                session: id,
+                handle,
+            },
+        ));
         self.emit_sessions(out);
     }
 
@@ -1142,7 +1540,9 @@ impl DebugState {
         let mut out = Vec::new();
         match pending {
             Pending::Activation { start } => {
-                let Some(mut st) = self.starts.remove(&start) else { return out };
+                let Some(mut st) = self.starts.remove(&start) else {
+                    return out;
+                };
                 // A failed activation is not fatal: the provider it would have registered may not exist.
                 st.waiting = st.waiting.saturating_sub(1);
                 if st.waiting == 0 && st.phase == Phase::Activating {
@@ -1152,7 +1552,9 @@ impl DebugState {
                 self.keep(st);
             }
             Pending::Resolve { start } => {
-                let Some(mut st) = self.starts.remove(&start) else { return out };
+                let Some(mut st) = self.starts.remove(&start) else {
+                    return out;
+                };
                 match result {
                     Ok(config) if config.is_object() => {
                         st.config = config;
@@ -1179,14 +1581,21 @@ impl DebugState {
                     let args = initialize_args(&s.debug_type);
                     send_dap(s, "initialize", args, Dap::Initialize, &mut out);
                 }
-                (Some(_), Err(e)) => self.fail_session(&session, format!("The debug adapter could not start: {e}"), &mut out),
+                (Some(_), Err(e)) => self.fail_session(
+                    &session,
+                    format!("The debug adapter could not start: {e}"),
+                    &mut out,
+                ),
                 // The session ended while its adapter was starting: do not leave the adapter running.
                 (None, Ok(_)) => out.push(Out::Rpc(wire::stop_da_session(handle))),
                 (None, Err(_)) => {}
             },
             Pending::Provide { debug_type } => {
                 if let Ok(Value::Array(configurations)) = result {
-                    out.push(Out::Ui(DebugUpdate::ProvidedConfigurations { debug_type, configurations }));
+                    out.push(Out::Ui(DebugUpdate::ProvidedConfigurations {
+                        debug_type,
+                        configurations,
+                    }));
                 }
             }
         }
@@ -1198,28 +1607,45 @@ impl DebugState {
     /// `$acceptDAMessage`.
     pub fn on_dap(&mut self, handle: i64, message: DapMessage) -> Vec<Out> {
         let mut out = Vec::new();
-        let Some(i) = self.sessions.iter().position(|s| s.handle == handle) else { return out };
+        let Some(i) = self.sessions.iter().position(|s| s.handle == handle) else {
+            return out;
+        };
         let sid = self.sessions[i].id.clone();
         match message {
-            DapMessage::Response { request_seq, success, body, message, .. } => {
+            DapMessage::Response {
+                request_seq,
+                success,
+                body,
+                message,
+                ..
+            } => {
                 if let Some(tag) = self.sessions[i].pending.remove(&request_seq) {
                     self.on_response(&sid, tag, success, body, message, &mut out);
                 }
             }
             DapMessage::Event { event, body, .. } => self.on_event(&sid, &event, body, &mut out),
-            DapMessage::Request { seq, command, arguments } => self.on_reverse(&sid, seq, &command, arguments, &mut out),
+            DapMessage::Request {
+                seq,
+                command,
+                arguments,
+            } => self.on_reverse(&sid, seq, &command, arguments, &mut out),
         }
         out
     }
 
     fn parse_frames(&self, body: &Value) -> Vec<FrameInfo> {
-        let Some(frames) = body.get("stackFrames").and_then(Value::as_array) else { return Vec::new() };
+        let Some(frames) = body.get("stackFrames").and_then(Value::as_array) else {
+            return Vec::new();
+        };
         frames
             .iter()
             .filter_map(|f| {
                 let id = f.get("id")?.as_i64()?;
                 let source = f.get("source");
-                let uri = source.and_then(|s| s.get("path")).and_then(Value::as_str).and_then(|p| self.uri_of(p));
+                let uri = source
+                    .and_then(|s| s.get("path"))
+                    .and_then(Value::as_str)
+                    .and_then(|p| self.uri_of(p));
                 Some(FrameInfo {
                     id,
                     name: str_of(f, "name").unwrap_or_default(),
@@ -1233,12 +1659,24 @@ impl DebugState {
             .collect()
     }
 
-    fn on_response(&mut self, sid: &str, tag: Dap, success: bool, body: Value, message: Option<String>, out: &mut Vec<Out>) {
+    fn on_response(
+        &mut self,
+        sid: &str,
+        tag: Dap,
+        success: bool,
+        body: Value,
+        message: Option<String>,
+        out: &mut Vec<Out>,
+    ) {
         let error = message.unwrap_or_else(|| "the debug adapter reported an error".to_owned());
         match tag {
             Dap::Initialize => {
                 if !success {
-                    self.fail_session(sid, format!("The debug adapter did not initialize: {error}"), out);
+                    self.fail_session(
+                        sid,
+                        format!("The debug adapter did not initialize: {error}"),
+                        out,
+                    );
                     return;
                 }
                 let Some(i) = self.idx(sid) else { return };
@@ -1267,9 +1705,13 @@ impl DebugState {
                 s.announced = true;
                 let notify = std::mem::take(&mut s.notify);
                 if announce {
-                    out.push(Out::Rpc(wire::accept_debug_session_started(&self.session_ref(i))));
+                    out.push(Out::Rpc(wire::accept_debug_session_started(
+                        &self.session_ref(i),
+                    )));
                     if self.active.as_deref() == Some(sid) {
-                        out.push(Out::Rpc(wire::accept_debug_session_active_changed(Some(&self.session_ref(i)))));
+                        out.push(Out::Rpc(wire::accept_debug_session_active_changed(Some(
+                            &self.session_ref(i),
+                        ))));
                     }
                 }
                 self.resolve_notify(notify, true, out);
@@ -1302,7 +1744,13 @@ impl DebugState {
             }
             Dap::ConfigurationDone => {
                 if let Some(i) = self.idx(sid) {
-                    send_dap(&mut self.sessions[i], "threads", Value::Null, Dap::Threads, out);
+                    send_dap(
+                        &mut self.sessions[i],
+                        "threads",
+                        Value::Null,
+                        Dap::Threads,
+                        out,
+                    );
                 }
             }
             Dap::Threads => {
@@ -1326,7 +1774,11 @@ impl DebugState {
                                     Some(stopped) => s.all_stopped || stopped == Some(id),
                                     None => false,
                                 };
-                                Some(ThreadInfo { id, name: str_of(t, "name").unwrap_or_default(), stopped })
+                                Some(ThreadInfo {
+                                    id,
+                                    name: str_of(t, "name").unwrap_or_default(),
+                                    stopped,
+                                })
                             })
                             .collect()
                     })
@@ -1339,7 +1791,10 @@ impl DebugState {
                         request_stack(s, first.id, out);
                     }
                 }
-                out.push(Out::Ui(DebugUpdate::Threads { session: sid.to_owned(), threads }));
+                out.push(Out::Ui(DebugUpdate::Threads {
+                    session: sid.to_owned(),
+                    threads,
+                }));
             }
             Dap::StackTrace { thread_id, epoch } => {
                 if !success {
@@ -1354,11 +1809,26 @@ impl DebugState {
                 s.thread_id = Some(thread_id);
                 s.frame_id = frames.first().map(|f| f.id);
                 if let Some(top) = frames.first() {
-                    send_dap(s, "scopes", json!({ "frameId": top.id }), Dap::Scopes { frame_id: top.id }, out);
-                    out.push(Out::Rpc(wire::accept_stack_frame_focus(sid, thread_id, Some(top.id))));
+                    send_dap(
+                        s,
+                        "scopes",
+                        json!({ "frameId": top.id }),
+                        Dap::Scopes { frame_id: top.id },
+                        out,
+                    );
+                    out.push(Out::Rpc(wire::accept_stack_frame_focus(
+                        sid,
+                        thread_id,
+                        Some(top.id),
+                    )));
                 }
                 let total_frames = body.get("totalFrames").and_then(Value::as_i64);
-                out.push(Out::Ui(DebugUpdate::CallStack { session: sid.to_owned(), thread_id, frames, total_frames }));
+                out.push(Out::Ui(DebugUpdate::CallStack {
+                    session: sid.to_owned(),
+                    thread_id,
+                    frames,
+                    total_frames,
+                }));
                 self.emit_sessions(out);
             }
             Dap::Scopes { frame_id } => {
@@ -1372,13 +1842,23 @@ impl DebugState {
                         a.iter()
                             .map(|s| ScopeInfo {
                                 name: str_of(s, "name").unwrap_or_default(),
-                                variables_reference: s.get("variablesReference").and_then(Value::as_i64).unwrap_or(0),
-                                expensive: s.get("expensive").and_then(Value::as_bool).unwrap_or(false),
+                                variables_reference: s
+                                    .get("variablesReference")
+                                    .and_then(Value::as_i64)
+                                    .unwrap_or(0),
+                                expensive: s
+                                    .get("expensive")
+                                    .and_then(Value::as_bool)
+                                    .unwrap_or(false),
                             })
                             .collect()
                     })
                     .unwrap_or_default();
-                out.push(Out::Ui(DebugUpdate::Scopes { session: sid.to_owned(), frame_id, scopes }));
+                out.push(Out::Ui(DebugUpdate::Scopes {
+                    session: sid.to_owned(),
+                    frame_id,
+                    scopes,
+                }));
             }
             Dap::Variables { reference } => {
                 let variables: Vec<VariableInfo> = if success {
@@ -1390,7 +1870,10 @@ impl DebugState {
                                     name: str_of(v, "name").unwrap_or_default(),
                                     value: str_of(v, "value").unwrap_or_default(),
                                     type_name: str_of(v, "type"),
-                                    variables_reference: v.get("variablesReference").and_then(Value::as_i64).unwrap_or(0),
+                                    variables_reference: v
+                                        .get("variablesReference")
+                                        .and_then(Value::as_i64)
+                                        .unwrap_or(0),
                                     evaluate_name: str_of(v, "evaluateName"),
                                 })
                                 .collect()
@@ -1400,25 +1883,40 @@ impl DebugState {
                     Vec::new()
                 };
                 let error = (!success).then_some(error);
-                out.push(Out::Ui(DebugUpdate::Variables { session: sid.to_owned(), reference, variables, error }));
+                out.push(Out::Ui(DebugUpdate::Variables {
+                    session: sid.to_owned(),
+                    reference,
+                    variables,
+                    error,
+                }));
             }
             Dap::Evaluate { id } => {
                 let result = if success {
                     Ok(EvalResult {
                         result: str_of(&body, "result").unwrap_or_default(),
                         type_name: str_of(&body, "type"),
-                        variables_reference: body.get("variablesReference").and_then(Value::as_i64).unwrap_or(0),
+                        variables_reference: body
+                            .get("variablesReference")
+                            .and_then(Value::as_i64)
+                            .unwrap_or(0),
                     })
                 } else {
                     Err(error)
                 };
-                out.push(Out::Ui(DebugUpdate::Evaluated { id, session: sid.to_owned(), result }));
+                out.push(Out::Ui(DebugUpdate::Evaluated {
+                    id,
+                    session: sid.to_owned(),
+                    result,
+                }));
             }
             Dap::Step { epoch } => {
                 // An adapter that does not send `continued` still resumed: the window shows it running.
                 if let Some(i) = self.idx(sid) {
                     let s = &mut self.sessions[i];
-                    if success && s.stop_epoch == epoch && matches!(s.state, SessionState::Stopped { .. }) {
+                    if success
+                        && s.stop_epoch == epoch
+                        && matches!(s.state, SessionState::Stopped { .. })
+                    {
                         s.state = SessionState::Running;
                         self.emit_sessions(out);
                     }
@@ -1454,7 +1952,13 @@ impl DebugState {
         }
         s.config_done = true;
         if s.cap("supportsConfigurationDoneRequest") {
-            send_dap(s, "configurationDone", json!({}), Dap::ConfigurationDone, out);
+            send_dap(
+                s,
+                "configurationDone",
+                json!({}),
+                Dap::ConfigurationDone,
+                out,
+            );
         } else {
             send_dap(s, "threads", Value::Null, Dap::Threads, out);
         }
@@ -1486,7 +1990,10 @@ impl DebugState {
                 let s = &mut self.sessions[i];
                 let thread_id = body.get("threadId").and_then(Value::as_i64);
                 s.stop_epoch += 1;
-                s.all_stopped = body.get("allThreadsStopped").and_then(Value::as_bool).unwrap_or(false);
+                s.all_stopped = body
+                    .get("allThreadsStopped")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
                 s.state = SessionState::Stopped {
                     reason: str_of(&body, "reason").unwrap_or_else(|| "unknown".to_owned()),
                     thread_id,
@@ -1509,16 +2016,33 @@ impl DebugState {
                     self.emit_sessions(out);
                 }
             }
-            "thread" => send_dap(&mut self.sessions[i], "threads", Value::Null, Dap::Threads, out),
+            "thread" => send_dap(
+                &mut self.sessions[i],
+                "threads",
+                Value::Null,
+                Dap::Threads,
+                out,
+            ),
             "output" => {
                 let category = str_of(&body, "category").unwrap_or_else(|| "console".to_owned());
                 if category == "telemetry" {
                     return;
                 }
                 let source = body.get("source");
-                let uri = source.and_then(|s| s.get("path")).and_then(Value::as_str).and_then(|p| self.uri_of(p));
-                let entry = ConsoleEntry { category, text: str_of(&body, "output").unwrap_or_default(), uri, line: u32_of(&body, "line") };
-                out.push(Out::Ui(DebugUpdate::Console { session: Some(sid.to_owned()), entry }));
+                let uri = source
+                    .and_then(|s| s.get("path"))
+                    .and_then(Value::as_str)
+                    .and_then(|p| self.uri_of(p));
+                let entry = ConsoleEntry {
+                    category,
+                    text: str_of(&body, "output").unwrap_or_default(),
+                    uri,
+                    line: u32_of(&body, "line"),
+                };
+                out.push(Out::Ui(DebugUpdate::Console {
+                    session: Some(sid.to_owned()),
+                    entry,
+                }));
             }
             "breakpoint" => {
                 let reason = str_of(&body, "reason").unwrap_or_default();
@@ -1553,18 +2077,34 @@ impl DebugState {
                     None => self.disconnect(sid, Some(false), None, None, out),
                 }
             }
-            "exited" | "loadedSource" | "module" | "process" | "progressStart" | "progressUpdate" | "progressEnd" | "invalidated" | "memory" => {}
+            "exited" | "loadedSource" | "module" | "process" | "progressStart"
+            | "progressUpdate" | "progressEnd" | "invalidated" | "memory" => {}
             _ => {
                 let event = json!({ "event": event, "body": body });
-                out.push(Out::Rpc(wire::accept_debug_session_custom_event(&self.session_ref(i), &event)));
+                out.push(Out::Rpc(wire::accept_debug_session_custom_event(
+                    &self.session_ref(i),
+                    &event,
+                )));
             }
         }
     }
 
-    fn on_reverse(&mut self, sid: &str, seq: i64, command: &str, arguments: Value, out: &mut Vec<Out>) {
+    fn on_reverse(
+        &mut self,
+        sid: &str,
+        seq: i64,
+        command: &str,
+        arguments: Value,
+        out: &mut Vec<Out>,
+    ) {
         let Some(i) = self.idx(sid) else { return };
         let handle = self.sessions[i].handle;
-        let refuse = |why: &str| Out::Rpc(wire::send_da_message(handle, &DapMessage::response(seq, command, Some(why), Value::Null)));
+        let refuse = |why: &str| {
+            Out::Rpc(wire::send_da_message(
+                handle,
+                &DapMessage::response(seq, command, Some(why), Value::Null),
+            ))
+        };
         match command {
             "runInTerminal" => out.push(refuse(
                 "This window has no terminal to run the program in. Set \"console\": \"internalConsole\" in the launch configuration.",
@@ -1596,8 +2136,18 @@ impl DebugState {
     /// `$acceptDAError`: the adapter failed; the session ends.
     pub fn on_da_error(&mut self, handle: i64, name: &str, message: &str) -> Vec<Out> {
         let mut out = Vec::new();
-        if let Some(sid) = self.sessions.iter().find(|s| s.handle == handle).map(|s| s.id.clone()) {
-            self.console(Some(sid.as_str()), "stderr", format!("{name}: {message}"), &mut out);
+        if let Some(sid) = self
+            .sessions
+            .iter()
+            .find(|s| s.handle == handle)
+            .map(|s| s.id.clone())
+        {
+            self.console(
+                Some(sid.as_str()),
+                "stderr",
+                format!("{name}: {message}"),
+                &mut out,
+            );
             self.finish_session(&sid, &mut out);
         }
         out
@@ -1606,9 +2156,19 @@ impl DebugState {
     /// `$acceptDAExit`: the adapter process ended.
     pub fn on_da_exit(&mut self, handle: i64, code: Option<i64>) -> Vec<Out> {
         let mut out = Vec::new();
-        if let Some(sid) = self.sessions.iter().find(|s| s.handle == handle).map(|s| s.id.clone()) {
+        if let Some(sid) = self
+            .sessions
+            .iter()
+            .find(|s| s.handle == handle)
+            .map(|s| s.id.clone())
+        {
             if let Some(code) = code.filter(|c| *c != 0) {
-                self.console(Some(sid.as_str()), "stderr", format!("The debug adapter exited with code {code}."), &mut out);
+                self.console(
+                    Some(sid.as_str()),
+                    "stderr",
+                    format!("The debug adapter exited with code {code}."),
+                    &mut out,
+                );
             }
             self.finish_session(&sid, &mut out);
         }
@@ -1624,7 +2184,12 @@ impl DebugState {
     }
 
     fn stop_all(&mut self, out: &mut Vec<Out>) {
-        let ids: Vec<String> = self.sessions.iter().filter(|s| s.state != SessionState::Terminated).map(|s| s.id.clone()).collect();
+        let ids: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|s| s.state != SessionState::Terminated)
+            .map(|s| s.id.clone())
+            .collect();
         for id in ids {
             self.disconnect(&id, None, None, None, out);
         }
@@ -1633,18 +2198,31 @@ impl DebugState {
     /// Ask the adapter to disconnect. `terminate` says whether the debuggee goes with it: by
     /// default a launched program is terminated and an attached one is left running. The session
     /// ends when the adapter answers, exits, or [`DISCONNECT_TIMEOUT`] passes.
-    fn disconnect(&mut self, sid: &str, terminate: Option<bool>, restart: Option<Value>, waiter: Option<u32>, out: &mut Vec<Out>) {
+    fn disconnect(
+        &mut self,
+        sid: &str,
+        terminate: Option<bool>,
+        restart: Option<Value>,
+        waiter: Option<u32>,
+        out: &mut Vec<Out>,
+    ) {
         let now = self.now;
         let Some(i) = self.idx(sid) else {
             if let Some(req) = waiter {
-                out.push(Out::Respond { req, result: Err(Some(js_error("Error", "debug session not found"))) });
+                out.push(Out::Respond {
+                    req,
+                    result: Err(Some(js_error("Error", "debug session not found"))),
+                });
             }
             return;
         };
         let s = &mut self.sessions[i];
         if s.state == SessionState::Terminated {
             if let Some(req) = waiter {
-                out.push(Out::Respond { req, result: Ok(Reply::Empty) });
+                out.push(Out::Respond {
+                    req,
+                    result: Ok(Reply::Empty),
+                });
             }
             return;
         }
@@ -1658,14 +2236,27 @@ impl DebugState {
         let waiters: Vec<u32> = waiter.into_iter().collect();
         if !s.da_started {
             // No adapter yet: nothing to disconnect.
-            s.ending = Some(Ending { deadline: now, restart, waiters });
+            s.ending = Some(Ending {
+                deadline: now,
+                restart,
+                waiters,
+            });
             self.finish_session(sid, out);
             return;
         }
-        let terminate = terminate.unwrap_or(s.request == "launch") && s.cap("supportTerminateDebuggee");
-        let args = if terminate { json!({ "restart": false, "terminateDebuggee": true }) } else { json!({ "restart": false }) };
+        let terminate =
+            terminate.unwrap_or(s.request == "launch") && s.cap("supportTerminateDebuggee");
+        let args = if terminate {
+            json!({ "restart": false, "terminateDebuggee": true })
+        } else {
+            json!({ "restart": false })
+        };
         send_dap(s, "disconnect", args, Dap::Disconnect, out);
-        s.ending = Some(Ending { deadline: now + DISCONNECT_TIMEOUT, restart, waiters });
+        s.ending = Some(Ending {
+            deadline: now + DISCONNECT_TIMEOUT,
+            restart,
+            waiters,
+        });
     }
 
     fn restart(&mut self, sid: &str, out: &mut Vec<Out>) {
@@ -1697,7 +2288,13 @@ impl DebugState {
         s.pending.clear();
         let notify = std::mem::take(&mut s.notify);
         let ending = s.ending.take();
-        let (handle, da_started, parent, folder, vars) = (s.handle, s.da_started, s.parent.clone(), s.folder.clone(), s.vars.clone());
+        let (handle, da_started, parent, folder, vars) = (
+            s.handle,
+            s.da_started,
+            s.parent.clone(),
+            s.folder.clone(),
+            s.vars.clone(),
+        );
         if da_started {
             out.push(Out::Rpc(wire::stop_da_session(handle)));
         }
@@ -1705,18 +2302,32 @@ impl DebugState {
             out.push(Out::Rpc(wire::accept_debug_session_terminated(&r)));
         }
         self.resolve_notify(notify, false, out);
-        let children: Vec<String> =
-            self.sessions.iter().filter(|c| c.parent.as_deref() == Some(sid) && c.state != SessionState::Terminated).map(|c| c.id.clone()).collect();
+        let children: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|c| c.parent.as_deref() == Some(sid) && c.state != SessionState::Terminated)
+            .map(|c| c.id.clone())
+            .collect();
         let was_active = self.active.as_deref() == Some(sid);
         if was_active {
-            self.active = self.sessions.iter().find(|c| c.id != sid && c.state != SessionState::Terminated).map(|c| c.id.clone());
+            self.active = self
+                .sessions
+                .iter()
+                .find(|c| c.id != sid && c.state != SessionState::Terminated)
+                .map(|c| c.id.clone());
         }
         // The ended session is in the list once, so the window can show how it ended.
         self.emit_sessions(out);
         self.sessions.retain(|c| c.id != sid);
         if was_active {
-            let next = self.active.as_deref().and_then(|a| self.idx(a)).map(|j| self.session_ref(j));
-            out.push(Out::Rpc(wire::accept_debug_session_active_changed(next.as_ref())));
+            let next = self
+                .active
+                .as_deref()
+                .and_then(|a| self.idx(a))
+                .map(|j| self.session_ref(j));
+            out.push(Out::Rpc(wire::accept_debug_session_active_changed(
+                next.as_ref(),
+            )));
         }
         if self.sessions.is_empty() {
             self.breakpoints.clear_adapter_data();
@@ -1724,10 +2335,19 @@ impl DebugState {
         }
         if let Some(ending) = ending {
             for req in ending.waiters {
-                out.push(Out::Respond { req, result: Ok(Reply::Empty) });
+                out.push(Out::Respond {
+                    req,
+                    result: Ok(Reply::Empty),
+                });
             }
             if let Some(config) = ending.restart {
-                let origin = Origin { parent, folder, notify: Notify::Nobody, no_debug: false, vars };
+                let origin = Origin {
+                    parent,
+                    folder,
+                    notify: Notify::Nobody,
+                    no_debug: false,
+                    vars,
+                };
                 self.begin_config(config, origin, out);
             }
         }
@@ -1753,24 +2373,43 @@ impl DebugState {
     }
 
     pub fn next_deadline(&self) -> Option<Instant> {
-        self.sessions.iter().filter_map(|s| s.ending.as_ref().map(|e| e.deadline)).min()
+        self.sessions
+            .iter()
+            .filter_map(|s| s.ending.as_ref().map(|e| e.deadline))
+            .min()
     }
 
     // ---- requests of the extension host (`MainThreadDebugService`) ----------------------------
 
     /// `$startDebugging(folder, nameOrConfig, options)`: answered with `true` once the adapter
     /// answered `launch`, `false` when the start was cancelled or failed.
-    pub fn ext_start_debugging(&mut self, req: u32, folder: Option<UriComponents>, name_or_config: Value, options: &Value, env: &Env) -> Vec<Out> {
+    pub fn ext_start_debugging(
+        &mut self,
+        req: u32,
+        folder: Option<UriComponents>,
+        name_or_config: Value,
+        options: &Value,
+        env: &Env,
+    ) -> Vec<Out> {
         let mut out = Vec::new();
         let selector = match name_or_config {
             Value::String(name) => ConfigSelector::Name(name),
             config @ Value::Object(_) => ConfigSelector::Config(config),
             _ => {
-                out.push(Out::Respond { req, result: Err(Some(js_error("Error", "cannot start debugging: no configuration"))) });
+                out.push(Out::Respond {
+                    req,
+                    result: Err(Some(js_error(
+                        "Error",
+                        "cannot start debugging: no configuration",
+                    ))),
+                });
                 return out;
             }
         };
-        let no_debug = options.get("noDebug").and_then(Value::as_bool).unwrap_or(false);
+        let no_debug = options
+            .get("noDebug")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let parent = str_of(options, "parentSessionID");
         let origin = self.origin(parent, Notify::Ext { req }, folder, no_debug, env);
         self.begin_selected(selector, origin, &mut out);
@@ -1784,35 +2423,70 @@ impl DebugState {
             Some(id) => self.disconnect(&id, None, None, Some(req), &mut out),
             None => {
                 self.stop_all(&mut out);
-                out.push(Out::Respond { req, result: Ok(Reply::Empty) });
+                out.push(Out::Respond {
+                    req,
+                    result: Ok(Reply::Empty),
+                });
             }
         }
         out
     }
 
     /// `$customDebugAdapterRequest(id, command, args)`: the adapter's body, or an error.
-    pub fn ext_custom_request(&mut self, req: u32, sid: &str, command: &str, args: Value) -> Vec<Out> {
+    pub fn ext_custom_request(
+        &mut self,
+        req: u32,
+        sid: &str,
+        command: &str,
+        args: Value,
+    ) -> Vec<Out> {
         let mut out = Vec::new();
         match self.idx(sid) {
-            Some(i) => send_dap(&mut self.sessions[i], command, args, Dap::Custom { req }, &mut out),
-            None => out.push(Out::Respond { req, result: Err(Some(js_error("Error", "debug session not found"))) }),
+            Some(i) => send_dap(
+                &mut self.sessions[i],
+                command,
+                args,
+                Dap::Custom { req },
+                &mut out,
+            ),
+            None => out.push(Out::Respond {
+                req,
+                result: Err(Some(js_error("Error", "debug session not found"))),
+            }),
         }
         out
     }
 
     /// `$getDebugProtocolBreakpoint(id, breakpointId)`: the adapter's own description of one.
-    pub fn ext_protocol_breakpoint(&mut self, req: u32, sid: &str, breakpoint_id: &str) -> Vec<Out> {
+    pub fn ext_protocol_breakpoint(
+        &mut self,
+        req: u32,
+        sid: &str,
+        breakpoint_id: &str,
+    ) -> Vec<Out> {
         if self.idx(sid).is_none() {
-            return vec![Out::Respond { req, result: Err(Some(js_error("Error", "debug session not found"))) }];
+            return vec![Out::Respond {
+                req,
+                result: Err(Some(js_error("Error", "debug session not found"))),
+            }];
         }
         let raw = self
             .breakpoints
             .find_source(breakpoint_id)
             .map(|b| b.raw.clone())
-            .or_else(|| self.breakpoints.functions.iter().find(|b| b.id == breakpoint_id).map(|b| b.raw.clone()))
+            .or_else(|| {
+                self.breakpoints
+                    .functions
+                    .iter()
+                    .find(|b| b.id == breakpoint_id)
+                    .map(|b| b.raw.clone())
+            })
             .filter(|raw| !raw.is_null());
         let reply = raw.map_or(Reply::Empty, Reply::Json);
-        vec![Out::Respond { req, result: Ok(reply) }]
+        vec![Out::Respond {
+            req,
+            result: Ok(reply),
+        }]
     }
 
     /// `$setDebugSessionName`.
@@ -1820,7 +2494,10 @@ impl DebugState {
         let mut out = Vec::new();
         if let Some(i) = self.idx(sid) {
             self.sessions[i].name = name.clone();
-            out.push(Out::Rpc(wire::accept_debug_session_name_changed(&self.session_ref(i), &name)));
+            out.push(Out::Rpc(wire::accept_debug_session_name_changed(
+                &self.session_ref(i),
+                &name,
+            )));
             self.emit_sessions(&mut out);
         }
         out

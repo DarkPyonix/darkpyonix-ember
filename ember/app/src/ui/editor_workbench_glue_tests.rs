@@ -1242,11 +1242,19 @@ fn fr_l31_status_tab_width_is_a_button_with_a_name() {
 impl Page {
     /// The titles of the rows of the open pick, in order.
     fn pick_rows(&self) -> Vec<String> {
-        self.connected()
-            .into_iter()
-            .filter(|&id| self.attr(id, "role").as_deref() == Some("option"))
-            .map(|id| self.dom.document().get_node(id).map(|n| n.text_content()).unwrap_or_default())
-            .collect()
+        // Document order: node ids follow creation order, and a row the list drew again has a new id.
+        let doc = self.dom.document();
+        let mut rows = Vec::new();
+        let mut stack = vec![doc.root_element().id];
+        while let Some(id) = stack.pop() {
+            if self.attr(id, "role").as_deref() == Some("option") {
+                rows.push(doc.get_node(id).map(|n| n.text_content()).unwrap_or_default());
+            }
+            if let Some(node) = doc.get_node(id) {
+                stack.extend(node.children.iter().rev());
+            }
+        }
+        rows
     }
 
     /// Clicks the row of the open pick whose text is `text`.
@@ -1342,18 +1350,35 @@ fn fr_l31_change_tab_display_size_keeps_insert_spaces() {
 #[test]
 fn fr_l31_detect_and_convert_indentation_go_to_the_session() {
     let _guard = crate::services::test_guard();
-    for (row, ends_with) in [
-        ("콘텐츠에서 들여쓰기 감지", "Detect"),
-        ("들여쓰기를 공백으로 변환", "Convert { to_spaces: true }"),
-        ("들여쓰기를 탭으로 변환", "Convert { to_spaces: false }"),
-        ("후행 공백 자르기", "TrimTrailingWhitespace"),
-    ] {
-        let mut page = Page::open_indentation_pick();
-        page.click_pick_row(row);
-        let sent = page.sent_indentation();
-        assert_eq!(sent.len(), 1, "{row}: {sent:?}");
-        assert!(sent[0].ends_with(ends_with), "{row}: {sent:?}");
-    }
+    sends_indentation_action("콘텐츠에서 들여쓰기 감지", "Detect");
+}
+
+#[test]
+fn fr_l31_convert_indentation_to_spaces_goes_to_the_session() {
+    let _guard = crate::services::test_guard();
+    sends_indentation_action("들여쓰기를 공백으로 변환", "Convert { to_spaces: true }");
+}
+
+#[test]
+fn fr_l31_convert_indentation_to_tabs_goes_to_the_session() {
+    let _guard = crate::services::test_guard();
+    sends_indentation_action("들여쓰기를 탭으로 변환", "Convert { to_spaces: false }");
+}
+
+#[test]
+fn fr_l31_trim_trailing_whitespace_goes_to_the_session() {
+    let _guard = crate::services::test_guard();
+    sends_indentation_action("후행 공백 자르기", "TrimTrailingWhitespace");
+}
+
+/// One page per test: the page's UI signals live in the first page's scope, so a second page in the
+/// same test reads dropped signals.
+fn sends_indentation_action(row: &str, ends_with: &str) {
+    let mut page = Page::open_indentation_pick();
+    page.click_pick_row(row);
+    let sent = page.sent_indentation();
+    assert_eq!(sent.len(), 1, "{row}: {sent:?}");
+    assert!(sent[0].ends_with(ends_with), "{row}: {sent:?}");
 }
 
 #[test]

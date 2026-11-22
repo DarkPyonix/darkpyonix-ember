@@ -2,7 +2,7 @@
 //! the run continues. The adapter is the unmodified `ms-python.debugpy` extension from Open VSX,
 //! run by the server's extension host, as in Code-OSS. Ignored by default and gated on
 //! `EMBER_OSE_SERVER`, like `live_session.rs`; it needs the network to install the extensions and
-//! `python3` on the PATH:
+//! `python3` on the PATH (in CI, where `CI` is set, a missing `python3` fails the test):
 //!
 //! ```sh
 //! export EMBER_OSE_SERVER="$(ember/editor-conn/scripts/fetch-ose-artifact.sh)"   # .../bin/dpx-ose-server
@@ -159,6 +159,9 @@ async fn fr_l31_42_live_python_stops_at_a_breakpoint_reads_a_variable_and_runs_o
         return;
     };
     if Command::new("python3").arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().map_or(true, |s| !s.success()) {
+        // In CI the live job installs Python for this test, so a missing one is a broken job,
+        // not a reason to pass without running.
+        assert!(std::env::var_os("CI").is_none(), "python3 is not on the PATH of the CI live job");
         eprintln!("[live-debug] python3 is not on the PATH; skipping");
         return;
     }

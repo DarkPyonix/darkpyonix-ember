@@ -6,7 +6,7 @@
 
 use std::io::{IsTerminal, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context};
 use serde_json::{json, Value};
@@ -75,8 +75,8 @@ Environment (set by Ember for every agent session):
 /// The one error text for a base URL the client refuses. Fixed: the URL may hold credentials.
 pub const BAD_BASE_URL: &str = "EMBER_URL is not a plain http://host[:port] address";
 
-const HOOK_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
-const HOOK_IO_TIMEOUT: Duration = Duration::from_secs(4);
+const HOOK_TOTAL_BUDGET: Duration = Duration::from_secs(4);
+const HOOK_MIN_STEP_BUDGET: Duration = Duration::from_millis(10);
 const MAX_HOOK_STDIN_BYTES: u64 = 64 * 1024;
 
 pub struct Client {
@@ -163,21 +163,20 @@ impl Client {
         self.request_with_timeouts(method, path, body, None, Duration::from_secs(120))
     }
 
-    /// One short-timeout request for `ember-a2a hook post-tool-use` (2 s connect, 4 s I/O) so a
-    /// stalled server fails open before Claude Code's 5 s hook timeout kills the process.
+    /// One deadline-bounded request for `ember-a2a hook post-tool-use` so a stalled server fails
+    /// open before Claude Code's 5 s hook timeout kills the process.
     pub fn request_hook(
         &self,
         method: &str,
         path: &str,
         body: Option<&Value>,
+        budget: Duration,
     ) -> anyhow::Result<(u16, Value)> {
-        self.request_with_timeouts(
-            method,
-            path,
-            body,
-            Some(HOOK_CONNECT_TIMEOUT),
-            HOOK_IO_TIMEOUT,
-        )
+        if budget < HOOK_MIN_STEP_BUDGET {
+            bail!("hook budget exhausted");
+        }
+        let deadline = Instant::now() + budget;
+        self.request_with_timeouts(method, path, body, Some(deadline), budget)
     }
 
     fn request_with_timeouts(
@@ -185,12 +184,12 @@ impl Client {
         method: &str,
         path: &str,
         body: Option<&Value>,
-        connect_timeout: Option<Duration>,
+        deadline: Option<Instant>,
         io_timeout: Duration,
     ) -> anyhow::Result<(u16, Value)> {
         let host = self.host.trim_start_matches('[').trim_end_matches(']');
-        let mut stream = match connect_timeout {
-            Some(timeout) => {
+        let mut stream = match deadline {
+            Some(deadline) => {
                 let addrs: Vec<_> = (host, self.port)
                     .to_socket_addrs()
                     .with_context(|| {
@@ -203,7 +202,11 @@ impl Client {
                 let mut last_err = None;
                 let mut connected = None;
                 for addr in addrs {
-                    match TcpStream::connect_timeout(&addr, timeout) {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        bail!("hook request timed out before connecting");
+                    }
+                    match TcpStream::connect_timeout(&addr, remaining) {
                         Ok(s) => {
                             connected = Some(s);
                             break;
@@ -233,8 +236,17 @@ impl Client {
                 )
             })?,
         };
-        stream.set_read_timeout(Some(io_timeout))?;
-        stream.set_write_timeout(Some(io_timeout))?;
+        let write_timeout = match deadline {
+            Some(d) => {
+                let remaining = d.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    bail!("hook request timed out before write");
+                }
+                remaining
+            }
+            None => io_timeout,
+        };
+        stream.set_write_timeout(Some(write_timeout))?;
         let body = body.map(|b| b.to_string()).unwrap_or_default();
         let req = format!(
             "{method} {}{path} HTTP/1.1\r\nHost: {}:{}\r\nAuthorization: Bearer {}\r\n\
@@ -247,7 +259,25 @@ impl Client {
         );
         stream.write_all(req.as_bytes())?;
         let mut raw = Vec::new();
-        stream.read_to_end(&mut raw)?;
+        if let Some(deadline) = deadline {
+            let mut buf = [0u8; 4096];
+            loop {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    bail!("hook request timed out");
+                }
+                stream.set_read_timeout(Some(remaining))?;
+                match stream.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => raw.extend_from_slice(&buf[..n]),
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        } else {
+            stream.set_read_timeout(Some(io_timeout))?;
+            stream.read_to_end(&mut raw)?;
+        }
         parse_response(&raw)
     }
 
@@ -561,7 +591,7 @@ fn run_hook(args: &[String]) -> i32 {
             let stdin_bytes = read_hook_stdin();
             if let Ok(client) = Client::from_env() {
                 let mut out = std::io::stdout().lock();
-                run_hook_post_tool_use(&client, &stdin_bytes, &mut out);
+                return run_hook_post_tool_use(&client, &stdin_bytes, &mut out);
             }
             0
         }
@@ -626,21 +656,36 @@ fn parse_hook_stdin(raw: &[u8]) -> HookStdin {
 
 /// Two-step at-least-once `PostToolUse` hook delivery:
 /// 1. Skip Task subagents (`agent_id` / `parent_session_id` in stdin JSON).
-/// 2. `POST /api/a2a/inbox/drain` with `native_session_id` (short hook timeout).
+/// 2. `POST /api/a2a/inbox/drain` with `native_session_id` under one total deadline (4 s).
 /// 3. Write `hookSpecificOutput` JSON to `out` and flush.
-/// 4. Best-effort `POST /api/a2a/inbox/ack` with the drained `ids`.
-/// Fails open silently on any error.
-fn run_hook_post_tool_use(client: &Client, stdin_bytes: &[u8], out: &mut dyn Write) {
+/// 4. Best-effort `POST /api/a2a/inbox/ack` with the drained `ids` using the remaining budget.
+/// Fails open silently on any error or timeout with exit code 0.
+fn run_hook_post_tool_use(client: &Client, stdin_bytes: &[u8], out: &mut dyn Write) -> i32 {
+    run_hook_post_tool_use_with_budget(client, stdin_bytes, out, HOOK_TOTAL_BUDGET)
+}
+
+fn run_hook_post_tool_use_with_budget(
+    client: &Client,
+    stdin_bytes: &[u8],
+    out: &mut dyn Write,
+    total_budget: Duration,
+) -> i32 {
     let HookStdin::Main { native_session_id } = parse_hook_stdin(stdin_bytes) else {
-        return;
+        return 0;
     };
+    let deadline = Instant::now() + total_budget;
+    let drain_budget = deadline.saturating_duration_since(Instant::now());
+    if drain_budget < HOOK_MIN_STEP_BUDGET {
+        return 0;
+    }
     let drain_body = json!({ "native_session_id": native_session_id });
-    let Ok((status, v)) = client.request_hook("POST", "/api/a2a/inbox/drain", Some(&drain_body))
+    let Ok((status, v)) =
+        client.request_hook("POST", "/api/a2a/inbox/drain", Some(&drain_body), drain_budget)
     else {
-        return;
+        return 0;
     };
     if !(200..300).contains(&status) {
-        return;
+        return 0;
     }
     let ids: Vec<String> = v
         .get("ids")
@@ -654,10 +699,10 @@ fn run_hook_post_tool_use(client: &Client, stdin_bytes: &[u8], out: &mut dyn Wri
         })
         .unwrap_or_default();
     let Some(text) = v.get("text").and_then(Value::as_str).filter(|s| !s.is_empty()) else {
-        return;
+        return 0;
     };
     if ids.is_empty() {
-        return;
+        return 0;
     }
     let payload = json!({
         "hookSpecificOutput": {
@@ -666,9 +711,19 @@ fn run_hook_post_tool_use(client: &Client, stdin_bytes: &[u8], out: &mut dyn Wri
         }
     });
     if writeln!(out, "{payload}").is_err() || out.flush().is_err() {
-        return;
+        return 0;
     }
-    let _ = client.request_hook("POST", "/api/a2a/inbox/ack", Some(&json!({ "ids": ids })));
+    let ack_budget = deadline.saturating_duration_since(Instant::now());
+    if ack_budget < HOOK_MIN_STEP_BUDGET {
+        return 0;
+    }
+    let _ = client.request_hook(
+        "POST",
+        "/api/a2a/inbox/ack",
+        Some(&json!({ "ids": ids })),
+        ack_budget,
+    );
+    0
 }
 
 enum CliError {
@@ -1391,7 +1446,51 @@ mod tests {
 
         // Unreachable server fails open with empty stdout.
         let mut out = Vec::new();
-        run_hook_post_tool_use(&client, br#"{"session_id":"main-1"}"#, &mut out);
+        assert_eq!(
+            run_hook_post_tool_use(&client, br#"{"session_id":"main-1"}"#, &mut out),
+            0
+        );
         assert!(out.is_empty(), "unreachable server must fail open");
+    }
+
+    #[test]
+    fn fr_t3_hook_fails_open_when_total_budget_expires() {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let srv = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf);
+            std::thread::sleep(Duration::from_millis(500));
+            let body = json!({ "ids": ["msg_1"], "text": "late" }).to_string();
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = sock.write_all(resp.as_bytes());
+        });
+
+        let client = Client::new(&format!("http://{addr}"), "tok").unwrap();
+        let mut out = Vec::new();
+        let start = Instant::now();
+        let exit = run_hook_post_tool_use_with_budget(
+            &client,
+            br#"{"session_id":"main-1"}"#,
+            &mut out,
+            Duration::from_millis(120),
+        );
+        let elapsed = start.elapsed();
+
+        assert_eq!(exit, 0);
+        assert!(out.is_empty(), "timed-out server must fail open with empty stdout");
+        assert!(
+            elapsed < Duration::from_millis(300),
+            "hook exceeded total budget: elapsed={elapsed:?}"
+        );
+        srv.join().unwrap();
     }
 }

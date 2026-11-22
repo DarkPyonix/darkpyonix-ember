@@ -121,6 +121,8 @@ async fn net_with(node_punch: bool, client_punch: bool) -> Net {
             .letify(LetifyConfig {
                 relay_listen: Some("127.0.0.1:0".parse().unwrap()),
                 qad_listen: Some(qad),
+                // The Worker rendezvous has its own tests (letify_worker.rs); these punch over Ember's own.
+                worker_rendezvous: false,
                 ..LetifyConfig::default()
             }),
     )
@@ -139,6 +141,8 @@ async fn net_with(node_punch: bool, client_punch: bool) -> Net {
             advertise,
             udp_punch,
             connect_timeout: Duration::from_secs(20),
+            // The Worker rendezvous has its own tests (letify_worker.rs); these punch over Ember's own.
+            worker_rendezvous: false,
             ..LetifyConfig::default()
         };
         TransportConfig::new(key)
@@ -274,6 +278,8 @@ async fn em11_fr_n3_a_device_the_node_does_not_admit_is_refused_on_the_punched_p
         signal: Some(n.signals.channel(stranger_id)),
         observer: Some(n.observer),
         connect_timeout: Duration::from_secs(8),
+        // The Worker rendezvous has its own tests (letify_worker.rs); these punch over Ember's own.
+        worker_rendezvous: false,
         ..LetifyConfig::default()
     };
     let stranger = Transport::bind(
@@ -337,6 +343,8 @@ async fn em11_a_dial_to_the_relay_node_offers_no_punch() {
                 relay_listen: Some("127.0.0.1:0".parse().unwrap()),
                 qad_listen: Some(qad),
                 signal: Some(server_signal),
+                // The Worker rendezvous has its own tests (letify_worker.rs); these punch over Ember's own.
+                worker_rendezvous: false,
                 ..LetifyConfig::default()
             }),
     )
@@ -354,6 +362,8 @@ async fn em11_a_dial_to_the_relay_node_offers_no_punch() {
             .letify(LetifyConfig {
                 signal: Some(signals.channel(client_key.peer_id())),
                 observer: Some(ObserverAddr { addr: qad, node: Some(server_id) }),
+                // The Worker rendezvous has its own tests (letify_worker.rs); these punch over Ember's own.
+                worker_rendezvous: false,
                 ..LetifyConfig::default()
             }),
     )

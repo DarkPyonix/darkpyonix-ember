@@ -2031,6 +2031,46 @@ mod tests {
     }
 
     #[test]
+    fn fr_a8_editing_cron_keeps_its_saved_time_zone() {
+        let old = schedule_to_routine(&schedule(
+            ScheduleKind::Cron {
+                expr: "0 9 * * *".into(),
+                tz: "Europe/Berlin".into(),
+            },
+            false,
+        ));
+        let mut draft = FormDraft::from_routine(&old);
+        draft.cron = "15 9 * * *".into();
+        assert_eq!(
+            changed_patch(&draft, &old).kind,
+            Some(ScheduleKind::Cron {
+                expr: "15 9 * * *".into(),
+                tz: "Europe/Berlin".into(),
+            }),
+        );
+    }
+
+    #[test]
+    fn fr_a8_dashboard_compares_cron_triggers_in_absolute_time() {
+        let entry = |name: &str, tz: &str| {
+            let mut s = schedule(
+                ScheduleKind::Cron {
+                    expr: "0 9 * * *".into(),
+                    tz: tz.into(),
+                },
+                false,
+            );
+            s.target = ScheduleTarget::New { title: Some(name.into()) };
+            s.next_run_at = None;
+            schedule_to_entry(&s, &[])
+        };
+        let entries = [entry("UTC routine", "UTC"), entry("Seoul routine", "Asia/Seoul")];
+        let next = &kpis(&entries, at(2026, 6, 1, 23, 0), 0)[3];
+        assert_eq!(next.value, "내일 00:00");
+        assert_eq!(next.note.as_deref(), Some("Seoul routine"));
+    }
+
+    #[test]
     fn fr_a8_a_schedule_reads_as_a_routine() {
         let e = schedule_to_entry(
             &schedule(cron_kind("0 9 * * 1-5"), false),

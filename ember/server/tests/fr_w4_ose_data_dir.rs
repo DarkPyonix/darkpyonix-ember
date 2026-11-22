@@ -269,6 +269,110 @@ fn fr_w4_ose_data_dir_a_timeout_kills_the_whole_process_group() {
     assert!(!alive, "grandchild {pid} survived the timeout");
 }
 
+/// The red run leaves subprocesses behind. Clean them even if an assertion panics.
+struct RunningFixture(PathBuf);
+
+impl RunningFixture {
+    fn pids(&self) -> Vec<libc::pid_t> {
+        std::fs::read_to_string(&self.0)
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(|pid| pid.parse().unwrap())
+            .collect()
+    }
+}
+
+impl Drop for RunningFixture {
+    fn drop(&mut self) {
+        for pid in self.pids() {
+            // SAFETY: these are positive process ids recorded by the fixture.
+            unsafe { libc::kill(pid, libc::SIGKILL); }
+        }
+    }
+}
+
+#[tokio::test]
+async fn fr_w4_ose_shutdown_cancels_an_active_install_and_its_descendant() {
+    let dir = tempfile::tempdir().unwrap();
+    let install = RunningFixture(dir.path().join("install-pids"));
+    let binary = fake(dir.path(), r#"sleep 60 & printf '%s %s\n' "$$" "$!" > "$(dirname "$0")/install-pids"; wait"#);
+    let data = dir.path().join("server-data");
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+    let base = format!("http://{port}");
+    let mut server = tokio::process::Command::new(env!("CARGO_BIN_EXE_ember-server"))
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap())
+        .env("HOME", dir.path())
+        .env("EMBER_DATA_DIR", &data)
+        .env("EMBER_LISTEN", port.to_string())
+        .env("EMBER_TRANSPORT", "0")
+        .env("EMBER_OWNER_PRESENCE", "warn")
+        .env("EMBER_OSE_SERVER", &binary)
+        .env("EMBER_OSE_DATA_DIR", dir.path().join("ose-data"))
+        .kill_on_drop(true)
+        .spawn().unwrap();
+    let http = reqwest::Client::new();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if http.get(format!("{base}/api/health")).send().await.is_ok_and(|r| r.status().is_success()) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await.expect("server did not become ready");
+    let token = std::fs::read_to_string(data.join("server-token")).unwrap();
+    let request = tokio::spawn(async move {
+        http.post(format!("{base}/api/computers/local/ide/extensions"))
+            .bearer_auth(token.trim())
+            .header("content-type", "application/json")
+            .body(r#"{"id":"a.b"}"#)
+            .send().await
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while install.pids().len() < 2 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await.expect("install fixture did not start");
+
+    // SAFETY: this is the live, positive process id of the test server.
+    assert_eq!(unsafe { libc::kill(server.id().unwrap() as libc::pid_t, libc::SIGINT) }, 0);
+    let status = tokio::time::timeout(Duration::from_secs(5), server.wait())
+        .await.expect("server waited for the full install timeout").unwrap();
+    assert!(status.success(), "server status {status}");
+    let response = request.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert!(response.text().await.unwrap().contains("shutting down"));
+    wait_for_fixture_exit(&install);
+}
+
+fn wait_for_fixture_exit(fixture: &RunningFixture) {
+    for pid in fixture.pids() {
+        let end = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            // SAFETY: signal zero only checks whether the positive fixture pid is present.
+            if unsafe { libc::kill(pid, 0) } != 0
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            {
+                break;
+            }
+            assert!(std::time::Instant::now() < end, "process {pid} survived OSE cleanup");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+#[test]
+fn fr_w4_ose_start_failure_kills_the_launcher_descendant() {
+    let dir = tempfile::tempdir().unwrap();
+    let started = RunningFixture(dir.path().join("start-pids"));
+    let binary = fake(dir.path(), r#"sleep 60 & echo "$!" > "$(dirname "$0")/start-pids"; exit 17"#);
+    let manager = OseManager::with_data_root(Some(binary), dir.path().join("ose-data"));
+    let error = manager.connection(dir.path()).unwrap_err();
+    assert!(error.contains("exited during startup"), "{error}");
+    assert_eq!(started.pids().len(), 1);
+    wait_for_fixture_exit(&started);
+}
+
 #[tokio::test]
 async fn fr_w4_ose_data_dir_start_passes_server_data_dir() {
     let dir = tempfile::tempdir().unwrap();

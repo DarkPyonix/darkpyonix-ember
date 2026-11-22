@@ -593,6 +593,26 @@ pub fn ide_pop_rows(choices: &[crate::ui::session::IdeChoice], remembered: Optio
         .collect()
 }
 
+/// [`ide_pop_rows`] with the Ember row carrying the chooser's advance notice
+/// ([`crate::ui::session::ember_ide_notice`]): the notice replaces its description and a warning
+/// badge marks it. The row stays selectable, so choosing it still opens the editor window, which
+/// shows the fallback. Without a notice the rows come back as they are.
+pub fn with_ember_notice(
+    mut rows: Vec<PopRow>,
+    choices: &[crate::ui::session::IdeChoice],
+    launch: Option<&Result<IdeLaunch, String>>,
+) -> Vec<PopRow> {
+    if let Some(notice) = crate::ui::session::ember_ide_notice(launch) {
+        for (row, c) in rows.iter_mut().zip(choices) {
+            if c.kind == IdeKind::Ember {
+                row.description = Some(notice.clone());
+                row.badge = Some(("지원 안 함".to_string(), PillTone::Orange));
+            }
+        }
+    }
+    rows
+}
+
 /// The demo's own computer, as the mockup names it.
 pub(crate) const DEMO_COMPUTER: &str = "mac-mini";
 
@@ -682,6 +702,7 @@ pub fn IdeMenu(session: &str) {
     // `computer:~/project` (mockup `ideMenu`), not the raw folder (review r8).
     let ide_sub = crate::ui::session::ide_menu_subtitle(computer.get().as_deref(), &cwd);
     let rows = ide_pop_rows(&choices, remembered);
+    let rows = with_ember_notice(rows, &choices, ide.get().as_ref());
     let o_d = open.clone();
     let choices_c = choices.clone();
     let ui_c = ui.clone();
@@ -4794,6 +4815,48 @@ mod tests {
         assert_ne!(sem(&closed), sem(&open));
         assert_ne!(sem(&closed), sem(&plain));
         assert_ne!(sem(&open), sem(&plain));
+    }
+
+    #[test]
+    fn fr_e10_chooser_rows_carry_the_notice_on_the_ember_row_only() {
+        use crate::ide::IdeKind;
+        use crate::ui::session::ide_choices;
+        let launch_with = |commit: &str| {
+            Ok(crate::demo::ide_launch_with(
+                "s",
+                "p",
+                "/w",
+                Some(ember_client::wire::EmberOseConnection {
+                    endpoint: "http://127.0.0.1:9000".into(),
+                    relay: None,
+                    connection_token: String::new(),
+                    ose_commit: Some(commit.to_string()),
+                }),
+            ))
+        };
+        for remembered in [None, Some(IdeKind::VsCode)] {
+            let choices = ide_choices(remembered);
+            let plain = ide_pop_rows(&choices, remembered);
+            let other = launch_with("0036dcb6c18a603d2168c00fa578be600987ac7b");
+            let rows = with_ember_notice(ide_pop_rows(&choices, remembered), &choices, Some(&other));
+            for ((row, base), c) in rows.iter().zip(&plain).zip(&choices) {
+                if c.kind == IdeKind::Ember {
+                    assert!(row.description.as_deref().unwrap().contains("0036dcb6c18a"));
+                    assert!(row.badge.is_some());
+                    assert_eq!(row.title, base.title);
+                } else {
+                    assert_eq!(row.description, base.description);
+                    assert!(row.badge.is_none());
+                }
+                assert_eq!(row.chosen, base.chosen);
+            }
+            let pinned = launch_with(ember_editor_conn::PINNED_COMMIT);
+            let same = with_ember_notice(ide_pop_rows(&choices, remembered), &choices, Some(&pinned));
+            assert_eq!(
+                same.iter().map(|r| (&r.title, &r.description, r.badge.is_some())).collect::<Vec<_>>(),
+                plain.iter().map(|r| (&r.title, &r.description, r.badge.is_some())).collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]

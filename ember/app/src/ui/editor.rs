@@ -581,6 +581,34 @@ impl EditorTabs {
         self.current.map(|i| self.tabs[i].path.as_str())
     }
 
+    /// Activate the next tab in the strip, wrapping around. Returns the new current path.
+    pub fn next_tab(&mut self) -> Option<String> {
+        let len = self.tabs.len();
+        if len <= 1 {
+            return None;
+        }
+        let next = match self.current {
+            Some(i) => (i + 1) % len,
+            None => 0,
+        };
+        self.current = Some(next);
+        Some(self.tabs[next].path.clone())
+    }
+
+    /// Activate the previous tab in the strip, wrapping around. Returns the new current path.
+    pub fn prev_tab(&mut self) -> Option<String> {
+        let len = self.tabs.len();
+        if len <= 1 {
+            return None;
+        }
+        let prev = match self.current {
+            Some(i) => (i + len - 1) % len,
+            None => len - 1,
+        };
+        self.current = Some(prev);
+        Some(self.tabs[prev].path.clone())
+    }
+
     /// Close every tab except the currently active one and the pinned ones, without asking, returning the
     /// paths of the tabs that closed. The window asks first through [`EditorTabs::close_others_request`].
     pub fn close_others(&mut self) -> Vec<String> {
@@ -944,6 +972,29 @@ pub enum PromptSubmitOutcome {
     DeleteMany { items: Vec<(String, bool)> },
     BlockedDirty { path: String, dirty_files: Vec<String> },
     EmptyName,
+    Unchanged,
+}
+
+/// Drops sources that are already in `dest_dir`, are `dest_dir` itself, or would move a folder into
+/// one of its own descendants.
+pub fn filter_move_sources(sources: Vec<String>, dest_dir: &str) -> Vec<String> {
+    let dest = dest_dir.trim_end_matches('/');
+    let dest = if dest.is_empty() { "/" } else { dest };
+    sources
+        .into_iter()
+        .filter(|src| {
+            let trimmed = src.trim_end_matches('/');
+            if trimmed == dest || is_at_or_below(dest, trimmed) {
+                return false;
+            }
+            let parent = match trimmed.rfind('/') {
+                Some(0) => "/",
+                Some(i) => &trimmed[..i],
+                None => "",
+            };
+            parent != dest
+        })
+        .collect()
 }
 
 /// Evaluates submitting a tree prompt: checks empty names and unsaved dirty buffers on rename.
@@ -966,6 +1017,9 @@ pub fn evaluate_prompt_submit(
             name: name.to_string(),
         },
         TreePrompt::Rename { path } => {
+            if name == base_name(path) {
+                return PromptSubmitOutcome::Unchanged;
+            }
             let blocked: Vec<String> = unsaved_paths
                 .iter()
                 .filter(|u| is_at_or_below(u, path))
@@ -1808,6 +1862,8 @@ pub fn is_implemented(action: Action) -> bool {
                 | Action::KeybindingsJson
                 | Action::Format
                 | Action::NewTerminal
+                | Action::NextTab
+                | Action::PrevTab
         )
 }
 
@@ -1824,6 +1880,14 @@ pub fn apply_action(action: Action, tabs: &mut EditorTabs, stripes: &mut Stripes
     match action {
         Action::NewTerminal => {
             stripes.show(ToolWindow::Terminal);
+            true
+        }
+        Action::NextTab => {
+            tabs.next_tab();
+            true
+        }
+        Action::PrevTab => {
+            tabs.prev_tab();
             true
         }
         Action::Close => match tabs.current_path().map(str::to_string) {
@@ -2492,5 +2556,77 @@ mod tests {
         assert_eq!(merged.len(), 4, "the document's own decorations stay first");
         assert_eq!(merged[0].range.start.line, 9);
         assert_eq!(with_diff_line_tints(own.clone(), 3, &[]), own, "no change sends the same list");
+    }
+
+    #[test]
+    fn tabs_next_and_prev_cycle_and_wrap() {
+        let mut tabs = EditorTabs::default();
+        assert_eq!(tabs.next_tab(), None);
+        assert_eq!(tabs.prev_tab(), None);
+
+        tabs.open("/w/a.rs");
+        assert_eq!(tabs.next_tab(), None);
+        assert_eq!(tabs.prev_tab(), None);
+
+        tabs.open("/w/b.rs");
+        tabs.open("/w/c.rs");
+        assert_eq!(tabs.current_path(), Some("/w/c.rs"));
+
+        assert_eq!(tabs.next_tab().as_deref(), Some("/w/a.rs"));
+        assert_eq!(tabs.next_tab().as_deref(), Some("/w/b.rs"));
+        assert_eq!(tabs.prev_tab().as_deref(), Some("/w/a.rs"));
+        assert_eq!(tabs.prev_tab().as_deref(), Some("/w/c.rs"));
+
+        let mut stripes = Stripes::default();
+        assert!(is_implemented(Action::NextTab));
+        assert!(is_implemented(Action::PrevTab));
+        assert!(apply_action(Action::NextTab, &mut tabs, &mut stripes));
+        assert_eq!(tabs.current_path(), Some("/w/a.rs"));
+        assert!(apply_action(Action::PrevTab, &mut tabs, &mut stripes));
+        assert_eq!(tabs.current_path(), Some("/w/c.rs"));
+    }
+
+    #[test]
+    fn filter_move_sources_drops_same_parent_self_and_descendant() {
+        assert_eq!(
+            filter_move_sources(vec!["/w/src/a.rs".into()], "/w/src"),
+            Vec::<String>::new(),
+            "dropping a file into its own parent is a no-op"
+        );
+        assert_eq!(
+            filter_move_sources(vec!["/w/src".into()], "/w/src"),
+            Vec::<String>::new(),
+            "dropping a folder onto itself is a no-op"
+        );
+        assert_eq!(
+            filter_move_sources(vec!["/w/src".into()], "/w/src/sub"),
+            Vec::<String>::new(),
+            "dropping a folder into its own descendant is rejected"
+        );
+        assert_eq!(
+            filter_move_sources(vec!["/w/src/a.rs".into(), "/w/docs/b.md".into()], "/w/src"),
+            vec!["/w/docs/b.md".to_string()],
+            "only items from another directory remain"
+        );
+    }
+
+    #[test]
+    fn rename_prompt_submit_unchanged_name_is_noop() {
+        let prompt = TreePrompt::Rename { path: "/w/src/a.rs".into() };
+        assert_eq!(
+            evaluate_prompt_submit(&prompt, "a.rs", &[]),
+            PromptSubmitOutcome::Unchanged
+        );
+        assert_eq!(
+            evaluate_prompt_submit(&prompt, "  a.rs  ", &[]),
+            PromptSubmitOutcome::Unchanged
+        );
+        assert_eq!(
+            evaluate_prompt_submit(&prompt, "b.rs", &[]),
+            PromptSubmitOutcome::Rename {
+                path: "/w/src/a.rs".into(),
+                new_name: "b.rs".into(),
+            }
+        );
     }
 }

@@ -373,7 +373,12 @@ async fn start_shim(rt: &ShimRuntime, session: &str, cmd: &AgentCommand) -> anyh
 /// Kill a shim's agent, drain its end and acknowledge it so the shim exits and cleans up.
 async fn stop_shim(mut c: ShimClient, dir: &Path, id: &str) {
     let _ = c.kill().await;
-    while let Ok(Some(ev)) = tokio::time::timeout(Duration::from_secs(5), c.events.recv()).await {
+    // The shim reports the end only after the agent's output ended, which may take its whole
+    // stdout limit (5 s); wait longer than that in total, not 5 s per event, so the end is
+    // acknowledged and the shim exits at once (#923). A shim that is not acknowledged still ends
+    // after `session_shim::KILLED_LINGER`.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while let Ok(Some(ev)) = tokio::time::timeout_at(deadline, c.events.recv()).await {
         if let ShimEvent::Exited(_) = ev {
             let _ = c.ack(u64::MAX).await;
             break;

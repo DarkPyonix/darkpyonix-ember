@@ -71,6 +71,13 @@ pub const READY_LIMIT: Duration = Duration::from_secs(60);
 #[cfg(unix)]
 const STDOUT_END_LIMIT: Duration = Duration::from_secs(5);
 
+/// How long a shim stays after an agent it was asked to `KILL` ended, when nobody acknowledges
+/// the end. The one who killed it does not need the output kept for a later server, so the shim
+/// does not linger the hour of [`linger_secs`]; this is only room to read the `X` line. Without it
+/// a client that stopped waiting for the end (the stdout limit and its own wait racing under load)
+/// left the shim running for an hour (#923, `fr_s8_acp_mid_turn_output_drained_and_persisted_after_server_crash`).
+pub const KILLED_LINGER: Duration = Duration::from_secs(10);
+
 /// What to run, written by the server and read by the shim.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShimSpec {
@@ -320,11 +327,11 @@ pub async fn run_shim(dir: &Path, id: &str) -> anyhow::Result<()> {
         let dir = dir.to_path_buf();
         let id = id.to_string();
         tokio::spawn(async move {
-            let status = tokio::select! {
-                s = child.wait() => s,
+            let (status, killed) = tokio::select! {
+                s = child.wait() => (s, false),
                 _ = shared.kill.notified() => {
                     kill_group(agent_pid);
-                    child.wait().await
+                    (child.wait().await, true)
                 }
             };
             // The main process ended, on its own, by KILL or by the memory limit: end the rest of
@@ -363,7 +370,8 @@ pub async fn run_shim(dir: &Path, id: &str) -> anyhow::Result<()> {
             };
             let _ = reason;
             shared.bump();
-            tokio::time::sleep(linger).await;
+            // An end that was asked for (`KILL`) is not kept for a later server (#923).
+            tokio::time::sleep(if killed { KILLED_LINGER.min(linger) } else { linger }).await;
             cleanup(&dir, &id);
             std::process::exit(0);
         });

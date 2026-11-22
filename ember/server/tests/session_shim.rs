@@ -314,3 +314,24 @@ async fn fr_s8_a_shim_that_ends_before_ready_is_an_error() {
     // It does not wait for a timeout: the end of the shim is the answer (generous bound).
     assert!(started.elapsed() < Duration::from_secs(30), "{:?}", started.elapsed());
 }
+
+/// #923: a shim whose agent was ended by `KILL` exits shortly after the end even when nobody
+/// acknowledges it (the client that killed it stopped waiting), instead of lingering for its
+/// configured time (60 s here, an hour by default). This was the shim the leak guard found after
+/// `fr_s8_acp_mid_turn_output_drained_and_persisted_after_server_crash` under load.
+#[cfg(unix)]
+#[tokio::test]
+async fn fr_s8_a_killed_agents_shim_exits_without_an_acknowledgement() {
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = ShimGuard::new(&[dir.path()]);
+    let mut c = spawn_shim(&shim_bin(), dir.path(), &spec("k", dir.path())).await.unwrap();
+    read_until(&mut c, "tick 1").await;
+    let meta = scan(dir.path()).pop().expect("meta file");
+    c.kill().await.unwrap();
+    drop(c);
+    wait_ended(meta.agent_pid, "the killed agent").await;
+    // The guard's grace (20 s) is longer than KILLED_LINGER (10 s) plus the stdout limit (5 s),
+    // and shorter than this spec's linger (60 s): a shim that lingered fails here.
+    assert!(ember_server::session_shim::KILLED_LINGER < Duration::from_secs(15));
+    wait_ended(meta.shim_pid, "the shim of a killed agent, without an acknowledgement").await;
+}

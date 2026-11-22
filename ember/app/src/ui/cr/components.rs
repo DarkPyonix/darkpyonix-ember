@@ -257,9 +257,10 @@ pub fn NamedDisabled(label: &'static str, modifier: Modifier, alignment: Alignme
     { use ::compose_rust::ui::Box; Box!(modifier = modifier.label(label).role(Role::Button).disabled(true), alignment = alignment, content = content) };
 }
 
-// TODO(#673): compose-rust#831 (owned, replaceable accessible name on a clickable container) is
-// closed in the toolkit. Keep `DataNamedOverlay` until a display pass migrates every caller onto
-// `Clickable` with an owned accessible name and verifies assistive technology output.
+// Kept by design: `Modifier::label(&str)` (compose-rust#831) uses a bounded 128-entry global LRU
+// `LabelCache`, which can evict entries on screens with many data-named rows (paths, commits,
+// routines). `DataNamedOverlay` puts the owned name on a clear `Button` (`accessible_name`) with
+// no global cache eviction.
 /// The control of a painted box whose accessible name is built from data: a clear toolkit
 /// `Button` exactly over its `Box` parent. It takes the parent's bounds without changing them
 /// (`Modifier::match_parent_size`, compose-rust#431), so the box keeps the size of what it
@@ -1086,9 +1087,8 @@ pub const FIELD_INSET_MULTILINE: (f32, f32) = (12.0, 10.0);
 /// The frame is Ember's own row and the field inside it is bare (FR-L10.2, #878): the toolkit's
 /// framed field puts its text 8 px in, and a per-side inner padding would also have to keep a
 /// single line centred in the 40 px height, which `TextField` cannot do yet.
-/// TODO(#673): compose-rust#771 (bare TextField inner padding) is closed in the toolkit; moving
-/// the frame and the 12 px inset onto the field waits for a display check. Until then a click on
-/// the 12 px strip does not focus the field.
+/// Ember owns the outer frame so focus events can switch the border colour between `line` and
+/// `ink` while keeping the 12 px inset around the bare `TextField` (compose-rust#771).
 pub fn EmberField(o: FieldOptions) {
     if o.bare {
         BareField(o);
@@ -1290,8 +1290,8 @@ pub fn name_then_pill_width(room: f32, natural: f32, pill: f32, gap: f32) -> Opt
 /// pill and whatever follows the row stay on screen (CSS `flex:0 1 auto;min-width:0` on the
 /// name and `flex:none` on the pill; `.detail .topbar` in the mockup). The pill never shrinks.
 ///
-/// TODO(#673): compose-rust#778 closed with max-width/max-height, not a weight that leaves a
-/// child its own size (`weight(fill = false)`). The measuring below stays until that gap lands.
+/// TODO(compose-rust#981): the measuring below goes when the toolkit adds a weight that leaves a
+/// child its own size (`weight(fill = false)`).
 ///
 /// The toolkit has no weight that leaves a child its own size (Compose `weight(fill = false)`)
 /// and no maximum width: a weighted child fills its share, and unweighted ones are measured
@@ -1769,9 +1769,8 @@ pub fn EmberCardSized(
         .border(1.0, paint(border))
         .corner_radius(CORNER_LG);
     // A Box rather than `Card`, whose design-system shape ignores `corner_radius`.
-    // TODO(#673): compose-rust#826 (per-side padding) is closed in the toolkit; moving card
-    // padding from uniform 16 + 4 dp side spacers onto `padding_xy` waits for a display pass
-    // (an earlier swap clipped 1 px of the first Home chart bar at 1440).
+    // TODO(compose-rust#982): `Modifier::padding_xy(20.0, 16.0)` clipped 1 px on the left edge of
+    // the first Home chart bar at 1440; keep uniform 16 + 4 dp side spacers until #982 lands.
     // The 4 dp spacers raise the uniform 16 to the mockup's 20 on the sides (`--pad-card`).
     let side = if padding.is_some() { 0.0 } else { PAD_CARD_H - PAD_CARD_V };
     { use ::compose_rust::ui::Box; Box!(modifier = m.padding(padding.unwrap_or(PAD_CARD_V)), {
@@ -1798,8 +1797,8 @@ pub fn InsetPanelSized(fill_max_width: bool, fill_max_height: bool, content: imp
     if fill_max_height {
         m = m.fill_max_height();
     }
-    // TODO(#673): compose-rust#826 (per-side padding) is closed in the toolkit; moving inset
-    // panel padding from uniform 12 + 4 dp side spacers onto `padding_xy` waits for a display pass.
+    // TODO(compose-rust#982): keep uniform 12 + 4 dp side spacers until `padding_xy` matches
+    // uniform padding + spacers inside a bordered Box.
     let alignment = if fill_max_height { Some(Alignment::CenterStart) } else { None };
     { use ::compose_rust::ui::Box; Box!(
         modifier = m.background(paint(theme.palette.surface_2)).corner_radius(CORNER_MD).padding(PAD_ROW_V),

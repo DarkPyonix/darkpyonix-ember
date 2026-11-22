@@ -1328,8 +1328,7 @@ pub fn apply_suggestion(_draft: &str, suggestion: &str) -> String {
 }
 
 /// Window width (dp) under which the Home composer puts the mode and computer chips and the send
-/// button on a second line. The split is by width from before the toolkit had a wrapping row
-/// (TODO(#673): compose-rust#521 closed; `FlowRow` replaces it after a display check).
+/// button on a second line.
 pub const CHIP_WRAP_WIDTH: f32 = 1100.0;
 
 pub fn split_chip_rows(width_dp: f32) -> bool {

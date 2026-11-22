@@ -141,9 +141,8 @@ impl ImeInput {
     }
 }
 
-/// The Korean notice for a paste chord while the editor window does not read the clipboard
-/// (TODO(#673): compose-rust#546 closed with `compose_rust::clipboard::read_text` in the pin; the
-/// read inside the dioxus-compose window needs a display check).
+/// The Korean notice for a paste chord while multi-line paste confirmation in the editor window
+/// is not yet wired (the toolkit's `compose_rust::clipboard::read_text` is already in the pin).
 pub const PASTE_UNAVAILABLE: &str = "이 창에서는 아직 클립보드를 읽을 수 없어 붙여넣기를 할 수 없습니다.";
 
 #[cfg(test)]

@@ -200,8 +200,12 @@ async fn em11_fr_n3_a_revoked_device_on_a_punched_path_is_dropped_within_the_bou
     assert!(started.elapsed() < REVOKE_BOUND);
     assert!(matches!(reason, CloseReason::Remote { code: CLOSE_REVOKED, .. }), "the device sees the revoked code, got {reason:?}");
 
-    // A new connection is refused: the node no longer punches for it and the gate refuses it.
-    match n.client.connect(n.node.peer_id(), SERVICE).await {
+    // A new connection is refused: the node no longer punches for it, the relay meeting is
+    // declined and the gate refuses it. The dial gives up after the client's connect timeout.
+    let again = tokio::time::timeout(Duration::from_secs(40), n.client.connect(n.node.peer_id(), SERVICE))
+        .await
+        .expect("the refused dial ends");
+    match again {
         Err(_) => {}
         Ok(again) => {
             let reason = tokio::time::timeout(Duration::from_secs(5), again.closed()).await.expect("refused");
@@ -235,7 +239,10 @@ async fn em11_fr_n3_a_device_the_node_does_not_admit_is_refused_on_the_punched_p
     .unwrap();
     stranger.add_peer_addr(PeerAddr { peer: n.node.peer_id(), relays: vec![], direct: n.node.local_addr().direct });
 
-    match stranger.connect(n.node.peer_id(), SERVICE).await {
+    let attempt = tokio::time::timeout(Duration::from_secs(30), stranger.connect(n.node.peer_id(), SERVICE))
+        .await
+        .expect("the stranger's dial ends");
+    match attempt {
         Err(_) => {}
         Ok(conn) => {
             let reason = tokio::time::timeout(Duration::from_secs(5), conn.closed()).await.expect("refused at accept");

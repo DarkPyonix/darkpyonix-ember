@@ -441,7 +441,6 @@ impl EditorSession {
             settings: settings.clone(),
             scope_table: scope_table.clone(),
             user_files: config.user_files.iter().map(|p| crate::settings::user_data_uri(p).key()).collect(),
-            authority: authority.clone(),
         };
         let task = tokio::spawn(driver.run(rx, rpc_events, changes, ipc_lifecycle));
 
@@ -869,8 +868,6 @@ struct Driver {
     scope_table: Vec<(String, Option<u8>)>,
     /// The keys of the `vscode-userdata:` URIs the session may read and write on this machine.
     user_files: Vec<String>,
-    /// The remote authority of the server, for a `file` URI the extension host names.
-    authority: String,
 }
 
 /// Reads one of the caller's settings files on the client machine. A file that is not there yet

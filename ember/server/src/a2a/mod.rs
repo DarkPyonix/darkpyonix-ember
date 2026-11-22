@@ -22,6 +22,11 @@ pub mod store;
 pub mod team;
 pub mod terminal;
 
+#[cfg(test)]
+mod mcp_agents_tests;
+#[cfg(test)]
+mod native_tests;
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, Weak};

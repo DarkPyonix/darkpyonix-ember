@@ -31,7 +31,7 @@ path = "src/main.rs"
 # compose-rust develop after the builder flip (#906): widgets are call macros. dioxus-compose
 # chore/compose-rust-fr39-flip pins the same rev.
 compose-rust = { git = "https://github.com/DarkPyonix/compose-rust", rev = "e52fbd396681ceb3017513107edda5812dee4920", default-features = false }
-dioxus-compose = { git = "https://github.com/DarkPyonix/dioxus-compose", rev = "d4a0088e85625dab62c3c8cd224418e9c8e0d0c5" }
+dioxus-compose = { git = "https://github.com/DarkPyonix/dioxus-compose", rev = "6e2c81d4d007003e372ba6d71e62456f97482746" }
 
 # Everything below the UI: sync engine, state reducer, transcript, cache.
 ember-client = { path = "../client" }

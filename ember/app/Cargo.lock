@@ -1121,7 +1121,7 @@ dependencies = [
 [[package]]
 name = "dioxus-compose"
 version = "0.0.1"
-source = "git+https://github.com/DarkPyonix/dioxus-compose?rev=d4a0088e85625dab62c3c8cd224418e9c8e0d0c5#d4a0088e85625dab62c3c8cd224418e9c8e0d0c5"
+source = "git+https://github.com/DarkPyonix/dioxus-compose?rev=6e2c81d4d007003e372ba6d71e62456f97482746#6e2c81d4d007003e372ba6d71e62456f97482746"
 dependencies = [
  "blitz-dom",
  "blitz-html",

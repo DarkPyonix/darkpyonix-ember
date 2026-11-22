@@ -4,6 +4,7 @@
 //! assertion waits for a condition with a generous bound and never sleeps and then asserts.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use ember_node::api::{self, Node};
@@ -18,6 +19,10 @@ const TOKEN: &str = "node-token";
 /// How long a condition may take to show up.
 const BOUND: Duration = Duration::from_secs(20);
 
+/// Serialize FSEvents/inotify integration tests so concurrent stream starts do not stall macOS
+/// `fseventsd` under heavy load (#976).
+static WATCH_SERIAL: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
 struct Fx {
     root: PathBuf,
     outside: PathBuf,
@@ -25,9 +30,11 @@ struct Fx {
     client: NodeClient,
     url: String,
     _dir: tempfile::TempDir,
+    _serial: tokio::sync::MutexGuard<'static, ()>,
 }
 
 async fn fx_with(limits: WatchLimits) -> Fx {
+    let serial = WATCH_SERIAL.get_or_init(|| tokio::sync::Mutex::new(())).lock().await;
     let dir = tempfile::tempdir().unwrap();
     let tmp = dir.path().canonicalize().unwrap();
     let root = tmp.join("root");
@@ -42,7 +49,7 @@ async fn fx_with(limits: WatchLimits) -> Fx {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", l.local_addr().unwrap());
     tokio::spawn(api::serve(l, node));
-    Fx { root, outside, denied, client: NodeClient::new(&url, TOKEN).unwrap(), url, _dir: dir }
+    Fx { root, outside, denied, client: NodeClient::new(&url, TOKEN).unwrap(), url, _dir: dir, _serial: serial }
 }
 
 async fn fx() -> Fx {
@@ -70,12 +77,13 @@ async fn next(ws: &mut FsWatchSocket, within: Duration) -> Option<Value> {
 /// Read frames until `want` holds for one of them (and return it), or panic after [`BOUND`].
 async fn until(ws: &mut FsWatchSocket, what: &str, want: impl Fn(&Value) -> bool) -> Value {
     let deadline = tokio::time::Instant::now() + BOUND;
+    let mut seen = Vec::new();
     loop {
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
         match next(ws, left).await {
             Some(v) if want(&v) => return v,
-            Some(_) => continue,
-            None => panic!("no frame with {what} within {BOUND:?}"),
+            Some(v) => seen.push(v),
+            None => panic!("no frame with {what} within {BOUND:?} (seen {} frames: {seen:?})", seen.len()),
         }
     }
 }

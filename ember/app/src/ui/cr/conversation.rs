@@ -51,8 +51,9 @@ use crate::ui::Route;
 
 use super::compat::{Badge, Banner, CodeText, MessageText, Spinner, StatusIndicator};
 use super::components::{
-    AppButton, BackButton, ButtonKind, Clickable, EmberCard, EmberField, FieldOptions, IconButton, Label, NameThenPill,
-    Pill, PillTone, PopKind, PopMenu, PopRow, PopoverMenu, Txt,
+    AppButton, BackButton, ButtonKind, Clickable, EmberCard, EmberField, FieldOptions, IconButton,
+    Label, NameThenPill, NamedClickable, Pill, PillTone, PopKind, PopMenu, PopRow, PopoverMenu,
+    Txt,
 };
 use super::ko;
 use super::launcher::{ConnectionBanner, export, patch_session};
@@ -336,6 +337,280 @@ pub fn fork_from(ui: &SharedUi, id: String, seq: Option<i64>) {
     );
 }
 
+/// Anchored popover menu for session actions (pin, export, fork, approve-all).
+/// Used in the visible single-session topbar and in standalone conversation headers.
+pub fn ConversationActionsMenu(id: &str) {
+    let p = ember_theme().palette;
+    let ui = shared_ui().clone();
+    let s = services();
+    let sid = id.to_string();
+    let actions_menu = remember_with_key(format!("{sid}:actions_menu"), || {
+        mutable_state_of(std::env::var("EMBER_CR_SESSION_MENU").as_deref() == Ok("more"))
+    });
+
+    let info = {
+        let _ = ui.live.launcher.get();
+        s.client.read(|st| {
+            st.session(&sid)
+                .map(|v| (v.record.title.clone(), v.record.pinned, st.approve_all(&sid)))
+        })
+    };
+    let Some((title, pinned, approve_all)) = info else {
+        return;
+    };
+
+    let more_rows = vec![
+        PopRow {
+            title: if pinned { "고정 해제" } else { "고정" }.into(),
+            chosen: pinned,
+            ..Default::default()
+        },
+        PopRow {
+            title: "내보내기".into(),
+            ..Default::default()
+        },
+        PopRow {
+            title: ko::FORK_MENU_LABEL.into(),
+            ..Default::default()
+        },
+        PopRow {
+            title: ko::approve_all_menu_label(approve_all).into(),
+            chosen: approve_all,
+            danger: !approve_all,
+            ..Default::default()
+        },
+    ];
+    let open = actions_menu.get();
+    let dismiss = actions_menu;
+    let toggle = actions_menu;
+    let sid_pick = sid.clone();
+    let title_pick = title;
+    let ui_pick = ui;
+    PopoverMenu(
+        open,
+        PopMenu {
+            name: super::a11y::MORE,
+            kind: PopKind::Drop,
+            head: "대화 메뉴",
+            sub: None,
+            rows: &more_rows,
+            align: compose_rust::PopoverAlign::End,
+        },
+        move || dismiss.set(false),
+        move |idx| match idx {
+            0 => patch_session(
+                sid_pick.clone(),
+                SessionPatch {
+                    pinned: Some(!pinned),
+                    ..Default::default()
+                },
+            ),
+            1 => export(sid_pick.clone(), title_pick.clone()),
+            2 => fork_from(&ui_pick, sid_pick.clone(), None),
+            3 => {
+                let id_ap = sid_pick.clone();
+                let enable = !approve_all;
+                run_shared(
+                    async move { services().set_approve_all(&id_ap, enable).await },
+                    |r| {
+                        if let Err(e) = r {
+                            notice::post(format!("모드를 바꾸지 못했습니다: {e}"));
+                        }
+                    },
+                );
+            }
+            _ => {}
+        },
+        move || {
+            NamedClickable(
+                super::a11y::MORE,
+                Modifier::new()
+                    .size(H_CTL, H_CTL)
+                    .background(paint(p.surface))
+                    .border(1.0, paint(p.line))
+                    .shape_role(ShapeRole::Full)
+                    .expanded(open),
+                Alignment::Center,
+                move || toggle.set(!toggle.get_untracked()),
+                move || NavIcon(super::session::ICON_MORE_H_SVG, p.text_2.to_argb(), 15.0),
+            );
+        },
+        None,
+    );
+}
+
+/// Anchored popover menu for switching the session's computer.
+/// Uses a compact 32 dp icon trigger in the single-session topbar and a labelled button in
+/// standalone conversation headers.
+pub fn SessionComputerMenu(id: &str, compact_trigger: bool) {
+    let p = ember_theme().palette;
+    let ui = shared_ui().clone();
+    let s = services();
+    let sid = id.to_string();
+    let computer = remember_with_key(format!("{sid}:comp_cur"), || {
+        mutable_state_of(None::<CurrentComputer>)
+    });
+    let computer_menu = remember_with_key(format!("{sid}:comp_menu"), || {
+        mutable_state_of(std::env::var("EMBER_CR_SESSION_MENU").as_deref() == Ok("computer"))
+    });
+
+    {
+        let sid_load = sid.clone();
+        let comp_load = computer;
+        launched_effect(sid.clone(), move || async move {
+            if services().demo.is_some() {
+                return;
+            }
+            let a = sid_load.clone();
+            let comp = comp_load;
+            run_shared(
+                async move {
+                    services()
+                        .server
+                        .session_computer(&a)
+                        .await
+                        .map_err(|e| e.to_string())
+                },
+                move |r| match r {
+                    Ok(c) => comp.set(Some(c)),
+                    Err(e) => tracing::debug!("current computer: {e}"),
+                },
+            );
+        });
+    }
+
+    let (busy, computers) = {
+        let _ = ui.live.launcher.get();
+        s.client.read(|st| {
+            let busy = st
+                .session(&sid)
+                .is_some_and(|v| model::is_busy(v.status));
+            (busy, st.computers().to_vec())
+        })
+    };
+    let current = computer.get();
+    let current_computer_id = current.as_ref().map(|c| c.computer.id.clone());
+    let computer_name = current
+        .as_ref()
+        .map(|c| c.computer.name.clone())
+        .unwrap_or_else(|| "이 컴퓨터".into());
+
+    let comp_rows: Vec<PopRow> = if computers.is_empty() {
+        vec![PopRow {
+            title: "등록된 컴퓨터가 없습니다".into(),
+            ..Default::default()
+        }]
+    } else {
+        computers
+            .iter()
+            .map(|c| PopRow {
+                title: c.name.clone(),
+                description: Some(ko::reachability_label(c.reachability).to_string()),
+                chosen: current_computer_id.as_deref() == Some(c.id.as_str()),
+                ..Default::default()
+            })
+            .collect()
+    };
+
+    let open = computer_menu.get();
+    let dismiss = computer_menu;
+    let toggle = computer_menu;
+    let comp_state = computer;
+    let comps_for_pick = computers;
+    let sid_comp = sid;
+    PopoverMenu(
+        open,
+        PopMenu {
+            name: super::a11y::COMPUTER_PICKER,
+            kind: PopKind::Mode,
+            head: "컴퓨터",
+            sub: None,
+            rows: &comp_rows,
+            align: if compact_trigger {
+                compose_rust::PopoverAlign::End
+            } else {
+                compose_rust::PopoverAlign::Start
+            },
+        },
+        move || dismiss.set(false),
+        move |idx| {
+            let Some(c) = comps_for_pick.get(idx) else {
+                return;
+            };
+            if demo_blocked_cr() {
+                return;
+            }
+            let cid = c.id.clone();
+            let s_id = sid_comp.clone();
+            let comp_out = comp_state;
+            run_shared(
+                async move {
+                    services()
+                        .server
+                        .switch_computer(&s_id, &cid)
+                        .await
+                        .map_err(|e| e.to_string())
+                },
+                move |r| match r {
+                    Ok(out) => {
+                        let name = out.computer.name.clone();
+                        let designated = comp_out
+                            .get_untracked()
+                            .and_then(|c| c.designated_computer_id);
+                        comp_out.set(Some(CurrentComputer {
+                            session_id: out.session_id,
+                            computer: out.computer,
+                            implicit: false,
+                            notice_pending: false,
+                            designated_computer_id: designated,
+                        }));
+                        notice::post(format!("{name} 컴퓨터로 전환했습니다"));
+                    }
+                    Err(e) => {
+                        notice::post(format!("컴퓨터를 전환하지 못했습니다: {e}"))
+                    }
+                },
+            );
+        },
+        move || {
+            if compact_trigger {
+                let tint = if busy {
+                    p.muted.to_argb()
+                } else {
+                    p.text_2.to_argb()
+                };
+                NamedClickable(
+                    super::a11y::COMPUTER_PICKER,
+                    Modifier::new()
+                        .size(H_CTL, H_CTL)
+                        .background(paint(p.surface))
+                        .border(1.0, paint(p.line))
+                        .shape_role(ShapeRole::Full)
+                        .expanded(open),
+                    Alignment::Center,
+                    move || {
+                        if !busy {
+                            toggle.set(!toggle.get_untracked());
+                        }
+                    },
+                    move || NavIcon(super::session::ICON_PC_SVG, tint, 15.0),
+                );
+            } else {
+                AppButton(
+                    &computer_name,
+                    None,
+                    ButtonKind::Default,
+                    true,
+                    !busy,
+                    false,
+                    move || toggle.set(!toggle.get_untracked()),
+                );
+            }
+        },
+        None,
+    );
+}
+
 /// The conversation view for `id` (FR-L5..FR-L7).
 ///
 /// When `embedded` is `true` (inside `SessionScreen`'s single view), the top-right "IDE 열기"
@@ -504,8 +779,6 @@ pub fn ConversationView(id: &str, embedded: bool) {
     let expanded = remember_with_key(sid.clone(), || mutable_state_of(HashSet::<String>::new()));
     let answering = remember_with_key(sid.clone(), || mutable_state_of(HashSet::<String>::new()));
     let ide_menu = remember_with_key(sid.clone(), || mutable_state_of(false));
-    let computer_menu = remember_with_key(sid.clone(), || mutable_state_of(false));
-    let more_menu = remember_with_key(sid.clone(), || mutable_state_of(false));
 
     let send = {
         let sid = sid.clone();
@@ -578,15 +851,6 @@ pub fn ConversationView(id: &str, embedded: bool) {
         meta.push(m.clone());
     }
     let meta = meta.join(" \u{00b7} ");
-    let computer_name = computer
-        .get()
-        .as_ref()
-        .map(|c| c.computer.name.clone())
-        .unwrap_or_else(|| "이 컴퓨터".into());
-    let computers = {
-        let _ = ui.live.launcher.get();
-        s.client.read(|st| st.computers().to_vec())
-    };
     let approve_all = {
         let _ = ui.live.launcher.get();
         s.client.read(|st| st.approve_all(&sid))
@@ -682,7 +946,6 @@ pub fn ConversationView(id: &str, embedded: bool) {
         ide_now.as_ref(),
     );
     let current_computer = computer.get();
-    let current_computer_id = current_computer.as_ref().map(|c| c.computer.id.clone());
     let ide_sub = crate::ui::session::ide_menu_subtitle(
         current_computer.as_ref().map(|c| c.computer.name.as_str()),
         &record.cwd,
@@ -717,7 +980,6 @@ pub fn ConversationView(id: &str, embedded: bool) {
         }
     };
 
-    let pinned = record.pinned;
     let agent = record.agent.clone();
 
     // `.detail{background:var(--surface)}`: the conversation sits on `surface`, not the window
@@ -751,74 +1013,7 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                         );
                                     }) };
                                 StatusIndicator(status);
-                                let more_rows = vec![
-                                    PopRow {
-                                        title: if pinned { "고정 해제" } else { "고정" }.into(),
-                                        chosen: pinned,
-                                        ..Default::default()
-                                    },
-                                    PopRow {
-                                        title: "내보내기".into(),
-                                        ..Default::default()
-                                    },
-                                    PopRow {
-                                        title: ko::FORK_MENU_LABEL.into(),
-                                        ..Default::default()
-                                    },
-                                    PopRow {
-                                        title: ko::approve_all_menu_label(approve_all).into(),
-                                        chosen: approve_all,
-                                        danger: !approve_all,
-                                        ..Default::default()
-                                    },
-                                ];
-                                let more_dismiss = more_menu;
-                                let sid_more = sid.clone();
-                                let title_more = title.clone();
-                                let ui_more = ui.clone();
-                                let more = more_menu;
-                                PopoverMenu(
-                                    more_menu.get(),
-                                    PopMenu {
-                                        name: super::a11y::MORE,
-                                        kind: PopKind::Drop,
-                                        head: "대화 메뉴",
-                                        sub: None,
-                                        rows: &more_rows,
-                                        align: compose_rust::PopoverAlign::End,
-                                    },
-                                    move || more_dismiss.set(false),
-                                    move |idx| match idx {
-                                        0 => patch_session(
-                                            sid_more.clone(),
-                                            SessionPatch {
-                                                pinned: Some(!pinned),
-                                                ..Default::default()
-                                            },
-                                        ),
-                                        1 => export(sid_more.clone(), title_more.clone()),
-                                        2 => fork_from(&ui_more, sid_more.clone(), None),
-                                        3 => {
-                                            let id_ap = sid_more.clone();
-                                            let enable = !approve_all;
-                                            run_shared(
-                                                async move { services().set_approve_all(&id_ap, enable).await },
-                                                |r| {
-                                                    if let Err(e) = r {
-                                                        notice::post(format!("모드를 바꾸지 못했습니다: {e}"));
-                                                    }
-                                                },
-                                            );
-                                        }
-                                        _ => {}
-                                    },
-                                    move || {
-                                        IconButton(IconRole::More, true, move || {
-                                            more.set(!more.get_untracked());
-                                        });
-                                    },
-                                    None,
-                                );
+                                ConversationActionsMenu(&sid);
                             }) };
                     }
 
@@ -859,83 +1054,7 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                     Some(paint(p.muted)),
                                     Some(1),
                                 );
-                                let comp_rows: Vec<PopRow> = if computers.is_empty() {
-                                    vec![PopRow {
-                                        title: "등록된 컴퓨터가 없습니다".into(),
-                                        ..Default::default()
-                                    }]
-                                } else {
-                                    computers
-                                        .iter()
-                                        .map(|c| PopRow {
-                                            title: c.name.clone(),
-                                            description: Some(ko::reachability_label(c.reachability).to_string()),
-                                            chosen: current_computer_id.as_deref() == Some(c.id.as_str()),
-                                            ..Default::default()
-                                        })
-                                        .collect()
-                                };
-                                let comp_dismiss = computer_menu;
-                                let comps_for_pick = computers.clone();
-                                let sid_comp = sid.clone();
-                                let reload_comp = load.clone();
-                                let cm = computer_menu;
-                                PopoverMenu(
-                                    computer_menu.get(),
-                                    PopMenu {
-                                        name: super::a11y::COMPUTER_PICKER,
-                                        kind: PopKind::Mode,
-                                        head: "컴퓨터",
-                                        sub: None,
-                                        rows: &comp_rows,
-                                        align: compose_rust::PopoverAlign::Start,
-                                    },
-                                    move || comp_dismiss.set(false),
-                                    move |idx| {
-                                        let Some(c) = comps_for_pick.get(idx) else {
-                                            return;
-                                        };
-                                        if demo_blocked_cr() {
-                                            return;
-                                        }
-                                        let cid = c.id.clone();
-                                        let s_id = sid_comp.clone();
-                                        let reload = reload_comp.clone();
-                                        run_shared(
-                                            async move {
-                                                services()
-                                                    .server
-                                                    .switch_computer(&s_id, &cid)
-                                                    .await
-                                                    .map_err(|e| e.to_string())
-                                            },
-                                            move |r| match r {
-                                                Ok(out) => {
-                                                    reload();
-                                                    notice::post(format!(
-                                                        "{} 컴퓨터로 전환했습니다",
-                                                        out.computer.name
-                                                    ));
-                                                }
-                                                Err(e) => {
-                                                    notice::post(format!("컴퓨터를 전환하지 못했습니다: {e}"))
-                                                }
-                                            },
-                                        );
-                                    },
-                                    move || {
-                                        AppButton(
-                                            &computer_name,
-                                            None,
-                                            ButtonKind::Default,
-                                            true,
-                                            !busy,
-                                            false,
-                                            move || cm.set(!cm.get_untracked()),
-                                        );
-                                    },
-                                    None,
-                                );
+                                SessionComputerMenu(&sid, false);
                                 { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                                 if let Some(label) = qv::needs_you_label(pending) {
                                     Badge(&label, Tone::Warning);

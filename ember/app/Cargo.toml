@@ -21,6 +21,8 @@ name = "ember-app"
 path = "src/main.rs"
 
 [dependencies]
+# The one-time token the shell hands its editor windows (SPEC FR-S12, #1042).
+getrandom = "0.3"
 # The UI toolkit. Base screens are written on compose-rust directly; IDE screens use
 # dioxus-compose (SPEC §L, INTENT D9). A git dependency rather than a path one so the manifest
 # does not depend on where this checkout sits relative to the toolkit checkout (a worktree is

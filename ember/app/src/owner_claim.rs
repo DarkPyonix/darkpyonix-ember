@@ -352,6 +352,11 @@ pub trait ClaimHooks: Send + Sync + 'static {
     fn view(&self, view: ClaimView);
     /// A line for the user.
     fn notice(&self, text: String);
+    /// Whether a pending claim by `pid` named `name` is an editor window this app started and
+    /// handed a token to (FR-S12, #1042): the driver then approves it without the sheet.
+    fn handoff(&self, _pid: u64, _name: &str) -> bool {
+        false
+    }
 }
 
 /// Sends commands to a running [`drive`].
@@ -378,9 +383,15 @@ impl ClaimHandle {
 /// Starts [`drive`] on `rt` and returns its handle. Dropping every handle ends the driver,
 /// which clears the key.
 #[cfg(any(unix, windows))]
-pub fn spawn(rt: &tokio::runtime::Handle, endpoint: OwnerEndpoint, hooks: Arc<dyn ClaimHooks>, backoff: Backoff) -> ClaimHandle {
+pub fn spawn(
+    rt: &tokio::runtime::Handle,
+    endpoint: OwnerEndpoint,
+    name: String,
+    hooks: Arc<dyn ClaimHooks>,
+    backoff: Backoff,
+) -> ClaimHandle {
     let (tx, rx) = mpsc::unbounded_channel();
-    rt.spawn(drive(endpoint, CLAIMANT_NAME.to_string(), hooks, backoff, rx));
+    rt.spawn(drive(endpoint, name, hooks, backoff, rx));
     ClaimHandle { tx }
 }
 
@@ -411,6 +422,17 @@ pub async fn drive(
                     m = link.next() => {
                         // `None` or a read error: the server closed the link, the key is void.
                         let Ok(Some(msg)) = m else { break };
+                        // One of this app's own editor windows, with its token and PID: approved
+                        // here, never shown on the sheet (FR-S12, #1042).
+                        if let OwnerMessage::ClaimPending { claim, pid, name, .. } = &msg
+                            && matches!(state, ClaimState::Held | ClaimState::PendingOther { .. })
+                            && hooks.handoff(*pid, name)
+                        {
+                            if link.approve(*claim).await.is_err() {
+                                break;
+                            }
+                            continue;
+                        }
                         let step = on_message(&state, msg);
                         if let Some(key) = &step.key {
                             held = hooks.set_key(Some(key));
@@ -836,6 +858,85 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), driver).await.expect("the driver ends").unwrap();
         door.await.unwrap();
         assert!(!api.has_owner_key());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The shell's own editor window (its token and PID) is approved by the driver without the
+    /// sheet; another pending claim still goes to the sheet (FR-S12, #1042).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fr_s12_handoff_driver_approves_its_own_editor_window_without_the_sheet() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        struct HandoffHooks {
+            inner: TestHooks,
+            handoffs: std::sync::Mutex<crate::owner_handoff::Handoffs>,
+        }
+        impl ClaimHooks for HandoffHooks {
+            fn set_key(&self, key: Option<&OwnerKey>) -> bool {
+                self.inner.set_key(key)
+            }
+            fn view(&self, view: ClaimView) {
+                self.inner.view(view)
+            }
+            fn notice(&self, text: String) {
+                self.inner.notice(text)
+            }
+            fn handoff(&self, pid: u64, name: &str) -> bool {
+                self.handoffs.lock().unwrap().take(pid, name, std::time::Instant::now())
+            }
+        }
+
+        let dir = std::path::Path::new("../../.scratch/owner-claim-test");
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join(format!("{}-handoff.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let editor_name = crate::owner_handoff::claim_name(Some("tok1"));
+        let (seen_tx, mut seen_rx) = mpsc::unbounded_channel::<serde_json::Value>();
+        let door_name = editor_name.clone();
+        let door = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (r, mut w) = stream.into_split();
+            let mut lines = BufReader::new(r).lines();
+            let _hello = lines.next_line().await.unwrap().unwrap();
+            w.write_all(b"{\"state\":\"granted\",\"claim\":1,\"key\":\"eok_k\"}\n").await.unwrap();
+            let editor = serde_json::json!({"event": "claim_pending", "claim": 3, "pid": 501, "exe": "/app/ember", "name": door_name});
+            w.write_all(format!("{editor}\n").as_bytes()).await.unwrap();
+            let line = lines.next_line().await.unwrap().unwrap();
+            seen_tx.send(serde_json::from_str(&line).unwrap()).unwrap();
+            // The same token again (a replay) and a stranger: both for the sheet.
+            let replay = serde_json::json!({"event": "claim_pending", "claim": 4, "pid": 501, "exe": "/app/ember", "name": door_name});
+            w.write_all(format!("{replay}\n").as_bytes()).await.unwrap();
+            w.write_all(b"{\"event\":\"claim_pending\",\"claim\":5,\"pid\":77,\"exe\":\"/bin/cli\",\"name\":\"cli\"}\n").await.unwrap();
+            // Hold the link until the test is done.
+            let _ = lines.next_line().await;
+        });
+
+        let api = ember_client::api::Api::with_token("http://127.0.0.1:1", None).unwrap();
+        let seen = Arc::new(Seen::default());
+        let mut handoffs = crate::owner_handoff::Handoffs::default();
+        handoffs.record("tok1".into(), 501, std::time::Instant::now());
+        let hooks = Arc::new(HandoffHooks {
+            inner: TestHooks { api: api.clone(), seen: seen.clone() },
+            handoffs: std::sync::Mutex::new(handoffs),
+        });
+        let (tx, rx) = mpsc::unbounded_channel();
+        let handle = ClaimHandle { tx };
+        let backoff = Backoff { first_ms: 60_000, max_ms: 60_000 };
+        let driver = tokio::spawn(drive(OwnerEndpoint::Socket(path.clone()), CLAIMANT_NAME.into(), hooks, backoff, rx));
+
+        assert_eq!(seen_rx.recv().await.unwrap(), serde_json::json!({ "op": "approve", "claim": 3 }));
+        wait_for(&seen, "the other two on the sheet", |s| {
+            matches!(s, ClaimState::PendingOther { claims } if claims.iter().map(|c| c.claim).collect::<Vec<_>>() == [4, 5])
+        })
+        .await;
+        // The editor's claim was never on the sheet.
+        let views = seen.views.lock().unwrap().clone();
+        assert!(!views.iter().any(|v| matches!(&v.state, ClaimState::PendingOther { claims } if claims.iter().any(|c| c.claim == 3))));
+        drop(handle);
+        let _ = tokio::time::timeout(Duration::from_secs(5), driver).await;
+        door.abort();
         let _ = std::fs::remove_file(&path);
     }
 

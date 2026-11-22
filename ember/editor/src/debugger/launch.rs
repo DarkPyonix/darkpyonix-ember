@@ -202,6 +202,76 @@ impl VarContext {
     }
 }
 
+/// A debugger an extension contributes (`contributes.debuggers`, `IDebuggerContribution`): what
+/// the window offers when it creates `launch.json`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DebuggerContribution {
+    pub debug_type: String,
+    /// `label`, or the type when the manifest has none or left an unresolved `%key%`.
+    pub label: String,
+    /// `initialConfigurations` when it is a list; a command id there is not run.
+    pub initial_configurations: Vec<Value>,
+}
+
+/// The debuggers of a scan, in scan order. A contribution without a type is skipped, and a type
+/// contributed twice is listed once (the first wins), as `adapterManager.registerDebuggers` merges
+/// contributions of one type.
+pub fn contributed_debuggers(extensions: &[Value]) -> Vec<DebuggerContribution> {
+    let mut out: Vec<DebuggerContribution> = Vec::new();
+    let list = extensions
+        .iter()
+        .filter_map(|desc| desc.get("contributes")?.get("debuggers")?.as_array())
+        .flatten();
+    for debugger in list {
+        let Some(debug_type) = debugger
+            .get("type")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        else {
+            continue;
+        };
+        if out.iter().any(|d| d.debug_type == debug_type) {
+            continue;
+        }
+        let label = debugger
+            .get("label")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !(l.len() >= 2 && l.starts_with('%') && l.ends_with('%')))
+            .unwrap_or(debug_type);
+        out.push(DebuggerContribution {
+            debug_type: debug_type.to_owned(),
+            label: label.to_owned(),
+            initial_configurations: debugger
+                .get("initialConfigurations")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+        });
+    }
+    out
+}
+
+/// The text of a new `launch.json`, as `Debugger.getInitialConfigurationContent` writes it: the
+/// contribution's `initialConfigurations` followed by what the providers gave, indented with tabs.
+pub fn initial_launch_json(initial: &[Value], provided: &[Value]) -> String {
+    let all: Vec<&Value> = initial.iter().chain(provided).collect();
+    let mut bytes = Vec::new();
+    let formatter = serde_json::ser::PrettyFormatter::with_indent(b"\t");
+    let mut ser = serde_json::Serializer::with_formatter(&mut bytes, formatter);
+    serde::Serialize::serialize(&all, &mut ser).expect("a JSON value serializes");
+    let content = String::from_utf8(bytes).expect("serde_json writes UTF-8");
+    let content: Vec<String> = content
+        .split('\n')
+        .map(|line| format!("\t{line}"))
+        .collect();
+    format!(
+        "{{\n\t// Use IntelliSense to learn about possible attributes.\n\t// Hover to view descriptions of existing attributes.\n\t// For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387\n\t\"version\": \"0.2.0\",\n\t\"configurations\": {}\n}}",
+        content.join("\n").trim()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -278,5 +348,44 @@ mod tests {
             ctx.substitute(&config),
             json!({"program": "/w/m.py", "args": ["/w", 3, true], "env": {"P": "m.py"}, "n": null})
         );
+    }
+
+    #[test]
+    fn fr_l31_42_debuggers_come_from_the_scan_once_per_type() {
+        let scan = vec![
+            json!({ "name": "plain" }),
+            json!({ "contributes": { "debuggers": [
+                { "type": "debugpy", "label": "Python Debugger",
+                  "initialConfigurations": [{ "name": "Python: Current File", "type": "debugpy", "request": "launch" }] },
+                { "label": "no type" },
+                { "type": "node", "label": "%node.label%", "initialConfigurations": "extension.pickNodeProcess" },
+            ] } }),
+            json!({ "contributes": { "debuggers": [{ "type": "debugpy", "label": "Second" }] } }),
+        ];
+        let found = contributed_debuggers(&scan);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].debug_type, "debugpy");
+        assert_eq!(found[0].label, "Python Debugger");
+        assert_eq!(found[0].initial_configurations.len(), 1);
+        assert_eq!(found[1].label, "node");
+        assert!(found[1].initial_configurations.is_empty());
+    }
+
+    #[test]
+    fn fr_l31_42_a_new_launch_json_is_code_oss_template_and_parses_back() {
+        let initial = [json!({ "name": "A", "type": "debugpy", "request": "launch" })];
+        let provided = [json!({ "name": "B", "type": "debugpy", "request": "attach" })];
+        let text = initial_launch_json(&initial, &provided);
+        assert!(text.starts_with("{\n\t// Use IntelliSense to learn about possible attributes.\n"));
+        assert!(text.contains(
+            "\t\"version\": \"0.2.0\",\n\t\"configurations\": [\n\t\t{\n\t\t\t\"name\": \"A\""
+        ));
+        assert!(text.ends_with("\n\t]\n}"));
+        let file = parse_launch_json(&text).unwrap();
+        let names: Vec<&str> = file.configurations.iter().map(config_name).collect();
+        assert_eq!(names, ["A", "B"]);
+        let empty = initial_launch_json(&[], &[]);
+        assert!(empty.ends_with("\t\"configurations\": []\n}"));
+        assert!(parse_launch_json(&empty).unwrap().configurations.is_empty());
     }
 }

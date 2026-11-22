@@ -210,6 +210,8 @@ pub struct EditorSession {
     installed: Vec<crate::extensions::InstalledExtension>,
     /// The extensions the extension host was started with (the scan without the disabled ids).
     running: Vec<crate::extensions::InstalledExtension>,
+    /// The debuggers the running extensions contribute (FR-L31.42).
+    debuggers: Vec<crate::debugger::launch::DebuggerContribution>,
     task: Option<JoinHandle<()>>,
     /// The settings the extension host was started with (FR-L31.17).
     settings: SettingsScopes,
@@ -337,6 +339,7 @@ impl EditorSession {
         let extensions = crate::extensions::enabled_only(&scanned, &config.disabled_extensions);
         drop(scanned);
         let running = crate::extensions::parse_installed(&extensions);
+        let debuggers = crate::debugger::launch::contributed_debuggers(&extensions);
         let fs = Arc::new(RemoteFs::new(ipc.clone()));
         let changes = fs.subscribe_changes().await?;
 
@@ -451,7 +454,7 @@ impl EditorSession {
         }
 
         let app_language = config.app_language.clone();
-        Ok((Self { tx, authority, workspace_path, fs, ipc, app_language, installed, running, task: Some(task), settings, catalogue, machine_settings_path, workspace_settings_error, machine_settings_error, user_files: config.user_files.clone() }, updates_rx))
+        Ok((Self { tx, authority, workspace_path, fs, ipc, app_language, installed, running, debuggers, task: Some(task), settings, catalogue, machine_settings_path, workspace_settings_error, machine_settings_error, user_files: config.user_files.clone() }, updates_rx))
     }
 
     /// Every extension the connect-time scan found, disabled ones included (FR-L31.14).
@@ -462,6 +465,11 @@ impl EditorSession {
     /// The extensions the extension host was started with: what is running until it restarts.
     pub fn running_extensions(&self) -> &[crate::extensions::InstalledExtension] {
         &self.running
+    }
+
+    /// The debuggers the running extensions contribute, for creating `launch.json` (FR-L31.42).
+    pub fn debuggers(&self) -> &[crate::debugger::launch::DebuggerContribution] {
+        &self.debuggers
     }
 
     /// Reads the scan again on the management connection (`remoteExtensionsScanner.scanExtensions`),

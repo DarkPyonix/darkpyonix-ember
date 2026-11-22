@@ -131,6 +131,8 @@ struct Rig {
     files: HashMap<String, String>,
     /// What the configuration providers answer; `None` hands the configuration back unchanged.
     resolve: Option<Value>,
+    /// What `$provideDebugConfigurations` answers.
+    provided: Value,
     adapter: Adapter,
     /// Every call the core made, in order.
     calls: Vec<(String, Vec<Value>)>,
@@ -157,6 +159,7 @@ impl Rig {
             next_req: 0,
             files: HashMap::new(),
             resolve: None,
+            provided: Value::Null,
             adapter: Adapter::default(),
             calls: Vec::new(),
             dap: Vec::new(),
@@ -265,6 +268,14 @@ impl Rig {
                                 let id = args[1]["id"].clone();
                                 let cached = self.request("$sessionCached", vec![id]);
                                 queue.push_back(cached);
+                            }
+                            "$provideDebugConfigurations" => {
+                                if let Some(t) = token {
+                                    queue.push_back(Input::RpcReply {
+                                        token: t,
+                                        result: Ok(self.provided.clone()),
+                                    });
+                                }
                             }
                             "$resolveDebugConfiguration"
                             | "$resolveDebugConfigurationWithSubstitutedVariables" => {
@@ -1092,10 +1103,54 @@ fn fr_l31_42_list_configurations_reads_launch_json_and_provided_configurations_c
             json!(8),
         ],
     );
+    rig.provided = json!([{"name": "Provided", "type": "debugpy", "request": "launch"}]);
+    rig.calls.clear();
     rig.debug(DebugRequest::ProvideConfigurations {
         debug_type: "debugpy".into(),
     });
     assert_eq!(rig.calls_of("$provideDebugConfigurations")[0][0], json!(8));
+    // `activateDebuggers('onDebugInitialConfigurations')` runs before the providers are asked.
+    let first_provide = rig
+        .methods()
+        .iter()
+        .position(|m| *m == "$provideDebugConfigurations")
+        .unwrap();
+    let activations: Vec<Value> = rig.calls[..first_provide]
+        .iter()
+        .filter(|(m, _)| m == "$activateByEvent")
+        .map(|(_, a)| a[0].clone())
+        .collect();
+    assert_eq!(
+        activations,
+        [json!("onDebugInitialConfigurations"), json!("onDebug")]
+    );
+    let provided: Vec<Vec<Value>> = rig
+        .ui
+        .iter()
+        .filter_map(|u| match u {
+            DebugUpdate::ProvidedConfigurations {
+                debug_type,
+                configurations,
+            } if debug_type == "debugpy" => Some(configurations.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(provided.len(), 1, "one answer for all the providers");
+    assert_eq!(provided[0][0]["name"], json!("Provided"));
+}
+
+#[test]
+fn fr_l31_42_a_type_without_providers_is_answered_with_no_configurations() {
+    let mut rig = Rig::fixture();
+    rig.debug(DebugRequest::ProvideConfigurations {
+        debug_type: "node".into(),
+    });
+    assert!(rig.calls_of("$provideDebugConfigurations").is_empty());
+    assert!(rig.ui.iter().any(|u| matches!(
+        u,
+        DebugUpdate::ProvidedConfigurations { debug_type, configurations }
+            if debug_type == "node" && configurations.is_empty()
+    )));
 }
 
 #[test]

@@ -53,6 +53,8 @@ pub struct Shared {
     pub bridge: Rc<RefCell<WidgetBridge>>,
     pub revision: SyncSignal<u64>,
     pub(crate) debug: Signal<super::editor_debug::DebugControls>,
+    /// Run and Debug and the debug console (FR-L31.42).
+    pub(crate) debug_view: Signal<super::editor_debug_view::DebugView>,
     pub tabs: Signal<EditorTabs>,
     pub directory: Signal<String>,
     pub expanded: Signal<std::collections::HashSet<String>>,
@@ -139,6 +141,7 @@ fn init(target: EditorTarget) {
     let revision = use_hook(|| SyncSignal::<u64>::new_maybe_sync_in_scope(0, root));
     let host = use_hook(|| EditorHost::start(target.clone(), revision));
     let debug = use_hook(|| Signal::new_in_scope(super::editor_debug::DebugControls::default(), root));
+    let debug_view = use_hook(|| Signal::new_in_scope(super::editor_debug_view::DebugView::default(), root));
     let tabs = use_hook(|| Signal::new_in_scope(EditorTabs::default(), root));
     let directory = use_hook(|| Signal::new_in_scope(target.folder.clone(), root));
     let expanded = use_hook(|| Signal::new_in_scope(std::collections::HashSet::<String>::new(), root));
@@ -225,7 +228,7 @@ fn init(target: EditorTarget) {
     });
     let extensions = use_hook(|| crate::ui::editor_extensions::Extensions::new(&target.computer, revision));
     let agent = use_hook(|| crate::ui::editor_agent::AgentTool::new(&target.project, &target.folder, revision));
-    SHARED.with(|s| *s.borrow_mut() = Some(Shared { extensions, agent, host, bridge, revision, debug, tabs, directory, expanded, bottom_max, tree_sel, tree_multi_sel, tree_clipboard, tree_drag_src, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, recent_files, theme, position, stripes, menu_open, tab_menu, close_confirm, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris, open_errors, editor_versions, last_find_cmd, pending_goto, next_goto_id, last_goto_id, problems_limit, selected_output_channel, workbench_logs, scm, notifications }));
+    SHARED.with(|s| *s.borrow_mut() = Some(Shared { extensions, agent, host, bridge, revision, debug, debug_view, tabs, directory, expanded, bottom_max, tree_sel, tree_multi_sel, tree_clipboard, tree_drag_src, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, recent_files, theme, position, stripes, menu_open, tab_menu, close_confirm, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris, open_errors, editor_versions, last_find_cmd, pending_goto, next_goto_id, last_goto_id, problems_limit, selected_output_channel, workbench_logs, scm, notifications }));
 }
 
 pub(crate) fn join_path(dir: &str, name: &str) -> String {
@@ -1419,6 +1422,7 @@ pub mod page {
             // Hot exit (FR-L31.6a): the disk text of a restored buffer, or its failed open.
             crate::editor_backup::view::on_update(&s, &update);
             crate::ui::editor_debug::on_update(&s, &update);
+            crate::ui::editor_debug_view::on_update(&s, &update);
             let action = s.bridge.borrow_mut().apply(update);
             match action {
                 BridgeAction::Resync(uri) => { s.host.send(HostCommand::Resync(uri)); }
@@ -1642,6 +1646,8 @@ pub mod page {
                             {crate::ui::editor_extensions::view::panel(&s)}
                         } else if w == ToolWindow::Agent {
                             {crate::ui::editor_agent::view::panel(&s)}
+                        } else if w == ToolWindow::Debug {
+                            {crate::ui::editor_debug_view::panel(&s)}
                         } else {
                             {side_note(w, "ed-left")}
                         }
@@ -2001,6 +2007,8 @@ pub mod page {
             ToolWindow::Run => "play",
             ToolWindow::Problems => "warn",
             ToolWindow::Output => "code",
+            ToolWindow::Debug => "play",
+            ToolWindow::DebugConsole => "code",
         }
     }
 
@@ -3509,6 +3517,8 @@ pub mod page {
                     {output_body(s)}
                 } else if w == ToolWindow::Run {
                     {crate::ui::editor_tasks::view::body(s)}
+                } else if w == ToolWindow::DebugConsole {
+                    {crate::ui::editor_debug_view::console_body(s)}
                 } else {
                     div { class: "ed-note", role: "status", "{body}" }
                 }

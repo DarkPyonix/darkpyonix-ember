@@ -113,9 +113,12 @@ if [ "$mode" = deep ]; then
   [ "$status" = 0 ] || exit "$status"
   echo "regress (deep): PASS"; exit 0
 fi
-logs=$(find "$tmp/data" -name '*.log' -path '*exthost*' 2>/dev/null || true)
-# shellcheck disable=SC2086
-python3 -I "$reg/regress.py" parse-log $logs > "$tmp/parsed.json" 2>/dev/null || echo '{}' > "$tmp/parsed.json"
+# regress.py walks the data folder for the extension host logs itself: their names carry spaces
+# ("1-Git Graph.log"), and an unquoted list of them made every extension read as not-activated
+# (#84). A parse error fails the run instead of turning into an empty result.
+if ! python3 -I "$reg/regress.py" parse-log "$tmp/data" > "$tmp/parsed.json"; then
+  echo "FAIL: the extension host logs could not be parsed" >&2; exit 1
+fi
 status=0
 python3 -I "$reg/regress.py" compare "$reg/expected.json" "$tmp/parsed.json" "$tmp/install-failed.txt" "$tmp/results.json" || status=$?
 echo "  results:"; sed 's/^/    /' "$tmp/results.json"

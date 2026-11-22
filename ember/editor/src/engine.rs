@@ -127,6 +127,9 @@ pub enum Input {
     /// Reopen an open document in `encoding` (its unsaved edits are discarded) or save it in
     /// `encoding` (FR-L31.7).
     SetEncoding { uri: UriComponents, encoding: Encoding, mode: EncodingMode },
+    /// Change the indentation options of an open document, or its leading whitespace: one choice of
+    /// the status bar's indentation pick. Options belong to the document, not to the settings.
+    SetIndentation { uri: UriComponents, action: crate::indentation::IndentationAction },
     /// Put an open document under a language id; `None` detects it from the path again (FR-L31.7).
     SetLanguage { uri: UriComponents, language_id: Option<String> },
     /// The user's answer to the workspace trust prompt (FR-L31.18): `true` grants trust.
@@ -235,6 +238,9 @@ pub enum SessionUpdate {
     /// The line ending, encoding and language of an open document (FR-L31.7): after it opens, is
     /// reloaded, or any of the three changes.
     Format { uri: UriComponents, format: DocumentFormat },
+    /// The indentation options of an open document: after it opens, or the person changes them. The
+    /// widget's tab width follows `tab_size`.
+    Indentation { uri: UriComponents, indentation: crate::indentation::Indentation },
     /// Reopening with an encoding failed; the document is unchanged (FR-L31.7).
     FormatFailed { uri: UriComponents, error: String },
     /// Every language the extensions contribute, for the language mode picker (FR-L31.7).
@@ -468,6 +474,7 @@ impl SessionCore {
             Input::Replace { id, request } => self.on_replace(id, request),
             Input::SetEol { uri, eol } => self.on_set_eol(&uri, eol),
             Input::SetEncoding { uri, encoding, mode } => self.on_set_encoding(&uri, encoding, mode),
+            Input::SetIndentation { uri, action } => self.on_set_indentation(&uri, action),
             Input::SetLanguage { uri, language_id } => self.on_set_language(&uri, language_id),
             Input::DecideWorkspaceTrust { trusted } => self.on_decide_trust(trusted),
             Input::AnswerMessage { id, handle } => {
@@ -645,7 +652,7 @@ impl SessionCore {
     fn emit_folds(&mut self, key: &str) {
         let Some(doc) = self.docs.get(key) else { return };
         let (uri, generation, version) = (doc.uri.clone(), doc.generation(), doc.widget_version());
-        let tab_width = self.indent_for(&doc.language_id).0;
+        let tab_width = doc.indentation().tab_size;
         let folds = self
             .folds
             .entry(key.to_owned())
@@ -720,10 +727,11 @@ impl SessionCore {
                 generation: d.generation(),
                 text: d.widget_text(),
                 language_id: d.language_id.clone(),
-                tab_width: self.indent_for(&d.language_id).0,
+                tab_width: d.indentation().tab_size,
             };
             self.ui(u);
             self.emit_format(&key);
+            self.emit_indentation(&key);
             self.emit_folds(&key);
             if self.textmate_runs.contains_key(&key) || self.semantic.contains_key(&key) {
                 self.emit_syntax(&key);
@@ -782,6 +790,7 @@ impl SessionCore {
         });
         self.docs.insert(key.clone(), doc);
         self.emit_format(&key);
+        self.emit_indentation(&key);
         self.folds.insert(key.clone(), DocFolds::default());
         self.emit_folds(&key);
         self.highlight_open(&key);
@@ -1069,6 +1078,51 @@ impl SessionCore {
         };
         let uri = doc.uri.clone();
         self.ui(SessionUpdate::Format { uri, format });
+    }
+
+    fn emit_indentation(&mut self, key: &str) {
+        let Some(doc) = self.docs.get(key) else { return };
+        let (uri, indentation) = (doc.uri.clone(), doc.indentation());
+        self.ui(SessionUpdate::Indentation { uri, indentation });
+    }
+
+    /// One choice of the indentation pick (Code-OSS `indentation.ts`): the document's options change,
+    /// the extension host is told, and a conversion edits the widget's text like any other edit (the
+    /// widget answers with `CodeChanged`, which makes the document dirty and undoable).
+    fn on_set_indentation(&mut self, uri: &UriComponents, action: crate::indentation::IndentationAction) {
+        use crate::indentation::{convert_indentation_edits, guess_indentation, trim_trailing_whitespace_edits, Indentation, IndentationAction};
+        let key = uri.key();
+        let Some(doc) = self.docs.get(&key) else { return };
+        let current = doc.indentation();
+        let next = match action {
+            IndentationAction::IndentUsing { insert_spaces, size } => Indentation { tab_size: size, indent_size: size, insert_spaces },
+            IndentationAction::DisplaySize(size) => Indentation { tab_size: size, ..current },
+            IndentationAction::Detect => {
+                // The defaults are the ones a document of this language opens with.
+                let (default_size, default_spaces) = self.indent_for(&doc.language_id);
+                let (size, insert_spaces) = guess_indentation(doc.lines(), default_size, default_spaces);
+                Indentation::new(size, insert_spaces)
+            }
+            IndentationAction::Convert { to_spaces } => {
+                let edits = convert_indentation_edits(doc.lines(), current.tab_size, to_spaces);
+                let (uri, version) = (doc.uri.clone(), doc.widget_version());
+                self.lang_edit_widget(&uri, version, &edits);
+                Indentation { insert_spaces: to_spaces, ..current }
+            }
+            IndentationAction::TrimTrailingWhitespace => {
+                let edits = trim_trailing_whitespace_edits(doc.lines());
+                let (uri, version) = (doc.uri.clone(), doc.widget_version());
+                self.lang_edit_widget(&uri, version, &edits);
+                current
+            }
+        };
+        let Some(doc) = self.docs.get_mut(&key) else { return };
+        let Some(call) = doc.set_indentation(next) else { return };
+        self.rpc(call);
+        self.emit_indentation(&key);
+        if next.tab_size != current.tab_size {
+            self.emit_folds(&key);
+        }
     }
 
     /// Code-OSS `ChangeEOLAction`: `pushEOL` on the model, which the extension host gets as a

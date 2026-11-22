@@ -51,6 +51,8 @@ pub enum HostCommand {
     SetEol { path: String, eol: ember_editor::Eol },
     SetEncoding { path: String, encoding: ember_editor::Encoding, mode: ember_editor::EncodingMode },
     SetLanguage { path: String, language_id: Option<String> },
+    /// One choice of the indentation pick for an open file: its own options, or its leading whitespace.
+    SetIndentation { path: String, action: ember_editor::IndentationAction },
     /// The answer to the workspace trust prompt (FR-L31.18); the window has saved it already.
     DecideTrust(bool),
     /// Answer extension message `id` with the chosen button's handle, or `undefined` (FR-L31.16).
@@ -639,6 +641,7 @@ impl EditorHost {
                             Some(HostCommand::SetEol { path, eol }) => { let _ = session.set_eol(session.document_uri(&path), eol); }
                             Some(HostCommand::SetEncoding { path, encoding, mode }) => { let _ = session.set_encoding(session.document_uri(&path), encoding, mode); }
                             Some(HostCommand::SetLanguage { path, language_id }) => { let _ = session.set_language(session.document_uri(&path), language_id); }
+                            Some(HostCommand::SetIndentation { path, action }) => { let _ = session.set_indentation(session.document_uri(&path), action); }
                             Some(HostCommand::Restore { path, text }) => { let _ = session.restore(session.document_uri(&path), text); }
                             Some(HostCommand::Reload(path)) => { let _ = session.reload(session.document_uri(&path)); }
                             Some(HostCommand::CompareWithDisk(path)) => {

@@ -3,13 +3,9 @@
 //! `ChangeEncodingAction`, `ChangeLanguageAction`). Pure; the window draws the items in the status
 //! bar and the pickers in the palette sheet (`editor_workbench`).
 
-use ember_editor::{DocumentFormat, Encoding, EncodingMode, Eol, LanguageInfo};
+use ember_editor::{DocumentFormat, Encoding, EncodingMode, Eol, Indentation, IndentationAction, LanguageInfo};
 
-use super::palette::{Item, Mode, Payload};
-
-/// The setting the tab width item opens in the settings view. There is no indentation picker yet:
-/// the width is the `editor.tabSize` setting, so the item leads to it.
-pub const TAB_WIDTH_SETTING: &str = "editor.tabSize";
+use super::palette::{IndentationSizeFor, Item, Mode, Payload};
 
 /// What the status bar shows for an encoding it does not know.
 pub const UNKNOWN: &str = "알 수 없음";
@@ -43,7 +39,90 @@ pub fn encoding_text(encoding: Option<Encoding>) -> &'static str {
 
 /// Does the palette show one of this module's pickers in `mode`?
 pub fn is_picker(mode: Mode) -> bool {
-    matches!(mode, Mode::Eol | Mode::EncodingAction | Mode::Encoding(_) | Mode::ConfirmReopen(_) | Mode::Language)
+    matches!(
+        mode,
+        Mode::Eol | Mode::EncodingAction | Mode::Encoding(_) | Mode::ConfirmReopen(_) | Mode::Language | Mode::Indentation | Mode::IndentationSize(_)
+    )
+}
+
+/// Is `mode` one of the indentation pick's two lists (their rows come from [`indentation_items`])?
+pub fn is_indentation_pick(mode: Mode) -> bool {
+    matches!(mode, Mode::Indentation | Mode::IndentationSize(_))
+}
+
+/// The status bar's indentation text: the size of one indent in spaces ("4칸"), the tab's size when
+/// the document is indented with tabs ("탭 크기: 4"), and both when a space-indented document has a
+/// tab of another width ("2칸 (탭 크기: 8)"), as Code-OSS's `onIndentationChange` words the three.
+pub fn indentation_text(indentation: Indentation) -> String {
+    if !indentation.insert_spaces {
+        return format!("탭 크기: {}", indentation.tab_size);
+    }
+    let spaces = super::editor::tab_width_text(indentation.indent_size);
+    if indentation.indent_size == indentation.tab_size {
+        spaces
+    } else {
+        format!("{spaces} (탭 크기: {})", indentation.tab_size)
+    }
+}
+
+/// The rows of the indentation pick, in Code-OSS's order (`showIndentationPicker`), the last one
+/// being "Trim Trailing Whitespace", which that pick lists with the conversions.
+pub const INDENT_USING_SPACES: &str = "공백을 사용한 들여쓰기";
+pub const INDENT_USING_TABS: &str = "탭을 사용한 들여쓰기";
+pub const CHANGE_TAB_DISPLAY_SIZE: &str = "탭 표시 크기 변경";
+pub const DETECT_INDENTATION: &str = "콘텐츠에서 들여쓰기 감지";
+pub const INDENTATION_TO_SPACES: &str = "들여쓰기를 공백으로 변환";
+pub const INDENTATION_TO_TABS: &str = "들여쓰기를 탭으로 변환";
+pub const TRIM_TRAILING_WHITESPACE: &str = "후행 공백 자르기";
+/// The notes on a row of the size list (Code-OSS `configuredTabSize`, `defaultTabSize`, `currentTabSize`).
+pub const CONFIGURED_TAB_SIZE: &str = "구성된 탭 크기";
+pub const DEFAULT_TAB_SIZE: &str = "기본 탭 크기";
+pub const CURRENT_TAB_SIZE: &str = "현재 탭 크기";
+
+/// The sizes the size list offers.
+pub const INDENTATION_SIZES: [u32; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+
+/// The rows of the indentation pick's two lists. `configured` is the tab size the settings give a
+/// document of this language (Code-OSS `creationOpts.tabSize`), `current` the document's own options.
+pub fn indentation_items(mode: Mode, current: Indentation, configured: u32) -> Vec<Item> {
+    match mode {
+        Mode::Indentation => vec![
+            item(Payload::IndentationSize(IndentationSizeFor::Spaces), INDENT_USING_SPACES, String::new()),
+            item(Payload::IndentationSize(IndentationSizeFor::Tabs), INDENT_USING_TABS, String::new()),
+            item(Payload::IndentationSize(IndentationSizeFor::Display), CHANGE_TAB_DISPLAY_SIZE, String::new()),
+            item(Payload::SetIndentation(IndentationAction::Detect), DETECT_INDENTATION, String::new()),
+            item(Payload::SetIndentation(IndentationAction::Convert { to_spaces: true }), INDENTATION_TO_SPACES, String::new()),
+            item(Payload::SetIndentation(IndentationAction::Convert { to_spaces: false }), INDENTATION_TO_TABS, String::new()),
+            item(Payload::SetIndentation(IndentationAction::TrimTrailingWhitespace), TRIM_TRAILING_WHITESPACE, String::new()),
+        ],
+        Mode::IndentationSize(kind) => INDENTATION_SIZES
+            .into_iter()
+            .map(|n| {
+                let note = match (n == configured, n == current.tab_size) {
+                    (true, true) => CONFIGURED_TAB_SIZE,
+                    (true, false) => DEFAULT_TAB_SIZE,
+                    (false, true) => CURRENT_TAB_SIZE,
+                    (false, false) => "",
+                };
+                let action = match kind {
+                    IndentationSizeFor::Spaces => IndentationAction::IndentUsing { insert_spaces: true, size: n },
+                    IndentationSizeFor::Tabs => IndentationAction::IndentUsing { insert_spaces: false, size: n },
+                    IndentationSizeFor::Display => IndentationAction::DisplaySize(n),
+                };
+                item(Payload::SetIndentation(action), &n.to_string(), note.to_string())
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The row highlighted when an indentation list opens: the first row of the action list, and the
+/// document's current tab size in the size list (Code-OSS `autoFocusIndex`).
+pub fn indentation_initial_selection(mode: Mode, current: Indentation) -> usize {
+    match mode {
+        Mode::IndentationSize(_) => (current.tab_size.saturating_sub(1) as usize).min(INDENTATION_SIZES.len() - 1),
+        _ => 0,
+    }
 }
 
 fn item(payload: Payload, title: &str, hint: String) -> Item {

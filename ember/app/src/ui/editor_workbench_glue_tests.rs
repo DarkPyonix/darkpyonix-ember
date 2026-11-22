@@ -66,6 +66,7 @@ fn describe(command: &HostCommand) -> String {
             format!("save {} generation {generation} version {version}", uri.path)
         }
         HostCommand::Widget(uri, _, _) => format!("widget event {}", uri.path),
+        HostCommand::SetIndentation { path, action } => format!("set indentation {path} {action:?}"),
         HostCommand::CreateFile { parent, name } => format!("create file {parent} {name}"),
         HostCommand::Rename { path, new_name } => format!("rename {path} {new_name}"),
         HostCommand::MovePaths { sources, dest_dir } => format!("move {} -> {dest_dir}", sources.join(",")),
@@ -1220,8 +1221,7 @@ fn fr_l31_tabs_arrow_keys_move_focus_with_the_selection() {
 }
 
 // FR-L31.7 (#302): the tab width is a button with a name, as the line ending, the encoding and the
-// language are; it opens the settings view on the tab size setting, the only indentation control
-// there is.
+// language are; it opens the indentation pick.
 #[test]
 fn fr_l31_status_tab_width_is_a_button_with_a_name() {
     let _guard = crate::services::test_guard();
@@ -1235,8 +1235,127 @@ fn fr_l31_status_tab_width_is_a_button_with_a_name() {
     assert_eq!(page.attr(item, "title").as_deref(), Some("들여쓰기 선택"));
 
     page.click("aria-label", "들여쓰기 선택: 4칸");
-    assert_eq!(crate::ui::editor_settings::view::query_text(), crate::ui::editor_status::TAB_WIDTH_SETTING);
-    assert!(page.find("aria-label", "설정 검색").is_some(), "the settings view is open");
+    assert!(page.find("aria-label", "들여쓰기 작업 검색").is_some(), "the indentation pick is open");
+    assert!(page.find("aria-label", "설정 검색").is_none(), "the settings view is not");
+}
+
+impl Page {
+    /// The titles of the rows of the open pick, in order.
+    fn pick_rows(&self) -> Vec<String> {
+        self.connected()
+            .into_iter()
+            .filter(|&id| self.attr(id, "role").as_deref() == Some("option"))
+            .map(|id| self.dom.document().get_node(id).map(|n| n.text_content()).unwrap_or_default())
+            .collect()
+    }
+
+    /// Clicks the row of the open pick whose text is `text`.
+    fn click_pick_row(&mut self, text: &str) {
+        let row = self
+            .find_where(&format!("the pick row {text:?}"), |id| {
+                self.attr(id, "role").as_deref() == Some("option")
+                    && self.dom.document().get_node(id).is_some_and(|n| n.text_content() == text)
+            })
+            .unwrap_or_else(|| panic!("no pick row {text:?} in {:?}", self.pick_rows()));
+        self.dom.click_node(row);
+        self.dom.render();
+    }
+
+    /// The indentation commands sent since the last call (closing a pick also cancels the file index).
+    fn sent_indentation(&mut self) -> Vec<String> {
+        self.sent().into_iter().filter(|c| c.starts_with("set indentation ")).collect()
+    }
+
+    /// A page with `a.rs` open and the indentation pick showing.
+    fn open_indentation_pick() -> Page {
+        let mut page = Page::open();
+        page.click_row();
+        page.deliver(opened(1));
+        let _ = page.sent();
+        page.click("aria-label", "들여쓰기 선택: 4칸");
+        page
+    }
+}
+
+// FR-L31.7 (#302): the status bar's indentation item opens Code-OSS's "Select Indentation" pick: the
+// rows of `showIndentationPicker` in its order, as Code-OSS's Korean pack words them.
+#[test]
+fn fr_l31_status_indentation_opens_the_select_indentation_pick() {
+    let _guard = crate::services::test_guard();
+    let page = Page::open_indentation_pick();
+    assert_eq!(
+        page.pick_rows(),
+        [
+            "공백을 사용한 들여쓰기",
+            "탭을 사용한 들여쓰기",
+            "탭 표시 크기 변경",
+            "콘텐츠에서 들여쓰기 감지",
+            "들여쓰기를 공백으로 변환",
+            "들여쓰기를 탭으로 변환",
+            "후행 공백 자르기",
+        ]
+    );
+}
+
+// FR-L31.7 (#302): spaces, then a size: the list of sizes marks the current one, the choice goes to
+// the session as that document's options, and the setting is not touched.
+#[test]
+fn fr_l31_indent_using_spaces_then_size_sets_the_document_options() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_indentation_pick();
+    page.click_pick_row("공백을 사용한 들여쓰기");
+    assert!(page.find("aria-label", "탭 크기 검색").is_some(), "the size list is open");
+    let rows = page.pick_rows();
+    assert_eq!(rows.len(), 8);
+    assert_eq!(rows[3], "4구성된 탭 크기", "the settings' size is marked");
+    assert_eq!(rows[1], "2");
+    page.click_pick_row("2");
+    let sent = page.sent_indentation();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(sent[0].starts_with("set indentation ") && sent[0].ends_with("IndentUsing { insert_spaces: true, size: 2 }"), "{sent:?}");
+
+    // The session answers with the document's options: the item shows them.
+    page.deliver(SessionUpdate::Indentation { uri: uri(), indentation: ember_editor::Indentation::new(2, true) });
+    assert!(page.find("aria-label", "들여쓰기 선택: 2칸").is_some());
+    page.deliver(SessionUpdate::Indentation { uri: uri(), indentation: ember_editor::Indentation::new(4, false) });
+    assert!(page.find("aria-label", "들여쓰기 선택: 탭 크기: 4").is_some());
+    // The user setting is what it was: the document's choice is not a setting.
+    assert_eq!(page.host().state.lock().unwrap().settings.editor(None).tab_size, 4);
+}
+
+#[test]
+fn fr_l31_change_tab_display_size_keeps_insert_spaces() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_indentation_pick();
+    page.click_pick_row("탭 표시 크기 변경");
+    page.click_pick_row("8");
+    let sent = page.sent_indentation();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(sent[0].ends_with("DisplaySize(8)"), "only the tab's width changes: {sent:?}");
+    page.deliver(SessionUpdate::Indentation {
+        uri: uri(),
+        indentation: ember_editor::Indentation { tab_size: 8, indent_size: 4, insert_spaces: true },
+    });
+    assert!(page.find("aria-label", "들여쓰기 선택: 4칸 (탭 크기: 8)").is_some());
+}
+
+#[test]
+fn fr_l31_detect_and_convert_indentation_go_to_the_session() {
+    let _guard = crate::services::test_guard();
+    for (row, ends_with) in [
+        ("콘텐츠에서 들여쓰기 감지", "Detect"),
+        ("들여쓰기를 공백으로 변환", "Convert { to_spaces: true }"),
+        ("들여쓰기를 탭으로 변환", "Convert { to_spaces: false }"),
+        ("후행 공백 자르기", "TrimTrailingWhitespace"),
+    ] {
+        let mut page = Page::open_indentation_pick();
+        page.click_pick_row(row);
+        let sent = page.sent_indentation();
+        assert_eq!(sent.len(), 1, "{row}: {sent:?}");
+        assert!(sent[0].ends_with(ends_with), "{row}: {sent:?}");
+    }
+}
+
 #[test]
 fn double_click_pins_preview_tab_from_tree_and_tab_strip() {
     let _guard = crate::services::test_guard();

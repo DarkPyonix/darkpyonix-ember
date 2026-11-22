@@ -467,9 +467,9 @@ pub(crate) fn stop(s: &Shared) {
 }
 
 pub(crate) fn breakpoint_editor(s: &Shared, path: &str) -> Element {
-    let uri = s.uris.borrow().get(path).cloned()?;
-    let line = u32::try_from(s.position.read().0).ok()?;
-    let breakpoint = s.debug.read().editing_target(&uri, line).cloned()?;
+    let Some(uri) = s.uris.borrow().get(path).cloned() else { return rsx! {} };
+    let Some(line) = u32::try_from(s.position.read().0).ok() else { return rsx! {} };
+    let Some(breakpoint) = s.debug.read().editing_target(&uri, line).cloned() else { return rsx! {} };
     let id = breakpoint.id.clone();
     let host = s.host.clone();
     rsx! {

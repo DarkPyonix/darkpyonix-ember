@@ -428,6 +428,8 @@ pub fn command_of(action: Action) -> Option<&'static str> {
         Action::PrevTab => "workbench.action.previousEditor",
         Action::Debug => "workbench.action.debug.start",
         Action::Stop => "workbench.action.debug.stop",
+        Action::DebugView => "workbench.view.debug",
+        Action::DebugConsole => "workbench.debug.action.toggleRepl",
         _ => return None,
     })
 }

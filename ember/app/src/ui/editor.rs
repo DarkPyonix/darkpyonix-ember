@@ -1982,10 +1982,14 @@ pub enum ToolWindow {
     Run,
     Problems,
     Output,
+    /// Run and Debug: variables, watch, call stack and breakpoints (FR-L31.42).
+    Debug,
+    /// The debug console: adapter output and evaluation (FR-L31.42).
+    DebugConsole,
 }
 
 impl ToolWindow {
-    pub const ALL: [ToolWindow; 11] = [
+    pub const ALL: [ToolWindow; 13] = [
         ToolWindow::Project,
         ToolWindow::Search,
         ToolWindow::Commit,
@@ -1997,14 +2001,25 @@ impl ToolWindow {
         ToolWindow::Run,
         ToolWindow::Problems,
         ToolWindow::Output,
+        ToolWindow::Debug,
+        ToolWindow::DebugConsole,
     ];
-    pub const LEFT: [ToolWindow; 6] =
-        [ToolWindow::Project, ToolWindow::Search, ToolWindow::Commit, ToolWindow::Git, ToolWindow::Extensions, ToolWindow::Agent];
+    pub const LEFT: [ToolWindow; 7] = [
+        ToolWindow::Project,
+        ToolWindow::Search,
+        ToolWindow::Commit,
+        ToolWindow::Git,
+        ToolWindow::Extensions,
+        ToolWindow::Agent,
+        ToolWindow::Debug,
+    ];
     pub const RIGHT: [ToolWindow; 1] = [ToolWindow::Notifications];
     /// The buttons of the right stripe: 에이전트 (its window opens in the left slot, #766) and 알림.
     pub const RIGHT_STRIPE: [ToolWindow; 2] = [ToolWindow::Agent, ToolWindow::Notifications];
-    pub const BOTTOM: [ToolWindow; 4] =
-        [ToolWindow::Terminal, ToolWindow::Run, ToolWindow::Problems, ToolWindow::Output];
+    /// The tabs of the bottom tool window. 디버그 콘솔 is a tab like 출력, as Code-OSS puts the
+    /// debug console in the panel (FR-L31.42).
+    pub const BOTTOM: [ToolWindow; 5] =
+        [ToolWindow::Terminal, ToolWindow::Run, ToolWindow::Problems, ToolWindow::Output, ToolWindow::DebugConsole];
 
     /// The buttons of the left stripe, exactly the mockup's (`editor.js:51`): 프로젝트, 커밋, Git.
     /// 검색 opens from the top find pill and ⇧⌘F, 확장 from its shortcut and the palette; their
@@ -2027,6 +2042,8 @@ impl ToolWindow {
             ToolWindow::Run => "실행",
             ToolWindow::Problems => "문제",
             ToolWindow::Output => "출력",
+            ToolWindow::Debug => "실행 및 디버그",
+            ToolWindow::DebugConsole => "디버그 콘솔",
         }
     }
 
@@ -2037,9 +2054,14 @@ impl ToolWindow {
             | ToolWindow::Commit
             | ToolWindow::Git
             | ToolWindow::Extensions
-            | ToolWindow::Agent => Side::Left,
+            | ToolWindow::Agent
+            | ToolWindow::Debug => Side::Left,
             ToolWindow::Notifications => Side::Right,
-            ToolWindow::Terminal | ToolWindow::Run | ToolWindow::Problems | ToolWindow::Output => Side::Bottom,
+            ToolWindow::Terminal
+            | ToolWindow::Run
+            | ToolWindow::Problems
+            | ToolWindow::Output
+            | ToolWindow::DebugConsole => Side::Bottom,
         }
     }
 
@@ -2057,6 +2079,8 @@ impl ToolWindow {
             ToolWindow::Run => Some(Action::Run),
             ToolWindow::Problems => Some(Action::Problems),
             ToolWindow::Output => None,
+            ToolWindow::Debug => Some(Action::DebugView),
+            ToolWindow::DebugConsole => Some(Action::DebugConsole),
         }
     }
 
@@ -2081,6 +2105,8 @@ impl ToolWindow {
             ToolWindow::Run => IconRole::Forward,
             ToolWindow::Problems => IconRole::Close,
             ToolWindow::Output => IconRole::Menu,
+            ToolWindow::Debug => IconRole::Forward,
+            ToolWindow::DebugConsole => IconRole::Menu,
         }
     }
 }

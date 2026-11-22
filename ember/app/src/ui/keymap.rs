@@ -86,10 +86,14 @@ pub enum Action {
     NextTab,
     /// Switch to the previous open editor tab.
     PrevTab,
+    /// Show Run and Debug (`workbench.view.debug`, FR-L31.42).
+    DebugView,
+    /// Show the debug console (`workbench.debug.action.toggleRepl`, FR-L31.42).
+    DebugConsole,
 }
 
 impl Action {
-    pub const ALL: [Action; 33] = [
+    pub const ALL: [Action; 35] = [
         Action::Project,
         Action::Commit,
         Action::Git,
@@ -123,6 +127,8 @@ impl Action {
         Action::KeybindingsJson,
         Action::NextTab,
         Action::PrevTab,
+        Action::DebugView,
+        Action::DebugConsole,
     ];
 
     pub fn label(self) -> &'static str {
@@ -160,6 +166,8 @@ impl Action {
             Action::KeybindingsJson => "키보드 단축키 열기 (JSON)",
             Action::NextTab => "다음 탭",
             Action::PrevTab => "이전 탭",
+            Action::DebugView => "실행 및 디버그",
+            Action::DebugConsole => "디버그 콘솔",
         }
     }
 }
@@ -287,7 +295,7 @@ impl Chord {
 /// `(action, macOS chord, other chord)`; an empty chord means no default binding.
 type Row = (Action, &'static str, &'static str);
 
-const VSCODE: [Row; 33] = [
+const VSCODE: [Row; 35] = [
     (Action::Project, "\u{21E7}\u{2318}E", "Ctrl+Shift+E"),
     // VS Code has no default for a commit window; the source control view shares Git's chord.
     (Action::Commit, "", ""),
@@ -325,9 +333,12 @@ const VSCODE: [Row; 33] = [
     (Action::KeybindingsJson, "", ""),
     (Action::NextTab, "\u{2303}Tab", "Ctrl+Tab"),
     (Action::PrevTab, "\u{2303}\u{21E7}Tab", "Ctrl+Shift+Tab"),
+    // Code-OSS: workbench.view.debug and workbench.debug.action.toggleRepl.
+    (Action::DebugView, "\u{21E7}\u{2318}D", "Ctrl+Shift+D"),
+    (Action::DebugConsole, "\u{21E7}\u{2318}Y", "Ctrl+Shift+Y"),
 ];
 
-const JETBRAINS: [Row; 33] = [
+const JETBRAINS: [Row; 35] = [
     (Action::Project, "\u{2318}1", "Alt+1"),
     (Action::Commit, "\u{2318}0", "Alt+0"),
     (Action::Git, "\u{2318}9", "Alt+9"),
@@ -365,6 +376,9 @@ const JETBRAINS: [Row; 33] = [
     (Action::KeybindingsJson, "", ""),
     (Action::NextTab, "\u{2303}Tab", "Ctrl+Tab"),
     (Action::PrevTab, "\u{2303}\u{21E7}Tab", "Ctrl+Shift+Tab"),
+    // IntelliJ's Debug tool window; its console is a tab of that window, with no chord of its own.
+    (Action::DebugView, "\u{2318}5", "Alt+5"),
+    (Action::DebugConsole, "", ""),
 ];
 
 impl Keymap {
@@ -392,7 +406,7 @@ impl Keymap {
         }
     }
 
-    fn table(self) -> &'static [Row; 33] {
+    fn table(self) -> &'static [Row; 35] {
         match self {
             Keymap::VsCode => &VSCODE,
             Keymap::JetBrains => &JETBRAINS,

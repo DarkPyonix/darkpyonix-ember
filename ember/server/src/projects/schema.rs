@@ -85,3 +85,10 @@ ALTER TABLE projects ADD COLUMN profile_overrides TEXT;
 pub const CHARACTER_OVERRIDES_MIGRATION: &str = "
 ALTER TABLE projects ADD COLUMN character_overrides TEXT;
 ";
+
+/// Migration 34: per-project leader session (FR-L26, D52 Q5, #327, #384).
+/// `leader_session` is a nullable TEXT holding the session id of an existing session in this
+/// project; `NULL` means none. Existing rows get `NULL`.
+pub const LEADER_SESSION_MIGRATION: &str = "
+ALTER TABLE projects ADD COLUMN leader_session TEXT;
+";

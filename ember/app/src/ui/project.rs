@@ -348,7 +348,11 @@ fn member_of(
         .session(id)
         .filter(|v| show_archived || !v.record.archived)?;
     let team: Option<&TeamView> = state.team_for_session(id);
-    let is_leader = team.is_some_and(|t| t.leader == id);
+    let project_leader = state.project(project).and_then(|p| p.leader_session.as_deref());
+    let is_leader = match project_leader {
+        Some(lid) => lid == id,
+        None => team.is_some_and(|t| t.leader == id),
+    };
     let leader = leader_badge(project, is_leader, *leader_seen);
     if leader {
         *leader_seen = true;
@@ -502,9 +506,8 @@ pub enum SettingsPart {
 
 /// Whether the main server can save a part today: computer assignment (FR-L4) and, through
 /// `PATCH /api/projects/{name}`, name, repository and branch, new member defaults, character
-/// style and the archived flag, and `DELETE /api/projects/{name}` (FR-L26, #327). The rest is
-/// shown disabled with an explanation.
-/// TODO(#384): the leader (server answers 400 `not_yet`, owner decision open).
+/// style, profile override, leader session and the archived flag, and `DELETE /api/projects/{name}`
+/// (FR-L26, #327, #384). The rest is shown disabled with an explanation.
 pub fn part_supported(part: SettingsPart) -> bool {
     matches!(
         part,
@@ -513,6 +516,7 @@ pub fn part_supported(part: SettingsPart) -> bool {
             | SettingsPart::Repository
             | SettingsPart::CharacterStyle
             | SettingsPart::MemberDefaults
+            | SettingsPart::Leader
             | SettingsPart::ProfileOverride
             | SettingsPart::Archive
             | SettingsPart::Delete
@@ -546,13 +550,14 @@ pub const SETTINGS_ORDER: [SettingsPart; 8] = [
     SettingsPart::Archive,
 ];
 
-/// One row of the danger zone (`.ps-danger`): title, explanation and the button's label.
+/// One row of the danger zone (`.ps-danger`): title, explanation, button label and enabled state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DangerRow {
     pub part: SettingsPart,
     pub title: &'static str,
     pub note: String,
     pub button: &'static str,
+    pub enabled: bool,
 }
 
 /// The danger zone's rows as the mockup: 프로젝트 보관 then 프로젝트 삭제, each with what it does,
@@ -561,37 +566,44 @@ pub fn danger_rows(project_id: &str, members: usize) -> [DangerRow; 2] {
     danger_rows_for(project_id, members, false, false)
 }
 
-/// The danger zone's rows (FR-L26, #327). An archived project offers 보관 해제. The delete note
-/// follows the server, which deletes only an empty project and refuses any other (#384): it
-/// counts the members the client knows and never promises a cascade. While the delete button is
-/// armed (`delete_armed`) it reads 정말 삭제합니다 and the note says what the second tap does.
-pub fn danger_rows_for(project_id: &str, members: usize, archived: bool, delete_armed: bool) -> [DangerRow; 2] {
+/// The danger zone's rows (FR-L26, #327, #384). An archived project offers 보관 해제. Deleting
+/// requires the project to be archived first and cascades to its sessions and history. While the
+/// delete button is armed (`delete_armed`) it reads 정말 삭제합니다.
+pub fn danger_rows_for(project_id: &str, _members: usize, archived: bool, delete_armed: bool) -> [DangerRow; 2] {
     let default_project = is_default_project(project_id);
+    let archive_enabled = danger_allowed(project_id, SettingsPart::Archive);
     let archive = if archived {
         DangerRow {
             part: SettingsPart::Archive,
             title: "프로젝트 보관 해제",
-            note: "보관된 프로젝트입니다. 해제하면 목록에 다시 나타납니다.".to_string(),
+            note: "보관을 해제하면 목록과 검색에 다시 표시됩니다.".to_string(),
             button: "보관 해제",
+            enabled: archive_enabled,
         }
     } else {
-        DangerRow { part: SettingsPart::Archive, title: "프로젝트 보관", note: "세션과 기록은 남고 목록에서 숨겨집니다.".to_string(), button: "보관" }
+        DangerRow {
+            part: SettingsPart::Archive,
+            title: "프로젝트 보관",
+            note: "세션과 기록은 남고 목록과 검색에서 숨겨집니다.".to_string(),
+            button: "보관",
+            enabled: archive_enabled,
+        }
     };
-    let armed = delete_armed && !default_project;
+    let delete_enabled = danger_allowed(project_id, SettingsPart::Delete) && archived;
+    let armed = delete_armed && delete_enabled;
     let delete_note = if default_project {
         "기본 프로젝트는 지울 수 없습니다.".to_string()
-    } else if armed {
-        "한 번 더 누르면 프로젝트를 지웁니다. 되돌릴 수 없습니다.".to_string()
-    } else if members > 0 {
-        format!("팀원 {members}명의 세션이 남아 있습니다. 비어 있는 프로젝트만 지울 수 있습니다.")
+    } else if !archived {
+        "먼저 보관한 뒤에 삭제할 수 있습니다.".to_string()
     } else {
-        "비어 있는 프로젝트만 지울 수 있습니다. 지우면 되돌릴 수 없습니다.".to_string()
+        "프로젝트와 소속 세션·대화 기록이 모두 함께 삭제됩니다. 되돌릴 수 없습니다.".to_string()
     };
     let delete = DangerRow {
         part: SettingsPart::Delete,
         title: "프로젝트 삭제",
         note: delete_note,
         button: if armed { "정말 삭제합니다" } else { "삭제" },
+        enabled: delete_enabled,
     };
     [archive, delete]
 }
@@ -641,9 +653,8 @@ pub fn delete_armed(armed_at: Option<i64>, now: i64) -> bool {
 /// The sentence a failed delete shows. Never the server's raw text.
 pub fn delete_error_message(status: Option<u16>, code: Option<&str>) -> &'static str {
     match (status, code) {
-        (Some(409), Some("project_not_empty")) => {
-            "프로젝트에 세션, 채널, 루틴 또는 팀이 남아 있어 지울 수 없습니다. 먼저 옮기거나 지운 뒤 다시 시도해 주세요"
-        }
+        (Some(409), Some("project_not_archived")) => "먼저 프로젝트를 보관한 뒤에 삭제할 수 있습니다.",
+        (Some(409), Some("sessions_running")) => "실행 중인 세션이 있어 삭제할 수 없습니다. 세션이 끝난 뒤에 다시 시도해 주세요.",
         (Some(403), Some("protected_project")) => "기본 프로젝트는 지울 수 없습니다",
         (Some(404), _) => "프로젝트를 찾지 못했습니다",
         (Some(400), Some("not_yet")) | (Some(405), _) => "이 서버는 프로젝트 삭제를 아직 지원하지 않습니다. 서버를 업데이트해 주세요",
@@ -688,6 +699,8 @@ pub struct SettingsDraft {
     pub model: String,
     pub mode: String,
     pub style: String,
+    /// Chosen leader session id (FR-L26, #384), `None` when unset.
+    pub leader_session: Option<String>,
     /// Profile override per harness kind to account id (FR-L26); a harness without an entry is
     /// unset. A deleted account (`null` on the server) counts as unset.
     pub overrides: BTreeMap<String, String>,
@@ -707,6 +720,7 @@ impl SettingsDraft {
             model: d.model.unwrap_or_default(),
             mode: d.mode.unwrap_or_default(),
             style: p.character_style.clone().unwrap_or_default(),
+            leader_session: p.leader_session.clone(),
             overrides: loaded_overrides(p),
             cleared: Default::default(),
         }
@@ -795,8 +809,8 @@ pub fn pick_override(server: &Project, draft: &mut SettingsDraft, harness: &str,
 }
 
 /// The patch that turns `server` into `d`: only changed fields are set (FR-L26). A field the
-/// user emptied is sent empty (or `null` for the defaults), which clears it. Leader, profile
-/// override and archive are never sent. The name of 기본 프로젝트 is never sent.
+/// user emptied is sent empty (or `null` for the defaults and leader), which clears it. Archive
+/// is sent via its own button. The name and leader of 기본 프로젝트 are never sent.
 pub fn build_patch(server: &Project, d: &SettingsDraft) -> ProjectPatch {
     let was = SettingsDraft::from_project(server);
     let mut patch = ProjectPatch::default();
@@ -816,6 +830,9 @@ pub fn build_patch(server: &Project, d: &SettingsDraft) -> ProjectPatch {
     }
     if d.style != was.style {
         patch.character_style = Some(d.style.clone());
+    }
+    if !is_default_project(&server.name) && d.leader_session != was.leader_session {
+        patch.leader_session = Some(d.leader_session.clone());
     }
     if d.overrides != was.overrides || !d.cleared.is_empty() {
         patch.profile_overrides = Some(overrides_map(&d.overrides));
@@ -905,10 +922,12 @@ pub fn patch_error_message(status: Option<u16>, code: Option<&str>, patch: &Proj
         && patch.repository.is_none()
         && patch.default_branch.is_none()
         && patch.member_defaults.is_none()
-        && patch.character_style.is_none();
+        && patch.character_style.is_none()
+        && patch.leader_session.is_none();
     let archive = patch.archived.is_some();
     match (status, code) {
         (Some(409), Some("name_taken")) => "이미 있는 이름입니다",
+        (Some(409), Some("sessions_running")) => "실행 중인 세션이 있어 보관할 수 없습니다. 세션이 끝난 뒤에 다시 시도해 주세요.",
         (Some(403), Some("protected_project")) if archive => "기본 프로젝트는 보관할 수 없습니다",
         (Some(400), Some("not_yet")) if archive => "이 서버는 프로젝트 보관을 아직 지원하지 않습니다. 서버를 업데이트해 주세요",
         (Some(403), Some("protected_project")) => "기본 프로젝트의 이름은 바꿀 수 없습니다",
@@ -1413,15 +1432,13 @@ mod tests {
     #[test]
     fn fr_l26_danger_rows_say_what_each_does() {
         let [archive, delete] = super::danger_rows("ember", 3);
-        assert_eq!((archive.title, archive.button), ("프로젝트 보관", "보관"));
-        assert_eq!(archive.note, "세션과 기록은 남고 목록에서 숨겨집니다.");
-        assert_eq!((delete.title, delete.button), ("프로젝트 삭제", "삭제"));
-        // The server refuses a project that still holds records (#384), so the row never
-        // promises a cascade.
-        assert!(delete.note.contains("팀원 3명") && delete.note.contains("비어 있는 프로젝트만"), "{}", delete.note);
-        assert!(!delete.note.contains("함께 지워집니다"));
+        assert_eq!((archive.title, archive.button, archive.enabled), ("프로젝트 보관", "보관", true));
+        assert_eq!(archive.note, "세션과 기록은 남고 목록과 검색에서 숨겨집니다.");
+        assert_eq!((delete.title, delete.button, delete.enabled), ("프로젝트 삭제", "삭제", false));
+        assert_eq!(delete.note, "먼저 보관한 뒤에 삭제할 수 있습니다.");
         let [_, d] = super::danger_rows(super::DEFAULT_PROJECT_ID, 3);
         assert_eq!(d.note, "기본 프로젝트는 지울 수 없습니다.");
+        assert!(!d.enabled);
     }
 
     #[test]
@@ -1775,25 +1792,21 @@ mod tests {
 
     // FR-L26: only what the server supports is enabled; the rest says the server cannot yet.
     #[test]
-    fn fr_l26_the_server_saves_metadata_profile_override_archive_and_delete_but_not_the_leader() {
+    fn fr_l26_the_server_saves_metadata_leader_profile_override_archive_and_delete() {
         for part in [
             SettingsPart::Computers,
             SettingsPart::Name,
             SettingsPart::Repository,
             SettingsPart::CharacterStyle,
             SettingsPart::MemberDefaults,
+            SettingsPart::Leader,
             SettingsPart::ProfileOverride,
             SettingsPart::Archive,
             SettingsPart::Delete,
         ] {
             assert!(part_supported(part), "{part:?}");
         }
-        for part in [
-            SettingsPart::Leader,
-            SettingsPart::Links,
-        ] {
-            assert!(!part_supported(part), "{part:?}");
-        }
+        assert!(!part_supported(SettingsPart::Links));
         assert_eq!(SOON, "준비 중입니다");
         assert!(SETTINGS_SAVE_AVAILABLE);
     }
@@ -2124,7 +2137,7 @@ mod tests {
         assert!(danger_allowed("ember", SettingsPart::Archive) && danger_allowed("ember", SettingsPart::Delete));
         assert!(!danger_allowed(DEFAULT_PROJECT_ID, SettingsPart::Archive));
         assert!(!danger_allowed(DEFAULT_PROJECT_NAME, SettingsPart::Delete));
-        assert!(!part_supported(SettingsPart::Leader), "the leader waits for an owner decision (#384)");
+        assert!(part_supported(SettingsPart::Leader));
         assert!(danger_hint("ember").contains("한 번 더"), "the hint says delete asks twice");
         assert!(danger_hint(DEFAULT_PROJECT_ID).contains("기본 프로젝트"));
     }
@@ -2139,25 +2152,32 @@ mod tests {
     #[test]
     fn fr_l26_an_archived_project_offers_restore() {
         let [archive, _] = danger_rows_for("ember", 0, true, false);
-        assert_eq!((archive.title, archive.button), ("프로젝트 보관 해제", "보관 해제"));
-        assert!(archive.note.contains("다시 나타납니다"), "{}", archive.note);
+        assert_eq!((archive.title, archive.button, archive.enabled), ("프로젝트 보관 해제", "보관 해제", true));
+        assert_eq!(archive.note, "보관을 해제하면 목록과 검색에 다시 표시됩니다.");
         let [archive, _] = danger_rows_for("ember", 0, false, false);
-        assert_eq!((archive.title, archive.button), ("프로젝트 보관", "보관"));
+        assert_eq!((archive.title, archive.button, archive.enabled), ("프로젝트 보관", "보관", true));
+        assert_eq!(archive.note, "세션과 기록은 남고 목록과 검색에서 숨겨집니다.");
     }
 
     #[test]
     fn fr_l26_delete_row_follows_the_server_rule_and_the_armed_state() {
+        // Unarchived: disabled, cannot be armed.
         let [_, d] = danger_rows_for("ember", 0, false, false);
-        assert_eq!(d.button, "삭제");
-        assert!(d.note.contains("비어 있는 프로젝트만"), "{}", d.note);
-        let [_, d] = danger_rows_for("ember", 2, false, false);
-        assert!(d.note.contains("팀원 2명"), "{}", d.note);
-        let [_, armed] = danger_rows_for("ember", 0, false, true);
-        assert_eq!(armed.button, "정말 삭제합니다");
-        assert!(armed.note.contains("되돌릴 수 없습니다"), "{}", armed.note);
-        // 기본 프로젝트 never shows the armed question.
-        let [_, d] = danger_rows_for(DEFAULT_PROJECT_ID, 0, false, true);
-        assert_eq!((d.button, d.note.as_str()), ("삭제", "기본 프로젝트는 지울 수 없습니다."));
+        assert_eq!((d.button, d.enabled), ("삭제", false));
+        assert_eq!(d.note, "먼저 보관한 뒤에 삭제할 수 있습니다.");
+        let [_, d] = danger_rows_for("ember", 2, false, true);
+        assert_eq!((d.button, d.enabled), ("삭제", false));
+        assert_eq!(d.note, "먼저 보관한 뒤에 삭제할 수 있습니다.");
+        // Archived: enabled, cascade warning, armed label on second tap.
+        let [_, d] = danger_rows_for("ember", 2, true, false);
+        assert_eq!((d.button, d.enabled), ("삭제", true));
+        assert_eq!(d.note, "프로젝트와 소속 세션·대화 기록이 모두 함께 삭제됩니다. 되돌릴 수 없습니다.");
+        let [_, armed] = danger_rows_for("ember", 0, true, true);
+        assert_eq!((armed.button, armed.enabled), ("정말 삭제합니다", true));
+        assert_eq!(armed.note, "프로젝트와 소속 세션·대화 기록이 모두 함께 삭제됩니다. 되돌릴 수 없습니다.");
+        // 기본 프로젝트 never enables or shows the armed question.
+        let [_, d] = danger_rows_for(DEFAULT_PROJECT_ID, 0, true, true);
+        assert_eq!((d.button, d.enabled, d.note.as_str()), ("삭제", false, "기본 프로젝트는 지울 수 없습니다."));
     }
 
     #[test]
@@ -2184,7 +2204,14 @@ mod tests {
 
     #[test]
     fn fr_l26_delete_and_archive_failures_read_as_fixed_sentences() {
-        assert!(delete_error_message(Some(409), Some("project_not_empty")).contains("남아 있어 지울 수 없습니다"));
+        assert_eq!(
+            delete_error_message(Some(409), Some("project_not_archived")),
+            "먼저 프로젝트를 보관한 뒤에 삭제할 수 있습니다."
+        );
+        assert_eq!(
+            delete_error_message(Some(409), Some("sessions_running")),
+            "실행 중인 세션이 있어 삭제할 수 없습니다. 세션이 끝난 뒤에 다시 시도해 주세요."
+        );
         assert_eq!(delete_error_message(Some(403), Some("protected_project")), "기본 프로젝트는 지울 수 없습니다");
         assert_eq!(delete_error_message(Some(404), Some("not_found")), "프로젝트를 찾지 못했습니다");
         for (st, code) in [(Some(400), Some("not_yet")), (Some(405), None)] {
@@ -2195,6 +2222,10 @@ mod tests {
             assert!(m.starts_with("프로젝트를 지우지 못했습니다") && !m.contains("500"), "{m}");
         }
         let archive = archive_patch(false);
+        assert_eq!(
+            patch_error_message(Some(409), Some("sessions_running"), &archive),
+            "실행 중인 세션이 있어 보관할 수 없습니다. 세션이 끝난 뒤에 다시 시도해 주세요."
+        );
         assert_eq!(patch_error_message(Some(403), Some("protected_project"), &archive), "기본 프로젝트는 보관할 수 없습니다");
         assert!(patch_error_message(Some(400), Some("not_yet"), &archive).contains("아직 지원하지 않습니다"));
         // A rename refusal keeps its own sentence.
@@ -2206,6 +2237,149 @@ mod tests {
         assert!(is_owner_refusal(Some(403), Some("owner_required")));
         assert!(!is_owner_refusal(Some(403), Some("protected_project")));
         assert!(!is_owner_refusal(Some(409), Some("owner_required")));
+    }
+
+    #[test]
+    fn fr_l26_leader_session_draft_patch_and_badge() {
+        use ember_client::wire::{Push, SessionRecord, SessionStatus, TeamMember, TeamRole};
+        use ember_client::Input;
+
+        let mut p = server_project();
+        let mut d = SettingsDraft::from_project(&p);
+        assert_eq!(d.leader_session, None);
+        assert!(build_patch(&p, &d).leader_session.is_none());
+
+        // Selecting a leader sends Some(Some(id)).
+        d.leader_session = Some("s1".into());
+        assert_eq!(build_patch(&p, &d).leader_session, Some(Some("s1".into())));
+
+        // Clearing an existing leader sends Some(None).
+        p.leader_session = Some("s1".into());
+        let mut d = SettingsDraft::from_project(&p);
+        assert_eq!(d.leader_session.as_deref(), Some("s1"));
+        assert!(build_patch(&p, &d).leader_session.is_none());
+        d.leader_session = None;
+        assert_eq!(build_patch(&p, &d).leader_session, Some(None));
+
+        // Default project ignores leader_session in build_patch.
+        for def_name in [DEFAULT_PROJECT_ID, DEFAULT_PROJECT_NAME] {
+            let dp = Project { name: def_name.into(), ..Default::default() };
+            let mut dd = SettingsDraft::from_project(&dp);
+            dd.leader_session = Some("s1".into());
+            assert!(build_patch(&dp, &dd).leader_session.is_none(), "default project {def_name} must not send leader_session");
+        }
+
+        // member_of prefers project.leader_session over team leader, falls back when None,
+        // and never badges a leader in the default project.
+        let make_rec = |id: &str, project: &str| SessionRecord {
+            id: id.into(),
+            project: project.into(),
+            title: format!("task {id}"),
+            agent: "claude-code".into(),
+            cwd: "/work".into(),
+            model: None,
+            native_id: None,
+            status: SessionStatus::Idle,
+            created_at: 10,
+            updated_at: 20,
+            last_seq: 1,
+            account_id: None,
+            account_reason: None,
+            pinned: false,
+            archived: false,
+        };
+        let mut state = State::default();
+        state.apply(Input::SessionsLoaded(vec![
+            make_rec("s1", "ember"),
+            make_rec("s2", "ember"),
+            make_rec("s3", DEFAULT_PROJECT_ID),
+        ]));
+        state.apply(Input::Push(Push::TeamUpdated {
+            team: TeamView {
+                id: "t1".into(),
+                project: "ember".into(),
+                leader: "s1".into(),
+                created_at: 1,
+                members: vec![
+                    TeamMember {
+                        session_id: "s1".into(),
+                        name: "lead".into(),
+                        role: TeamRole::Leader,
+                        joined_at: 1,
+                        ended_at: None,
+                        title: "task s1".into(),
+                        agent: "claude-code".into(),
+                        status: Some(SessionStatus::Idle),
+                    },
+                    TeamMember {
+                        session_id: "s2".into(),
+                        name: "worker".into(),
+                        role: TeamRole::Teammate,
+                        joined_at: 1,
+                        ended_at: None,
+                        title: "task s2".into(),
+                        agent: "claude-code".into(),
+                        status: Some(SessionStatus::Idle),
+                    },
+                ],
+                tasks: Vec::new(),
+            },
+        }));
+
+        // When project.leader_session is None, falls back to team leader (s1).
+        state.apply(Input::ProjectsLoaded(vec![
+            Project { name: "ember".into(), leader_session: None, ..Default::default() },
+            Project { name: DEFAULT_PROJECT_ID.into(), leader_session: Some("s3".into()), ..Default::default() },
+        ]));
+        let boxes = project_boxes(&state);
+        let ember = boxes.iter().find(|b| b.id == "ember").expect("ember box");
+        assert_eq!(ember.leader().map(|m| m.session_id.as_str()), Some("s1"));
+        let def = boxes.iter().find(|b| b.id == DEFAULT_PROJECT_ID).expect("default box");
+        assert!(def.leader().is_none(), "default project never has a leader badge");
+
+        // When project.leader_session is Some("s2"), overrides team leader.
+        state.apply(Input::ProjectsLoaded(vec![
+            Project { name: "ember".into(), leader_session: Some("s2".into()), ..Default::default() },
+        ]));
+        let boxes = project_boxes(&state);
+        let ember = boxes.iter().find(|b| b.id == "ember").expect("ember box");
+        assert_eq!(ember.leader().map(|m| m.session_id.as_str()), Some("s2"));
+    }
+
+    #[test]
+    fn fr_l26_delete_requires_archived_and_warns_cascade() {
+        let [_, unarchived] = danger_rows_for("ember", 5, false, false);
+        assert!(!unarchived.enabled);
+        assert_eq!(unarchived.note, "먼저 보관한 뒤에 삭제할 수 있습니다.");
+        assert!(!unarchived.note.contains("비어 있는 프로젝트만"));
+
+        let [_, archived] = danger_rows_for("ember", 5, true, false);
+        assert!(archived.enabled);
+        assert_eq!(archived.note, "프로젝트와 소속 세션·대화 기록이 모두 함께 삭제됩니다. 되돌릴 수 없습니다.");
+        assert!(!archived.note.contains("비어 있는 프로젝트만"));
+    }
+
+    #[test]
+    fn fr_l26_archive_and_delete_error_messages_cover_running_and_not_archived() {
+        let archive = archive_patch(false);
+        assert_eq!(
+            patch_error_message(Some(409), Some("sessions_running"), &archive),
+            "실행 중인 세션이 있어 보관할 수 없습니다. 세션이 끝난 뒤에 다시 시도해 주세요."
+        );
+        // Mixing profile_overrides with leader_session is not account_only.
+        let mixed = ProjectPatch { leader_session: Some(Some("s1".into())), ..only_overrides() };
+        assert_eq!(
+            patch_error_message(Some(400), Some("invalid_field"), &mixed),
+            "입력한 값을 서버가 받아들이지 않았습니다. 내용을 확인하십시오."
+        );
+        assert_eq!(
+            delete_error_message(Some(409), Some("project_not_archived")),
+            "먼저 프로젝트를 보관한 뒤에 삭제할 수 있습니다."
+        );
+        assert_eq!(
+            delete_error_message(Some(409), Some("sessions_running")),
+            "실행 중인 세션이 있어 삭제할 수 없습니다. 세션이 끝난 뒤에 다시 시도해 주세요."
+        );
     }
 
     #[test]

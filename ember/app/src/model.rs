@@ -352,6 +352,9 @@ pub fn search_results(state: &State, query: &str, hits: &[SearchHit], cx: &RowCo
         .iter()
         .filter_map(|h| {
             let row = session_row(state, &h.session_id, cx)?;
+            if state.project(&row.project).is_some_and(|p| p.archived) {
+                return None;
+            }
             Some(SearchResult { row, seq: Some(h.seq), snippet: Some(one_line(&h.plain_snippet(), 200)) })
         })
         .collect();
@@ -359,6 +362,7 @@ pub fn search_results(state: &State, query: &str, hits: &[SearchHit], cx: &RowCo
     let mut by_details: Vec<SessionRow> = state
         .projects()
         .into_iter()
+        .filter(|p| !state.project(&p.name).is_some_and(|pr| pr.archived))
         .flat_map(|p| p.sessions)
         .filter(|id| !with_hits.contains(id))
         .filter_map(|id| session_row(state, &id, cx))
@@ -386,6 +390,7 @@ pub fn recent_sessions(state: &State, cx: &RowContext<'_>, n: usize) -> Vec<Sess
     let mut rows: Vec<SessionRow> = state
         .projects()
         .into_iter()
+        .filter(|p| !state.project(&p.name).is_some_and(|pr| pr.archived))
         .flat_map(|p| p.sessions)
         .filter_map(|id| session_row(state, &id, cx))
         .filter(|r| !r.archived)
@@ -1096,5 +1101,43 @@ mod tests {
         ]));
         let restored: Vec<String> = project_cards(&s).into_iter().map(|c| c.name).collect();
         assert_eq!(restored, vec!["alpha", "beta", "gamma"]);
+    }
+
+    #[test]
+    fn fr_l26_search_excludes_archived_projects() {
+        let mut s = state(vec![
+            rec("a", "alpha", SessionStatus::Running, 30),
+            rec("b", "beta", SessionStatus::Idle, 20),
+        ]);
+        s.apply(Input::ProjectsLoaded(vec![
+            Project { name: "alpha".into(), archived: false, ..Default::default() },
+            Project { name: "beta".into(), archived: true, ..Default::default() },
+        ]));
+        let labels = HashMap::new();
+        let cx = RowContext { account_labels: &labels };
+        let hit = |id: &str, seq: i64| SearchHit {
+            session_id: id.into(),
+            seq,
+            kind: "user_message".into(),
+            snippet: "deploy".into(),
+            title: String::new(),
+            project: String::new(),
+            archived: false,
+        };
+
+        // Server hits for sessions in archived projects are excluded.
+        let with_hits = search_results(&s, "deploy", &[hit("a", 1), hit("b", 2)], &cx);
+        let hit_ids: Vec<&str> = with_hits.iter().map(|r| r.row.id.as_str()).collect();
+        assert_eq!(hit_ids, vec!["a"]);
+
+        // Local detail scan excludes sessions in archived projects.
+        let local = search_results(&s, "claude-code", &[], &cx);
+        let local_ids: Vec<&str> = local.iter().map(|r| r.row.id.as_str()).collect();
+        assert_eq!(local_ids, vec!["a"]);
+
+        // Recent sessions also exclude archived projects.
+        let recent = recent_sessions(&s, &cx, 10);
+        let recent_ids: Vec<&str> = recent.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(recent_ids, vec!["a"]);
     }
 }

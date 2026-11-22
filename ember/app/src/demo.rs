@@ -1145,6 +1145,12 @@ impl DemoSource {
                 .filter_map(|(k, v)| v.clone().filter(|o| !o.is_empty()).map(|o| (k.clone(), o)))
                 .collect();
         }
+        if let Some(ls) = &patch.leader_session {
+            project.leader_session = ls.clone();
+        }
+        if let Some(archived) = patch.archived {
+            project.archived = archived;
+        }
         client.apply(Input::Push(Push::ProjectUpdated { project: project.clone() }));
         Ok(project)
     }

@@ -430,7 +430,8 @@ pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<Cre
             { use ::compose_rust::ui::Column; Column!(spacing = SP[4], modifier = Modifier::new().fill_max_width().padding(pad), {
                 if skip.show(EST_HEAD) {
                     // On a phone the header keeps the menu button's room beside the title (FR-L27.10).
-                    HeaderGap("파일", "연결된 모든 장비 사이에서 파일을 주고받습니다. 휴대폰과 태블릿도 포함됩니다.", compact, w <= 900.0, 6.0, compact, || {
+                    // At 768 dp and above the actions sit beside the title on one row (#487).
+                    HeaderGap("파일", "연결된 모든 장비 사이에서 파일을 주고받습니다. 휴대폰과 태블릿도 포함됩니다.", compact, w < 700.0, 6.0, compact, || {
                         // The share button is named "공유 시트 열기" (compose-rust v0.0.7, #460).
                         ShareButton(compact, {
                             let o = share_open.clone();
@@ -699,9 +700,16 @@ fn Stage(model: &FilesModel, members: &[CrewMember], extras: &Extras, st: &State
             // The card's inner width, for the spanning tiles to line up with the columns.
             let avail = super::home::content_width(w, page_pad(w)) - 2.0 * PAD_CARD_H;
             if devices {
-                // The mockup's header (the sending device and its scan note) is 41 px high.
+                // The mockup's header (the sending device and its scan note) is 41 px high (#487).
                 { use ::compose_rust::ui::Box; Box!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width().height(41.0), {
-                    super::home::CardHead(ICON_DESKTOP, "장비", || {});
+                    let lost = model.lost;
+                    super::home::CardHead(ICON_DESKTOP, "보내는 장비", move || {
+                        if lost {
+                            Pill("오프라인", PillTone::Red, true);
+                        } else if ready {
+                            Pill("근처 장비 탐색 중", PillTone::Green, true);
+                        }
+                    });
                 }) };
                 if model.devices.is_empty() {
                     Label(empty_text(crate::ui::files::Section::Devices, ready), Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
@@ -721,8 +729,14 @@ fn Stage(model: &FilesModel, members: &[CrewMember], extras: &Extras, st: &State
                             let presence = d.presence;
                             let lost = model.lost;
                             let demo = is_demo();
+                            // #786: when the server is lost after loading, device tiles show 오프라인
+                            // while transfer and history lists stay on screen.
+                            let mut tile_device = d.clone();
+                            if lost {
+                                tile_device.presence = Presence::Offline;
+                            }
                             Box::new(move || {
-                                DeviceTile(d, extras.devices.get(&d.id), move |_| {
+                                DeviceTile(&tile_device, extras.devices.get(&tile_device.id), move |_| {
                                     if let Some(why) = tile_tap_notice(lost, presence, &d_name) {
                                         notice::post(why);
                                     } else {
@@ -2265,5 +2279,21 @@ mod tests {
         let screen = src.split("pub fn FilesScreenWith(").nth(1).unwrap().split("\n}\n").next().unwrap();
         assert!(screen.contains("offers.first().filter(|_| offer_card_shown(true, sheet_open, share_open.get()))"));
         assert!(!screen.contains("if let Some(offer) = offers.first() {"));
+    }
+
+    /// #487 / #786: devices card uses "보내는 장비" with scanning/offline pill, 768 header puts
+    /// actions beside the title, and a lost server marks device tiles offline while keeping lists.
+    #[test]
+    fn fr_l27_lost_server_marks_device_tiles_offline_and_keeps_lists() {
+        let (model, _) = sample_model();
+        let lost = FilesModel { lost: true, ..model };
+        let all = screen_texts(lost);
+        assert!(all.iter().any(|t| t == "보내는 장비"), "devices card header: {all:?}");
+        assert!(all.iter().any(|t| t == "오프라인"), "offline status shown when server is lost: {all:?}");
+        assert!(all.iter().any(|t| t == "전송 중"), "transfer list kept when server is lost");
+        assert!(all.iter().any(|t| t == "전송 기록"), "history list kept when server is lost");
+        let src = include_str!("files.rs");
+        assert!(src.contains("HeaderGap(\"파일\""), "header exists");
+        assert!(src.contains("w < 700.0"), "768 header keeps actions beside the title");
     }
 }

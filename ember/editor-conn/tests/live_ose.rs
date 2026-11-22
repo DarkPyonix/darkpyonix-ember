@@ -363,6 +363,22 @@ async fn respond_loop(
                         _ => {}
                     }
                 }
+                if r.proxy == Some(ember_editor_conn::actors::generated::main_thread_storage::PROXY) {
+                    use ember_editor_conn::actors::generated::main_thread_storage::{InitializeExtensionStorageArgs, SetValueArgs};
+                    match r.method.as_str() {
+                        "$initializeExtensionStorage" => {
+                            if let Err(e) = InitializeExtensionStorageArgs::decode(&r.args) {
+                                eprintln!("[live-ose] cannot parse {name}: {e}; args {}", args_preview(&r.args));
+                            }
+                        }
+                        "$setValue" => {
+                            if let Err(e) = SetValueArgs::decode(&r.args) {
+                                eprintln!("[live-ose] cannot parse {name}: {e}; args {}", args_preview(&r.args));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 if r.proxy == Some("MainThreadLogger") && r.method == "$registerLogger" {
                     let logger = r.args.first().and_then(Arg::as_json).cloned().unwrap_or(Value::Null);
                     let label = ["name", "id"].iter().find_map(|k| logger.get(*k).and_then(Value::as_str)).unwrap_or_default().to_owned();
@@ -731,6 +747,17 @@ async fn live_ose_end_to_end() {
     }
     assert!(markers.iter().any(|m| m.severity == 8), "expected an Error marker: {markers:?}");
     steps.done("4. MainThreadDiagnostics.$changeMany (JSON errors)");
+    let storage_inits = seen
+        .lock()
+        .unwrap()
+        .get("MainThreadStorage.$initializeExtensionStorage")
+        .copied()
+        .unwrap_or(0);
+    assert!(
+        storage_inits > 0,
+        "expected at least one MainThreadStorage.$initializeExtensionStorage call during activation"
+    );
+    steps.done("4. MainThreadStorage.$initializeExtensionStorage observed");
 
     // The JSON language client's log is a log output channel (`createOutputChannel(name, { log: true })`):
     // the extension host's logger service writes the file and registers it with

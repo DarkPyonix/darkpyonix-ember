@@ -569,6 +569,28 @@ pub mod page {
             }
             return;
         }
+        if matches!(action, Action::NextTab | Action::PrevTab) {
+            let next = {
+                let mut tabs = s.tabs;
+                if action == Action::NextTab { tabs.write().next_tab() } else { tabs.write().prev_tab() }
+            };
+            if let Some(path) = next {
+                s.scm.close_diff();
+                let mut recent = s.recent_files;
+                record_recent_file(&mut recent, &path);
+                if let Some(handle) = webview_handle_from_tab(&path) {
+                    s.host.send(HostCommand::Webview(ember_editor::webview::WebviewEvent::ViewState {
+                        handle: handle.to_string(),
+                        visible: true,
+                        active: true,
+                        position: 1,
+                    }));
+                } else {
+                    s.host.send(HostCommand::Focus(path));
+                }
+            }
+            return;
+        }
         if action == Action::Close {
             // Bound first: the read guard must be gone before `sync_dirty` writes the tabs.
             let current = s.tabs.read().current_path().map(str::to_owned);
@@ -1560,11 +1582,20 @@ pub mod page {
                     };
                     match resolution {
                         crate::ui::editor_settings::KeyResolution::Default => {
-                            if let Some(action) = default_action { run_action(&key_s, action); }
+                            if let Some(action) = default_action {
+                                event.prevent_default();
+                                run_action(&key_s, action);
+                            }
                         }
                         crate::ui::editor_settings::KeyResolution::Unbound => {}
-                        crate::ui::editor_settings::KeyResolution::Action(action) => run_action(&key_s, action),
-                        crate::ui::editor_settings::KeyResolution::Command(id) => { key_s.host.send(HostCommand::ExecuteCommand(id)); }
+                        crate::ui::editor_settings::KeyResolution::Action(action) => {
+                            event.prevent_default();
+                            run_action(&key_s, action);
+                        }
+                        crate::ui::editor_settings::KeyResolution::Command(id) => {
+                            event.prevent_default();
+                            key_s.host.send(HostCommand::ExecuteCommand(id));
+                        }
                     }
                 },
                 if let Some(text) = fallback_text {
@@ -2053,7 +2084,8 @@ pub mod page {
                 crate::ui::editor::PromptSubmitOutcome::DeleteMany { items } => {
                     submit_host.send(HostCommand::DeleteMany { items });
                 }
-                crate::ui::editor::PromptSubmitOutcome::EmptyName => {}
+                crate::ui::editor::PromptSubmitOutcome::EmptyName
+                | crate::ui::editor::PromptSubmitOutcome::Unchanged => {}
             }
             let _ = &submit_root;
             prompt.set(None);
@@ -2540,6 +2572,9 @@ pub mod page {
                                 ondragstart: move |_| {
                                     tree_drag_src.set(Some(drag_path.clone()));
                                 },
+                                ondragend: move |_| {
+                                    tree_drag_src.set(None);
+                                },
                                 ondragover: move |event| {
                                     event.prevent_default();
                                 },
@@ -2553,17 +2588,15 @@ pub mod page {
                                             crate::ui::editor::new_item_parent(Some((drop_path.as_str(), false)), &drop_root)
                                         };
                                         let multi = tree_multi_sel.read().clone();
-                                        let sources = if multi.iter().any(|(p, _)| p == &src) {
+                                        let raw_sources = if multi.iter().any(|(p, _)| p == &src) {
                                             crate::ui::editor::prune_redundant_selection(&multi)
                                                 .into_iter()
                                                 .map(|(p, _)| p)
-                                                .filter(|p| p != &dest_dir)
                                                 .collect()
-                                        } else if src != dest_dir {
-                                            vec![src]
                                         } else {
-                                            Vec::new()
+                                            vec![src]
                                         };
+                                        let sources = crate::ui::editor::filter_move_sources(raw_sources, &dest_dir);
                                         if !sources.is_empty() {
                                             expanded.write().insert(dest_dir.clone());
                                             drop_host.send(HostCommand::MovePaths { sources, dest_dir });
@@ -2621,8 +2654,7 @@ pub mod page {
                                 },
                                 ondoubleclick: move |_| {
                                     if !is_dir {
-                                        let mut tabs = keep_s.tabs;
-                                        tabs.write().keep_open(&keep_path);
+                                        open_tab_file(&keep_s, &keep_path);
                                     }
                                 },
                                 // Right-click selects the row (keeping a multi-selection it is part of)

@@ -8,8 +8,8 @@
 
 use ember_editor_conn::actors::generated::{
     main_thread_bulk_edits, main_thread_commands, main_thread_diagnostics, main_thread_documents, main_thread_language_features,
-    main_thread_languages, main_thread_logger, main_thread_message_service, main_thread_output_service, main_thread_search, main_thread_window,
-    main_thread_workspace,
+    main_thread_languages, main_thread_logger, main_thread_message_service, main_thread_output_service, main_thread_search,
+    main_thread_storage, main_thread_window, main_thread_workspace,
 };
 use ember_editor_conn::actors::{Ctx, Outcome};
 use ember_editor_conn::exthost::{DocumentFilter, MarkerData, SemanticTokensLegend};
@@ -60,6 +60,7 @@ impl SessionCore {
             Some(main_thread_output_service::PROXY) => Some(main_thread_output_service::dispatch(self, &cx, method, args)),
             Some(main_thread_message_service::PROXY) => Some(main_thread_message_service::dispatch(self, &cx, method, args)),
             Some(main_thread_search::PROXY) => Some(main_thread_search::dispatch(self, &cx, method, args)),
+            Some(main_thread_storage::PROXY) => Some(main_thread_storage::dispatch(self, &cx, method, args)),
             Some(main_thread_language_features::PROXY) => Some(main_thread_language_features::dispatch(self, &cx, method, args)),
             Some(main_thread_documents::PROXY) => Some(main_thread_documents::dispatch(self, &cx, method, args)),
             Some(main_thread_languages::PROXY) => Some(main_thread_languages::dispatch(self, &cx, method, args)),
@@ -690,6 +691,44 @@ impl main_thread_workspace::Workspace for SessionCore {
 impl main_thread_window::Window for SessionCore {
     fn get_initial_state(&mut self, _cx: &Ctx, _args: main_thread_window::GetInitialStateArgs) -> Outcome {
         Outcome::Reply(Reply::Json(json!({ "isFocused": true, "isActive": true })))
+    }
+}
+
+impl main_thread_storage::Storage for SessionCore {
+    fn initialize_extension_storage(
+        &mut self,
+        cx: &Ctx,
+        args: main_thread_storage::InitializeExtensionStorageArgs,
+    ) -> Outcome {
+        match self.storage.on_initialize(cx.req, args.shared, &args.extension_id) {
+            crate::storage::InitAction::Reply(reply) => Outcome::Reply(reply),
+            crate::storage::InitAction::Read { uri, key } => {
+                self.out.push(Effect::ReadStorage { uri, shared: key.shared, extension_id: key.extension_id });
+                Outcome::Deferred
+            }
+            crate::storage::InitAction::Wait => Outcome::Deferred,
+        }
+    }
+
+    fn set_value(&mut self, cx: &Ctx, args: main_thread_storage::SetValueArgs) -> Outcome {
+        let next = self.next_token + 1;
+        match self.storage.on_set_value(cx.req, args.shared, &args.extension_id, args.value, || next) {
+            crate::storage::SetAction::Reply(reply) => Outcome::Reply(reply),
+            crate::storage::SetAction::Write { uri, bytes, token } => {
+                self.next_token = token;
+                self.out.push(Effect::WriteStorage { uri, bytes, token });
+                Outcome::Deferred
+            }
+        }
+    }
+
+    fn register_extension_storage_keys_to_sync(
+        &mut self,
+        _cx: &Ctx,
+        args: main_thread_storage::RegisterExtensionStorageKeysToSyncArgs,
+    ) -> Outcome {
+        self.storage.on_register_sync_keys(&args.extension, args.keys);
+        empty()
     }
 }
 

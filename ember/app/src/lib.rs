@@ -205,7 +205,7 @@ fn open_window() {
     if let Some(target) = ide::parse_editor_args(std::env::args()) {
         // Separate IDE window (FR-L31): `--editor <project> <folder>` opens the editor as its own
         // HTML-mode window in its own process. The `Window` element (dioxus-compose#152) is in the
-        // pin; an HTML page under the shell's Compose root waits for dioxus-compose#161.
+        // pin; an HTML page under a Compose root waits for dioxus-compose#161 (below).
         // `EMBER_CR_SIZE=1100x400` opens a check window of that size beside the owner's.
         let (w, h): (u16, u16) = std::env::var("EMBER_CR_SIZE")
             .ok()
@@ -219,7 +219,11 @@ fn open_window() {
         let title: &'static str = Box::leak(format!("{} - Ember", target.project).into_boxed_str());
         services().ui.standalone_editor.set(true);
         services().ui.editor.set(Some(target));
-        // TODO(dioxus-compose#161): HtmlView inside a Compose root aborts the real renderer, so the editor runs in HTML mode.
+        // TODO(dioxus-compose#161): open through `HtmlView` inside a Compose root. The renderer abort is
+        // fixed (dioxus-compose 7573b55c), but on 5b6f707c a Compose root delivers no event to a
+        // `WidgetView` inside an `HtmlView` (`html_view::route_event` asks only the page's own
+        // handlers, and `html_widget::route_event` runs only under an HTML-mode root), so the code
+        // editor and the diff editor would get none of theirs. The editor stays in HTML mode until then.
         launch_builder()
             .with_html(ui::editor_workbench::page::config)
             .with_window(ui::cr::shell::window_chrome(Window::new().with_title(title).with_size(w, h)))

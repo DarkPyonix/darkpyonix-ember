@@ -234,8 +234,8 @@ impl SharedUi {
     /// Open the Ember 에디터 for a project in its own window (FR-L7, FR-L31).
     /// TODO(dioxus-compose#161): open the editor window in the same process instead of spawning
     /// `--editor <project> <folder>`. The `Window` element (dioxus-compose#152) is in the pin; the
-    /// shell is a Compose root and the editor an HTML page, and an HTML view inside a Compose root
-    /// aborts the real renderer (#161).
+    /// shell is a Compose root and the editor an HTML page, and a Compose root does not yet deliver
+    /// events to the editor's `WidgetView`s inside an `HtmlView` (#161; see `open_window` in lib.rs).
     pub fn open_editor(&self, project: String, folder: String) {
         self.open_editor_connection(project, folder, None, None, None, None, None);
     }

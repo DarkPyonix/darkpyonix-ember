@@ -856,6 +856,10 @@ pub struct CurrentComputer {
     pub designated_computer_id: Option<String>,
 }
 
+/// Told about every move [`Computers::reconcile`] makes: the switch, and whether it was a fall
+/// back from the designated computer to the main server (true) or a return (false).
+pub type MoveListener = Arc<dyn Fn(&SwitchOutcome, bool) + Send + Sync>;
+
 pub struct Computers {
     registry: Registry,
     connector: Connector,
@@ -877,6 +881,8 @@ pub struct Computers {
     watch_secs: std::sync::atomic::AtomicU64,
     /// Per session: how many consecutive probes wanted a move (FR-X3 debounce).
     flap: Mutex<HashMap<String, u32>>,
+    /// Called after the watcher moved a session (FR-X3), so teams can tell the leader (#82).
+    move_listeners: Mutex<Vec<MoveListener>>,
     /// This machine's in-process node, started on first use of the local computer's terminals
     /// (FR-W4, #455). Dropping it closes the loopback port.
     local_node: Mutex<Option<local_node::LocalNode>>,
@@ -947,6 +953,7 @@ impl Computers {
             debounce: std::sync::atomic::AtomicU32::new(fallback_env().0),
             watch_secs: std::sync::atomic::AtomicU64::new(fallback_env().1),
             flap: Mutex::new(HashMap::new()),
+            move_listeners: Mutex::new(Vec::new()),
             local_node: Mutex::new(None),
             local_node_options: Mutex::new(local_node::LocalNodeOptions::default()),
         })
@@ -1418,6 +1425,19 @@ impl Computers {
         self.debounce.store(probes.max(1), std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Register a [`MoveListener`] (FR-T7, #82: the team tells the leader).
+    pub fn on_move(&self, listener: MoveListener) {
+        self.move_listeners.lock().unwrap().push(listener);
+    }
+
+    /// `(designated computer id, current computer id)` of a session, each `None` when nothing
+    /// is recorded (FR-T7 team views, #82). Read errors count as nothing recorded.
+    pub fn placement(&self, session_id: &str) -> (Option<String>, Option<String>) {
+        let designated = self.registry.designated(session_id).ok().flatten();
+        let current = self.registry.session_computer(session_id).ok().flatten().map(|sc| sc.computer_id);
+        (designated, current)
+    }
+
     /// Designate `computer_id` for the session, or clear it with `None` (FR-X3). The session
     /// does not move until [`Computers::reconcile`] runs (the watcher, or the caller).
     pub fn designate(&self, session_id: &str, computer_id: Option<&str>) -> Result<(), ComputerError> {
@@ -1469,6 +1489,11 @@ impl Computers {
         match self.switch(sessions, session_id, &want).await {
             Ok(out) => {
                 self.flap.lock().unwrap().remove(session_id);
+                let fell_back = !up;
+                let listeners = self.move_listeners.lock().unwrap().clone();
+                for l in listeners {
+                    l(&out, fell_back);
+                }
                 Ok(Some(out))
             }
             Err(ComputerError::Busy(_)) => Ok(None),

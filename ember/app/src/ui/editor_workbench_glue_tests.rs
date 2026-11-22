@@ -1058,10 +1058,7 @@ fn fr_l33_1_the_safe_area_arriving_after_the_first_render_moves_the_top_bar() {
 
     let lights = SafeArea { top: 28.0, leading: 78.0, trailing: 0.0 };
     toolkit
-        .dispatch(HostEvent {
-            node_id: 0,
-            handler_id: 0,
-            payload: EventPayload::WindowSizeChanged {
+        .dispatch(HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
                 width_dp: 1440.0,
                 height_dp: 900.0,
                 class: WindowSizeClass::from_width_dp(1440.0),
@@ -1070,8 +1067,7 @@ fn fr_l33_1_the_safe_area_arriving_after_the_first_render_moves_the_top_bar() {
                 safe_area_leading: lights.leading,
                 safe_area_trailing: lights.trailing,
                 safe_area_bottom: 0.0,
-            },
-        })
+            }))
         .expect("dispatch");
     // The report woke the page; nothing else asks it to render.
     page.dom.virtual_dom_mut().process_events();

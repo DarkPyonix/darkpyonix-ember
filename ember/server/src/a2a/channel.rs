@@ -256,7 +256,7 @@ impl A2a {
     /// window and the thread can be tested without waiting. The rate limit keeps its own
     /// monotonic clock.
     ///
-    /// The mention thread (#380, INTENT D50) is the latest mention of the session in the channel;
+    /// The mention thread (#380, INTENT D51) is the latest mention of the session in the channel;
     /// it is open while that mention is at most [`CHANNEL_THREAD_MAX`] old and the session has
     /// written nothing in the channel since it. Its first post closes it.
     pub fn check_channel_post_at(&self, session: &str, channel: &str, now_ms: i64) -> Result<(), A2aError> {

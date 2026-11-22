@@ -317,8 +317,11 @@ async fn only_the_leader_spawns_and_ends_teammates() {
     assert!(!v["ended_at"].is_null());
     assert!(!w.sessions.is_live(&alice).await);
     assert!(notices(&w.sessions, &alice).iter().any(|n| n.contains("ended by the team leader")));
+    // After FR-T2a an ended teammate's token is revoked with her agent run, so the call is
+    // refused at authentication (401). The old 403 came from a still-valid token of a member who
+    // had left. Either way the ended teammate cannot reach team data.
     let (st, _) = agent(&w, &alice, "GET", "/api/a2a/team/tasks", None).await;
-    assert_eq!(st, StatusCode::FORBIDDEN);
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
     let (st, _) = agent(&w, &lead, "DELETE", "/api/a2a/team/members/alice", None).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
 

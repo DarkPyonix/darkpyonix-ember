@@ -1479,7 +1479,7 @@ impl Driver {
                         });
                     }
                 }
-                Effect::ReloadSharedStorage { uri, extension_id } => {
+                Effect::ReloadSharedStorage { uri, extension_id, generation } => {
                     let tx = internal.clone();
                     if self.local_storage {
                         let path = std::path::PathBuf::from(&uri.path);
@@ -1489,7 +1489,7 @@ impl Driver {
                             })
                             .await
                             .unwrap_or_else(|e| Err(e.to_string()));
-                            let _ = tx.send(Input::SharedStorageReloaded { extension_id, result });
+                            let _ = tx.send(Input::SharedStorageReloaded { extension_id, generation, result });
                         });
                     } else {
                         let fs = Arc::clone(&self.fs);
@@ -1499,7 +1499,7 @@ impl Driver {
                                 Err(e) if is_not_found(&e) => Ok(None),
                                 Err(e) => Err(e.to_string()),
                             };
-                            let _ = tx.send(Input::SharedStorageReloaded { extension_id, result });
+                            let _ = tx.send(Input::SharedStorageReloaded { extension_id, generation, result });
                         });
                     }
                 }

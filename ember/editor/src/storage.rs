@@ -533,10 +533,22 @@ pub struct ExtensionStorage {
     /// Reverse lookup from `<encode_extension_key(id)>.json` to lowercased `extension_id` for
     /// matching directory watch events on `global_dir`.
     shared_file_index: HashMap<String, String>,
+    /// Monotonic per-key generation bumped on every accepted `$setValue` and every applied
+    /// external shared-storage change so a stale reload reply cannot rewind a newer value.
+    generations: HashMap<StorageKey, u64>,
     sync_keys: HashMap<String, Vec<String>>,
 }
 
 impl ExtensionStorage {
+    fn generation_of(&self, key: &StorageKey) -> u64 {
+        self.generations.get(key).copied().unwrap_or(0)
+    }
+
+    fn bump_generation(&mut self, key: &StorageKey) -> u64 {
+        let slot = self.generations.entry(key.clone()).or_insert(0);
+        *slot += 1;
+        *slot
+    }
     pub fn set_roots(&mut self, roots: StorageRoots) {
         self.roots = Some(roots);
     }
@@ -579,9 +591,9 @@ impl ExtensionStorage {
         write_wake.chain(read_wake).min()
     }
 
-    /// Resolve a changed file path under `global_dir` to `(file_uri, extension_id)` for reloading,
-    /// skipping keys with a local write or quarantine currently in progress.
-    pub fn shared_extension_for_path(&self, path: &str) -> Option<(UriComponents, String)> {
+    /// Resolve a changed file path under `global_dir` to `(file_uri, extension_id, generation)`
+    /// for reloading, skipping keys with a local write or quarantine currently in progress.
+    pub fn shared_extension_for_path(&self, path: &str) -> Option<(UriComponents, String, u64)> {
         let roots = self.roots.as_ref()?;
         let dir = roots.global_dir.path.trim_end_matches('/');
         let rest = path.strip_prefix(dir)?.strip_prefix('/')?;
@@ -596,12 +608,12 @@ impl ExtensionStorage {
         {
             return None;
         }
-        Some((roots.file_uri(true, ext_id), ext_id.clone()))
+        Some((roots.file_uri(true, ext_id), ext_id.clone(), self.generation_of(&key)))
     }
 
     /// All cached `shared = true` keys that should be reloaded from disk after a broadcast lag,
     /// skipping keys with a local write or quarantine currently in progress.
-    pub fn cached_shared_keys(&self) -> Vec<(UriComponents, String)> {
+    pub fn cached_shared_keys(&self) -> Vec<(UriComponents, String, u64)> {
         let Some(roots) = self.roots.as_ref() else {
             return Vec::new();
         };
@@ -613,7 +625,7 @@ impl ExtensionStorage {
                     && !self.queued_writes.contains_key(k)
                     && !self.quarantining.contains_key(k)
             })
-            .map(|k| (roots.file_uri(true, &k.extension_id), k.extension_id.clone()))
+            .map(|k| (roots.file_uri(true, &k.extension_id), k.extension_id.clone(), self.generation_of(k)))
             .collect()
     }
 
@@ -855,6 +867,7 @@ impl ExtensionStorage {
                 }
             }
         };
+        self.bump_generation(&key);
         self.cache.insert(key.clone(), entry.clone());
         let broadcast = if key.shared { Some((key.extension_id.clone(), entry)) } else { None };
         if self.roots.is_none() {
@@ -959,18 +972,25 @@ impl ExtensionStorage {
         if let Some(in_flight) = self.in_flight_writes.get_mut(&key) {
             in_flight.superseded_by_external = true;
         }
+        self.bump_generation(&key);
         self.cache.insert(key, value);
     }
 
     /// Apply the result of reloading a `shared = true` file after a directory watch event or hub
-    /// lag. Returns `Some(new_value)` only when the disk content differs from the current cache
-    /// (filtering self-echoes and already-delivered hub updates).
+    /// lag. Drops replies whose `generation` no longer matches the key's current generation (a
+    /// newer local `$setValue` or external update landed while the reload was in flight). Returns
+    /// `Some(new_value)` only when the disk content differs from the current cache (filtering
+    /// self-echoes and already-delivered hub updates).
     pub fn on_shared_reload_done(
         &mut self,
         extension_id: &str,
+        generation: u64,
         result: Result<Option<Vec<u8>>, String>,
     ) -> Option<Option<String>> {
         let key = StorageKey::new(true, extension_id);
+        if generation != self.generation_of(&key) {
+            return None;
+        }
         if self.in_flight_writes.contains_key(&key)
             || self.queued_writes.contains_key(&key)
             || self.quarantining.contains_key(&key)
@@ -1318,5 +1338,59 @@ mod tests {
         // Sync keys registration is recorded by lowercased id.
         store.on_register_sync_keys(&json!({"id": "Pub.Ext", "version": "1.0.0"}), vec!["k1".into(), "k2".into()]);
         assert_eq!(store.sync_keys("pub.ext"), Some(&["k1".to_owned(), "k2".to_owned()][..]));
+    }
+
+    #[test]
+    fn shared_reload_drops_stale_generation_after_local_or_external_update() {
+        let mut store = ExtensionStorage::default();
+        let roots = StorageRoots::from_env(
+            "127.0.0.1:8000",
+            &UriComponents::remote("127.0.0.1:8000", "/data/globalStorage"),
+            &UriComponents::remote("127.0.0.1:8000", "/data/workspaceStorage"),
+            "/work/proj",
+        );
+        let path = roots.file_uri(true, "pub.gen").path;
+        store.set_roots(roots);
+        store.register_shared_extension("pub.gen");
+
+        // Snapshot generation before a newer local `$setValue` completes.
+        let (_, _, stale_gen) = store.shared_extension_for_path(&path).expect("tracked shared path");
+        let mut tok = 1u64;
+        let out = store.on_set_value(true, "pub.gen", json!({"v": "local"}), || {
+            tok += 1;
+            tok
+        });
+        let write = out.write.expect("local write starts");
+        assert!(store.on_write_done(Instant::now(), write.token, Ok(()), || { tok += 1; tok }).is_none());
+
+        // Stale reload reply with `stale_gen` must be dropped even though no write is in flight.
+        assert_eq!(
+            store.on_shared_reload_done("pub.gen", stale_gen, Ok(Some(br#"{"v":"stale"}"#.to_vec()))),
+            None
+        );
+        assert_eq!(store.cached(true, "pub.gen"), Some(Some(r#"{"v":"local"}"#)));
+
+        // Snapshot current generation, apply an external hub change, then deliver the stale reload.
+        let (_, _, stale_gen2) = store.shared_extension_for_path(&path).expect("tracked shared path");
+        store.on_external_shared_change("pub.gen", Some(r#"{"v":"hub"}"#.to_owned()));
+        assert_eq!(
+            store.on_shared_reload_done("pub.gen", stale_gen2, Ok(Some(br#"{"v":"stale2"}"#.to_vec()))),
+            None
+        );
+        assert_eq!(store.cached(true, "pub.gen"), Some(Some(r#"{"v":"hub"}"#)));
+
+        // A reload carrying the current generation applies cleanly and bumps generation again.
+        let (_, _, current_gen) = store.shared_extension_for_path(&path).expect("tracked shared path");
+        assert_eq!(
+            store.on_shared_reload_done("pub.gen", current_gen, Ok(Some(br#"{"v":"disk"}"#.to_vec()))),
+            Some(Some(r#"{"v":"disk"}"#.to_owned()))
+        );
+        assert_eq!(store.cached(true, "pub.gen"), Some(Some(r#"{"v":"disk"}"#)));
+        // A second concurrent reload from the same `current_gen` is now stale and dropped.
+        assert_eq!(
+            store.on_shared_reload_done("pub.gen", current_gen, Ok(Some(br#"{"v":"earlier-disk"}"#.to_vec()))),
+            None
+        );
+        assert_eq!(store.cached(true, "pub.gen"), Some(Some(r#"{"v":"disk"}"#)));
     }
 }

@@ -147,7 +147,7 @@ pub enum Input {
     /// A `shared = true` (`globalState`) update broadcast from another session on the same hub.
     SharedStorageChanged { extension_id: String, value: Option<String> },
     /// Result of reloading a `shared = true` storage file after a watcher event or hub lag.
-    SharedStorageReloaded { extension_id: String, result: Result<Option<Vec<u8>>, String> },
+    SharedStorageReloaded { extension_id: String, generation: u64, result: Result<Option<Vec<u8>>, String> },
     /// Resync all cached `shared = true` keys from disk (e.g. after `StorageHub` broadcast lag).
     ResyncSharedStorage,
     /// Nothing happened; run due timers.
@@ -169,7 +169,7 @@ pub enum Effect {
     ReadStorage { uri: UriComponents, shared: bool, extension_id: String },
     /// Reload one `shared = true` storage file after a watcher event or hub lag; answered with
     /// [`Input::SharedStorageReloaded`].
-    ReloadSharedStorage { uri: UriComponents, extension_id: String },
+    ReloadSharedStorage { uri: UriComponents, extension_id: String, generation: u64 },
     /// Move a corrupt extension storage file aside (`*.corrupt.<millis>-<seq>`); answered with
     /// [`Input::StorageQuarantined`].
     QuarantineStorage { from: UriComponents, to: UriComponents, shared: bool, extension_id: String },
@@ -539,15 +539,15 @@ impl SessionCore {
                 let raw = value.as_deref().unwrap_or("{}");
                 self.rpc(ember_editor_conn::exthost::accept_storage_value(true, &extension_id, raw));
             }
-            Input::SharedStorageReloaded { extension_id, result } => {
-                if let Some(value) = self.storage.on_shared_reload_done(&extension_id, result) {
+            Input::SharedStorageReloaded { extension_id, generation, result } => {
+                if let Some(value) = self.storage.on_shared_reload_done(&extension_id, generation, result) {
                     let raw = value.as_deref().unwrap_or("{}");
                     self.rpc(ember_editor_conn::exthost::accept_storage_value(true, &extension_id, raw));
                 }
             }
             Input::ResyncSharedStorage => {
-                for (uri, extension_id) in self.storage.cached_shared_keys() {
-                    self.out.push(Effect::ReloadSharedStorage { uri, extension_id });
+                for (uri, extension_id, generation) in self.storage.cached_shared_keys() {
+                    self.out.push(Effect::ReloadSharedStorage { uri, extension_id, generation });
                 }
             }
             Input::Tick => {}
@@ -2208,9 +2208,9 @@ impl SessionCore {
     fn on_files_changed(&mut self, changes: Vec<FileChange>) {
         let mut reload_shared: HashSet<String> = HashSet::new();
         for c in changes {
-            if let Some((uri, extension_id)) = self.storage.shared_extension_for_path(&c.resource.path) {
+            if let Some((uri, extension_id, generation)) = self.storage.shared_extension_for_path(&c.resource.path) {
                 if reload_shared.insert(extension_id.clone()) {
-                    self.out.push(Effect::ReloadSharedStorage { uri, extension_id });
+                    self.out.push(Effect::ReloadSharedStorage { uri, extension_id, generation });
                 }
                 continue;
             }

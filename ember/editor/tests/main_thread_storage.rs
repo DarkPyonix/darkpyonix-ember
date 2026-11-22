@@ -349,6 +349,13 @@ async fn run_fake_management(mut server: DuplexStream, disk: FakeRemoteDisk, aut
                 ("remoteFilesystem", "unwatch") => Ok(IpcValue::Undefined),
                 ("remoteFilesystem", "mkdir") => Ok(IpcValue::Undefined),
                 ("remoteFilesystem", "readFile") => {
+                    let path = match &body {
+                        IpcValue::Array(args) => args.first().and_then(|a| a.to_json()["path"].as_str().map(str::to_owned)),
+                        _ => None,
+                    }
+                    .unwrap_or_default();
+                    let injected = disk.read_failures.lock().unwrap().pop_front();
+                    let snapshot = disk.files.lock().unwrap().get(&path).cloned();
                     let gate = disk.read_gate.lock().unwrap().clone();
                     if let Some(gate) = gate {
                         if gate.triggered.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -356,16 +363,10 @@ async fn run_fake_management(mut server: DuplexStream, disk: FakeRemoteDisk, aut
                             gate.release.notified().await;
                         }
                     }
-                    let path = match &body {
-                        IpcValue::Array(args) => args.first().and_then(|a| a.to_json()["path"].as_str().map(str::to_owned)),
-                        _ => None,
-                    }
-                    .unwrap_or_default();
-                    let injected = disk.read_failures.lock().unwrap().pop_front();
                     if let Some(msg) = injected {
                         Err(json!({ "name": "IOError", "message": msg }))
                     } else {
-                        match disk.files.lock().unwrap().get(&path).cloned() {
+                        match snapshot {
                             Some(bytes) => Ok(IpcValue::VsBuffer(bytes)),
                             None => Err(json!({ "name": "EntryNotFound", "message": format!("ENOENT: {path}") })),
                         }
@@ -1750,13 +1751,17 @@ async fn external_shared_change_cancels_pending_local_retry() {
     let (sess_a, ops_a, mut accept_a) =
         connect_interactive_session(disk.clone(), "127.0.0.1:8000", "/workspace/a", hub.clone()).await;
 
-    // Session A's write fails once, scheduling a retry after 50 ms.
+    // Gate Session A's failing write so the external update is guaranteed to arrive before the
+    // failure can schedule or fire a retry.
+    let write_gate = IoGate::new();
+    disk.set_write_gate(Some(write_gate.clone()));
     disk.push_write_failure("EIO: transient write failure");
     let (tx, rx) = oneshot::channel();
     ops_a.send((set_op(true, "pub.cancel", json!({ "staleLocal": 1 })), tx)).unwrap();
     assert_eq!(tokio::time::timeout(Duration::from_secs(2), rx).await.unwrap().unwrap(), ObservedReply::Ok(Reply::Empty));
+    tokio::time::timeout(Duration::from_secs(2), write_gate.wait_entered()).await.unwrap();
 
-    // Before the retry fires, another session writes a newer value to disk and publishes it.
+    // While the failing write is in flight, another session writes a newer value and publishes it.
     let roots = ember_editor::StorageRoots::from_env(
         "127.0.0.1:8000",
         &UriComponents::remote("127.0.0.1:8000", "/ose-data/User/globalStorage"),
@@ -1768,7 +1773,8 @@ async fn external_shared_change_cancels_pending_local_retry() {
     hub.publish(9999, "pub.cancel".to_owned(), Some(r#"{"newerExternal":2}"#.to_owned()));
 
     // Wait deterministically until Session A applies the external change and forwards $acceptValue,
-    // then wait past the 50 ms retry window and shut down; the stale local retry must NOT overwrite disk.
+    // then release the failing write, wait past the 50 ms retry window, and shut down; the stale
+    // local retry must NOT overwrite disk.
     let (shared, key, val) = tokio::time::timeout(Duration::from_secs(2), accept_a.recv())
         .await
         .expect("timed out waiting for external $acceptValue")
@@ -1776,6 +1782,7 @@ async fn external_shared_change_cancels_pending_local_retry() {
     assert!(shared);
     assert_eq!(key, "pub.cancel");
     assert_eq!(serde_json::from_str::<Value>(&val).unwrap(), json!({ "newerExternal": 2 }));
+    write_gate.release();
     tokio::time::sleep(Duration::from_millis(120)).await;
     sess_a.shutdown().await;
 
@@ -1953,4 +1960,115 @@ async fn local_mode_cross_process_shared_storage_delivers_accept_value_without_h
     sess_a.shutdown().await;
     sess_b.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn stale_watch_reload_does_not_rewind_newer_local_or_hub_update() {
+    let disk = FakeRemoteDisk::default();
+    let hub = StorageHub::new();
+    let (sess, ops, mut accept) =
+        connect_interactive_session(disk.clone(), "127.0.0.1:8000", "/workspace/reload-race", hub.clone()).await;
+
+    let roots = ember_editor::StorageRoots::from_env(
+        "127.0.0.1:8000",
+        &UriComponents::remote("127.0.0.1:8000", "/ose-data/User/globalStorage"),
+        &UriComponents::remote("127.0.0.1:8000", "/ose-data/User/workspaceStorage"),
+        "/workspace/reload-race",
+    );
+
+    // Part A: watch-triggered reload pauses on IoGate; while paused, a newer local `$setValue`
+    // updates the cache and finishes writing to disk; releasing the stale reload must NOT rewind
+    // the cache or emit a stale `$acceptValue`.
+    let (tx, rx) = oneshot::channel();
+    ops.send((init_op(true, "pub.race_local"), tx)).unwrap();
+    assert_eq!(tokio::time::timeout(Duration::from_secs(2), rx).await.unwrap().unwrap(), ObservedReply::Ok(Reply::Empty));
+
+    let gate_local = IoGate::new();
+    disk.set_read_gate(Some(gate_local.clone()));
+    let path_local = roots.file_uri(true, "pub.race_local").path;
+    disk.insert(path_local.clone(), br#"{"stale":"from-watch"}"#.to_vec());
+    tokio::time::timeout(Duration::from_secs(2), gate_local.wait_entered()).await.unwrap();
+
+    let (tx, rx) = oneshot::channel();
+    ops.send((set_op(true, "pub.race_local", json!({ "newer": "local" })), tx)).unwrap();
+    assert_eq!(tokio::time::timeout(Duration::from_secs(2), rx).await.unwrap().unwrap(), ObservedReply::Ok(Reply::Empty));
+
+    // Wait until the local write completes on disk so `in_flight_writes` is empty when the stale
+    // reload reply lands.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if disk.snapshot().get(&path_local).and_then(|b| serde_json::from_slice::<Value>(b).ok())
+            == Some(json!({ "newer": "local" }))
+        {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "timed out waiting for local write to hit disk");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    gate_local.release();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (tx, rx) = oneshot::channel();
+    ops.send((init_op(true, "pub.race_local"), tx)).unwrap();
+    let cached_local = tokio::time::timeout(Duration::from_secs(2), rx).await.unwrap().unwrap();
+    assert_eq!(
+        parse_reply_json(&cached_local),
+        json!({ "newer": "local" }),
+        "stale watch reload must not rewind cache after newer local $setValue"
+    );
+
+    // Deterministic check that no stale `$acceptValue` was emitted: publish a sentinel key and
+    // assert it arrives FIRST.
+    hub.publish(9999, "pub.sentinel_local".to_owned(), Some(r#"{"sentinel":1}"#.to_owned()));
+    let (_, first_key, _) = tokio::time::timeout(Duration::from_secs(2), accept.recv())
+        .await
+        .expect("timed out waiting for sentinel_local")
+        .expect("accept channel closed");
+    assert_eq!(first_key, "pub.sentinel_local", "stale watch reload must not emit $acceptValue after local $setValue");
+
+    // Part B: watch-triggered reload pauses on IoGate; while paused, a newer StorageHub external
+    // update arrives; releasing the stale reload must NOT rewind the cache or emit a stale
+    // `$acceptValue`.
+    disk.set_read_gate(None);
+    let (tx, rx) = oneshot::channel();
+    ops.send((init_op(true, "pub.race_hub"), tx)).unwrap();
+    assert_eq!(tokio::time::timeout(Duration::from_secs(2), rx).await.unwrap().unwrap(), ObservedReply::Ok(Reply::Empty));
+
+    let gate_hub = IoGate::new();
+    disk.set_read_gate(Some(gate_hub.clone()));
+    let path_hub = roots.file_uri(true, "pub.race_hub").path;
+    disk.insert(path_hub, br#"{"stale":"from-watch-hub"}"#.to_vec());
+    tokio::time::timeout(Duration::from_secs(2), gate_hub.wait_entered()).await.unwrap();
+
+    hub.publish(9999, "pub.race_hub".to_owned(), Some(r#"{"newer":"hub"}"#.to_owned()));
+    let (shared, key, val) = tokio::time::timeout(Duration::from_secs(2), accept.recv())
+        .await
+        .expect("timed out waiting for hub $acceptValue")
+        .expect("accept channel closed");
+    assert!(shared);
+    assert_eq!(key, "pub.race_hub");
+    assert_eq!(serde_json::from_str::<Value>(&val).unwrap(), json!({ "newer": "hub" }));
+
+    gate_hub.release();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (tx, rx) = oneshot::channel();
+    ops.send((init_op(true, "pub.race_hub"), tx)).unwrap();
+    let cached_hub = tokio::time::timeout(Duration::from_secs(2), rx).await.unwrap().unwrap();
+    assert_eq!(
+        parse_reply_json(&cached_hub),
+        json!({ "newer": "hub" }),
+        "stale watch reload must not rewind cache after newer hub update"
+    );
+
+    hub.publish(9999, "pub.sentinel_hub".to_owned(), Some(r#"{"sentinel":2}"#.to_owned()));
+    let (_, first_key, _) = tokio::time::timeout(Duration::from_secs(2), accept.recv())
+        .await
+        .expect("timed out waiting for sentinel_hub")
+        .expect("accept channel closed");
+    assert_eq!(first_key, "pub.sentinel_hub", "stale watch reload must not emit $acceptValue after hub update");
+
+    sess.shutdown().await;
 }

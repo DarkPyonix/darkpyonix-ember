@@ -7,6 +7,7 @@ There are three injection points. What goes where is the whole of this file.
 | The workbench main CSS            | static/overlay.css               | Mobile layout                        |
 | The top-level workbench doc (`/`) | viewport + overlay.css + overlay.js | Bar, gestures, keyboard policy    |
 |                                   | + static/detach.js + one settings default | Tab detach (SPEC FR-B1/B2)  |
+|                                   | + the DarkPyonix colour theme defaults | Default theme (SPEC FR-W6) |
 | VS Code webview host frames       | static/webview-kb.js             | Keyboard policy for extension panels |
 
 Injecting into **the top-level document only** is the load-bearing part. VS Code also
@@ -21,7 +22,7 @@ from fastapi import Request, Response
 
 from dpx import assets
 from dpx.config import ASSET_VERSION, TAB_DETACH
-from dpx.vscode import html_rewrite, proxy
+from dpx.vscode import html_rewrite, proxy, runtime
 
 logger = logging.getLogger("proxy")
 
@@ -76,7 +77,10 @@ async def workbench_html(request: Request, path: str) -> Response:
 
     # Tab detach (detach.js + the dragToOpenWindow default) rides along unless switched off
     # with DPX_TAB_DETACH=0. See html_rewrite.py for what is rewritten and why.
-    html, inserted = html_rewrite.workbench_inserts(resp.text, ASSET_VERSION, detach=TAB_DETACH)
+    # The DarkPyonix theme is the default colour theme whenever it is among the default
+    # extensions this runtime installs (SPEC FR-W6, #15).
+    html, inserted = html_rewrite.workbench_inserts(resp.text, ASSET_VERSION, detach=TAB_DETACH,
+                                                    theme=runtime.theme_is_default_extension())
     if inserted:
         logger.info("Injected %s into HTML: %s", ", ".join(inserted), path)
     return Response(content=html, media_type="text/html", headers=assets.NO_CACHE)

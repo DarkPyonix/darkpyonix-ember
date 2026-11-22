@@ -3,14 +3,16 @@
 # screen, size and theme (FR-L37, #222). macOS only for now: the capture uses screencapture,
 # CoreGraphics window ids and sips. On any other OS it stops with an error.
 #
-# usage: MOCKUP_DIR=<mockup folder> .github/scripts/preview/side-by-side.sh [options]
+# usage: [MOCKUP_DIR=<mockup folder>] .github/scripts/preview/side-by-side.sh [options]
 #   --only <screen>[,<screen>]   only these rows of screens.tsv (may be repeated)
 #   --size <WxH|W>[,...]         only these sizes (default: 1440x900 1024x800 768x900 390x844)
 #   --theme <light|dark>[,...]   only these themes (default: light dark)
 #   --list                       print the screen names and exit
 #
 # Environment:
-#   MOCKUP_DIR     required. The mockup folder (home.html, vcs.html, ...). It is not in git.
+#   MOCKUP_DIR     the mockup folder (home.html, vcs.html, ...): docs/design/mockup in this
+#                  repository, as the CI job "Screen previews" passes it (#222). Without it the
+#                  run writes the app captures only (no mockup renders, no pairs).
 #   EMBER_APP_BIN  the client binary (default: ember/app/target/debug/ember-app). A debug build,
 #                  because the EMBER_CR_* review hooks exist in debug builds only.
 #   OUT_DIR        output folder (default: .scratch/preview).
@@ -44,7 +46,7 @@ ALL_SIZES="1440x900 1024x800 768x900 390x844"
 ALL_THEMES="light dark"
 
 die() { echo "error: $*" >&2; exit 2; }
-usage() { sed -n '2,33p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,35p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 only="" sizes="" themes="" list=0
 while [[ $# -gt 0 ]]; do
@@ -96,12 +98,21 @@ for t in $themes; do
 done
 [[ -n "$picked_themes" ]] || picked_themes="$ALL_THEMES"
 
-[[ -n "${MOCKUP_DIR:-}" ]] || die "MOCKUP_DIR is required (the mockup folder; it is not in git)"
-[[ -d "$MOCKUP_DIR" ]] || die "MOCKUP_DIR is not a folder: $MOCKUP_DIR"
-MOCKUP_DIR="$(cd "$MOCKUP_DIR" && pwd)"
+# Without MOCKUP_DIR only the app is captured (#222): nothing is rendered or joined, so uv
+# (the Python helpers) is not needed either.
+APP_ONLY=0
+if [[ -z "${MOCKUP_DIR:-}" ]]; then
+    APP_ONLY=1
+    echo "mockup: MOCKUP_DIR is not set, so this run writes app captures only (no pairs)"
+else
+    [[ -d "$MOCKUP_DIR" ]] || die "MOCKUP_DIR is not a folder: $MOCKUP_DIR"
+    MOCKUP_DIR="$(cd "$MOCKUP_DIR" && pwd)"
+fi
 APP_BIN="${EMBER_APP_BIN:-$ROOT/ember/app/target/debug/ember-app}"
 [[ -x "$APP_BIN" ]] || die "app binary not found or not executable: $APP_BIN (set EMBER_APP_BIN)"
-for tool in osascript screencapture sips uv; do
+tools="osascript screencapture sips"
+[[ $APP_ONLY -eq 1 ]] || tools="$tools uv"
+for tool in $tools; do
     command -v "$tool" >/dev/null 2>&1 || die "$tool is not on PATH"
 done
 [[ -f "$SRGB" ]] || die "sRGB profile not found: $SRGB"
@@ -173,7 +184,7 @@ mock_rc=0
 while IFS=$'\t' read -r name route envs murl mstore mact <&3; do
     case "$name" in ''|'#'*) continue ;; esac
     wanted "$name" || continue
-    [[ "$murl" == "-" ]] && continue
+    [[ "$murl" == "-" || $APP_ONLY -eq 1 ]] && continue
     for size in $picked_sizes; do
         for theme in $picked_themes; do
             printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$OUT_DIR/mockup/$name-$size-$theme.png" \
@@ -249,7 +260,9 @@ while IFS=$'\t' read -r name route envs murl mstore mact <&3; do
                 echo "OK   $base app"
             fi
             mock="-"
-            if [[ "$murl" != "-" ]]; then
+            if [[ "$murl" != "-" && $APP_ONLY -eq 1 ]]; then
+                mock="no-mockup-dir"
+            elif [[ "$murl" != "-" ]]; then
                 mock="missing"
                 if [[ -s "$OUT_DIR/mockup/$base.png" ]]; then
                     mock="ok"
@@ -277,7 +290,11 @@ INDEX="$OUT_DIR/index.md"
     echo "# Preview pairs"
     echo
     echo "Written by \`.github/scripts/preview/side-by-side.sh\` (FR-L37) on $(date '+%Y-%m-%d %H:%M:%S')."
-    echo "Left: the app (\`$APP_BIN\`), converted to sRGB. Right: the mockup (\`$MOCKUP_DIR\`)."
+    if [[ $APP_ONLY -eq 1 ]]; then
+        echo "App captures only (\`$APP_BIN\`), converted to sRGB: MOCKUP_DIR was not set, so there are no pairs."
+    else
+        echo "Left: the app (\`$APP_BIN\`), converted to sRGB. Right: the mockup (\`$MOCKUP_DIR\`)."
+    fi
     echo "Pair images hold $PAIR_SCALE px per point. Logs are in \`logs/\`."
     echo
     echo "| Screen | Size | Theme | Pair | App | Mockup |"
@@ -288,6 +305,8 @@ INDEX="$OUT_DIR/index.md"
             cell="[$base-pair.png](pairs/$base-pair.png)"
         elif [[ "$mock" == "-" ]]; then
             cell="none (no mockup state in the table)"
+        elif [[ "$mock" == "no-mockup-dir" ]]; then
+            cell="none (MOCKUP_DIR not set)"
         elif [[ "$app" != "ok" ]]; then
             cell="MISSING (app: $app)"
         elif [[ "$mock" != "ok" ]]; then
@@ -304,7 +323,7 @@ INDEX="$OUT_DIR/index.md"
 while IFS=$'\t' read -r name size theme app mock; do
     if [[ -s "$OUT_DIR/pairs/$name-$size-$theme-pair.png" ]]; then
         pairs=$(( pairs + 1 ))
-    elif [[ "$mock" == "-" ]]; then
+    elif [[ "$mock" == "-" || "$mock" == "no-mockup-dir" ]]; then
         app_only=$(( app_only + 1 ))
     else
         missing=$(( missing + 1 ))

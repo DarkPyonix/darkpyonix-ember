@@ -1,0 +1,50 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>에디터 결정</title><link rel="stylesheet" href="style.css"><script src="icons.js"></script>
+<style>
+body{overflow-x:hidden}
+.wrapx{max-width:1480px;margin:0 auto;padding:var(--sp8) var(--sp4)}
+.wrapx h1{font-size:var(--fs-2xl);font-weight:var(--fw-regular);letter-spacing:var(--ls-tight);margin:0}
+.area{margin:var(--sp8) 0}
+.area h2{font-size:var(--fs-xl);font-weight:var(--fw-semibold);margin:0 0 var(--sp2)}
+.area p,.area li{color:var(--text-2);font-size:var(--fs-sm);line-height:var(--lh-md)}
+.area ul{margin:var(--sp2) 0 var(--sp4);padding-left:20px}
+.pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--sp4)}
+@media(max-width:900px){.pair{grid-template-columns:minmax(0,1fr)}}
+.pane2{min-width:0}
+.pane2 .cap{display:flex;align-items:center;gap:var(--sp2);font-size:var(--fs-sm);font-weight:var(--fw-semibold);margin-bottom:var(--sp2)}
+.stage{background:var(--surface-2);border:1px solid var(--line);border-radius:var(--r-lg);overflow:hidden;position:relative}
+.stage iframe{border:0;transform-origin:0 0;display:block;background:var(--bg)}
+.ctl{display:flex;gap:var(--sp3);flex-wrap:wrap;align-items:center;margin-top:var(--sp4)}
+.stage{max-width:100%}
+.kmt{border-collapse:collapse;font-size:var(--fs-sm);width:100%;max-width:640px}.kmt th,.kmt td{text-align:left;padding:6px 12px;border-bottom:1px solid var(--line)}.kmt td:not(:first-child){font-family:var(--mono);color:var(--text-2)}
+</style></head><body>
+<div class="wrapx">
+<div class="flex"><h1>에디터와 터미널: 결정</h1><div class="spacer"></div><button class="icon-btn" id="th" title="테마"></button></div>
+<p class="muted">오너 결정(2026-10-25)을 반영한 Ember 에디터(D32)입니다. 다른 화면은 바꾸지 않았습니다.</p>
+<div class="ctl"><b>폭</b><div class="seg" id="widths"></div></div>
+<section class="area"><h2>결정</h2><ul>
+<li>바탕은 앱 기본 스타일입니다. 둥근 패널(아일랜드), 탭, 도구 창, 코드 영역이 JetBrains의 최신 Islands 디자인 개념과 맞다는 오너 판단입니다.</li>
+<li>좌우 도구 창 띠만 JetBrains식 40px 아이콘 띠로 바꿨습니다. 선택된 버튼은 흰 바탕과 그림자 없이 옅은 선택 색만 씁니다.</li>
+<li>단축키는 VS Code와 JetBrains 중 고릅니다. 탭 줄의 ⋯ 메뉴 아래 "단축키 체계"에서 바꾸고, 화면의 단축키 표시와 실제로 받는 키가 함께 바뀝니다. macOS는 ⌘, 다른 OS는 Ctrl입니다(<code>?os=other</code>로 미리 봅니다). 선택은 브라우저에 저장됩니다.</li>
+<li>브레드크럼은 지금처럼 탭 아래에 둡니다(리더 결정, 오너가 정하지 않음).</li>
+</ul></section>
+<section class="area"><h2>에디터</h2><div class="stage"><iframe data-src="editor.html" title="Ember 에디터"></iframe></div></section>
+<section class="area"><h2>터미널 (아래 도구 창 최대화)</h2><div class="stage"><iframe data-src="editor.html#terminal" title="Ember 터미널"></iframe></div></section>
+<section class="area"><h2>단축키 기본값 (macOS)</h2>
+<table class="kmt"><tr><th>동작</th><th>VS Code</th><th>JetBrains</th></tr>
+<tr><td>빠른 열기 / 모든 곳에서 찾기</td><td>⌘P</td><td>⇧⇧</td></tr><tr><td>명령 팔레트 / 동작 찾기</td><td>⇧⌘P</td><td>⇧⌘A</td></tr>
+<tr><td>최근 파일</td><td>⌃R</td><td>⌘E</td></tr><tr><td>터미널</td><td>⌃`</td><td>⌥F12</td></tr><tr><td>프로젝트 트리</td><td>⇧⌘E</td><td>⌘1</td></tr>
+<tr><td>문제</td><td>⇧⌘M</td><td>⌘6</td></tr><tr><td>실행 출력</td><td>⇧⌘U</td><td>⌘4</td></tr><tr><td>아래 창 숨기기</td><td>⌘J</td><td>⇧⎋</td></tr>
+<tr><td>실행 / 중지</td><td>⌃F5 / ⇧F5</td><td>⌃R / ⌘F2</td></tr><tr><td>탭 닫기 / 저장</td><td>⌘W / ⌘S</td><td>⌘W / ⌘S</td></tr></table></section>
+</div>
+<script>
+(function(){var r=document.documentElement, MQ=matchMedia("(prefers-color-scheme: dark)"), U={system:["pc","시스템"],light:["sun","라이트"],dark:["moon","다크"]};
+function pref(){try{var v=localStorage.getItem("ember-mock-theme");return v==="light"||v==="dark"?v:"system"}catch(e){return "system"}}
+function ap(){var p=pref();r.dataset.theme=p==="system"?(MQ.matches?"dark":"light"):p;var b=document.getElementById("th");b.innerHTML='<svg class="i" viewBox="0 0 24 24">'+EMBER_ICONS[U[p][0]]+'</svg>';b.title="테마: "+U[p][1];b.setAttribute("aria-label","테마: "+U[p][1]+", 눌러서 다음으로")}
+var F=[].slice.call(document.querySelectorAll("iframe[data-src]")), w=1440;
+document.getElementById("th").onclick=function(){var o=["system","light","dark"],n=o[(o.indexOf(pref())+1)%3];try{localStorage.setItem("ember-mock-theme",n)}catch(e){};ap();F.forEach(function(f){f.src=f.dataset.src})};
+ap();
+var ws=document.getElementById("widths");ws.innerHTML=[1440,1024,768].map(function(x){return '<button data-v="'+x+'" class="'+(x===w?"on":"")+'">'+x+'px</button>'}).join("");
+ws.onclick=function(e){var b=e.target.closest("button");if(!b)return;w=+b.dataset.v;ws.querySelectorAll("button").forEach(function(x){x.classList.toggle("on",x===b)});fit()};
+function fit(){var h=w<=768?1024:900;F.forEach(function(f){var st=f.parentNode,k=st.clientWidth/w;f.style.width=w+"px";f.style.height=h+"px";f.style.transform="scale("+k+")";st.style.height=(h*k)+"px"})}
+F.forEach(function(f){f.src=f.dataset.src});fit();addEventListener("resize",fit)})();
+</script></body></html>

@@ -219,8 +219,8 @@ impl<R: Rendezvous + 'static> PunchDriver<R> {
         UdpPath::connect(socket.into_std()?, from).await
     }
 
-    /// Binds a punch socket and observes its public mapping. A host address that is not the
-    /// unspecified one is offered too, for a peer on the same network.
+    /// Binds a punch socket and observes its public mapping. Once a mapping is observed, a host
+    /// address that is not the unspecified one is offered too, for a peer on the same network.
     async fn observe(&self) -> io::Result<Own> {
         let socket = UdpSocket::bind(SocketAddr::new(self.bind_ip, 0)).await?;
         let mut nat = NatType::Unknown;
@@ -240,13 +240,16 @@ impl<R: Rendezvous + 'static> PunchDriver<R> {
                 }
             }
         }
+        // No observation, no punch: an endpoint whose observer does not answer (none reachable,
+        // or a reply not signed by the pinned key) offers nothing, so a host address alone
+        // never starts a punch.
+        if mappings.is_empty() {
+            return Err(io::Error::new(io::ErrorKind::NotConnected, "no public UDP address was observed"));
+        }
         if let Ok(local) = socket.local_addr() {
             if !local.ip().is_unspecified() && !mappings.contains(&local) {
                 mappings.push(local);
             }
-        }
-        if mappings.is_empty() {
-            return Err(io::Error::new(io::ErrorKind::NotConnected, "no public UDP address was observed"));
         }
         mappings.truncate(MAX_MAPPINGS);
         Ok(Own { socket, nat, mappings })

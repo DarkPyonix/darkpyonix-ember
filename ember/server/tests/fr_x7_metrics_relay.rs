@@ -87,9 +87,19 @@ async fn fr_x7_metrics_relay_answers_for_the_local_computer_from_the_in_process_
             "{:?}",
             s.sessions
         );
-        // Power is never invented: empty with the reason.
-        assert!(s.processes.iter().all(|p| p.power_watts.is_none()));
-        assert!(s.power_reason.is_some());
+        // Power is never invented. Off macOS there is no per-process energy API: empty with the
+        // reason. On macOS (`proc_pid_rusage`, 2ac55109) a value is reported from the second sample
+        // on, and each one is finite and not negative; no reason is given only when power is
+        // reported (or the top list left out the processes that have it), as the node test
+        // `fr_x7_sample_reports_chip_and_os_and_never_invents_power` checks.
+        if cfg!(target_os = "macos") {
+            assert!(s.processes.iter().all(|p| p.power_watts.is_none_or(|w| w.is_finite() && w >= 0.0)), "{:?}", s.processes);
+            let any = s.processes.iter().any(|p| p.power_watts.is_some());
+            assert!(s.power_reason.is_some() || any || s.process_count > 3, "no reason only when power is reported");
+        } else {
+            assert!(s.processes.iter().all(|p| p.power_watts.is_none()));
+            assert!(s.power_reason.is_some());
+        }
     })
     .await;
 }

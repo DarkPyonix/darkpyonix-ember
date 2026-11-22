@@ -57,12 +57,19 @@ jobs:
     strategy:
       # A dry run shows every target's failure at once; a tag stops at the first.
       fail-fast: ${{ github.event_name != 'workflow_dispatch' }}
+      # server_features: the project mount, so a Claude Code session on another computer edits
+      # that computer's files (SPEC FR-X1, FR-X2). macOS: loopback NFS and the built-in
+      # /sbin/mount_nfs; Linux: in-process FUSE (pure Rust, no libfuse to build), which needs the
+      # `fuse3` package (setuid fusermount3) on the server at run time. Without a working mount
+      # the server refuses such a session instead of running it on its own disk.
+      # Checked by fr_x1_release_build_ships_a_project_mount (ember/server/tests).
       matrix:
         include:
-          - { os: macos-15, target: macos-arm64 }
-          - { os: ubuntu-24.04, target: linux-x86_64 }
-          - { os: ubuntu-24.04-arm, target: linux-aarch64 }
+          - { os: macos-15, target: macos-arm64, server_features: mount-nfs }
+          - { os: ubuntu-24.04, target: linux-x86_64, server_features: mount-fuse }
+          - { os: ubuntu-24.04-arm, target: linux-aarch64, server_features: mount-fuse }
     env:
+      SERVER_FEATURES: ${{ matrix.server_features }}
       CARGO_BUILD_JOBS: "2"
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: "0"
@@ -76,7 +83,7 @@ jobs:
             ember/node
       - name: Build server and node
         run: |
-          (cd ember/server && cargo build --release --locked)
+          (cd ember/server && cargo build --release --locked --features "$SERVER_FEATURES")
           (cd ember/node && cargo build --release --locked)
       - name: Ad hoc sign macOS binaries
         if: runner.os == 'macOS'

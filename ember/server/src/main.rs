@@ -320,7 +320,10 @@ async fn serve_main() -> anyhow::Result<()> {
             tracing::warn!("project mount disabled: {e:#}");
         }
     } else {
-        tracing::info!("project mount off; Claude Code file tools stay on this server");
+        tracing::warn!(
+            "project mount off ({}); Claude Code and ACP sessions on other computers are refused at start",
+            computers::mount::unavailable_reason()
+        );
     }
     computers.install(&sessions);
     // The agent CLI's own API traffic leaves through the session's current computer (FR-X6).

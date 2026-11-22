@@ -12,8 +12,13 @@
 //! | macOS (Mac mini) | loopback NFSv3 server in this process ([`nfs`], `nfsserve`) + `/sbin/mount_nfs` (`mount-nfs`) | none for a mount point this user owns **[U]**; creating a missing mount point outside the user's directories needs a one-time `sudo` (and `/etc/auto_master` for `/home`, `/etc/synthetic.conf` for a new top-level directory) |
 //! | Linux (Raspberry Pi) | FUSE in this process ([`fuse`], `fuser`) via setuid `fusermount3` (`mount-fuse`) | none for an owned mount point (package `fuse3`); creating `/Users/<u>/…` or `/home/<other>/…` needs a one-time `sudo mkdir`+`chown` |
 //!
-//! Without either feature, or with `EMBER_MOUNT=off`, nothing is mounted and the file tools stay
-//! local (the behaviour before this module).
+//! The release build turns on `mount-nfs` for macOS and `mount-fuse` for Linux
+//! (`.github/workflows/publish-release.yml`). Without a mechanism (a build without either
+//! feature, `EMBER_MOUNT=off`, or a server OS with no mount client here, such as Windows), nothing
+//! is mounted and a Claude Code or ACP session on another computer is **refused** at start
+//! ([`MountError::Unavailable`], `Computers::prepare_start`): its file tools would otherwise act
+//! on this server's disk instead of the node's (FR-X1, FR-X2). Sessions on this server need no
+//! mount and are unaffected.
 //!
 //! # Lifecycle
 //!
@@ -88,13 +93,7 @@ impl MountSettings {
     }
 
     pub fn from_vars(get: impl Fn(&str) -> Option<String>) -> MountSettings {
-        let auto = if cfg!(all(feature = "mount-fuse", target_os = "linux")) {
-            Mechanism::Fuse
-        } else if cfg!(feature = "mount-nfs") {
-            Mechanism::Nfs
-        } else {
-            Mechanism::Off
-        };
+        let auto = compiled_mechanism();
         let mechanism = match get(ENV_MOUNT).as_deref() {
             Some("off" | "0" | "false") => Mechanism::Off,
             Some("nfs") => Mechanism::Nfs,
@@ -112,6 +111,22 @@ impl MountSettings {
             idle_grace: Duration::from_secs(120),
         }
     }
+}
+
+/// The mechanism `auto` picks on `os` given which mount features are compiled in: FUSE on Linux
+/// (no root needed), else NFS on macOS or Linux, else none. `None` is an OS without a mount
+/// client here (Windows).
+pub fn auto_mechanism(os: Option<Os>, nfs: bool, fuse: bool) -> Mechanism {
+    match os {
+        Some(Os::Linux) if fuse => Mechanism::Fuse,
+        Some(_) if nfs => Mechanism::Nfs,
+        _ => Mechanism::Off,
+    }
+}
+
+/// [`auto_mechanism`] for this build and platform.
+pub fn compiled_mechanism() -> Mechanism {
+    auto_mechanism(Os::current(), cfg!(feature = "mount-nfs"), cfg!(feature = "mount-fuse"))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -328,6 +343,25 @@ pub enum MountError {
     MountPoint(#[from] cmd::MountPointError),
     #[error("project mount: mounting {path} failed: {error:#}")]
     Mount { path: PathBuf, error: anyhow::Error },
+    /// No mount mechanism on this server, so the session's file tools would act on this
+    /// server's disk instead of the computer's (FR-X1); the start is refused.
+    #[error("cannot start this session on computer \"{computer}\": its file tools need a project mount, and this ember server has none ({reason}). Without it they would read and edit this server's disk instead of \"{computer}\"'s. Switch the session to the main server, or run an ember server built with the project mount (mount-nfs on macOS, mount-fuse on Linux) without EMBER_MOUNT=off.")]
+    Unavailable { computer: String, reason: String },
+}
+
+/// Why this server has no project mount, for [`MountError::Unavailable`].
+pub fn unavailable_reason() -> String {
+    let env = std::env::var(ENV_MOUNT).ok();
+    if matches!(env.as_deref(), Some("off" | "0" | "false")) {
+        return format!("{ENV_MOUNT}={} turns it off", env.unwrap_or_default());
+    }
+    match Os::current() {
+        None => "this server's operating system has no supported mount client".into(),
+        Some(_) if compiled_mechanism() == Mechanism::Off => {
+            "it was built without the mount-nfs or mount-fuse feature".into()
+        }
+        Some(_) => "the project mount could not be enabled at startup; see the server log".into(),
+    }
 }
 
 struct Entry {

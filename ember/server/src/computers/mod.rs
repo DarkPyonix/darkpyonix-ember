@@ -983,8 +983,9 @@ impl Computers {
 
     /// Mount (or release) the session's project directory for its next agent start: a Claude
     /// Code or ACP session on a node gets its cwd mounted here; on this server it needs none.
+    /// Without a project mount such a session on a node is refused (FR-X1): its file tools
+    /// would otherwise act on this server's disk.
     pub async fn prepare_start(&self, rec: &SessionRecord) -> anyhow::Result<()> {
-        let Some(mounts) = self.mounts() else { return Ok(()) };
         // Claude Code's own file tools need the project here. An ACP agent's file and shell tools
         // go through the ACP client methods (served on the computer), but its other built-in
         // tools (search, LSP, …) read the cwd directly, so it gets the same mount.
@@ -995,12 +996,18 @@ impl Computers {
             Some(sc) => self.resolve(&sc.computer_id)?,
             None => None,
         };
-        match computer {
-            Some(c) => Ok(mounts.acquire(&rec.id, &c, std::path::Path::new(&rec.cwd)).await?),
-            None => {
+        match (computer, self.mounts()) {
+            (Some(c), Some(mounts)) => Ok(mounts.acquire(&rec.id, &c, std::path::Path::new(&rec.cwd)).await?),
+            // Fail safe: never run the agent with local file tools for another computer.
+            (Some(c), None) => {
+                tracing::warn!(session = %rec.id, computer = %c.name, "refusing a start on another computer: no project mount");
+                Err(mount::MountError::Unavailable { computer: c.name.clone(), reason: mount::unavailable_reason() }.into())
+            }
+            (None, Some(mounts)) => {
                 mounts.release(&rec.id).await;
                 Ok(())
             }
+            (None, None) => Ok(()),
         }
     }
 

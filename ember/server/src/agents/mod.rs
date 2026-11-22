@@ -98,7 +98,7 @@ impl AcpName {
     #[allow(clippy::let_and_return)] // the guard must outlive the borrow
     pub fn lookup(name: &str) -> Option<AcpName> {
         let names = acp_names().lock().unwrap();
-        let found = names.get_key_value(name).filter(|(_, r)| **r).map(|(k, _)| AcpName(*k));
+        let found = names.get_key_value(name).filter(|(_, r)| **r).map(|(k, _)| AcpName(k));
         found
     }
 

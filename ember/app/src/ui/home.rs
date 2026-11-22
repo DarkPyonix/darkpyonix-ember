@@ -1327,13 +1327,8 @@ pub fn apply_suggestion(_draft: &str, suggestion: &str) -> String {
     suggestion.to_string()
 }
 
-/// Window width (dp) under which the Home composer puts the mode and computer chips and the send
-/// button on a second line. The split is by width from before the toolkit had a wrapping row.
-/// TODO(#673): the toolkit's `FlowRow` (compose-rust#521) can wrap the chips by their measured
-/// width, but it would wrap the send button with them; the chips need a `FlowRow` in a weighted
-/// box with the send button after it, which moves the button at every width, so it waits for
-/// a capture of the composer at 1440, 1100, 1024 and 390 with the button at the end of the
-/// last line.
+/// Window width (dp) breakpoint for [`split_chip_rows`] and [`suggestion_lines`]. The Home
+/// composer itself now wraps chips by measured width via [`composer_chip_line`].
 pub const CHIP_WRAP_WIDTH: f32 = 1100.0;
 
 pub fn split_chip_rows(width_dp: f32) -> bool {
@@ -1432,6 +1427,9 @@ impl StatusCounts {
 pub fn status_counts(state: &State) -> StatusCounts {
     let mut c = StatusCounts::default();
     for p in state.projects() {
+        if state.project(&p.name).is_some_and(|pr| pr.archived) {
+            continue;
+        }
         for id in &p.sessions {
             if let Some(v) = state.session(id).filter(|v| !v.record.archived) {
                 c.add(v.status);
@@ -1539,6 +1537,9 @@ pub struct HarnessBar {
 pub fn harness_usage(state: &State) -> Vec<HarnessBar> {
     let mut counts: Vec<(String, usize)> = Vec::new();
     for p in state.projects() {
+        if state.project(&p.name).is_some_and(|pr| pr.archived) {
+            continue;
+        }
         for id in &p.sessions {
             let Some(v) = state.session(id).filter(|v| !v.record.archived) else {
                 continue;
@@ -1699,6 +1700,9 @@ pub struct CrewMember {
 pub fn crew(state: &State, max: usize) -> Vec<CrewMember> {
     let mut rows: Vec<(bool, i64, CrewMember)> = Vec::new();
     for p in state.projects() {
+        if state.project(&p.name).is_some_and(|pr| pr.archived) {
+            continue;
+        }
         for id in &p.sessions {
             let Some(v) = state.session(id).filter(|v| !v.record.archived) else {
                 continue;
@@ -3102,6 +3106,71 @@ mod tests {
             waiting: 1,
         };
         assert_eq!(project_tile_line(&t), "팀원 3명 · 실행 1 · 대기 1");
+    }
+
+    // ---- FR-L26: archived projects excluded from dashboard ----
+
+    #[test]
+    fn fr_l26_dashboard_excludes_archived_projects() {
+        use ember_client::state::Input;
+        use ember_client::wire::{Project, SessionRecord, SessionStatus};
+
+        let mk = |id: &str, project: &str, agent: &str, status: SessionStatus, at: i64| SessionRecord {
+            id: id.into(),
+            project: project.into(),
+            agent: agent.into(),
+            cwd: format!("/w/{project}"),
+            model: None,
+            native_id: None,
+            status,
+            title: format!("title {id}"),
+            created_at: 0,
+            updated_at: at,
+            last_seq: 0,
+            account_id: None,
+            account_reason: None,
+            pinned: false,
+            archived: false,
+        };
+
+        let mut s = State::new();
+        s.apply(Input::SessionsLoaded(vec![
+            mk("a1", "alpha", "claude-code", SessionStatus::Running, 10),
+            mk("a2", "alpha", "codex", SessionStatus::Finished, 20),
+            mk("b1", "beta", "gemini", SessionStatus::WaitingForApproval, 30),
+            mk("b2", "beta", "claude-code", SessionStatus::Running, 40),
+        ]));
+        s.apply(Input::ProjectsLoaded(vec![
+            Project { name: "alpha".into(), archived: false, ..Default::default() },
+            Project { name: "beta".into(), archived: true, ..Default::default() },
+        ]));
+
+        let counts = status_counts(&s);
+        assert_eq!(
+            (counts.running, counts.waiting, counts.done, counts.total()),
+            (1, 0, 1, 2),
+            "archived project sessions are excluded from status_counts"
+        );
+
+        let usage = harness_usage(&s);
+        assert_eq!(
+            usage,
+            vec![
+                HarnessBar { label: Harness::ClaudeCode.label().to_string(), sessions: 1 },
+                HarnessBar { label: Harness::Codex.label().to_string(), sessions: 1 },
+            ],
+            "archived project sessions are excluded from harness_usage"
+        );
+
+        let members = crew(&s, 10);
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].id, "a1");
+        assert_eq!(members[0].project, "alpha");
+
+        let tiles = project_tiles(&s, 10);
+        assert_eq!(tiles.len(), 1);
+        assert_eq!(tiles[0].name, "alpha");
+        assert_eq!((tiles[0].total, tiles[0].running, tiles[0].waiting), (2, 1, 0));
     }
 
     // ---- NFR-L4 ----

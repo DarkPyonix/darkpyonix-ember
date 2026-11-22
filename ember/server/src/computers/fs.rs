@@ -192,6 +192,7 @@ fn client_error(e: ClientError) -> Response {
     }
 }
 
+#[expect(clippy::result_large_err, reason = "return the Axum error response directly without boxing it")]
 fn body<T: DeserializeOwned>(v: Value) -> Result<T, Response> {
     serde_json::from_value(v).map_err(|e| plain(StatusCode::BAD_REQUEST, format!("bad request body: {e}")))
 }
@@ -250,6 +251,7 @@ async fn drain_discard(mut body: Body, max_drain: usize) {
 /// drains and discards the remaining frames (up to [`OVER_LIMIT_DRAIN_CAP`]) without buffering them
 /// before answering `413 Payload Too Large` with `Connection: close`, so an HTTP/1.1 client that
 /// is still writing the request body reads `413` cleanly instead of seeing `ECONNRESET`.
+#[expect(clippy::result_large_err, reason = "return the Axum error response directly without boxing it")]
 async fn read_json_capped(req: Request, max_bytes: usize) -> Result<Value, Response> {
     if !is_json_content_type(req.headers()) {
         return Err(plain(

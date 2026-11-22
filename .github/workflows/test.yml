@@ -4,7 +4,8 @@
 #   editor-conn-pin      ember/editor-conn/src/rpc_ids.rs + PINNED_VERSION/PINNED_COMMIT match the
 #                        Code-OSS tag in ember/ose/VERSION (regenerated with gen_rpc_ids.sh), and
 #                        src/actors/generated.rs matches extHost.protocol.ts at PINNED_COMMIT
-#                        (scripts/gen-actors/gen.sh --check), when present
+#                        (scripts/gen-actors/gen.sh --check), and every SUPPORTED_BUILDS commit
+#                        is admitted by scripts/gen-actors/compare.sh (FR-E10), when present
 #   vendored-css         .github/scripts/checks/check-vendored-css.sh + check-no-has-selector.sh (D23, #143)
 #   no-webview           .github/scripts/checks/check-no-webview.sh (SPEC NFR-L2), when present
 #   sync-release         .github/scripts/tests/sync-release.test.sh (release keeps develop's history)
@@ -19,7 +20,7 @@
 #                        .github/scripts/tests/install-ose.test.sh (step 6: an Ember install
 #                        fetches the matching OSE release, #83)
 #   no-em-dash           .github/scripts/checks/check-no-em-dash.sh (AGENTS.md writing rules)
-#   rust                 cargo test for each ember/<crate> dir that exists
+#   rust                 cargo test for each ember/<crate> dir that exists, plus Clippy for server
 #   oniguruma            the editor core links Oniguruma (a C library) on Windows and macOS too
 #   windows-node-server  ember-node and ember-server binaries build on Windows (#200), and the
 #                        owner presence tests run against the named-pipe door (FR-S12, #815)
@@ -188,6 +189,21 @@ jobs:
             exit 0
           fi
           bash ember/editor-conn/scripts/gen-actors/gen.sh --check
+      - name: Admit every supported Code-OSS build (FR-E10)
+        run: |
+          set -euo pipefail
+          if [ ! -f ember/editor-conn/scripts/gen-actors/compare.sh ]; then
+            echo "ember/editor-conn/scripts/gen-actors/compare.sh not present on this ref; skipping"
+            exit 0
+          fi
+          node --test ember/editor-conn/scripts/gen-actors/compare.test.mjs
+          # SUPPORTED_BUILDS: the pin (PINNED_COMMIT) plus every literal commit listed.
+          pinned="$(sed -n 's/^pub const PINNED_COMMIT: &str = "\([0-9a-f]\{40\}\)";$/\1/p' ember/editor-conn/src/lib.rs)"
+          others="$(sed -n '/^pub const SUPPORTED_BUILDS/,/];$/p' ember/editor-conn/src/lib.rs | grep -o 'commit: "[0-9a-f]\{40\}"' | grep -o '[0-9a-f]\{40\}' || true)"
+          for commit in $pinned $others; do
+            echo "== $commit"
+            bash ember/editor-conn/scripts/gen-actors/compare.sh "$commit"
+          done
 
   oniguruma:
     name: Oniguruma builds (${{ matrix.os }})
@@ -265,10 +281,16 @@ jobs:
           else echo "ember/${{ matrix.crate }}/Cargo.toml not present on this ref; skipping"; echo "yes=false" >> "$GITHUB_OUTPUT"; fi
       - uses: dtolnay/rust-toolchain@stable
         if: steps.present.outputs.yes == 'true'
+        with:
+          components: ${{ matrix.crate == 'server' && 'clippy' || '' }}
       - uses: Swatinem/rust-cache@v2
         if: steps.present.outputs.yes == 'true'
         with:
           workspaces: ember/${{ matrix.crate }}
+      - name: cargo clippy (server)
+        if: steps.present.outputs.yes == 'true' && matrix.crate == 'server'
+        working-directory: ember/server
+        run: cargo clippy --locked -- -D warnings
       - name: Renderer system libraries
         if: steps.present.outputs.yes == 'true' && matrix.crate == 'app'
         # The compose-rust renderer links X11, GL, fontconfig and freetype on Linux.

@@ -547,6 +547,54 @@ pub fn dispose_custom_document(resource: &UriComponents, view_type: &str) -> Cal
     Call::new(proxy::EXT_HOST_CUSTOM_EDITORS, "$disposeCustomDocument", vec![crate::exthost::j(resource), Arg::Json(view_type.into())])
 }
 
+/// `ExtHostCustomEditors.$undo(resource, viewType, editId, isDirty)`.
+pub fn undo_custom_document(resource: &UriComponents, view_type: &str, edit_id: i64, is_dirty: bool) -> Call {
+    Call::new(
+        proxy::EXT_HOST_CUSTOM_EDITORS,
+        "$undo",
+        vec![
+            crate::exthost::j(resource),
+            Arg::Json(view_type.into()),
+            Arg::Json(edit_id.into()),
+            Arg::Json(is_dirty.into()),
+        ],
+    )
+}
+
+/// `ExtHostCustomEditors.$redo(resource, viewType, editId, isDirty)`.
+pub fn redo_custom_document(resource: &UriComponents, view_type: &str, edit_id: i64, is_dirty: bool) -> Call {
+    Call::new(
+        proxy::EXT_HOST_CUSTOM_EDITORS,
+        "$redo",
+        vec![
+            crate::exthost::j(resource),
+            Arg::Json(view_type.into()),
+            Arg::Json(edit_id.into()),
+            Arg::Json(is_dirty.into()),
+        ],
+    )
+}
+
+/// `ExtHostCustomEditors.$onSave(resource, viewType, cancellation)`.
+pub fn save_custom_document(resource: &UriComponents, view_type: &str) -> Call {
+    Call::new(
+        proxy::EXT_HOST_CUSTOM_EDITORS,
+        "$onSave",
+        vec![crate::exthost::j(resource), Arg::Json(view_type.into())],
+    )
+    .cancellable()
+}
+
+/// `ExtHostCustomEditors.$revert(resource, viewType, cancellation)`.
+pub fn revert_custom_document(resource: &UriComponents, view_type: &str) -> Call {
+    Call::new(
+        proxy::EXT_HOST_CUSTOM_EDITORS,
+        "$revert",
+        vec![crate::exthost::j(resource), Arg::Json(view_type.into())],
+    )
+    .cancellable()
+}
+
 /// `ExtHostCustomEditors.$resolveCustomEditor(resource, newHandle, viewType, { title, contentOptions,
 /// options, active }, position, cancellation)`.
 #[allow(clippy::too_many_arguments)]

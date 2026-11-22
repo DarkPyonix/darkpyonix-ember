@@ -81,6 +81,7 @@ pub const ICON_SIDEBAR_OPEN_SVG: &str = r#"<svg viewBox="0 0 24 24" fill="none" 
 pub const ICON_CODE_SVG: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M17.25 6.75 22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3-4.5 16.5"/></svg>"#;
 pub const ICON_CHECK_SVG: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/></svg>"#;
 pub const ICON_PLAY_SVG: &str = r#"<svg viewBox="0 0 24 24" fill="currentColor"><path d="M5.25 5.65c0-1.42 1.52-2.31 2.76-1.62l11.54 6.35c1.29.71 1.29 2.53 0 3.24L8.01 19.97c-1.24.69-2.76-.2-2.76-1.62V5.65Z"/></svg>"#;
+pub const ICON_PAUSE_SVG: &str = r#"<svg viewBox="0 0 24 24" fill="currentColor"><path d="M6.75 5.25a.75.75 0 0 1 .75-.75H9a.75.75 0 0 1 .75.75v13.5a.75.75 0 0 1-.75.75H7.5a.75.75 0 0 1-.75-.75V5.25Zm7.5 0a.75.75 0 0 1 .75-.75h1.5a.75.75 0 0 1 .75.75v13.5a.75.75 0 0 1-.75.75H15a.75.75 0 0 1-.75-.75V5.25Z"/></svg>"#;
 pub const ICON_REPEAT_SVG: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M19.5 12c0-1.23-.05-2.45-.14-3.66a4.11 4.11 0 0 0-3.7-3.7 48.66 48.66 0 0 0-7.32 0 4.11 4.11 0 0 0-3.7 3.7c-.09 1.21-.14 2.43-.14 3.66 0 1.23.05 2.45.14 3.66a4.11 4.11 0 0 0 3.7 3.7c2.43.2 4.89.2 7.32 0a4.11 4.11 0 0 0 3.7-3.7c.09-1.21.14-2.43.14-3.66Z"/></svg>"#;
 pub const ICON_EDIT_SVG: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m16.86 4.49 1.69-1.69a1.88 1.88 0 1 1 2.65 2.65L10.58 16.07a4.5 4.5 0 0 1-1.9 1.13L6 18l.8-2.68a4.5 4.5 0 0 1 1.13-1.9l8.93-8.93ZM19.5 7.13 16.86 4.49M18 14v4.75A2.25 2.25 0 0 1 15.75 21H5.25A2.25 2.25 0 0 1 3 18.75V8.25A2.25 2.25 0 0 1 5.25 6H10"/></svg>"#;
 pub const ICON_EXPAND_SVG: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15M20.25 3.75h-4.5m4.5 0v4.5m0-4.5L15 9m5.25 11.25h-4.5m4.5 0v-4.5m0 4.5L15 15"/></svg>"#;
@@ -96,7 +97,8 @@ const MODEL_LOCKED: &str = "실행 중인 세션의 모델은 바꿀 수 없습�
 const NO_SESSION: &str = "세션이 없습니다";
 const TIMELINE_TITLE: &str = "에이전트 간 통신";
 use crate::ui::session::{
-    ComputerHost, WebPagesLoad, WebTap, computer_host, timeline_summary, web_pages_from, web_tap,
+    ComputerHost, TimelinePlayback, WebPagesLoad, WebTap, computer_host, timeline_summary,
+    web_pages_from, web_tap,
 };
 
 const POPUP_W: f32 = 280.0;
@@ -2765,6 +2767,23 @@ fn TimelineCard(project: &str) {
     let p = ember_theme().palette;
     let proj_owned = project.to_string();
     let speed = remember(|| mutable_state_of(1_u8));
+    let playback = remember(|| mutable_state_of(TimelinePlayback::new()));
+    let pb = playback.get();
+    let cur_spd = speed.get();
+    let total_events = DEMO_TL_LANES.len();
+    let active_lane = pb.active_index(total_events);
+    if pb.playing {
+        let pb_tick = playback.clone();
+        let step_ms = if cur_spd >= 2 { 450 } else { 900 };
+        launched_effect((pb.playing, pb.cursor, cur_spd), move || async move {
+            delay(std::time::Duration::from_millis(step_ms)).await;
+            let mut next = pb_tick.get_untracked();
+            if next.playing {
+                next.step_next(total_events);
+                pb_tick.set(next);
+            }
+        });
+    }
     let is_phone = window.width_dp <= 560.0;
     let label_w = if is_phone {
         56.0
@@ -2838,10 +2857,19 @@ fn TimelineCard(project: &str) {
                                             {
                                                 let pr_l = proj_owned.clone();
                                                 let (strong_col, _) = (lane.tone)(p);
-                                                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = 8.0, modifier = Modifier::new()
-                                                            .fill_max_width()
-                                                            .height(55.0)
-                                                            .padding(SP[1]), content = move || {
+                                                let row_mod = if active_lane == Some(lane_idx) {
+                                                    Modifier::new()
+                                                        .fill_max_width()
+                                                        .height(55.0)
+                                                        .background(paint(p.surface_2))
+                                                        .padding(SP[1])
+                                                } else {
+                                                    Modifier::new()
+                                                        .fill_max_width()
+                                                        .height(55.0)
+                                                        .padding(SP[1])
+                                                };
+                                                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = 8.0, modifier = row_mod, content = move || {
                                                         Character(
                                                             lane.agent,
                                                             lane.leader,
@@ -2943,30 +2971,48 @@ fn TimelineCard(project: &str) {
                     { use ::compose_rust::ui::Separator; Separator!(Some(paint(p.line))) };
 
                     // 3. Footer (.tl-foot: ~72dp high): play (40x40), restart (32x32), speed 1x/2x, time, legend
-                    let cur_spd = speed.get();
                     let spd_st = speed.clone();
+                    let pb_play = playback.clone();
+                    let pb_rst = playback.clone();
+                    let play_icon = if pb.playing { ICON_PAUSE_SVG } else { ICON_PLAY_SVG };
+                    let play_label = pb.action_label();
+                    let step_label = format!(
+                        "{}/{} \u{b7} 16.4s",
+                        active_lane.map(|i| i + 1).unwrap_or(0),
+                        total_events
+                    );
                     { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[2], modifier = Modifier::new()
                                 .fill_max_width()
                                 .height(72.0)
                                 .background(paint(p.surface_2))
                                 .padding(SP[3]), content = move || {
-                            Clickable(
+                            NamedClickable(
+                                play_label,
                                 Modifier::new()
                                     .size(40.0, 40.0)
                                     .background(paint(p.ink))
                                     .shape_role(ShapeRole::Full),
                                 Alignment::Center,
-                                || notice::post("타임라인 재생 데모입니다"),
-                                || NavIcon(ICON_PLAY_SVG, p.ink_text.to_argb(), 16.0),
+                                move || {
+                                    let mut next = pb_play.get_untracked();
+                                    next.toggle_play(total_events);
+                                    pb_play.set(next);
+                                },
+                                move || NavIcon(play_icon, p.ink_text.to_argb(), 16.0),
                             );
-                            Clickable(
+                            NamedClickable(
+                                "처음부터 재생",
                                 Modifier::new()
                                     .size(32.0, 32.0)
                                     .background(paint(p.surface))
                                     .border(1.0, paint(p.line))
                                     .shape_role(ShapeRole::Full),
                                 Alignment::Center,
-                                || notice::post("처음으로 되돌렸습니다"),
+                                move || {
+                                    let mut next = pb_rst.get_untracked();
+                                    next.restart();
+                                    pb_rst.set(next);
+                                },
                                 || NavIcon(ICON_REPEAT_SVG, p.text_2.to_argb(), 15.0),
                             );
                             // 1x / 2x mini segmented control
@@ -3008,7 +3054,7 @@ fn TimelineCard(project: &str) {
                                     }
                                 }) };
                             Label(
-                                "16.4s",
+                                &step_label,
                                 Fs::Xs,
                                 Weight::Medium,
                                 Some(paint(p.muted)),
@@ -3862,6 +3908,22 @@ pub(super) fn NewMemberSheet(
     let comp_idx = remember_with_key(format!("{proj_owned}:snew_comp"), || {
         mutable_state_of(0_usize)
     });
+    let model_opt = remember_with_key(format!("{proj_owned}:snew_model"), || {
+        mutable_state_of(crate::ui::home::default_option(
+            crate::ui::home::Harness::ClaudeCode,
+        ))
+    });
+    let perm_mode = remember_with_key(format!("{proj_owned}:snew_mode"), || {
+        mutable_state_of(crate::ui::home::default_mode(
+            crate::ui::home::Harness::ClaudeCode,
+        ))
+    });
+    let model_open = remember_with_key(format!("{proj_owned}:snew_model_open"), || {
+        mutable_state_of(false)
+    });
+    let mode_open = remember_with_key(format!("{proj_owned}:snew_mode_open"), || {
+        mutable_state_of(false)
+    });
     let busy = remember_with_key(format!("{proj_owned}:snew_busy"), || mutable_state_of(false));
 
     let comp_opts = vec!["mac-mini".to_string(), "mac-studio".to_string(), "이 컴퓨터".to_string()];
@@ -3882,6 +3944,8 @@ pub(super) fn NewMemberSheet(
         let ui = ui.clone();
         let proj_c = proj_owned.clone();
         let role_c = role_name.clone();
+        let model_c = model_opt.clone();
+        let mode_c = perm_mode.clone();
         let busy_c = busy.clone();
         let mut close_done = on_close.clone();
         move || {
@@ -3901,28 +3965,44 @@ pub(super) fn NewMemberSheet(
                 close_done();
                 return;
             }
+            let chosen_opt = model_c.get_untracked();
+            let chosen_mode = mode_c.get_untracked();
             let cwd = services()
                 .client
                 .read(|s| crate::model::latest_cwd(s, &proj_c))
                 .unwrap_or_else(|| "/work".to_string());
             let body = crate::server::CreateSession {
                 project: proj_c.clone(),
-                agent: "claude-code".to_string(),
+                agent: chosen_opt.harness.kind().to_string(),
                 cwd,
-                model: None,
+                model: Some(chosen_opt.model.to_string()),
                 title: Some(r_title),
                 account: None,
             };
+            let bypass = crate::ui::home::needs_approve_all(chosen_mode);
             busy_c.set(true);
             let b_done = busy_c.clone();
             let u_done = ui.clone();
             let mut cl_done = close_done.clone();
             run_shared(
-                async move { services().create_session(&body).await },
+                async move {
+                    let s = services();
+                    let rec = s.create_session(&body).await?;
+                    let mut note = None;
+                    if bypass {
+                        if let Err(e) = s.set_approve_all(&rec.id, true).await {
+                            note = Some(format!("모두 허용을 켜지 못했습니다({e})"));
+                        }
+                    }
+                    Ok::<_, String>((rec, note))
+                },
                 move |res| {
                     b_done.set(false);
                     match res {
-                        Ok(rec) => {
+                        Ok((rec, note)) => {
+                            if let Some(m) = note {
+                                notice::post(m);
+                            }
                             cl_done();
                             u_done.open_conversation(&rec.id);
                         }
@@ -4034,7 +4114,68 @@ pub(super) fn NewMemberSheet(
                                     }) };
                             }) };
 
-                        // 3. 하네스, 모델, 권한 모드 (.snew-picks: 40dp height, CORNER_SM)
+                        // 3. 하네스, 모델, 권한 모드 (.snew-picks: 40dp height, CORNER_SM, FR-L15 / FR-L16)
+                        let cur_model = model_opt.get();
+                        let cur_mode = perm_mode.get();
+                        let catalog = crate::ui::home::model_catalog();
+                        let model_rows: Vec<PopRow> = catalog
+                            .iter()
+                            .map(|opt| PopRow {
+                                title: opt.chip_label(),
+                                chosen: *opt == cur_model,
+                                ..Default::default()
+                            })
+                            .collect();
+                        let model_chip_text = cur_model.chip_label();
+                        let model_dot = harness_dot_color(cur_model.harness.kind(), p);
+                        let mo_expanded = model_open.get();
+                        let (mo_btn, mo_dismiss, mo_pick, mo_close_mode) = (
+                            model_open.clone(),
+                            model_open.clone(),
+                            model_open.clone(),
+                            mode_open.clone(),
+                        );
+                        let (m_state, md_sync) = (model_opt.clone(), perm_mode.clone());
+                        let cat_pick = catalog.clone();
+
+                        let mode_list = crate::ui::home::modes_for(cur_model.harness);
+                        let mode_head = crate::ui::home::mode_header(cur_model.harness);
+                        let mode_pop_rows: Vec<PopRow> =
+                            crate::ui::home::mode_picker_rows(cur_model.harness, cur_mode)
+                                .into_iter()
+                                .map(|r| PopRow {
+                                    icon: Some(if r.danger {
+                                        super::home::ICON_WARN
+                                    } else {
+                                        ICON_SHIELD_SVG
+                                    }),
+                                    title: r.title.to_string(),
+                                    description: Some(r.description.to_string()),
+                                    chosen: r.chosen,
+                                    danger: r.danger,
+                                    ..Default::default()
+                                })
+                                .collect();
+                        let (mode_bg, mode_fg) = if cur_mode.is_bypass() {
+                            (p.orange.soft, p.orange.strong)
+                        } else {
+                            (p.surface_2, p.text)
+                        };
+                        let mode_icon = if cur_mode.is_bypass() {
+                            super::home::ICON_WARN
+                        } else {
+                            ICON_SHIELD_SVG
+                        };
+                        let mode_chip_text = cur_mode.label();
+                        let md_expanded = mode_open.get();
+                        let (md_btn, md_dismiss, md_pick, md_close_model) = (
+                            mode_open.clone(),
+                            mode_open.clone(),
+                            mode_open.clone(),
+                            model_open.clone(),
+                        );
+                        let mode_state = perm_mode.clone();
+
                         { use ::compose_rust::ui::Column; Column!(spacing = 8.0, modifier = Modifier::new().fill_max_width(), {
                                 Label(
                                     "하네스, 모델, 권한 모드",
@@ -4044,72 +4185,133 @@ pub(super) fn NewMemberSheet(
                                     Some(1),
                                 );
                                 { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
-                                        Clickable(
-                                            Modifier::new()
-                                                .height(H_BTN)
-                                                .background(paint(p.surface_2))
-                                                .border(1.0, paint(p.line))
-                                                .corner_radius(CORNER_SM),
-                                            Alignment::CenterStart,
-                                            || notice::post("데모에서는 기본 모델을 사용합니다"),
-                                            || {
-                                                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = 6.0, {
-                                                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(10.0)) };
-                                                        { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
-                                                                .size(8.0, 8.0)
-                                                                .background(paint(p.orange.strong))
-                                                                .corner_radius(4.0)) };
-                                                        Label(
-                                                            "Claude Code · Opus 5.5 · 높음",
-                                                            Fs::Sm,
-                                                            Weight::Medium,
-                                                            Some(paint(p.text)),
-                                                            Some(1),
-                                                        );
-                                                        NavIcon(
-                                                            ICON_CHEVRON_DOWN_SVG,
-                                                            p.muted.to_argb(),
-                                                            12.0,
-                                                        );
-                                                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(10.0)) };
-                                                    }) };
+                                        PopoverMenuWith(
+                                            mo_expanded,
+                                            PopMenu {
+                                                name: super::a11y::MODEL_PICKER,
+                                                kind: PopKind::Mode,
+                                                head: "하네스 · 모델",
+                                                sub: None,
+                                                rows: &model_rows,
+                                                align: compose_rust::PopoverAlign::Start,
                                             },
+                                            PopExtra { plain_sheet: true, ..Default::default() },
+                                            move || mo_dismiss.set(false),
+                                            move |idx| {
+                                                if let Some(opt) = cat_pick.get(idx).copied() {
+                                                    m_state.set(opt);
+                                                    let synced =
+                                                        crate::ui::home::mode_after_harness_change(
+                                                            opt.harness,
+                                                            md_sync.get_untracked(),
+                                                        );
+                                                    md_sync.set(synced);
+                                                }
+                                                mo_pick.set(false);
+                                            },
+                                            move || {
+                                                Clickable(
+                                                    Modifier::new()
+                                                        .height(H_BTN)
+                                                        .background(paint(p.surface_2))
+                                                        .border(1.0, paint(p.line))
+                                                        .corner_radius(CORNER_SM)
+                                                        .expanded(mo_expanded),
+                                                    Alignment::CenterStart,
+                                                    move || {
+                                                        mo_close_mode.set(false);
+                                                        mo_btn.set(!mo_btn.get_untracked());
+                                                    },
+                                                    move || {
+                                                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = 6.0, {
+                                                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(10.0)) };
+                                                                { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
+                                                                        .size(8.0, 8.0)
+                                                                        .background(paint(model_dot))
+                                                                        .corner_radius(4.0)) };
+                                                                Label(
+                                                                    &model_chip_text,
+                                                                    Fs::Sm,
+                                                                    Weight::Medium,
+                                                                    Some(paint(p.text)),
+                                                                    Some(1),
+                                                                );
+                                                                NavIcon(
+                                                                    ICON_CHEVRON_DOWN_SVG,
+                                                                    p.muted.to_argb(),
+                                                                    12.0,
+                                                                );
+                                                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(10.0)) };
+                                                            }) };
+                                                    },
+                                                );
+                                            },
+                                            None,
                                         );
-                                        Clickable(
-                                            Modifier::new()
-                                                .height(H_BTN)
-                                                .background(paint(p.surface_2))
-                                                .border(1.0, paint(p.line))
-                                                .corner_radius(CORNER_SM),
-                                            Alignment::CenterStart,
-                                            || notice::post("권한 모드는 세션에서도 바꿀 수 있습니다"),
-                                            || {
-                                                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = 6.0, {
-                                                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(10.0)) };
-                                                        NavIcon(
-                                                            ICON_SHIELD_SVG,
-                                                            p.text_2.to_argb(),
-                                                            14.0,
-                                                        );
-                                                        Label(
-                                                            "명령마다 확인",
-                                                            Fs::Sm,
-                                                            Weight::Medium,
-                                                            Some(paint(p.text)),
-                                                            Some(1),
-                                                        );
-                                                        NavIcon(
-                                                            ICON_CHEVRON_DOWN_SVG,
-                                                            p.muted.to_argb(),
-                                                            12.0,
-                                                        );
-                                                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(10.0)) };
-                                                    }) };
+                                        PopoverMenu(
+                                            md_expanded,
+                                            PopMenu {
+                                                name: super::a11y::MODE_PICKER,
+                                                kind: PopKind::Mode,
+                                                head: &mode_head,
+                                                sub: None,
+                                                rows: &mode_pop_rows,
+                                                align: compose_rust::PopoverAlign::Start,
                                             },
+                                            move || md_dismiss.set(false),
+                                            move |idx| {
+                                                if let Some(m) = mode_list.get(idx).copied() {
+                                                    mode_state.set(m);
+                                                }
+                                                md_pick.set(false);
+                                            },
+                                            move || {
+                                                Clickable(
+                                                    Modifier::new()
+                                                        .height(H_BTN)
+                                                        .background(paint(mode_bg))
+                                                        .border(1.0, paint(p.line))
+                                                        .corner_radius(CORNER_SM)
+                                                        .expanded(md_expanded),
+                                                    Alignment::CenterStart,
+                                                    move || {
+                                                        md_close_model.set(false);
+                                                        md_btn.set(!md_btn.get_untracked());
+                                                    },
+                                                    move || {
+                                                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = 6.0, {
+                                                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(10.0)) };
+                                                                NavIcon(
+                                                                    mode_icon,
+                                                                    if cur_mode.is_bypass() {
+                                                                        p.orange.strong.to_argb()
+                                                                    } else {
+                                                                        p.text_2.to_argb()
+                                                                    },
+                                                                    14.0,
+                                                                );
+                                                                Label(
+                                                                    mode_chip_text,
+                                                                    Fs::Sm,
+                                                                    Weight::Medium,
+                                                                    Some(paint(mode_fg)),
+                                                                    Some(1),
+                                                                );
+                                                                NavIcon(
+                                                                    ICON_CHEVRON_DOWN_SVG,
+                                                                    p.muted.to_argb(),
+                                                                    12.0,
+                                                                );
+                                                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(10.0)) };
+                                                            }) };
+                                                    },
+                                                );
+                                            },
+                                            None,
                                         );
                                     }) };
                                 Label(
-                                    "프로필 Claude 개인",
+                                    &format!("하네스 {}", cur_model.harness.label()),
                                     Fs::Xs,
                                     Weight::Regular,
                                     Some(paint(p.muted)),

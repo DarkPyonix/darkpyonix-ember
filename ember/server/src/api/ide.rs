@@ -642,18 +642,18 @@ async fn bridge_node_relay(socket: WebSocket, upstream: OseRelayStream) {
             loop {
                 match client_rx.next().await {
                     Some(Ok(Message::Binary(bytes))) => {
-                        if node_tx.send(NodeMessage::Binary(bytes.into())).await.is_err() {
+                        if node_tx.send(NodeMessage::Binary(bytes)).await.is_err() {
                             return BridgeEnd::Other;
                         }
                     }
                     Some(Ok(Message::Text(_))) => return BridgeEnd::ClientText,
                     Some(Ok(Message::Ping(payload))) => {
-                        if node_tx.send(NodeMessage::Ping(payload.into())).await.is_err() {
+                        if node_tx.send(NodeMessage::Ping(payload)).await.is_err() {
                             return BridgeEnd::Other;
                         }
                     }
                     Some(Ok(Message::Pong(payload))) => {
-                        if node_tx.send(NodeMessage::Pong(payload.into())).await.is_err() {
+                        if node_tx.send(NodeMessage::Pong(payload)).await.is_err() {
                             return BridgeEnd::Other;
                         }
                     }
@@ -665,7 +665,7 @@ async fn bridge_node_relay(socket: WebSocket, upstream: OseRelayStream) {
             loop {
                 match node_rx.next().await {
                     Some(Ok(NodeMessage::Binary(bytes))) => {
-                        if client_tx.send(Message::Binary(bytes.into())).await.is_err() {
+                        if client_tx.send(Message::Binary(bytes)).await.is_err() {
                             return BridgeEnd::Other;
                         }
                     }
@@ -675,7 +675,7 @@ async fn bridge_node_relay(socket: WebSocket, upstream: OseRelayStream) {
                         )
                     }
                     Some(Ok(NodeMessage::Ping(payload))) => {
-                        if client_tx.send(Message::Ping(payload.into())).await.is_err() {
+                        if client_tx.send(Message::Ping(payload)).await.is_err() {
                             return BridgeEnd::Other;
                         }
                     }

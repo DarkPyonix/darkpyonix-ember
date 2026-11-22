@@ -24,7 +24,11 @@ pub struct Indentation {
 impl Indentation {
     /// Options with one size for both the tab and the indent, as a document opens.
     pub fn new(size: u32, insert_spaces: bool) -> Self {
-        Self { tab_size: size, indent_size: size, insert_spaces }
+        Self {
+            tab_size: size,
+            indent_size: size,
+            insert_spaces,
+        }
     }
 }
 
@@ -82,7 +86,14 @@ fn spaces_diff(a: &[u16], a_len: usize, b: &[u16], b_len: usize) -> (usize, bool
     if tabs_diff == 0 {
         // Folk align code under an earlier line; that is no hint of the indent size.
         let mut alignment = false;
-        if spaces_diff > 0 && b_spaces >= 1 && b_spaces - 1 < a.len() && b_spaces < b.len() && b[b_spaces] != SPACE && a[b_spaces - 1] == SPACE && a[a.len() - 1] == COMMA {
+        if spaces_diff > 0
+            && b_spaces >= 1
+            && b_spaces - 1 < a.len()
+            && b_spaces < b.len()
+            && b[b_spaces] != SPACE
+            && a[b_spaces - 1] == SPACE
+            && a[a.len() - 1] == COMMA
+        {
             alignment = true;
         }
         return (spaces_diff, alignment);
@@ -97,7 +108,11 @@ fn spaces_diff(a: &[u16], a_len: usize, b: &[u16], b_len: usize) -> (usize, bool
 /// decide, tabs win when more lines start with a tab than with two or more spaces, and the tab size
 /// is the most common step between the indentation of neighbouring lines. `default_*` stand when
 /// the text gives no hint.
-pub fn guess_indentation(lines: &[String], default_tab_size: u32, default_insert_spaces: bool) -> (u32, bool) {
+pub fn guess_indentation(
+    lines: &[String],
+    default_tab_size: u32,
+    default_insert_spaces: bool,
+) -> (u32, bool) {
     const ALLOWED: [usize; 7] = [2, 4, 6, 8, 3, 5, 7];
     const MAX_GUESS: usize = 8;
 
@@ -153,7 +168,11 @@ pub fn guess_indentation(lines: &[String], default_tab_size: u32, default_insert
             }
         }
         // 2 beats 4 when it has at least two thirds of the occurrences of 4 (YAML nests by 4 now and then).
-        if tab_size == 4 && counts[4] > 0 && counts[2] > 0 && counts[2] as f64 >= counts[4] as f64 * 2.0 / 3.0 {
+        if tab_size == 4
+            && counts[4] > 0
+            && counts[2] > 0
+            && counts[2] as f64 >= counts[4] as f64 * 2.0 / 3.0
+        {
             tab_size = 2;
         }
     }
@@ -164,7 +183,11 @@ pub fn guess_indentation(lines: &[String], default_tab_size: u32, default_insert
 /// each tab becomes `tab_size` spaces, or each run of `tab_size` spaces becomes a tab. A line of
 /// whitespace only is converted whole. One edit per line that changes, last line first (the order
 /// the widget takes them in).
-pub fn convert_indentation_edits(lines: &[String], tab_size: u32, to_spaces: bool) -> Vec<TextEdit> {
+pub fn convert_indentation_edits(
+    lines: &[String],
+    tab_size: u32,
+    to_spaces: bool,
+) -> Vec<TextEdit> {
     if tab_size == 0 {
         return Vec::new();
     }
@@ -176,10 +199,17 @@ pub fn convert_indentation_edits(lines: &[String], tab_size: u32, to_spaces: boo
             continue;
         }
         let old = &line[..end];
-        let new = if to_spaces { old.replace('\t', &spaces) } else { old.replace(spaces.as_str(), "\t") };
+        let new = if to_spaces {
+            old.replace('\t', &spaces)
+        } else {
+            old.replace(spaces.as_str(), "\t")
+        };
         if new != old {
             // The indentation is ASCII, so its byte length is its UTF-16 length.
-            let range = WidgetRange::new(WidgetPos::new(n as u32, 0), WidgetPos::new(n as u32, end as u32));
+            let range = WidgetRange::new(
+                WidgetPos::new(n as u32, 0),
+                WidgetPos::new(n as u32, end as u32),
+            );
             edits.push(TextEdit { range, text: new });
         }
     }
@@ -198,7 +228,13 @@ pub fn trim_trailing_whitespace_edits(lines: &[String]) -> Vec<TextEdit> {
         }
         let start = crate::coords::utf16_len(kept);
         let end = crate::coords::utf16_len(line);
-        edits.push(TextEdit { range: WidgetRange::new(WidgetPos::new(n as u32, start), WidgetPos::new(n as u32, end)), text: String::new() });
+        edits.push(TextEdit {
+            range: WidgetRange::new(
+                WidgetPos::new(n as u32, start),
+                WidgetPos::new(n as u32, end),
+            ),
+            text: String::new(),
+        });
     }
     edits.reverse();
     edits
@@ -221,8 +257,14 @@ mod tests {
 
     #[test]
     fn fr_l31_indentation_guess_finds_spaces_and_their_size() {
-        assert_eq!(guess_indentation(&lines("a\n  b\n    c\n  d\ne"), 4, false), (2, true));
-        assert_eq!(guess_indentation(&lines("a\n    b\n        c\n    d"), 2, false), (4, true));
+        assert_eq!(
+            guess_indentation(&lines("a\n  b\n    c\n  d\ne"), 4, false),
+            (2, true)
+        );
+        assert_eq!(
+            guess_indentation(&lines("a\n    b\n        c\n    d"), 2, false),
+            (4, true)
+        );
     }
 
     #[test]
@@ -254,14 +296,20 @@ mod tests {
 
     #[test]
     fn fr_l31_convert_indentation_to_spaces_replaces_each_leading_tab() {
-        assert_eq!(convert_indentation("a\n\tb\n\t\tc\n \td", 4, true), "a\n    b\n        c\n     d");
+        assert_eq!(
+            convert_indentation("a\n\tb\n\t\tc\n \td", 4, true),
+            "a\n    b\n        c\n     d"
+        );
         // Tabs after the first character are text, not indentation.
         assert_eq!(convert_indentation("\ta\tb", 2, true), "  a\tb");
     }
 
     #[test]
     fn fr_l31_convert_indentation_to_tabs_replaces_each_run_of_tab_size_spaces() {
-        assert_eq!(convert_indentation("a\n    b\n        c\n      d", 4, false), "a\n\tb\n\t\tc\n\t  d");
+        assert_eq!(
+            convert_indentation("a\n    b\n        c\n      d", 4, false),
+            "a\n\tb\n\t\tc\n\t  d"
+        );
         assert_eq!(convert_indentation("  a\n   b", 2, false), "\ta\n\t b");
         assert_eq!(convert_indentation("a    b", 4, false), "a    b");
     }

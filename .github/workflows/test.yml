@@ -19,7 +19,7 @@
 #                        .github/scripts/tests/install-ose.test.sh (step 6: an Ember install
 #                        fetches the matching OSE release, #83)
 #   no-em-dash           .github/scripts/checks/check-no-em-dash.sh (AGENTS.md writing rules)
-#   rust                 cargo test for each ember/<crate> dir that exists
+#   rust                 cargo test for each ember/<crate> dir that exists, plus Clippy for server
 #   oniguruma            the editor core links Oniguruma (a C library) on Windows and macOS too
 #   windows-node-server  ember-node and ember-server binaries build on Windows (#200), and the
 #                        owner presence tests run against the named-pipe door (FR-S12, #815)
@@ -265,10 +265,16 @@ jobs:
           else echo "ember/${{ matrix.crate }}/Cargo.toml not present on this ref; skipping"; echo "yes=false" >> "$GITHUB_OUTPUT"; fi
       - uses: dtolnay/rust-toolchain@stable
         if: steps.present.outputs.yes == 'true'
+        with:
+          components: ${{ matrix.crate == 'server' && 'clippy' || '' }}
       - uses: Swatinem/rust-cache@v2
         if: steps.present.outputs.yes == 'true'
         with:
           workspaces: ember/${{ matrix.crate }}
+      - name: cargo clippy (server)
+        if: steps.present.outputs.yes == 'true' && matrix.crate == 'server'
+        working-directory: ember/server
+        run: cargo clippy --locked -- -D warnings
       - name: Renderer system libraries
         if: steps.present.outputs.yes == 'true' && matrix.crate == 'app'
         # The compose-rust renderer links X11, GL, fontconfig and freetype on Linux.

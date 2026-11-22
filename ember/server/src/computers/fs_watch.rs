@@ -127,7 +127,7 @@ async fn bridge(socket: WebSocket, upstream: FsWatchSocket, _permit: OwnedSemaph
             loop {
                 let out = match node_rx.next().await {
                     Some(Ok(NodeMessage::Text(t))) => Message::Text(t.to_string().into()),
-                    Some(Ok(NodeMessage::Ping(p))) => Message::Ping(p.into()),
+                    Some(Ok(NodeMessage::Ping(p))) => Message::Ping(p),
                     Some(Ok(NodeMessage::Close(frame))) => {
                         return End::NodeClosed(frame.map(|f| (u16::from(f.code), f.reason.as_str().to_string())))
                     }

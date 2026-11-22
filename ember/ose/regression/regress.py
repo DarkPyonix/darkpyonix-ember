@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Extension regression helpers for OSE (SPEC NFR-W1, issue #84).
 
-  regress.py parse-log <exthost.log>...      print {id: activated|failed} as JSON
+  regress.py parse-log <log or dir>...       print {id: activated|failed} as JSON; a directory
+                                             stands for every *.log below it on an exthost path
   regress.py compare <expected.json> <results.json> [<install-failed.txt>] [<merged.json>]
                                              exit 1 on a regression; ids listed in
                                              install-failed.txt (one per line) count as
@@ -26,10 +27,11 @@ Status values: activated, failed, not-activated, install-failed.
 "activated" means the extension host logged the start of the activation and no failure for it;
 an activation that starts and never finishes is not told apart (SPEC NFR-W1, "Not covered").
 The two log lines are VS Code's extension host messages at the pinned tag
-(`extHostExtensionService.ts` and `extHostExtensionActivator.ts`, read at 1.139.1); no real OSE
-run has confirmed them yet.
+(`extHostExtensionService.ts` and `extHostExtensionActivator.ts`, read at 1.139.1). The
+activation line is confirmed by the first real run (Ember CI 44946499791, 2026-11-21, every
+target); no failure line has been seen in a real run yet.
 """
-import json, os, re, sys
+import json, os, re, sys, tempfile
 
 ACTIVATE = re.compile(r"_doActivateExtension\s+([\w.-]+)")
 FAILED = re.compile(r"Activating extension '?([\w.-]+)'? failed", re.I)
@@ -46,6 +48,24 @@ def parse_log(text):
         if m:
             out.setdefault(m.group(1).lower(), "activated")
     return out
+
+
+def log_files(paths):
+    """The extension host logs among `paths`: a file is taken as it is; a directory gives every
+    `*.log` below it whose path contains `exthost`. The server names output channel logs after
+    the channel ("1-Git Graph.log"), so the paths are walked here instead of being passed through
+    a shell word list, which split them at the spaces (#84, run 44946499791)."""
+    out = []
+    for p in paths:
+        if os.path.isdir(p):
+            for root, _, names in os.walk(p):
+                for n in sorted(names):
+                    full = os.path.join(root, n)
+                    if n.endswith(".log") and "exthost" in full:
+                        out.append(full)
+        else:
+            out.append(p)
+    return sorted(out)
 
 
 def entries(doc):
@@ -167,6 +187,23 @@ def self_test():
     exp = {"redhat.vscode-yaml": {"expect": "pass"}, "golang.go": {"expect": "pass"},
            "ms-python.python": {"expect": "pass"}, "vscodevim.vim": {"expect": "known-fail"},
            "esbenp.prettier-vscode": {"expect": "known-fail"}}
+    # Log names with spaces (the server names output channel logs after the channel) and logs
+    # outside an exthost folder: a directory argument takes exactly the exthost ones.
+    with tempfile.TemporaryDirectory() as d:
+        os.makedirs(os.path.join(d, "logs", "exthost1", "output_logging_1"))
+        os.makedirs(os.path.join(d, "logs", "other"))
+        for rel, text in (("exthost1/remoteexthost.log", "ExtensionService#_doActivateExtension a.one, startup: true\n"),
+                          ("exthost1/output_logging_1/1-Git Graph.log", "ExtensionService#_doActivateExtension b.two\n"),
+                          ("other/server.log", "ExtensionService#_doActivateExtension c.three\n")):
+            with open(os.path.join(d, "logs", rel), "w") as f:
+                f.write(text)
+        found = [os.path.relpath(x, d) for x in log_files([d])]
+        assert found == ["logs/exthost1/output_logging_1/1-Git Graph.log", "logs/exthost1/remoteexthost.log"], found
+        merged = {}
+        for x in log_files([d]):
+            with open(x) as f:
+                merged.update(parse_log(f.read()))
+        assert merged == {"a.one": "activated", "b.two": "activated"}, merged
     fails, warns = compare(exp, got)
     assert fails == ["golang.go: expected activation, got failed",
                      "ms-python.python: expected activation, got not-activated"], fails
@@ -236,7 +273,7 @@ def main(a):
         return self_test()
     if a[:1] == ["parse-log"]:
         res = {}
-        for p in a[1:]:
+        for p in log_files(a[1:]):
             with open(p, errors="replace") as f:
                 for k, v in parse_log(f.read()).items():
                     if res.get(k) != "failed":

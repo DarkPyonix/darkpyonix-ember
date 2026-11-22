@@ -502,6 +502,10 @@ fn exthost_open_document_and_other_requests() {
     assert_eq!(fx, vec![Effect::Respond { req: 7, result: Ok(Reply::Empty) }]);
     let fx = c.handle(t0, request(8, "MainThreadCommands", "$executeCommand", vec![json!("setContext"), json!(["k", true]), json!(false)]));
     assert_eq!(fx, vec![Effect::Respond { req: 8, result: Ok(Reply::Empty) }]);
+    // The extension host at 1.139.1 sends setContext as `_setContext` (mhutchie.git-graph, #84):
+    // also a no-op, never a RunCommand to the UI.
+    let fx = c.handle(t0, request(9, "MainThreadCommands", "$executeCommand", vec![json!("_setContext"), json!(["git-graph:codiconsSupported", true]), json!(false)]));
+    assert_eq!(fx, vec![Effect::Respond { req: 9, result: Ok(Reply::Empty) }]);
 }
 
 fn problems(effects: &[Effect]) -> Option<&Vec<ember_editor::diagnostics::Problem>> {

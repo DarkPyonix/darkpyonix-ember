@@ -185,7 +185,7 @@ Answered by `replies::session_reply` = `exthost::default_reply` plus what `live_
   to the extension host as a document without an editor, reply with the URI. If the user opens it
   later it is removed and re-added at the next version.
 - `MainThreadCommands.$executeCommand(id, args)`: the extension host runs its own commands locally,
-  so what arrives is a workbench command → `RunCommand` to the UI (except `setContext`, a no-op),
+  so what arrives is a workbench command → `RunCommand` to the UI (except `setContext` and `_setContext`, no-ops),
   reply `undefined`.
 - `$registerCommand` / `$unregisterCommand`, `$register…Provider` / `$unregister`: tracked in
   `registry.rs`, with selector matching ported from `languageSelector.ts` `score()` (scheme,

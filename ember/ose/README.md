@@ -131,10 +131,14 @@ the extension host logs. In CI the Live checks job runs this per target and uplo
 Status today: the list is the five extensions the leader approved on 2026-11-15: two language
 servers (`redhat.vscode-yaml`, `dbaeumer.vscode-eslint`), the most used language extension
 (`ms-python.python`), a debugger (`ms-python.debugpy`) and a webview panel (`mhutchie.git-graph`).
-The live checks ran once on all four targets (run 43670763653) with the earlier list; this list
-has not run yet, so every `expected.json` entry is an unverified `pass` and the step does not
-fail the job. `ms-python.debugpy` and `mhutchie.git-graph` have no pinned version: their first
-resolving run prints the version to pin. The check is "installed and activated without a failure
+The first run of this list (Ember CI 44946499791, 2026-11-21) installed all five on all four
+targets and pinned `ms-python.debugpy` 2026.6.0 and `mhutchie.git-graph` 1.30.0. Its extension
+host logs show every entry activating, except `ms-python.debugpy` on linux-arm64; its
+`results.json` said `not-activated` for all of them, because `regress.sh` passed the log paths as
+an unquoted list and their names carry spaces (`1-Git Graph.log`). `regress.py parse-log` now
+walks the data folder itself, and a parse error fails the step (#84). `expected.json` keeps that
+run in `_runs`. The step still does not fail the job: the owner has not confirmed the list, and
+the gate changes in its own PR. The check is "installed and activated without a failure
 line". Results are compared with our own previous OSE release, not with another vendor's build.
 
 ### Deep checks (#929)
@@ -150,7 +154,8 @@ page. Each check writes `pass`, `fail` or `not-run` with a reason to `OSE_REGRES
 OSE_REGRESS_MODE=deep OSE_REGRESS_OUT=.scratch/regress-deep ember/ose/regress.sh "$(dirname "$(dirname "$EMBER_OSE_SERVER")")"
 ```
 
-- **Webview** (`mhutchie.git-graph`, written, not yet run): the client runs `git-graph.view`
+- **Webview** (`mhutchie.git-graph`, failed in run 44946499791 with `unregistered command
+  _setContext`, fixed in the client by #84, not yet rerun): the client runs `git-graph.view`
   (retried while the extension registers it), waits for `$createWebviewPanel` and `$setHtml`,
   reports the page shown (`$onDidChangeWebviewPanelViewStates`) and ready, sends
   `{"command":"loadRepos","check":false}` with `$onMessage` and waits for a `$postMessage` whose

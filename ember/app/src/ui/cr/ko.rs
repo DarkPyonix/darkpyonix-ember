@@ -138,6 +138,15 @@ pub fn connection_banner(c: &ConnectionState) -> Option<(String, Tone)> {
             format!("연결이 끊어졌습니다({error}). {}초 후 다시 시도합니다", retry_in_ms.div_ceil(1000)),
             Tone::Warning,
         )),
+        // FR-S11, #982: 같은 토큰은 다시 거부되므로 되풀이하지 않고, 토큰을 찾은 곳을 알린다.
+        ConnectionState::Unauthorized { error, looked_in } => {
+            let mut text = format!("서버가 토큰을 거부했습니다({error}).");
+            if !looked_in.is_empty() {
+                text.push_str(&format!(" 토큰을 찾은 곳: {}.", looked_in.join(", ")));
+            }
+            text.push_str(" 서버의 server-token 파일을 이 중 한 곳에 두거나 EMBER_SERVER_TOKEN을 설정한 뒤 앱을 다시 시작하십시오.");
+            Some((text, Tone::Error))
+        }
     }
 }
 
@@ -188,5 +197,21 @@ mod tests {
             updated_at: 0,
         };
         assert_eq!(task_line(&task), "#3 [진행 중] 테스트 작성 \u{00b7} alice");
+    }
+
+    #[test]
+    fn fr_s11_an_unauthorized_push_says_where_the_token_was_looked_for() {
+        let c = ConnectionState::Unauthorized {
+            error: "missing or invalid server token".into(),
+            looked_in: vec!["EMBER_SERVER_TOKEN".into(), "C:/Users/me/AppData/Roaming/ember/server-token".into()],
+        };
+        let (text, tone) = connection_banner(&c).unwrap();
+        assert_eq!(tone, Tone::Error);
+        assert!(text.starts_with("서버가 토큰을 거부했습니다(missing or invalid server token)."), "{text}");
+        assert!(text.contains("토큰을 찾은 곳: EMBER_SERVER_TOKEN, C:/Users/me/AppData/Roaming/ember/server-token."), "{text}");
+        assert!(!text.contains("다시 시도합니다"), "no retry loop: {text}");
+        // A token given by the caller has no place to name.
+        let given = ConnectionState::Unauthorized { error: "x".into(), looked_in: Vec::new() };
+        assert!(!connection_banner(&given).unwrap().0.contains("찾은 곳"));
     }
 }

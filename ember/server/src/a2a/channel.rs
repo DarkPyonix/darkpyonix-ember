@@ -14,8 +14,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::{
-    store::now_ms, team, A2a, A2aError, Receipt, CHANNEL_MENTION_WINDOW, CHANNEL_POSTS_PER_MINUTE, CLI_NAME,
-    HEADER_TAG,
+    store::now_ms, team, A2a, A2aError, Receipt, CHANNEL_MENTION_WINDOW, CHANNEL_POSTS_PER_MINUTE,
+    CHANNEL_THREAD_MAX, CLI_NAME, HEADER_TAG,
 };
 use crate::channels::invites::{is_format_char, is_line_separator};
 use crate::channels::ChannelError;
@@ -244,12 +244,24 @@ impl A2a {
 
     /// May `session` post into `channel` now (FR-T12, `ember-a2a channel post`)? The caller is
     /// already authenticated. In order: the session is a member (else `Forbidden`), a person
-    /// mentioned it in this channel within [`CHANNEL_MENTION_WINDOW`] (else `Forbidden`), and it
-    /// made fewer than [`CHANNEL_POSTS_PER_MINUTE`] posts here in the last minute (else
-    /// `RateLimited`). The session's own A2A switch is not consulted: it may answer a mention
-    /// even with A2A off. An allowed call counts toward the rate limit.
+    /// mentioned it in this channel within [`CHANNEL_MENTION_WINDOW`] or its mention thread there
+    /// is open (else `Forbidden`), and it made fewer than [`CHANNEL_POSTS_PER_MINUTE`] posts here
+    /// in the last minute (else `RateLimited`). The session's own A2A switch is not consulted: it
+    /// may answer a mention even with A2A off. An allowed call counts toward the rate limit.
     pub fn check_channel_post(&self, session: &str, channel: &str) -> Result<(), A2aError> {
-        let members = self.sessions.store().channel_members(channel).map_err(|e| match e {
+        self.check_channel_post_at(session, channel, now_ms())
+    }
+
+    /// [`A2a::check_channel_post`] at the wall-clock time `now_ms` (ms since the epoch), so the
+    /// window and the thread can be tested without waiting. The rate limit keeps its own
+    /// monotonic clock.
+    ///
+    /// The mention thread (#380, INTENT D51) is the latest mention of the session in the channel;
+    /// it is open while that mention is at most [`CHANNEL_THREAD_MAX`] old and the session has
+    /// written nothing in the channel since it. Its first post closes it.
+    pub fn check_channel_post_at(&self, session: &str, channel: &str, now_ms: i64) -> Result<(), A2aError> {
+        let channels = self.sessions.store();
+        let members = channels.channel_members(channel).map_err(|e| match e {
             ChannelError::NotFound(m) => A2aError::NotFound(m),
             ChannelError::Forbidden(m) | ChannelError::BadRequest(m) => A2aError::Forbidden(m),
             other => A2aError::Other(anyhow::anyhow!("{other}")),
@@ -257,11 +269,19 @@ impl A2a {
         if !members.iter().any(|m| m.id == session) {
             return Err(A2aError::Forbidden(format!("{session} is not a member of channel {channel}")));
         }
-        let since = now_ms() - CHANNEL_MENTION_WINDOW.as_millis() as i64;
-        if !self.store.channel_mention_since(session, channel, since)? {
+        let since = now_ms - CHANNEL_MENTION_WINDOW.as_millis() as i64;
+        let recent = self.store.channel_mention_since(session, channel, since)?;
+        let open_thread = !recent
+            && match self.store.latest_channel_mention(session, channel)? {
+                Some(at) if now_ms - at <= CHANNEL_THREAD_MAX.as_millis() as i64 => !channels
+                    .channel_posted_since(channel, session, at)
+                    .map_err(|e| A2aError::Other(anyhow::anyhow!("{e}")))?,
+                _ => false,
+            };
+        if !recent && !open_thread {
             return Err(A2aError::Forbidden(format!(
-                "no one has mentioned you in channel {channel} in the last {} minutes; \
-                 an agent answers a mention and does not post unprompted",
+                "no one has mentioned you in channel {channel} in the last {} minutes and no earlier \
+                 mention there waits for your answer; an agent answers a mention and does not post unprompted",
                 CHANNEL_MENTION_WINDOW.as_secs() / 60
             )));
         }

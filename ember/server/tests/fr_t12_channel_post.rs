@@ -192,6 +192,60 @@ async fn fr_t12_channel_post_without_a_recent_mention_is_403() {
     assert!(w.log().await.is_empty());
 }
 
+const MINUTE_MS: i64 = 60_000;
+
+/// A person's mention of `session` in the channel; its time in ms.
+fn mention_at(w: &World, session: &str) -> i64 {
+    w.a2a.store().insert_channel_message(&w.channel, "나", session, "please look").unwrap().created_at
+}
+
+fn forbidden(r: Result<(), ember_server::a2a::A2aError>) -> bool {
+    matches!(r, Err(ember_server::a2a::A2aError::Forbidden(_)))
+}
+
+#[tokio::test]
+async fn fr_t12_the_mention_window_expires_after_30_minutes() {
+    let w = world().await;
+    let t = mention_at(&w, &w.alpha);
+    // The agent answers, which closes the mention thread: later posts rest on the window alone.
+    let (st, b) = w.post_as(Some(&w.token(&w.alpha)), "on it").await;
+    assert_eq!(st, StatusCode::CREATED, "{b}");
+    assert!(w.a2a.check_channel_post_at(&w.alpha, &w.channel, t + 30 * MINUTE_MS - 1).is_ok());
+    match w.a2a.check_channel_post_at(&w.alpha, &w.channel, t + 30 * MINUTE_MS + 1) {
+        Err(ember_server::a2a::A2aError::Forbidden(m)) => assert!(m.contains("30 minutes"), "{m}"),
+        other => panic!("expected Forbidden after 30 minutes, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn fr_t12_an_open_mention_thread_allows_an_answer_after_the_window() {
+    let w = world().await;
+    let t = mention_at(&w, &w.alpha);
+    // A long turn: 45 minutes later the agent has not answered yet, so it may.
+    assert!(w.a2a.check_channel_post_at(&w.alpha, &w.channel, t + 45 * MINUTE_MS).is_ok());
+    // Its answer closes the thread: a second post at 45 minutes needs a new mention.
+    let (st, b) = w.post_as(Some(&w.token(&w.alpha)), "done, see the PR").await;
+    assert_eq!(st, StatusCode::CREATED, "{b}");
+    assert!(forbidden(w.a2a.check_channel_post_at(&w.alpha, &w.channel, t + 45 * MINUTE_MS)));
+    // A new mention opens a new thread (a few ms later, so it is after the answer).
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let t2 = mention_at(&w, &w.alpha);
+    assert!(w.a2a.check_channel_post_at(&w.alpha, &w.channel, t2 + 45 * MINUTE_MS).is_ok());
+}
+
+#[tokio::test]
+async fn fr_t12_an_open_mention_thread_closes_after_24_hours() {
+    let w = world().await;
+    let t = mention_at(&w, &w.alpha);
+    let day = 24 * 60 * MINUTE_MS;
+    assert!(w.a2a.check_channel_post_at(&w.alpha, &w.channel, t + day).is_ok());
+    assert!(forbidden(w.a2a.check_channel_post_at(&w.alpha, &w.channel, t + day + 1)));
+    // A member never mentioned here has no thread, and a mention elsewhere opens none here.
+    assert!(forbidden(w.a2a.check_channel_post_at(&w.beta, &w.channel, t + 1)));
+    w.a2a.store().insert_channel_message("some-other-channel", "나", &w.beta, "x").unwrap();
+    assert!(forbidden(w.a2a.check_channel_post_at(&w.beta, &w.channel, t + 45 * MINUTE_MS)));
+}
+
 #[tokio::test]
 async fn fr_t12_channel_post_is_rate_limited_429() {
     let w = world().await;

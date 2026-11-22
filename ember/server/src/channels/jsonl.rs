@@ -1,6 +1,7 @@
 //! The per-channel JSONL file of human messages (SPEC FR-T16) [provisional layout].
 //!
-//! `<data dir>/channels/<channel id>.jsonl`, one JSON object per line:
+//! `<data dir>/channels/<file name>.jsonl` ([`file_stem`]: the channel id itself when it is a
+//! safe path component, else an encoded or hashed form, #987), one JSON object per line:
 //! `{"seq":N,"channel_id":"...","from":"user","text":"...","at":S}` (`at` is Unix seconds, as in
 //! the API). A guest's line (a guest is a human, FR-T15) has `from` = `guest:<id>` and one more
 //! field, `name`, the display name at the time of writing; no other line has `name`. Only
@@ -144,8 +145,56 @@ fn scan_tail(f: &mut File, len: u64) -> Result<(u64, i64), &'static str> {
     Ok((keep, seq))
 }
 
-/// Longest channel id accepted as a file name.
+/// Longest channel id used as a file name unchanged.
 const MAX_ID: usize = 128;
+
+/// Starts the name of a channel id that is not a safe path component; a safe id never has it.
+const ENCODED_PREFIX: char = '~';
+
+/// Longest encoded stem (prefix included); a longer one is replaced by the hashed form, so the
+/// file name stays far below the usual 255-byte limit.
+const MAX_ENCODED_STEM: usize = 200;
+
+/// The file name of a channel's log without `.jsonl` (SPEC FR-T16, #987); `None` for the empty
+/// id.
+///
+/// - A safe id (1 to [`MAX_ID`] ASCII letters, digits, `-` and `_`) is its own name, as before.
+/// - Any other id is `~` and its UTF-8 bytes, each byte outside `a-z`, `0-9`, `-` and `_` written
+///   as `%XX` (upper-case hex). Upper-case letters are encoded too, so two encoded names never
+///   differ only in case (a case-insensitive file system would merge them).
+/// - When that is longer than [`MAX_ENCODED_STEM`]: `~~` and the SHA-256 of the id in lower-case
+///   hex.
+///
+/// A safe id has no `~`, and the encoded part never starts with `~` (it is `%7E`), so the three
+/// forms never meet. No form contains `/`, `\`, `.` or a control character.
+pub fn file_stem(channel_id: &str) -> Option<String> {
+    use std::fmt::Write as _;
+    if channel_id.is_empty() {
+        return None;
+    }
+    let safe = channel_id.len() <= MAX_ID
+        && channel_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    if safe {
+        return Some(channel_id.to_string());
+    }
+    let mut stem = String::from(ENCODED_PREFIX);
+    for b in channel_id.bytes() {
+        if b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_' {
+            stem.push(b as char);
+        } else {
+            let _ = write!(stem, "%{b:02X}");
+        }
+    }
+    if stem.len() > MAX_ENCODED_STEM {
+        use sha2::Digest as _;
+        let digest = sha2::Sha256::digest(channel_id.as_bytes());
+        stem = format!("{ENCODED_PREFIX}{ENCODED_PREFIX}");
+        for b in digest.iter() {
+            let _ = write!(stem, "{b:02x}");
+        }
+    }
+    Some(stem)
+}
 
 #[derive(Debug)]
 pub struct JsonlLog {
@@ -185,15 +234,11 @@ impl JsonlLog {
         self.lock.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// The file of a channel, or an error when the id is not a safe path component.
+    /// The file of a channel, directly in the channels directory ([`file_stem`]); an error only
+    /// for the empty id.
     pub fn path_of(&self, channel_id: &str) -> Result<PathBuf, ChannelError> {
-        let safe = !channel_id.is_empty()
-            && channel_id.len() <= MAX_ID
-            && channel_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-        if !safe {
-            return Err(ChannelError::BadRequest(format!("unsafe channel id {channel_id:?}")));
-        }
-        Ok(self.dir.join(format!("{channel_id}.jsonl")))
+        let stem = file_stem(channel_id).ok_or_else(|| ChannelError::BadRequest("empty channel id".into()))?;
+        Ok(self.dir.join(format!("{stem}.jsonl")))
     }
 
     /// Append one line for a human message (`user` or a guest) and sync it. `Ok(false)` when
@@ -262,7 +307,8 @@ impl JsonlLog {
     }
 
     fn recover_channel(&self, store: &Store, id: &str, report: &mut RecoverReport) -> Result<(), &'static str> {
-        let path = self.path_of(id).map_err(|_| "unsafe channel id")?;
+        // The name comes from the id with the rule of `file_stem`, so no name is mapped back.
+        let path = self.path_of(id).map_err(|_| "empty channel id")?;
         let exists = match std::fs::symlink_metadata(&path) {
             Ok(md) if md.file_type().is_file() => true,
             Ok(_) => return Err("not a regular file"),

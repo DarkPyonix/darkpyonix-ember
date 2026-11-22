@@ -1,12 +1,14 @@
-//! Listening ports of a registered computer's sessions, relayed from its node (FR-P7).
+//! Listening ports of a computer's sessions, relayed from its node (FR-P7).
 //!
 //! | Method | Path | Node route |
 //! | ------ | ---- | ---------- |
 //! | GET    | `/api/computers/{id}/ports` | `GET /ports` |
 //!
 //! The body is the node's `PortsResponse` (`ember_node::proto`), unchanged. A node error keeps
-//! its status and body; an unreachable node is 502; an unknown computer is 404; the local
-//! computer (this server) has no node client, so it answers 400. The server keeps no state. **[provisional]**
+//! its status and body; an unreachable node is 502; an unknown computer is 404. The local
+//! computer (this server) is answered by the server's in-process node, which lists the ports of
+//! the local terminals and jobs ([`Computers::relay_client`], #981). The server keeps no state.
+//! **[provisional]**
 
 use std::sync::Arc;
 
@@ -33,7 +35,7 @@ async fn ports(
     State(c): State<Arc<Computers>>,
     Path(id): Path<String>,
 ) -> Result<Json<PortsResponse>, Response> {
-    let node = c.client(&id).map_err(|e| {
+    let node = c.relay_client(&id).map_err(|e| {
         let code = match &e {
             ComputerError::NotFound(_) | ComputerError::SessionNotFound(_) => StatusCode::NOT_FOUND,
             ComputerError::BadRequest(_) => StatusCode::BAD_REQUEST,

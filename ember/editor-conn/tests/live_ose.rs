@@ -301,6 +301,15 @@ fn live_reply(proxy: Option<&str>, method: &str, seq: u64) -> Reply {
     }
 }
 
+/// What the extension host said about its output channels: the `$register` calls (label, log file)
+/// and the `$update` calls (channel id, mode, till). The text itself never crosses RPC; it is in
+/// the log file.
+#[derive(Default)]
+struct OutputLog {
+    registers: Vec<(String, UriComponents)>,
+    updates: Vec<(String, Value, Value)>,
+}
+
 fn args_preview(args: &[Arg]) -> String {
     let v: Vec<Value> = args.iter().map(|a| a.as_json().cloned().unwrap_or(Value::Null)).collect();
     let s = Value::Array(v).to_string();
@@ -317,6 +326,7 @@ async fn respond_loop(
     mut events: mpsc::UnboundedReceiver<RpcEvent>,
     diag: mpsc::UnboundedSender<DiagEvent>,
     seen: Arc<Mutex<BTreeMap<String, u32>>>,
+    outputs: Arc<Mutex<OutputLog>>,
     verbose: bool,
 ) {
     let mut seq = 0u64;
@@ -334,6 +344,21 @@ async fn respond_loop(
                     }
                     _ if verbose => println!("[live-ose]   EH→ {name} {}", args_preview(&r.args)),
                     _ => {}
+                }
+                if r.proxy == Some("MainThreadOutputService") {
+                    let json = |i: usize| r.args.get(i).and_then(Arg::as_json).cloned().unwrap_or(Value::Null);
+                    let mut log = outputs.lock().unwrap_or_else(|e| e.into_inner());
+                    match r.method.as_str() {
+                        "$register" => match serde_json::from_value::<UriComponents>(json(1)) {
+                            Ok(file) => log.registers.push((json(0).as_str().unwrap_or_default().to_owned(), file)),
+                            Err(e) => eprintln!("[live-ose] cannot parse the file of {name}: {e}; args {}", args_preview(&r.args)),
+                        },
+                        "$update" => {
+                            let channel = json(0).as_str().unwrap_or_default().to_owned();
+                            log.updates.push((channel, json(1), json(2)));
+                        }
+                        _ => {}
+                    }
                 }
                 if r.proxy == Some(ember_editor_conn::actors::generated::main_thread_diagnostics::PROXY) && r.method == "$changeMany" {
                     match ChangeManyArgs::decode(&r.args)
@@ -600,7 +625,8 @@ async fn live_ose_end_to_end() {
     let (diag_tx, mut diag_rx) = mpsc::unbounded_channel();
     let seen = Arc::new(Mutex::new(BTreeMap::new()));
     let _census = Census(Arc::clone(&seen));
-    let responder = tokio::spawn(respond_loop(peer.clone(), rpc_events, diag_tx, Arc::clone(&seen), verbose));
+    let outputs = Arc::new(Mutex::new(OutputLog::default()));
+    let responder = tokio::spawn(respond_loop(peer.clone(), rpc_events, diag_tx, Arc::clone(&seen), Arc::clone(&outputs), verbose));
 
     let defaults = exthost::contributed_configuration_defaults(&extensions);
     let configuration = exthost::configuration_init_data(&defaults, &[]);
@@ -694,6 +720,41 @@ async fn live_ose_end_to_end() {
     }
     assert!(markers.iter().any(|m| m.severity == 8), "expected an Error marker: {markers:?}");
     steps.done("4. MainThreadDiagnostics.$changeMany (JSON errors)");
+
+    // The JSON language client registered an output channel for its log. The text of a channel is
+    // not sent over RPC: it is in the channel's log file, which `$update` says has changed.
+    let (label, file, update_calls) = {
+        let log = outputs.lock().unwrap_or_else(|e| e.into_inner());
+        let labels: Vec<&str> = log.registers.iter().map(|(l, _)| l.as_str()).collect();
+        let (label, file) = log
+            .registers
+            .iter()
+            .find(|(l, _)| l == "JSON Language Server")
+            .unwrap_or_else(|| panic!("no MainThreadOutputService.$register for \"JSON Language Server\" arrived; registered channels: {labels:?}"));
+        // The extension host named the channel with the id we answered `$register` with.
+        let n = log.updates.iter().filter(|(id, _, _)| id.starts_with("ember-live-output-")).count();
+        (label.clone(), file.clone(), n)
+    };
+    println!("[live-ose]   output channel {label:?}: file {} ({} $update calls seen)", file.key(), update_calls);
+    for (id, mode, till) in outputs.lock().unwrap_or_else(|e| e.into_inner()).updates.iter() {
+        println!("[live-ose]   $update {id} mode={mode} till={till}");
+    }
+    // The URI transformer normally hands us `vscode-remote://`; a `file:` one is a path on the server.
+    let log_file = if file.scheme == "file" { UriComponents::remote(&authority, &file.path) } else { file.clone() };
+    // The extension host flushes the log on its own schedule, so give it a moment.
+    let log_bytes = within("the output channel's log file", 30, async {
+        loop {
+            match fs.read_file(&log_file).await {
+                Ok(bytes) if !bytes.is_empty() => return bytes,
+                Ok(_) => {}
+                Err(e) => println!("[live-ose]   log file not readable yet: {e}"),
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    })
+    .await;
+    println!("[live-ose]   log file has {} bytes: {:?}", log_bytes.len(), String::from_utf8_lossy(&log_bytes).lines().next());
+    steps.done("4. output channel log file exists and is non-empty");
 
     // ---- 5. shutdown ----------------------------------------------------------------------------
     exthost::terminate(peer.connection());

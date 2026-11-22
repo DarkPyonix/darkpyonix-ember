@@ -577,21 +577,48 @@ fn file_close_clears_markers_for_that_file() {
     assert_eq!(remaining[0].uri.path, "/w/b.json");
 }
 
+fn log_uri() -> Value {
+    json!({"$mid": 1, "scheme": "vscode-remote", "authority": AUTH, "path": "/logs/git.log"})
+}
+
+/// `$register` for the channel `label`, whose request id is `req`; returns the effects.
+fn register_channel(c: &mut SessionCore, t0: Instant, req: u32, label: &str) -> Vec<Effect> {
+    c.handle(t0, request(req, "MainThreadOutputService", "$register", vec![json!(label), log_uri(), json!("git"), json!("vscode.git")]))
+}
+
+fn update_channel(c: &mut SessionCore, t0: Instant, req: u32, id: &str, mode: u8, till: Option<u64>) -> Vec<Effect> {
+    let mut args = vec![json!(id), json!(mode)];
+    args.extend(till.map(|t| json!(t)));
+    c.handle(t0, request(req, "MainThreadOutputService", "$update", args))
+}
+
+/// The log-file reads among `fx`.
+fn channel_reads(fx: &[Effect]) -> Vec<(UriComponents, ReadPurpose)> {
+    fx.iter()
+        .filter_map(|e| match e {
+            Effect::ReadFile { uri, purpose: purpose @ ReadPurpose::OutputChannel { .. } } => Some((uri.clone(), purpose.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Serve one log-file read with `text` and return what the channel list says afterwards.
+fn serve_channel_read(c: &mut SessionCore, t0: Instant, read: (UriComponents, ReadPurpose), text: &str) -> (Vec<Effect>, Option<Vec<ember_editor::OutputChannel>>) {
+    let fx = c.handle(t0, Input::FileRead { uri: read.0, purpose: read.1, result: Ok(text.as_bytes().to_vec()) });
+    let channels = updates(&fx).into_iter().find_map(|u| match u {
+        SessionUpdate::OutputChannels { channels, .. } => Some(channels.clone()),
+        _ => None,
+    });
+    (fx, channels)
+}
+
 #[test]
 fn output_service_and_message_service_flow() {
     let t0 = Instant::now();
     let mut c = core(t0);
 
     // Register an output channel
-    let fx = c.handle(
-        t0,
-        request(
-            1,
-            "MainThreadOutputService",
-            "$register",
-            vec![json!("Git"), json!(null), json!("git"), json!("vscode.git")],
-        ),
-    );
+    let fx = register_channel(&mut c, t0, 1, "Git");
     assert!(fx.contains(&Effect::Respond {
         req: 1,
         result: Ok(Reply::Json(json!("ember-output-1"))),
@@ -602,39 +629,49 @@ fn output_service_and_message_service_flow() {
     }).expect("OutputChannels update");
     assert_eq!(up.0.len(), 1);
     assert_eq!(up.0[0].label, "Git");
+    assert_eq!(up.0[0].file, Some(serde_json::from_value(log_uri()).unwrap()));
     assert_eq!(up.1.as_deref(), Some("ember-output-1"));
 
-    // Append to the channel
-    let fx = c.handle(
-        t0,
-        request(
-            2,
-            "MainThreadOutputService",
-            "$append",
-            vec![json!("ember-output-1"), json!("git status output\n")],
-        ),
-    );
-    let up = updates(&fx).into_iter().find_map(|u| match u {
-        SessionUpdate::OutputChannels { channels, .. } => Some(channels),
-        _ => None,
-    }).expect("OutputChannels update on append");
-    assert_eq!(up[0].text, "git status output\n");
+    // Append to the channel: the extension host wrote the text to the file and says so.
+    let fx = update_channel(&mut c, t0, 2, "ember-output-1", 1, None);
+    assert!(fx.contains(&Effect::Respond { req: 2, result: Ok(Reply::Empty) }));
+    let reads = channel_reads(&fx);
+    assert_eq!(reads.len(), 1, "{fx:#?}");
+    assert_eq!(reads[0].0, serde_json::from_value(log_uri()).unwrap());
+    let (_, up) = serve_channel_read(&mut c, t0, reads[0].clone(), "git status output\n");
+    assert_eq!(up.expect("OutputChannels update on append")[0].text, "git status output\n");
 
-    // Clear the channel
-    let fx = c.handle(
-        t0,
-        request(
-            3,
-            "MainThreadOutputService",
-            "$clear",
-            vec![json!("ember-output-1")],
-        ),
-    );
+    // Clear the channel: the text now starts where the file ends.
+    let fx = update_channel(&mut c, t0, 3, "ember-output-1", 3, Some(18));
     let up = updates(&fx).into_iter().find_map(|u| match u {
         SessionUpdate::OutputChannels { channels, .. } => Some(channels),
         _ => None,
     }).expect("OutputChannels update on clear");
     assert_eq!(up[0].text, "");
+    let reads = channel_reads(&fx);
+    assert_eq!(reads.len(), 1);
+    let (_, up) = serve_channel_read(&mut c, t0, reads[0].clone(), "git status output\n");
+    assert_eq!(up.expect("OutputChannels update after the clear")[0].text, "");
+
+    // Reveal makes it the active channel.
+    let fx = c.handle(t0, request(6, "MainThreadOutputService", "$reveal", vec![json!("ember-output-1"), json!(false)]));
+    let active = updates(&fx).into_iter().find_map(|u| match u {
+        SessionUpdate::OutputChannels { active_id, .. } => Some(active_id.clone()),
+        _ => None,
+    }).expect("OutputChannels update on reveal");
+    assert_eq!(active.as_deref(), Some("ember-output-1"));
+
+    // Dispose removes it, and a late read of its file is dropped.
+    let fx = update_channel(&mut c, t0, 7, "ember-output-1", 1, None);
+    let late = channel_reads(&fx).remove(0);
+    let fx = c.handle(t0, request(8, "MainThreadOutputService", "$dispose", vec![json!("ember-output-1")]));
+    let up = updates(&fx).into_iter().find_map(|u| match u {
+        SessionUpdate::OutputChannels { channels, .. } => Some(channels),
+        _ => None,
+    }).expect("OutputChannels update on dispose");
+    assert!(up.is_empty());
+    let (_, up) = serve_channel_read(&mut c, t0, late, "after dispose\n");
+    assert!(up.is_none());
 
     // Show message: no answer until the notification closes (FR-L31.16).
     let fx = c.handle(
@@ -672,6 +709,116 @@ fn output_service_and_message_service_flow() {
     let id = updates(&fx).into_iter().find_map(|u| match u { SessionUpdate::ExtensionMessage(m) => Some(m.id), _ => None }).unwrap();
     let fx = c.handle(t0, Input::AnswerMessage { id, handle: None });
     assert!(fx.contains(&Effect::Respond { req: 5, result: Ok(Reply::Empty) }));
+}
+
+#[test]
+fn fr_l31_16_output_channel_shows_the_file_after_update() {
+    let t0 = Instant::now();
+    let mut c = core(t0);
+    register_channel(&mut c, t0, 1, "Git");
+
+    let fx = update_channel(&mut c, t0, 2, "ember-output-1", 1, None);
+    let read = channel_reads(&fx).remove(0);
+    let (_, up) = serve_channel_read(&mut c, t0, read, "one\n");
+    assert_eq!(up.unwrap()[0].text, "one\n");
+
+    // The second read returns the whole file, so both lines show and the first is not doubled.
+    let fx = update_channel(&mut c, t0, 3, "ember-output-1", 1, None);
+    let read = channel_reads(&fx).remove(0);
+    let (_, up) = serve_channel_read(&mut c, t0, read, "one\ntwo\n");
+    assert_eq!(up.unwrap()[0].text, "one\ntwo\n");
+
+    // A file that cannot be read leaves the text as it was.
+    let fx = update_channel(&mut c, t0, 4, "ember-output-1", 1, None);
+    let (uri, purpose) = channel_reads(&fx).remove(0);
+    let fx = c.handle(t0, Input::FileRead { uri, purpose, result: Err("gone".into()) });
+    assert!(updates(&fx).iter().all(|u| !matches!(u, SessionUpdate::OutputChannels { .. })));
+    let fx = update_channel(&mut c, t0, 5, "ember-output-1", 1, None);
+    let read = channel_reads(&fx).remove(0);
+    let (_, up) = serve_channel_read(&mut c, t0, read, "one\ntwo\nthree\n");
+    assert_eq!(up.unwrap()[0].text, "one\ntwo\nthree\n");
+
+    // Bytes that are not UTF-8 are replaced, not refused.
+    let fx = update_channel(&mut c, t0, 6, "ember-output-1", 1, None);
+    let (uri, purpose) = channel_reads(&fx).remove(0);
+    let fx = c.handle(t0, Input::FileRead { uri, purpose, result: Ok(vec![b'a', 0xFF, b'b']) });
+    let text = updates(&fx).into_iter().find_map(|u| match u {
+        SessionUpdate::OutputChannels { channels, .. } => Some(channels[0].text.clone()),
+        _ => None,
+    });
+    assert_eq!(text.as_deref(), Some("a\u{FFFD}b"));
+}
+
+#[test]
+fn fr_l31_16_output_channel_clear_and_replace_drop_text_before_till() {
+    let t0 = Instant::now();
+    let mut c = core(t0);
+    register_channel(&mut c, t0, 1, "Git");
+
+    let fx = update_channel(&mut c, t0, 2, "ember-output-1", 1, None);
+    let read = channel_reads(&fx).remove(0);
+    serve_channel_read(&mut c, t0, read, "old1\nold2\n");
+
+    // Replace(till = 10) was written after the old text: the shown text is the file from byte 10.
+    let fx = update_channel(&mut c, t0, 3, "ember-output-1", 2, Some(10));
+    let read = channel_reads(&fx).remove(0);
+    let (_, up) = serve_channel_read(&mut c, t0, read, "old1\nold2\nnew\n");
+    assert_eq!(up.unwrap()[0].text, "new\n");
+
+    // An append after it keeps counting from the same start.
+    let fx = update_channel(&mut c, t0, 4, "ember-output-1", 1, None);
+    let read = channel_reads(&fx).remove(0);
+    let (_, up) = serve_channel_read(&mut c, t0, read, "old1\nold2\nnew\nmore\n");
+    assert_eq!(up.unwrap()[0].text, "new\nmore\n");
+
+    // Clear(till = 19) empties the channel at once and what follows starts at byte 19.
+    let fx = update_channel(&mut c, t0, 5, "ember-output-1", 3, Some(19));
+    let cleared = updates(&fx).into_iter().find_map(|u| match u {
+        SessionUpdate::OutputChannels { channels, .. } => Some(channels[0].text.clone()),
+        _ => None,
+    });
+    assert_eq!(cleared.as_deref(), Some(""));
+    let read = channel_reads(&fx).remove(0);
+    let (_, up) = serve_channel_read(&mut c, t0, read, "old1\nold2\nnew\nmore\n");
+    assert_eq!(up.unwrap()[0].text, "");
+    let fx = update_channel(&mut c, t0, 6, "ember-output-1", 1, None);
+    let read = channel_reads(&fx).remove(0);
+    let (_, up) = serve_channel_read(&mut c, t0, read, "old1\nold2\nnew\nmore\nfresh\n");
+    assert_eq!(up.unwrap()[0].text, "fresh\n");
+
+    // A replace or clear without `till` is ignored: no read, no change.
+    let fx = update_channel(&mut c, t0, 7, "ember-output-1", 3, None);
+    assert!(fx.contains(&Effect::Respond { req: 7, result: Ok(Reply::Empty) }));
+    assert!(channel_reads(&fx).is_empty());
+    assert!(updates(&fx).is_empty());
+}
+
+#[test]
+fn fr_l31_16_output_channel_reads_coalesce_while_one_is_in_flight() {
+    let t0 = Instant::now();
+    let mut c = core(t0);
+    register_channel(&mut c, t0, 1, "Git");
+
+    let fx = update_channel(&mut c, t0, 2, "ember-output-1", 1, None);
+    let first = channel_reads(&fx).remove(0);
+    // Every update answers at once, and none starts a second read while the first is out.
+    for req in 3..8 {
+        let fx = update_channel(&mut c, t0, req, "ember-output-1", 1, None);
+        assert!(fx.contains(&Effect::Respond { req, result: Ok(Reply::Empty) }));
+        assert!(channel_reads(&fx).is_empty(), "a read is already in flight: {fx:#?}");
+    }
+    // When it lands, exactly one more read follows for all of them.
+    let (fx, up) = serve_channel_read(&mut c, t0, first, "a\n");
+    assert_eq!(up.unwrap()[0].text, "a\n");
+    let again = channel_reads(&fx);
+    assert_eq!(again.len(), 1, "{fx:#?}");
+    let (fx, up) = serve_channel_read(&mut c, t0, again[0].clone(), "a\nb\n");
+    assert_eq!(up.unwrap()[0].text, "a\nb\n");
+    assert!(channel_reads(&fx).is_empty());
+
+    // With nothing in flight, the next update reads again.
+    let fx = update_channel(&mut c, t0, 9, "ember-output-1", 1, None);
+    assert_eq!(channel_reads(&fx).len(), 1);
 }
 
 #[test]

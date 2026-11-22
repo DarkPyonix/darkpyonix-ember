@@ -18,7 +18,7 @@ use ember_editor_conn::rpc::{IncomingRequest, Reply};
 use ember_editor_conn::uri::UriComponents;
 use serde_json::{json, Value};
 
-use super::{Effect, SessionCore, SessionUpdate};
+use super::{Effect, ReadPurpose, SessionCore, SessionUpdate};
 use crate::codelens::CommandDto;
 use crate::registry::{InlineMeta, RegistryCall};
 use crate::replies::session_reply;
@@ -44,9 +44,6 @@ impl SessionCore {
         // (`languages.getLanguages()`), and the session owns the answer.
         if r.proxy == Some(main_thread_languages::PROXY) && r.method == "$getLanguages" {
             self.fallback_reply(&r);
-            return;
-        }
-        if r.proxy == Some(main_thread_output_service::PROXY) && self.on_output_text(&r) {
             return;
         }
         let cx = Ctx { req: r.req, cancellable: r.cancellable };
@@ -89,38 +86,6 @@ impl SessionCore {
                 self.fallback_reply(&r);
             }
         }
-    }
-
-    /// `$append` and `$clear` are not in the generated output service, and the output panel
-    /// needs them, so the session answers them here. So is `$register`: only its label is
-    /// used, and the generated decoder would reject a missing or odd `file`, which the session
-    /// has always tolerated. Returns false when the call is not one of these or its arguments
-    /// are malformed, so the caller falls through to the generated dispatch.
-    fn on_output_text(&mut self, r: &IncomingRequest) -> bool {
-        let text = |i: usize| r.args.get(i).and_then(|a| a.as_json()).and_then(Value::as_str);
-        let Some(channel_id) = text(0) else { return false };
-        if r.method == "$register" {
-            let reply = self.register_output_channel(channel_id.to_owned());
-            self.respond(r.req, Ok(reply));
-            return true;
-        }
-        let value = match r.method.as_str() {
-            "$append" => match text(1) {
-                Some(v) => Some(v),
-                None => return false,
-            },
-            "$clear" => None,
-            _ => return false,
-        };
-        if let Some(ch) = self.output_channels.iter_mut().find(|c| c.id == channel_id) {
-            match value {
-                Some(v) => ch.append(v),
-                None => ch.clear(),
-            }
-            self.output_changed(None);
-        }
-        self.respond(r.req, Ok(Reply::Empty));
-        true
     }
 
     fn count_unimplemented(&mut self, r: &IncomingRequest) {
@@ -174,12 +139,43 @@ impl SessionCore {
         self.ui(SessionUpdate::OutputChannels { channels, active_id });
     }
 
-    fn register_output_channel(&mut self, label: String) -> Reply {
+    fn register_output_channel(&mut self, label: String, file: UriComponents) -> Reply {
         self.output_seq += 1;
         let id = format!("ember-output-{}", self.output_seq);
-        self.output_channels.push(crate::output::OutputChannel::new(id.clone(), label));
+        self.output_channels.push(crate::output::OutputChannel::with_file(id.clone(), label, file));
         self.output_changed(Some(id.clone()));
         Reply::Json(json!(id))
+    }
+
+    /// Read the log file of channel `id`, or note that it must be read again when the read in
+    /// flight lands, so a burst of `$update` calls costs two reads at most.
+    fn read_output_channel(&mut self, id: &str) {
+        let Some(ch) = self.output_channels.iter_mut().find(|c| c.id == id) else { return };
+        let Some(uri) = ch.file.clone() else { return };
+        if ch.reading {
+            ch.dirty = true;
+        } else {
+            ch.reading = true;
+            self.out.push(Effect::ReadFile { uri, purpose: ReadPurpose::OutputChannel { id: id.to_owned() } });
+        }
+    }
+
+    /// The file of channel `id` was read: show it from the channel's start offset, then read once
+    /// more if an `$update` came in meanwhile. A failed read leaves the text as it was.
+    pub(super) fn finish_output_read(&mut self, id: &str, result: Result<Vec<u8>, String>) {
+        let Some(ch) = self.output_channels.iter_mut().find(|c| c.id == id) else { return };
+        ch.reading = false;
+        let again = std::mem::take(&mut ch.dirty);
+        match result {
+            Ok(bytes) => {
+                ch.show_file(&bytes);
+                self.output_changed(None);
+            }
+            Err(e) => tracing::warn!("ember-editor: cannot read the output channel file of {id}: {e}"),
+        }
+        if again {
+            self.read_output_channel(id);
+        }
     }
 
     fn dispose_output_channel(&mut self, channel_id: &str) -> Outcome {
@@ -244,10 +240,27 @@ impl main_thread_commands::Commands for SessionCore {
 
 impl main_thread_output_service::OutputService for SessionCore {
     fn register(&mut self, _cx: &Ctx, args: main_thread_output_service::RegisterArgs) -> Outcome {
-        Outcome::Reply(self.register_output_channel(args.label))
+        Outcome::Reply(self.register_output_channel(args.label, args.file))
     }
 
-    fn update(&mut self, _cx: &Ctx, _args: main_thread_output_service::UpdateArgs) -> Outcome {
+    /// `mode` is `OutputChannelUpdateMode`: 1 appended, 2 replaced, 3 cleared. The text is in the
+    /// channel's file. A replace or clear carries `till`, the file offset where the text now
+    /// starts, and is ignored without one, as upstream does.
+    fn update(&mut self, _cx: &Ctx, args: main_thread_output_service::UpdateArgs) -> Outcome {
+        let Some(ch) = self.output_channels.iter_mut().find(|c| c.id == args.channel_id) else { return empty() };
+        match args.mode.as_i64() {
+            Some(1) => {}
+            Some(mode @ (2 | 3)) => {
+                let Some(till) = args.till.and_then(|t| u64::try_from(t).ok()) else { return empty() };
+                ch.start = till;
+                if mode == 3 {
+                    ch.text.clear();
+                    self.output_changed(None);
+                }
+            }
+            _ => return empty(),
+        }
+        self.read_output_channel(&args.channel_id);
         empty()
     }
 

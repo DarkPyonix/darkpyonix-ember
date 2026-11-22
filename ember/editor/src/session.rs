@@ -423,6 +423,7 @@ impl EditorSession {
             settings: settings.clone(),
             scope_table: scope_table.clone(),
             user_files: config.user_files.iter().map(|p| crate::settings::user_data_uri(p).key()).collect(),
+            authority: authority.clone(),
         };
         let task = tokio::spawn(driver.run(rx, rpc_events, changes, ipc_lifecycle));
 
@@ -843,6 +844,8 @@ struct Driver {
     scope_table: Vec<(String, Option<u8>)>,
     /// The keys of the `vscode-userdata:` URIs the session may read and write on this machine.
     user_files: Vec<String>,
+    /// The remote authority of the server, for a `file` URI the extension host names.
+    authority: String,
 }
 
 /// Reads one of the caller's settings files on the client machine. A file that is not there yet
@@ -1081,18 +1084,22 @@ impl Driver {
                         continue;
                     }
                     let (fs, tx) = (Arc::clone(&self.fs), internal.clone());
+                    // An output channel's log file is named by the extension host with a server path. The
+                    // server's URI transformer usually maps it to `vscode-remote` already; a `file` URI is
+                    // a path on the server, never on this machine, so read it through the same authority.
+                    let target = if uri.scheme == "file" { UriComponents::remote(&self.authority, &uri.path) } else { uri.clone() };
                     // A grammar file comes from an extension on the server: ask how big it is before reading it.
                     let cap = matches!(purpose, crate::engine::ReadPurpose::Grammar { .. }).then_some(crate::textmate::MAX_GRAMMAR_BYTES);
                     tokio::spawn(async move {
                         let read = async {
                             if let Some(cap) = cap {
-                                match fs.stat(&uri).await {
+                                match fs.stat(&target).await {
                                     Ok(st) if st.size > cap => return Err("the grammar file is too large".to_owned()),
                                     Ok(_) => {}
                                     Err(e) => return Err(e.to_string()),
                                 }
                             }
-                            fs.read_file(&uri).await.map_err(|e| e.to_string())
+                            fs.read_file(&target).await.map_err(|e| e.to_string())
                         };
                         // A grammar read is bounded in time as well as in size.
                         let result = match cap {

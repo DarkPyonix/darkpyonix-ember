@@ -2172,6 +2172,36 @@ mod tests {
         c.shutdown().await;
     }
 
+    #[tokio::test]
+    async fn fr_x1_without_a_mount_claude_code_on_a_node_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        // The same path exists on this server: without the refusal the agent would edit it here.
+        let proj = dir.path().join("proj");
+        std::fs::create_dir(&proj).unwrap();
+        let c = Computers::with_shim(Registry::open_in_memory().unwrap(), default_connector(), Some("/x/ember-exec".into()));
+        assert!(c.mounts().is_none());
+        let pi = c.register("pi", "http://pi:8741", "tok").unwrap();
+        let acp = AgentKind::Acp(crate::agents::AcpName::register("fr-x1-acp").unwrap());
+        for (id, agent) in [("claude", AgentKind::ClaudeCode), ("acp", acp)] {
+            c.registry().set_session_computer(id, &pi.id, Some(&sample_env()), None).unwrap();
+            let e = c.prepare_start(&record(id, agent, &proj)).await.unwrap_err();
+            let msg = format!("{e:#}");
+            assert!(msg.contains("\"pi\"") && msg.contains("project mount"), "{msg}");
+            assert!(
+                matches!(e.downcast_ref::<mount::MountError>(), Some(mount::MountError::Unavailable { .. })),
+                "{msg}"
+            );
+        }
+
+        // Codex runs its tools on the node through the exec-server: no mount needed.
+        c.registry().set_session_computer("codex", &pi.id, Some(&sample_env()), None).unwrap();
+        c.prepare_start(&record("codex", AgentKind::Codex, &proj)).await.unwrap();
+        // On the main server itself Claude Code needs no mount.
+        c.prepare_start(&record("never-switched", AgentKind::ClaudeCode, &proj)).await.unwrap();
+        c.registry().set_session_computer("claude", LOCAL, None, None).unwrap();
+        c.prepare_start(&record("claude", AgentKind::ClaudeCode, &proj)).await.unwrap();
+    }
+
     #[test]
     fn notice_names_both_computers_and_asks_to_reread() {
         let n = switch_notice("mac", "pi");

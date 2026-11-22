@@ -931,4 +931,43 @@ pub(crate) mod tests {
         assert!(s.cache.op_timeout < cmd::NfsOptions::new(1).worst_case_wait());
         assert_eq!(MountSettings::from_vars(|k| (k == ENV_MOUNT).then(|| "nfs".into())).mechanism, Mechanism::Nfs);
     }
+
+    #[test]
+    fn fr_x2_auto_mechanism_picks_the_compiled_in_mount() {
+        // Linux: FUSE when compiled in (no root needed), else NFS (needs root to mount there).
+        assert_eq!(auto_mechanism(Some(Os::Linux), true, true), Mechanism::Fuse);
+        assert_eq!(auto_mechanism(Some(Os::Linux), false, true), Mechanism::Fuse);
+        assert_eq!(auto_mechanism(Some(Os::Linux), true, false), Mechanism::Nfs);
+        // macOS: NFS; FUSE is Linux only here (macFUSE is not used).
+        assert_eq!(auto_mechanism(Some(Os::MacOs), true, false), Mechanism::Nfs);
+        assert_eq!(auto_mechanism(Some(Os::MacOs), true, true), Mechanism::Nfs);
+        assert_eq!(auto_mechanism(Some(Os::MacOs), false, true), Mechanism::Off);
+        // Nothing compiled in, or an OS without a mount client here (Windows): Off.
+        assert_eq!(auto_mechanism(Some(Os::MacOs), false, false), Mechanism::Off);
+        assert_eq!(auto_mechanism(Some(Os::Linux), false, false), Mechanism::Off);
+        assert_eq!(auto_mechanism(None, true, true), Mechanism::Off);
+    }
+
+    #[test]
+    fn fr_x2_default_settings_use_the_mount_this_build_has() {
+        let want = auto_mechanism(Os::current(), cfg!(feature = "mount-nfs"), cfg!(feature = "mount-fuse"));
+        assert_eq!(compiled_mechanism(), want);
+        assert_eq!(MountSettings::from_vars(|_| None).mechanism, want);
+        if cfg!(all(feature = "mount-nfs", target_os = "macos")) {
+            assert_eq!(want, Mechanism::Nfs);
+        }
+        if cfg!(all(feature = "mount-fuse", target_os = "linux")) {
+            assert_eq!(want, Mechanism::Fuse);
+        }
+        // The chosen mechanism has a real mounter, not the one that always fails.
+        let m = mounter_for(&MountSettings::from_vars(|_| None));
+        let name = match want {
+            Mechanism::Off => "none",
+            Mechanism::Nfs => "nfs",
+            Mechanism::Fuse => "fuse",
+        };
+        assert_eq!(m.name(), name);
+        // `EMBER_MOUNT=off` still turns it off (and remote Claude Code sessions are then refused).
+        assert_eq!(MountSettings::from_vars(|k| (k == ENV_MOUNT).then(|| "off".into())).mechanism, Mechanism::Off);
+    }
 }

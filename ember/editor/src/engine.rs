@@ -722,7 +722,11 @@ impl SessionCore {
                 language_id: d.language_id.clone(),
                 tab_width: self.indent_for(&d.language_id).0,
             };
+            let dirty = SessionUpdate::Dirty { uri: d.uri.clone(), dirty: d.is_dirty() };
             self.ui(u);
+            // The window may rebuild its state for the document from `Opened`; say again whether
+            // the buffer is unsaved so it never shows an unsaved buffer as saved.
+            self.ui(dirty);
             self.emit_format(&key);
             self.emit_folds(&key);
             if self.textmate_runs.contains_key(&key) || self.semantic.contains_key(&key) {

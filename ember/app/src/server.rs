@@ -269,6 +269,11 @@ impl IdeLaunch {
                 .and_then(|e| e.server_url.clone())
                 .filter(|u| !u.is_empty())
                 .or_else(|| crate::services::try_services().map(|s| s.config.server_url.clone()).filter(|u| !u.is_empty())),
+            vscode_url: l
+                .target("vscode")
+                .filter(|t| t.available)
+                .and_then(|t| t.url.clone())
+                .filter(|u| !u.is_empty()),
         }
     }
 }
@@ -287,6 +292,9 @@ pub struct EditorConnection {
     pub computer: Option<String>,
     /// The ember server's base URL for the terminal relay.
     pub server_url: Option<String>,
+    /// The VS Code target's URL, offered by the editor window when the server is a Code-OSS commit
+    /// it does not support (SPEC FR-E10, #32).
+    pub vscode_url: Option<String>,
 }
 
 /// `http://127.0.0.1:9000/` becomes `127.0.0.1:9000`; a bare `host:port` is kept.
@@ -324,11 +332,33 @@ mod editor_connection_tests {
                         endpoint: e.into(),
                         relay: relay.map(str::to_owned),
                         connection_token: t.into(),
+                        ose_commit: None,
                     }),
                 }),
                 reason: None,
             }],
         })
+    }
+
+    /// SPEC FR-E10 (#32): the editor connection carries the available VS Code target's URL, which
+    /// the window offers on a fallback; an unavailable one is not offered.
+    #[test]
+    fn fr_e10_editor_connection_carries_the_vscode_target() {
+        let vscode = |available: bool| IdeTarget {
+            kind: "vscode".into(),
+            available,
+            url: Some("http://c:8890/?folder=%2Fw".into()),
+            command: None,
+            launch: None,
+            reason: None,
+        };
+        let mut l = launch(Some(("http://127.0.0.1:9000/", "tok"))).unwrap();
+        assert_eq!(IdeLaunch::editor_connection(Some(&Ok(l.clone()))).vscode_url, None);
+        l.targets.push(vscode(true));
+        assert_eq!(IdeLaunch::editor_connection(Some(&Ok(l.clone()))).vscode_url.as_deref(), Some("http://c:8890/?folder=%2Fw"));
+        l.targets.pop();
+        l.targets.push(vscode(false));
+        assert_eq!(IdeLaunch::editor_connection(Some(&Ok(l))).vscode_url, None);
     }
 
     #[test]

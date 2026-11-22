@@ -33,6 +33,11 @@ pub struct EmberOseConnection {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relay: Option<String>,
     pub connection_token: String,
+    /// The Code-OSS commit of the OSE build (`commit` in its `product.json`), so the editor can
+    /// tell before connecting whether it supports this server (SPEC FR-E10, #32). `None` when the
+    /// build has no readable commit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ose_commit: Option<String>,
 }
 
 impl std::fmt::Debug for EmberOseConnection {
@@ -41,6 +46,7 @@ impl std::fmt::Debug for EmberOseConnection {
             .field("endpoint", &self.endpoint)
             .field("relay", &self.relay)
             .field("connection_token", &"[REDACTED]")
+            .field("ose_commit", &self.ose_commit)
             .finish()
     }
 }
@@ -60,6 +66,19 @@ pub struct OseLaunch {
 pub const NOT_INSTALLED: &str = "OSE server binary is not installed: run install-ose.sh from the \
     ember-server or ember-node folder (it fetches the matching DarkPyonix OSE release into \
     ~/.local/share), or set EMBER_OSE_SERVER to a dpx-ose-server launcher";
+
+/// The Code-OSS commit of the OSE build that `binary` launches (SPEC FR-E10, #32): `commit` in the
+/// build's `product.json`, which sits beside `bin/` (`<root>/bin/dpx-ose-server` and
+/// `<root>/product.json`, the layout of the release archives and of `install-ose.sh`). `None` for
+/// a missing or unreadable file, or a value that is not a hex commit of at most 64 characters.
+pub fn ose_commit(binary: &Path) -> Option<String> {
+    let root = binary.parent()?.parent()?;
+    let text = std::fs::read_to_string(root.join("product.json")).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let commit = value.get("commit")?.as_str()?.trim();
+    (!commit.is_empty() && commit.len() <= 64 && commit.bytes().all(|b| b.is_ascii_hexdigit()))
+        .then(|| commit.to_ascii_lowercase())
+}
 
 /// The runtime dir for the server's `data_dir`: its sibling `<name>-runtime` (SPEC FR-A11). The
 /// server's `runtime_dir` module re-exports it and holds the migration.
@@ -820,6 +839,7 @@ impl OseManager {
             endpoint: format!("http://{address}"),
             relay: Some(relay),
             connection_token: placeholder.clone(),
+            ose_commit: None,
         };
         let folder = folder.canonicalize().unwrap_or_else(|_| folder.to_path_buf());
         let key = (computer_id.to_string(), folder);
@@ -1090,6 +1110,7 @@ impl OseManager {
             endpoint: format!("http://{address}"),
             relay: Some(format!("/api/computers/{computer_id}/ide/relay/{launch_id}")),
             connection_token: placeholder.clone(),
+            ose_commit: ose_commit(binary),
         };
         let launch = OseLaunch { launch_id: launch_id.clone(), connection: connection.clone() };
         let mut process = Process {
@@ -1154,6 +1175,31 @@ fn server_binary() -> Option<PathBuf> {
         .map(|e| launcher_in(&e.path(), cfg!(windows))).filter(|p| p.is_file()).collect();
     candidates.sort();
     candidates.pop()
+}
+
+#[cfg(test)]
+mod ose_commit_tests {
+    use super::ose_commit;
+
+    /// SPEC FR-E10 (#32): the commit comes from the build's `product.json`, beside `bin/`.
+    #[test]
+    fn fr_e10_ose_commit_is_read_from_the_build_product_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("dpx-ose-1.139.1-linux-x64").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let launcher = bin.join("dpx-ose-server");
+        std::fs::write(&launcher, "").unwrap();
+        assert_eq!(ose_commit(&launcher), None, "no product.json");
+        let product = bin.parent().unwrap().join("product.json");
+        std::fs::write(&product, r#"{"commit":"  0123456789ABCDEF0123456789abcdef01234567 ","nameShort":"x"}"#).unwrap();
+        assert_eq!(ose_commit(&launcher).as_deref(), Some("0123456789abcdef0123456789abcdef01234567"));
+        for bad in [r#"{"nameShort":"x"}"#, r#"{"commit":""}"#, r#"{"commit":"not-hex"}"#, r#"{"commit":7}"#, "not json"] {
+            std::fs::write(&product, bad).unwrap();
+            assert_eq!(ose_commit(&launcher), None, "{bad}");
+        }
+        std::fs::write(&product, format!(r#"{{"commit":"{}"}}"#, "a".repeat(65))).unwrap();
+        assert_eq!(ose_commit(&launcher), None, "longer than 64");
+    }
 }
 
 #[cfg(test)]

@@ -393,6 +393,7 @@ pub struct MonitorFeed {
     memory: Vec<f32>,
     temperature: Vec<f32>,
     net_rx: Vec<f32>,
+    net_tx: Vec<f32>,
 }
 
 impl MonitorFeed {
@@ -417,12 +418,23 @@ impl MonitorFeed {
         self.gpu = fold_samples(&self.gpu, &gpu, FEED_CAP);
         self.memory = fold_samples(&self.memory, &mem, FEED_CAP);
         self.temperature = fold_samples(&self.temperature, &temp, FEED_CAP);
-        if let Some((rx, _)) = rates {
+        if let Some((rx, tx)) = rates {
             self.net_rx = fold_samples(&self.net_rx, &[rx as f32], FEED_CAP);
+            self.net_tx = fold_samples(&self.net_tx, &[tx as f32], FEED_CAP);
         }
         self.prev = self.latest.take();
         self.latest = Some(sample);
         self.error = None;
+    }
+
+    /// Rolling download rate samples in bytes per second, oldest first.
+    pub fn net_rx_series(&self) -> &[f32] {
+        &self.net_rx
+    }
+
+    /// Rolling upload rate samples in bytes per second, oldest first.
+    pub fn net_tx_series(&self) -> &[f32] {
+        &self.net_tx
     }
 
     /// A request failed. The last values stay so the sheet can show them dimmed.
@@ -539,7 +551,7 @@ pub fn card_view(metric: Metric, feed: &MonitorFeed) -> Option<CardView> {
             Some(m) => CardView {
                 headline: percent_text(Some(ratio_percent(m.used_bytes, m.total_bytes))),
                 lines: memory_lines(m),
-                bars: vec![],
+                bars: feed.series(Metric::Memory).filter(|b| b.len() >= 2).unwrap_or_default(),
             },
             None => CardView {
                 headline: "-".into(),
@@ -954,6 +966,208 @@ pub const FAN_MODE_AVAILABLE: bool = false;
 
 /// Why the fan mode control is disabled.
 pub const FAN_MODE_REASON: &str = "이 컴퓨터의 팬 속도와 모드는 아직 읽거나 바꿀 수 없습니다";
+
+/// Height of the card sparkline and area graphs in dp.
+pub const GRAPH_HEIGHT: f32 = 44.0;
+
+/// One sensor reading shown in the temperature card, with its severity tone.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TempReading {
+    pub label: String,
+    pub celsius: f32,
+    pub tone: crate::ui::components::PillTone,
+}
+
+fn temp_tone(celsius: f32) -> crate::ui::components::PillTone {
+    use crate::ui::components::PillTone;
+    if celsius >= 85.0 {
+        PillTone::Red
+    } else if celsius >= 70.0 {
+        PillTone::Orange
+    } else {
+        PillTone::Green
+    }
+}
+
+/// Up to two sensor readings for the temperature card: CPU and GPU side by side when reported,
+/// otherwise the hottest reported sensors. Never invents a sensor that was not reported.
+pub fn temperature_readings(s: &MetricsSample) -> Vec<TempReading> {
+    let finite: Vec<(usize, &ember_client::api::TempMetrics)> = s
+        .temperatures
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.celsius.is_finite())
+        .collect();
+    if finite.is_empty() {
+        return Vec::new();
+    }
+    let hottest_matching = |needle: &str| {
+        finite
+            .iter()
+            .filter(|(_, t)| t.label.to_ascii_lowercase().contains(needle))
+            .max_by(|a, b| a.1.celsius.partial_cmp(&b.1.celsius).unwrap_or(std::cmp::Ordering::Equal))
+            .copied()
+    };
+    let mut picked: Vec<(usize, String, f32)> = Vec::new();
+    if let Some((idx, t)) = hottest_matching("cpu") {
+        picked.push((idx, "CPU".to_string(), t.celsius));
+    }
+    if let Some((idx, t)) = hottest_matching("gpu") {
+        if !picked.iter().any(|(i, _, _)| *i == idx) {
+            picked.push((idx, "GPU".to_string(), t.celsius));
+        }
+    }
+    if picked.len() < 2 {
+        let mut rest: Vec<(usize, &ember_client::api::TempMetrics)> = finite
+            .into_iter()
+            .filter(|(idx, _)| !picked.iter().any(|(i, _, _)| i == idx))
+            .collect();
+        rest.sort_by(|a, b| b.1.celsius.partial_cmp(&a.1.celsius).unwrap_or(std::cmp::Ordering::Equal));
+        for (idx, t) in rest.into_iter().take(2 - picked.len()) {
+            let label = t.label.trim();
+            let name = if label.is_empty() { "센서".to_string() } else { label.to_string() };
+            picked.push((idx, name, t.celsius));
+        }
+    }
+    picked
+        .into_iter()
+        .map(|(_, label, celsius)| TempReading { label, celsius, tone: temp_tone(celsius) })
+        .collect()
+}
+
+fn rgb_hex(argb: u32) -> String {
+    format!("#{:06x}", argb & 0x00ff_ffff)
+}
+
+/// An SVG sparkline (line only, or line with a 16 percent area fill) over a 200 x 44 viewBox.
+/// Returns an empty string when `values` is empty.
+pub fn sparkline_svg(values: &[f32], max: f32, stroke_argb: u32, area: bool) -> String {
+    if values.is_empty() {
+        return String::new();
+    }
+    let w = 200.0_f32;
+    let h = GRAPH_HEIGHT;
+    let scale = if max.is_finite() && max > 0.0 { max } else { 100.0 };
+    let y_of = |v: f32| {
+        let frac = bar_fraction(v, scale);
+        h - 3.0 - frac * (h - 6.0)
+    };
+    let pts = if values.len() == 1 {
+        let y = y_of(values[0]);
+        format!("0.0,{y:.1} {w:.1},{y:.1}")
+    } else {
+        let n = (values.len() - 1) as f32;
+        values
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| format!("{:.1},{:.1}", i as f32 * w / n, y_of(v)))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let color = rgb_hex(stroke_argb);
+    let mut svg = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100%\" height=\"100%\" viewBox=\"0 0 200 {h:.0}\" preserveAspectRatio=\"none\">"
+    );
+    if area {
+        svg.push_str(&format!(
+            "<polygon fill=\"{color}\" fill-opacity=\"0.16\" points=\"0,{h:.0} {pts} {w:.0},{h:.0}\"/>"
+        ));
+    }
+    svg.push_str(&format!(
+        "<polyline fill=\"none\" stroke=\"{color}\" stroke-width=\"1.5\" stroke-linejoin=\"round\" points=\"{pts}\"/>"
+    ));
+    svg.push_str("</svg>");
+    svg
+}
+
+/// A dual-area SVG graph for the network card: upload rises above the center line (`y=22`) in
+/// `up_argb` and download drops below it in `down_argb`, over a 200 x 44 viewBox.
+pub fn net_graph_svg(up: &[f32], down: &[f32], up_argb: u32, down_argb: u32, mid_argb: u32) -> String {
+    let len = up.len().min(down.len());
+    if len == 0 {
+        return String::new();
+    }
+    let w = 200.0_f32;
+    let mid = GRAPH_HEIGHT / 2.0;
+    let span = mid - 3.0;
+    let max_up = up[..len].iter().copied().filter(|v| v.is_finite()).fold(1.0_f32, f32::max);
+    let max_down = down[..len].iter().copied().filter(|v| v.is_finite()).fold(1.0_f32, f32::max);
+    let series_pts = |arr: &[f32], max_v: f32, dir: f32| -> String {
+        if arr.len() == 1 {
+            let y = mid + dir * bar_fraction(arr[0], max_v) * span;
+            format!("0.0,{y:.1} {w:.1},{y:.1}")
+        } else {
+            let n = (arr.len() - 1) as f32;
+            arr.iter()
+                .enumerate()
+                .map(|(i, &v)| {
+                    let y = mid + dir * bar_fraction(v, max_v) * span;
+                    format!("{:.1},{:.1}", i as f32 * w / n, y)
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+    };
+    let u = series_pts(&up[..len], max_up, -1.0);
+    let d = series_pts(&down[..len], max_down, 1.0);
+    let up_c = rgb_hex(up_argb);
+    let down_c = rgb_hex(down_argb);
+    let mid_c = rgb_hex(mid_argb);
+    format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100%\" height=\"100%\" viewBox=\"0 0 200 {h:.0}\" preserveAspectRatio=\"none\">\
+<line x1=\"0\" y1=\"{mid:.0}\" x2=\"200\" y2=\"{mid:.0}\" stroke=\"{mid_c}\" stroke-width=\"1\"/>\
+<polygon fill=\"{up_c}\" fill-opacity=\"0.16\" points=\"0,{mid:.0} {u} 200,{mid:.0}\"/>\
+<polyline fill=\"none\" stroke=\"{up_c}\" stroke-width=\"1.5\" stroke-linejoin=\"round\" points=\"{u}\"/>\
+<polygon fill=\"{down_c}\" fill-opacity=\"0.16\" points=\"0,{mid:.0} {d} 200,{mid:.0}\"/>\
+<polyline fill=\"none\" stroke=\"{down_c}\" stroke-width=\"1.5\" stroke-linejoin=\"round\" points=\"{d}\"/>\
+</svg>",
+        h = GRAPH_HEIGHT
+    )
+}
+
+/// Column widths and in-cell CPU bar geometry for the process table at a given window width.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TableLayout {
+    pub pid_w: f32,
+    pub cpu_w: f32,
+    pub pwr_w: f32,
+    pub mem_w: f32,
+    pub cpu_bar_w: Option<f32>,
+    pub cpu_bar_h: f32,
+}
+
+/// Responsive column widths for the process table: desktop/tablet keeps the 64 x 6 in-cell CPU
+/// bar; phones at 560 dp and below use compact widths without the bar so the name column stays
+/// readable on a 390 dp screen.
+pub fn table_layout(width_dp: f32) -> TableLayout {
+    if width_dp <= 560.0 {
+        TableLayout {
+            pid_w: 44.0,
+            cpu_w: 52.0,
+            pwr_w: 40.0,
+            mem_w: 60.0,
+            cpu_bar_w: None,
+            cpu_bar_h: 6.0,
+        }
+    } else {
+        TableLayout {
+            pid_w: 72.0,
+            cpu_w: 124.0,
+            pwr_w: 72.0,
+            mem_w: 96.0,
+            cpu_bar_w: Some(64.0),
+            cpu_bar_h: 6.0,
+        }
+    }
+}
+
+/// Scale ceiling for in-cell CPU bars: the highest reported process CPU, at least 1.0.
+pub fn max_process_cpu(rows: &[ProcessRow]) -> f32 {
+    rows.iter()
+        .filter_map(|r| r.cpu)
+        .filter(|v| v.is_finite())
+        .fold(1.0_f32, f32::max)
+}
 
 #[cfg(test)]
 mod tests {
@@ -1599,5 +1813,75 @@ mod tests {
         assert_eq!(title_os(&f, 1440.0).as_deref(), Some("Ubuntu 24.04"));
         assert_eq!(title_os(&f, 561.0).as_deref(), Some("Ubuntu 24.04"));
         assert_eq!(title_os(&f, 560.0), None, "`.mon-os{{display:none}}` at 560 and below");
+    }
+
+    #[test]
+    fn fr_l21_sparkline_and_area_graph_svg_encode_series_and_fill() {
+        assert!(sparkline_svg(&[], 100.0, 0xFFFF_8800, false).is_empty());
+        let line = sparkline_svg(&[10.0, 50.0, 90.0], 100.0, 0xFFFF_8800, false);
+        assert!(line.contains("viewBox=\"0 0 200 44\""), "{line}");
+        assert!(line.contains("<polyline") && line.contains("stroke=\"#ff8800\""), "{line}");
+        assert!(!line.contains("<polygon"), "GPU sparkline has no area fill: {line}");
+
+        let area = sparkline_svg(&[40.0, 52.0, 55.0], 100.0, 0xFF00_66FF, true);
+        assert!(area.contains("<polygon") && area.contains("fill=\"#0066ff\"") && area.contains("fill-opacity=\"0.16\""), "{area}");
+        assert!(area.contains("<polyline") && area.contains("stroke=\"#0066ff\""), "{area}");
+    }
+
+    #[test]
+    fn fr_l21_net_graph_svg_splits_upload_above_and_download_below_center() {
+        let mut f = MonitorFeed::default();
+        f.push(sample(1000, 0, 0));
+        f.push(sample(2000, 2000, 500));
+        f.push(sample(3000, 6000, 1500));
+        assert_eq!(f.net_rx_series(), &[2000.0, 4000.0]);
+        assert_eq!(f.net_tx_series(), &[500.0, 1000.0]);
+        let svg = net_graph_svg(f.net_tx_series(), f.net_rx_series(), 0xFF00_AA44, 0xFF00_66FF, 0xFFCC_CCCC);
+        assert!(svg.contains("<line x1=\"0\" y1=\"22\" x2=\"200\" y2=\"22\""), "{svg}");
+        assert!(svg.contains("stroke=\"#00aa44\"") && svg.contains("stroke=\"#0066ff\""), "{svg}");
+        assert!(svg.contains("points=\"0,22 ") && svg.contains(" 200,22\""), "{svg}");
+    }
+
+    #[test]
+    fn fr_l21_memory_card_reports_series_after_two_samples() {
+        let mut f = MonitorFeed::default();
+        f.push(sample(1000, 0, 0));
+        assert!(card_view(Metric::Memory, &f).unwrap().bars.is_empty());
+        f.push(sample(4000, 0, 0));
+        assert_eq!(card_view(Metric::Memory, &f).unwrap().bars.len(), 2);
+    }
+
+    #[test]
+    fn fr_l21_temperature_readings_pair_cpu_and_gpu_with_tones() {
+        use crate::ui::components::PillTone;
+        let mut s = sample(1000, 0, 0);
+        s.temperatures = vec![
+            TempMetrics { label: "CPU die".into(), celsius: 74.0 },
+            TempMetrics { label: "GPU die".into(), celsius: 48.0 },
+            TempMetrics { label: "SSD".into(), celsius: 39.0 },
+        ];
+        let items = temperature_readings(&s);
+        assert_eq!(items.len(), 2);
+        assert_eq!((items[0].label.as_str(), items[0].celsius, items[0].tone), ("CPU", 74.0, PillTone::Orange));
+        assert_eq!((items[1].label.as_str(), items[1].celsius, items[1].tone), ("GPU", 48.0, PillTone::Green));
+
+        s.temperatures = vec![TempMetrics { label: "NVMe".into(), celsius: 88.0 }];
+        let fallback = temperature_readings(&s);
+        assert_eq!(fallback.len(), 1);
+        assert_eq!((fallback[0].label.as_str(), fallback[0].tone), ("NVMe", PillTone::Red));
+    }
+
+    #[test]
+    fn fr_l21_table_layout_fits_phone_and_keeps_desktop_cpu_bar() {
+        let desk = table_layout(1440.0);
+        assert_eq!(desk.cpu_bar_w, Some(64.0));
+        assert_eq!(desk.cpu_bar_h, 6.0);
+        let phone = table_layout(390.0);
+        assert_eq!(phone.cpu_bar_w, None);
+        let fixed_sum = phone.pid_w + phone.cpu_w + phone.pwr_w + phone.mem_w;
+        // 390 dp less 32 dp outer scroll padding and 32 dp card row padding leaves 326 dp.
+        assert!(326.0 - fixed_sum >= 120.0, "name column needs room on 390 dp: fixed={fixed_sum}");
+        assert_eq!(max_process_cpu(&[row("a", Some(1), Some(35.0), None), row("b", Some(2), Some(5.0), None)]), 35.0);
+        assert_eq!(max_process_cpu(&[]), 1.0);
     }
 }

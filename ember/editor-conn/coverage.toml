@@ -1,0 +1,708 @@
+# FR-E9 protocol coverage ledger.
+#
+# Every MainThread* actor and method of the pinned Code-OSS (ember/editor-conn/src/actors/generated.rs,
+# generated from extHost.protocol.ts) with what Ember does with it:
+#   bridged  the session decodes the call and answers from its own state;
+#   acked    the empty answer is correct, confirmed by a person (name and date in the actor's `note`);
+#   out      out of scope; the actor's `note` says why and who decided;
+#   todo     not built yet: answered with the fallback reply and recorded with the calling extension.
+# `fr_e9_ledger_covers_generated_protocol` fails when the generated protocol has an actor or method
+# this file lacks, or this file names one the protocol does not have. A pin bump adds new methods
+# here as `todo` or `out` (docs/design/POST-1-0-EDITOR-CORE.md 4.4).
+
+[MainThreadAuthentication]
+"$registerAuthenticationProvider" = "todo"
+"$unregisterAuthenticationProvider" = "todo"
+"$ensureProvider" = "todo"
+"$sendDidChangeSessions" = "todo"
+"$getSession" = "todo"
+"$getAccounts" = "todo"
+"$removeSession" = "todo"
+"$waitForUriHandler" = "todo"
+"$showContinueNotification" = "todo"
+"$showDeviceCodeModal" = "todo"
+"$promptForClientRegistration" = "todo"
+"$promptForResourceClientSecret" = "todo"
+"$registerDynamicAuthenticationProvider" = "todo"
+"$setSessionsForDynamicAuthProvider" = "todo"
+"$sendDidChangeDynamicProviderInfo" = "todo"
+
+[MainThreadBulkEdits]
+"$tryApplyWorkspaceEdit" = "bridged"
+
+[MainThreadLanguageModels]
+"$registerLanguageModelProvider" = "todo"
+"$onLMProviderChange" = "todo"
+"$unregisterProvider" = "todo"
+"$tryStartChatRequest" = "todo"
+"$reportResponsePart" = "todo"
+"$reportResponseDone" = "todo"
+"$selectChatModels" = "todo"
+"$countTokens" = "todo"
+"$cancelLanguageModelChatRequest" = "todo"
+"$fileIsIgnored" = "todo"
+"$registerFileIgnoreProvider" = "todo"
+"$unregisterFileIgnoreProvider" = "todo"
+
+[MainThreadEmbeddings]
+"$registerEmbeddingProvider" = "todo"
+"$unregisterEmbeddingProvider" = "todo"
+"$computeEmbeddings" = "todo"
+
+[MainThreadChatAgents2]
+"$handleProgressChunk" = "todo"
+"$handleAnchorResolve" = "todo"
+"$registerAgent" = "todo"
+"$registerChatParticipantDetectionProvider" = "todo"
+"$unregisterChatParticipantDetectionProvider" = "todo"
+"$registerPromptFileProvider" = "todo"
+"$unregisterPromptFileProvider" = "todo"
+"$onDidChangePromptFiles" = "todo"
+"$registerChatSessionCustomizationProvider" = "todo"
+"$unregisterChatSessionCustomizationProvider" = "todo"
+"$onDidChangeCustomizations" = "todo"
+"$registerAgentCompletionsProvider" = "todo"
+"$unregisterAgentCompletionsProvider" = "todo"
+"$updateAgent" = "todo"
+"$unregisterAgent" = "todo"
+"$transferActiveChatSession" = "todo"
+"$provideCustomAgents" = "todo"
+"$provideInstructions" = "todo"
+"$provideSkills" = "todo"
+"$provideSlashCommands" = "todo"
+"$provideHooks" = "todo"
+"$providePlugins" = "todo"
+
+[MainThreadCodeMapper]
+"$registerCodeMapperProvider" = "todo"
+"$unregisterCodeMapperProvider" = "todo"
+"$handleProgress" = "todo"
+
+[MainThreadLanguageModelTools]
+"$getTools" = "todo"
+"$acceptToolProgress" = "todo"
+"$invokeTool" = "todo"
+"$countTokensForInvocation" = "todo"
+"$registerTool" = "todo"
+"$registerToolWithDefinition" = "todo"
+"$unregisterTool" = "todo"
+
+[MainThreadGitExtension]
+"$onDidChangeRepository" = "todo"
+
+[MainThreadClipboard]
+"$readText" = "todo"
+"$writeText" = "todo"
+
+[MainThreadCommands]
+"$registerCommand" = "bridged"
+"$unregisterCommand" = "bridged"
+"$fireCommandActivationEvent" = "todo"
+"$executeCommand" = "bridged"
+"$getCommands" = "todo"
+
+[MainThreadComments]
+"$registerCommentController" = "todo"
+"$unregisterCommentController" = "todo"
+"$updateCommentControllerFeatures" = "todo"
+"$createCommentThread" = "todo"
+"$updateCommentThread" = "todo"
+"$deleteCommentThread" = "todo"
+"$updateCommentingRanges" = "todo"
+"$revealCommentThread" = "todo"
+"$hideCommentThread" = "todo"
+
+[MainThreadConfiguration]
+"$updateConfigurationOption" = "todo"
+"$removeConfigurationOption" = "todo"
+
+[MainThreadConsole]
+"$logExtensionHostMessage" = "todo"
+
+[MainThreadDebugService]
+"$registerDebugTypes" = "todo"
+"$sessionCached" = "todo"
+"$acceptDAMessage" = "todo"
+"$acceptDAError" = "todo"
+"$acceptDAExit" = "todo"
+"$registerDebugConfigurationProvider" = "todo"
+"$registerDebugAdapterDescriptorFactory" = "todo"
+"$unregisterDebugConfigurationProvider" = "todo"
+"$unregisterDebugAdapterDescriptorFactory" = "todo"
+"$startDebugging" = "todo"
+"$stopDebugging" = "todo"
+"$setDebugSessionName" = "todo"
+"$customDebugAdapterRequest" = "todo"
+"$getDebugProtocolBreakpoint" = "todo"
+"$appendDebugConsole" = "todo"
+"$registerBreakpoints" = "todo"
+"$unregisterBreakpoints" = "todo"
+"$registerDebugVisualizer" = "todo"
+"$unregisterDebugVisualizer" = "todo"
+"$registerDebugVisualizerTree" = "todo"
+"$unregisterDebugVisualizerTree" = "todo"
+
+[MainThreadDecorations]
+"$registerDecorationProvider" = "todo"
+"$unregisterDecorationProvider" = "todo"
+"$onDidChange" = "todo"
+
+[MainThreadDiagnostics]
+"$changeMany" = "bridged"
+"$clear" = "bridged"
+
+[MainThreadDialogs]
+"$showOpenDialog" = "todo"
+"$showSaveDialog" = "todo"
+
+[MainThreadDocuments]
+"$tryCreateDocument" = "todo"
+"$tryOpenDocument" = "bridged"
+"$trySaveDocument" = "todo"
+
+[MainThreadDocumentContentProviders]
+"$registerTextContentProvider" = "todo"
+"$unregisterTextContentProvider" = "todo"
+"$onVirtualDocumentChange" = "todo"
+
+[MainThreadTextEditors]
+"$tryShowTextDocument" = "todo"
+"$registerTextEditorDecorationType" = "todo"
+"$removeTextEditorDecorationType" = "todo"
+"$tryShowEditor" = "todo"
+"$tryHideEditor" = "todo"
+"$trySetOptions" = "todo"
+"$trySetDecorations" = "todo"
+"$trySetDecorationsFast" = "todo"
+"$tryRevealRange" = "todo"
+"$trySetSelections" = "todo"
+"$tryApplyEdits" = "todo"
+"$tryInsertSnippet" = "todo"
+"$getDiffInformation" = "todo"
+
+[MainThreadEditorInsets]
+"$createEditorInset" = "todo"
+"$disposeEditorInset" = "todo"
+"$setHtml" = "todo"
+"$setOptions" = "todo"
+"$postMessage" = "todo"
+
+[MainThreadEditorTabs]
+"$moveTab" = "todo"
+"$closeTab" = "todo"
+"$closeGroup" = "todo"
+
+[MainThreadErrors]
+"$onUnexpectedError" = "todo"
+
+[MainThreadTreeViews]
+"$registerTreeViewDataProvider" = "todo"
+"$refresh" = "todo"
+"$reveal" = "todo"
+"$setMessage" = "todo"
+"$setTitle" = "todo"
+"$setBadge" = "todo"
+"$resolveDropFileData" = "todo"
+"$disposeTree" = "todo"
+"$logResolveTreeNodeFailure" = "todo"
+
+[MainThreadDownloadService]
+"$download" = "todo"
+
+[MainThreadLanguageFeatures]
+"$unregister" = "bridged"
+"$registerDocumentSymbolProvider" = "bridged"
+"$registerCodeLensSupport" = "bridged"
+"$emitCodeLensEvent" = "bridged"
+"$registerDefinitionSupport" = "bridged"
+"$registerDeclarationSupport" = "todo"
+"$registerImplementationSupport" = "todo"
+"$registerTypeDefinitionSupport" = "todo"
+"$registerHoverProvider" = "bridged"
+"$registerEvaluatableExpressionProvider" = "todo"
+"$registerInlineValuesProvider" = "todo"
+"$emitInlineValuesEvent" = "todo"
+"$registerDocumentHighlightProvider" = "todo"
+"$registerMultiDocumentHighlightProvider" = "todo"
+"$registerLinkedEditingRangeProvider" = "todo"
+"$registerReferenceSupport" = "bridged"
+"$registerCodeActionSupport" = "bridged"
+"$registerPasteEditProvider" = "todo"
+"$registerDocumentFormattingSupport" = "bridged"
+"$registerRangeFormattingSupport" = "bridged"
+"$registerOnTypeFormattingSupport" = "todo"
+"$registerNavigateTypeSupport" = "todo"
+"$registerRenameSupport" = "bridged"
+"$registerNewSymbolNamesProvider" = "todo"
+"$registerDocumentSemanticTokensProvider" = "bridged"
+"$emitDocumentSemanticTokensEvent" = "bridged"
+"$registerDocumentRangeSemanticTokensProvider" = "todo"
+"$emitDocumentRangeSemanticTokensEvent" = "todo"
+"$registerCompletionsProvider" = "bridged"
+"$registerInlineCompletionsSupport" = "bridged"
+"$emitInlineCompletionsChange" = "bridged"
+"$emitInlineCompletionModelInfoChange" = "todo"
+"$emitInlineCompletionProviderOptionsChange" = "todo"
+"$registerSignatureHelpProvider" = "bridged"
+"$registerInlayHintsProvider" = "todo"
+"$emitInlayHintsEvent" = "todo"
+"$registerDocumentLinkProvider" = "todo"
+"$registerDocumentColorProvider" = "todo"
+"$registerFoldingRangeProvider" = "bridged"
+"$emitFoldingRangeEvent" = "bridged"
+"$registerSelectionRangeProvider" = "todo"
+"$registerCallHierarchyProvider" = "todo"
+"$registerTypeHierarchyProvider" = "todo"
+"$registerDocumentOnDropEditProvider" = "todo"
+"$resolvePasteFileData" = "todo"
+"$resolveDocumentOnDropFileData" = "todo"
+"$setLanguageConfiguration" = "todo"
+
+[MainThreadLanguages]
+"$changeLanguage" = "bridged"
+"$tokensAtPosition" = "todo"
+"$computeFullSyntaxHighlighting" = "todo"
+"$setLanguageStatus" = "todo"
+"$removeLanguageStatus" = "todo"
+
+[MainThreadLogger]
+"$log" = "todo"
+"$flush" = "todo"
+"$createLogger" = "todo"
+"$registerLogger" = "todo"
+"$deregisterLogger" = "todo"
+"$setVisibility" = "todo"
+
+[MainThreadMessageService]
+"$showMessage" = "bridged"
+
+[MainThreadOutputService]
+"$register" = "bridged"
+"$update" = "todo"
+"$reveal" = "bridged"
+"$close" = "bridged"
+"$dispose" = "bridged"
+
+[MainThreadProgress]
+"$startProgress" = "todo"
+"$progressReport" = "todo"
+"$progressEnd" = "todo"
+
+[MainThreadQuickDiff]
+"$registerQuickDiffProvider" = "todo"
+"$unregisterQuickDiffProvider" = "todo"
+"$createSourceControlDiffInformation" = "todo"
+"$disposeSourceControlDiffInformation" = "todo"
+
+[MainThreadAgentEditorComments]
+"$createAgentEditorComments" = "todo"
+"$addComment" = "todo"
+"$deleteComment" = "todo"
+"$disposeAgentEditorComments" = "todo"
+
+[MainThreadDocumentDiff]
+"$computeDocumentDiff" = "todo"
+
+[MainThreadQuickOpen]
+"$show" = "todo"
+"$setItems" = "todo"
+"$setError" = "todo"
+"$input" = "todo"
+"$createOrUpdate" = "todo"
+"$dispose" = "todo"
+
+[MainThreadStatusBar]
+"$setEntry" = "todo"
+"$disposeEntry" = "todo"
+
+[MainThreadSecretState]
+"$getPassword" = "todo"
+"$setPassword" = "todo"
+"$deletePassword" = "todo"
+"$getKeys" = "todo"
+
+[MainThreadStorage]
+"$initializeExtensionStorage" = "bridged"
+"$setValue" = "bridged"
+"$registerExtensionStorageKeysToSync" = "bridged"
+
+[MainThreadSpeech]
+"$registerProvider" = "todo"
+"$unregisterProvider" = "todo"
+"$emitSpeechToTextEvent" = "todo"
+"$emitTextToSpeechEvent" = "todo"
+"$emitKeywordRecognitionEvent" = "todo"
+
+[MainThreadTelemetry]
+"$publicLog" = "todo"
+"$publicLog2" = "todo"
+
+[MainThreadMeteredConnection]
+
+[MainThreadTerminalService]
+"$createTerminal" = "todo"
+"$dispose" = "todo"
+"$hide" = "todo"
+"$sendText" = "todo"
+"$show" = "todo"
+"$registerProcessSupport" = "todo"
+"$registerProfileProvider" = "todo"
+"$unregisterProfileProvider" = "todo"
+"$registerCompletionProvider" = "todo"
+"$unregisterCompletionProvider" = "todo"
+"$registerQuickFixProvider" = "todo"
+"$unregisterQuickFixProvider" = "todo"
+"$setEnvironmentVariableCollection" = "todo"
+"$startSendingDataEvents" = "todo"
+"$stopSendingDataEvents" = "todo"
+"$startSendingCommandEvents" = "todo"
+"$stopSendingCommandEvents" = "todo"
+"$startLinkProvider" = "todo"
+"$stopLinkProvider" = "todo"
+"$sendProcessData" = "todo"
+"$sendProcessReady" = "todo"
+"$sendProcessProperty" = "todo"
+"$sendProcessExit" = "todo"
+
+[MainThreadTerminalShellIntegration]
+"$executeCommand" = "todo"
+
+[MainThreadWebviews]
+"$setHtml" = "bridged"
+"$setOptions" = "bridged"
+"$postMessage" = "bridged"
+
+[MainThreadWebviewPanels]
+"$createWebviewPanel" = "bridged"
+"$disposeWebview" = "bridged"
+"$reveal" = "bridged"
+"$setTitle" = "bridged"
+"$setIconPath" = "bridged"
+"$registerSerializer" = "bridged"
+"$unregisterSerializer" = "bridged"
+
+[MainThreadWebviewViews]
+"$registerWebviewViewProvider" = "bridged"
+"$unregisterWebviewViewProvider" = "bridged"
+"$setWebviewViewTitle" = "bridged"
+"$setWebviewViewDescription" = "bridged"
+"$setWebviewViewBadge" = "bridged"
+"$show" = "bridged"
+
+[MainThreadCustomEditors]
+"$registerTextEditorProvider" = "bridged"
+"$registerCustomEditorProvider" = "bridged"
+"$unregisterEditorProvider" = "bridged"
+"$onDidEdit" = "todo"
+"$onContentChange" = "todo"
+
+[MainThreadUrls]
+"$registerUriHandler" = "todo"
+"$unregisterUriHandler" = "todo"
+"$createAppUri" = "todo"
+
+[MainThreadUriOpeners]
+"$registerUriOpener" = "todo"
+"$unregisterUriOpener" = "todo"
+
+[MainThreadProfileContentHandlers]
+"$registerProfileContentHandler" = "todo"
+"$unregisterProfileContentHandler" = "todo"
+
+[MainThreadWorkspace]
+"$startFileSearch" = "todo"
+"$startTextSearch" = "todo"
+"$checkExists" = "todo"
+"$save" = "todo"
+"$saveAll" = "todo"
+"$updateWorkspaceFolders" = "todo"
+"$resolveProxy" = "todo"
+"$lookupAuthorization" = "todo"
+"$lookupKerberosAuthorization" = "todo"
+"$loadCertificates" = "todo"
+"$requestResourceTrust" = "bridged"
+"$requestWorkspaceTrust" = "bridged"
+"$isResourceTrusted" = "bridged"
+"$registerEditSessionIdentityProvider" = "todo"
+"$unregisterEditSessionIdentityProvider" = "todo"
+"$registerCanonicalUriProvider" = "todo"
+"$unregisterCanonicalUriProvider" = "todo"
+"$resolveDecoding" = "todo"
+"$validateDetectedEncoding" = "todo"
+"$resolveEncoding" = "todo"
+
+[MainThreadFileSystem]
+"$registerFileSystemProvider" = "todo"
+"$unregisterProvider" = "todo"
+"$onFileSystemChange" = "todo"
+"$stat" = "todo"
+"$readdir" = "todo"
+"$readFile" = "todo"
+"$writeFile" = "todo"
+"$rename" = "todo"
+"$copy" = "todo"
+"$mkdir" = "todo"
+"$delete" = "todo"
+"$ensureActivation" = "todo"
+
+[MainThreadFileSystemEventService]
+"$watch" = "todo"
+"$unwatch" = "todo"
+
+[MainThreadExtensionService]
+"$getExtension" = "todo"
+"$activateExtension" = "todo"
+"$onWillActivateExtension" = "todo"
+"$onDidActivateExtension" = "todo"
+"$onExtensionActivationError" = "todo"
+"$onExtensionRuntimeError" = "todo"
+"$setPerformanceMarks" = "todo"
+"$asBrowserUri" = "todo"
+
+[MainThreadSCM]
+"$registerSourceControl" = "todo"
+"$updateSourceControl" = "todo"
+"$unregisterSourceControl" = "todo"
+"$registerGroups" = "todo"
+"$updateGroup" = "todo"
+"$updateGroupLabel" = "todo"
+"$unregisterGroup" = "todo"
+"$spliceResourceStates" = "todo"
+"$setInputBoxValue" = "todo"
+"$setInputBoxPlaceholder" = "todo"
+"$setInputBoxEnablement" = "todo"
+"$setInputBoxVisibility" = "todo"
+"$showValidationMessage" = "todo"
+"$setValidationProviderIsEnabled" = "todo"
+"$onDidChangeHistoryProviderCurrentHistoryItemRefs" = "todo"
+"$onDidChangeHistoryProviderHistoryItemRefs" = "todo"
+"$onDidChangeArtifacts" = "todo"
+
+[MainThreadSearch]
+"$registerFileSearchProvider" = "todo"
+"$registerAITextSearchProvider" = "todo"
+"$registerTextSearchProvider" = "bridged"
+"$unregisterProvider" = "bridged"
+"$handleFileMatch" = "todo"
+"$handleTextMatch" = "bridged"
+"$handleKeywordResult" = "todo"
+"$handleTelemetry" = "todo"
+
+[MainThreadShare]
+"$registerShareProvider" = "todo"
+"$unregisterShareProvider" = "todo"
+
+[MainThreadTask]
+"$createTaskId" = "todo"
+"$registerTaskProvider" = "todo"
+"$unregisterTaskProvider" = "todo"
+"$fetchTasks" = "todo"
+"$getTaskExecution" = "todo"
+"$executeTask" = "todo"
+"$terminateTask" = "todo"
+"$registerTaskSystem" = "todo"
+"$customExecutionComplete" = "todo"
+"$registerSupportedExecutions" = "todo"
+
+[MainThreadWindow]
+"$getInitialState" = "todo"
+"$openUri" = "todo"
+"$asExternalUri" = "todo"
+
+[MainThreadPower]
+"$getSystemIdleState" = "todo"
+"$getSystemIdleTime" = "todo"
+"$getCurrentThermalState" = "todo"
+"$isOnBatteryPower" = "todo"
+"$startPowerSaveBlocker" = "todo"
+"$stopPowerSaveBlocker" = "todo"
+"$isPowerSaveBlockerStarted" = "todo"
+
+[MainThreadLabelService]
+"$registerResourceLabelFormatter" = "todo"
+"$unregisterResourceLabelFormatter" = "todo"
+
+[MainThreadNotebook]
+"$registerNotebookSerializer" = "todo"
+"$unregisterNotebookSerializer" = "todo"
+"$registerNotebookCellStatusBarItemProvider" = "todo"
+"$unregisterNotebookCellStatusBarItemProvider" = "todo"
+"$emitCellStatusBarEvent" = "todo"
+
+[MainThreadNotebookDocuments]
+"$tryCreateNotebook" = "todo"
+"$tryOpenNotebook" = "todo"
+"$trySaveNotebook" = "todo"
+
+[MainThreadNotebookEditors]
+"$tryShowNotebookDocument" = "todo"
+"$tryRevealRange" = "todo"
+"$trySetSelections" = "todo"
+
+[MainThreadNotebookKernels]
+"$postMessage" = "todo"
+"$addKernel" = "todo"
+"$updateKernel" = "todo"
+"$removeKernel" = "todo"
+"$updateNotebookPriority" = "todo"
+"$createExecution" = "todo"
+"$updateExecution" = "todo"
+"$completeExecution" = "todo"
+"$createNotebookExecution" = "todo"
+"$beginNotebookExecution" = "todo"
+"$completeNotebookExecution" = "todo"
+"$addKernelDetectionTask" = "todo"
+"$removeKernelDetectionTask" = "todo"
+"$addKernelSourceActionProvider" = "todo"
+"$removeKernelSourceActionProvider" = "todo"
+"$emitNotebookKernelSourceActionsChangeEvent" = "todo"
+"$receiveVariable" = "todo"
+"$variablesUpdated" = "todo"
+
+[MainThreadNotebookRenderers]
+"$postMessage" = "todo"
+
+[MainThreadInteractive]
+
+[MainThreadTheming]
+
+[MainThreadTunnelService]
+"$openTunnel" = "todo"
+"$closeTunnel" = "todo"
+"$getTunnels" = "todo"
+"$setTunnelProvider" = "todo"
+"$hasTunnelProvider" = "todo"
+"$setRemoteTunnelService" = "todo"
+"$setCandidateFilter" = "todo"
+"$onFoundNewCandidates" = "todo"
+"$setCandidatePortSource" = "todo"
+"$registerPortsAttributesProvider" = "todo"
+"$unregisterPortsAttributesProvider" = "todo"
+
+[MainThreadManagedSockets]
+"$registerSocketFactory" = "todo"
+"$unregisterSocketFactory" = "todo"
+"$onDidManagedSocketHaveData" = "todo"
+"$onDidManagedSocketClose" = "todo"
+"$onDidManagedSocketEnd" = "todo"
+
+[MainThreadBrowserTunnelProxy]
+"$updateProxyInfo" = "todo"
+
+[MainThreadTimeline]
+"$registerTimelineProvider" = "todo"
+"$unregisterTimelineProvider" = "todo"
+"$emitTimelineChangeEvent" = "todo"
+
+[MainThreadTesting]
+"$registerTestController" = "todo"
+"$updateController" = "todo"
+"$unregisterTestController" = "todo"
+"$subscribeToDiffs" = "todo"
+"$unsubscribeFromDiffs" = "todo"
+"$publishDiff" = "todo"
+"$getCoverageDetails" = "todo"
+"$publishTestRunProfile" = "todo"
+"$updateTestRunConfig" = "todo"
+"$removeTestProfile" = "todo"
+"$runTests" = "todo"
+"$addTestsToRun" = "todo"
+"$updateTestStateInRun" = "todo"
+"$appendTestMessagesInRun" = "todo"
+"$appendOutputToRun" = "todo"
+"$appendCoverage" = "todo"
+"$startedTestRunTask" = "todo"
+"$finishedTestRunTask" = "todo"
+"$startedExtensionTestRun" = "todo"
+"$finishedExtensionTestRun" = "todo"
+"$markTestRetired" = "todo"
+
+[MainThreadLocalization]
+"$fetchBuiltInBundleUri" = "todo"
+"$fetchBundleContents" = "todo"
+
+[MainThreadMcp]
+"$onDidChangeState" = "todo"
+"$onDidPublishLog" = "todo"
+"$onDidReceiveMessage" = "todo"
+"$upsertMcpCollection" = "todo"
+"$deleteMcpCollection" = "todo"
+"$getTokenFromServerMetadata" = "todo"
+"$getTokenForProviderId" = "todo"
+"$logMcpAuthSetup" = "todo"
+"$startMcpGateway" = "todo"
+"$disposeMcpGateway" = "todo"
+
+[MainThreadAiRelatedInformation]
+"$getAiRelatedInformation" = "todo"
+"$registerAiRelatedInformationProvider" = "todo"
+"$unregisterAiRelatedInformationProvider" = "todo"
+
+[MainThreadAiEmbeddingVector]
+"$registerAiEmbeddingVectorProvider" = "todo"
+"$unregisterAiEmbeddingVectorProvider" = "todo"
+
+[MainThreadChatStatus]
+"$setEntry" = "todo"
+"$disposeEntry" = "todo"
+
+[MainThreadChatQuota]
+"$updateQuotas" = "todo"
+
+[MainThreadChatInputNotification]
+"$setNotification" = "todo"
+"$disposeNotification" = "todo"
+
+[MainThreadAiSettingsSearch]
+"$registerAiSettingsSearchProvider" = "todo"
+"$unregisterAiSettingsSearchProvider" = "todo"
+"$handleSearchResult" = "todo"
+
+[MainThreadDataChannels]
+"$createLinkPresentationWatcher" = "todo"
+"$disposeLinkPresentationWatcher" = "todo"
+"$registerLinkPresentationProvider" = "todo"
+"$unregisterLinkPresentationProvider" = "todo"
+"$acceptLinkPresentationProviderData" = "todo"
+
+[MainThreadChatSessions]
+"$registerChatSessionItemController" = "todo"
+"$updateChatSessionItemControllerCapabilities" = "todo"
+"$unregisterChatSessionItemController" = "todo"
+"$updateChatSessionItems" = "todo"
+"$addOrUpdateChatSessionItem" = "todo"
+"$onDidCommitChatSessionItem" = "todo"
+"$registerChatSessionContentProvider" = "todo"
+"$unregisterChatSessionContentProvider" = "todo"
+"$onDidChangeChatSessionOptions" = "todo"
+"$onDidChangeChatSessionProviderOptions" = "todo"
+"$updateChatSessionInputState" = "todo"
+"$handleProgressChunk" = "todo"
+"$handleAnchorResolve" = "todo"
+"$handleProgressComplete" = "todo"
+
+[MainThreadChatOutputRenderer]
+"$registerChatOutputRenderer" = "todo"
+"$unregisterChatOutputRenderer" = "todo"
+
+[MainThreadChatContext]
+"$registerChatWorkspaceContextProvider" = "todo"
+"$registerChatExplicitContextProvider" = "todo"
+"$registerChatResourceContextProvider" = "todo"
+"$unregisterChatContextProvider" = "todo"
+"$updateWorkspaceContextItems" = "todo"
+"$executeChatContextItemCommand" = "todo"
+
+[MainThreadChatDebug]
+"$registerChatDebugLogProvider" = "todo"
+"$unregisterChatDebugLogProvider" = "todo"
+"$acceptChatDebugEvent" = "todo"
+"$subscribeToCoreDebugEvents" = "todo"
+"$unsubscribeFromCoreDebugEvents" = "todo"
+
+[MainThreadBrowsers]
+"$openBrowserTab" = "todo"
+"$closeBrowserTab" = "todo"
+"$startCDPSession" = "todo"
+"$closeCDPSession" = "todo"
+"$sendCDPMessage" = "todo"

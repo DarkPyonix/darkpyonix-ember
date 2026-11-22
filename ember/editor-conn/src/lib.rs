@@ -24,6 +24,8 @@
 //! | [`trust`]     | workspace trust: restricted mode extensions, grant (FR-L31.18)   |
 //! | [`uri`]       | `UriComponents` with `$mid` marshalling                           |
 //! | [`webview`]   | `MainThreadWebviews` / panels / views / custom editors (FR-E8)    |
+//! | [`debug`]     | `ExtHostDebugService` calls and DAP messages                      |
+//! | [`coverage`]  | the protocol coverage ledger `coverage.toml` (FR-E9)              |
 //!
 //! Everything is generic over `AsyncRead + AsyncWrite`, so the same code rides a plain TCP socket,
 //! a TLS stream, or an `ember-transport` stream later.
@@ -42,6 +44,8 @@
 
 pub mod actors;
 pub mod connection;
+pub mod coverage;
+pub mod debug;
 pub mod document;
 pub mod exthost;
 pub mod frame;

@@ -224,12 +224,11 @@ pub fn ClickableAs(
     { use ::compose_rust::ui::Box; Box!(modifier = pressable_as(modifier, kind), alignment = alignment, on_click = Some(move || on_click()), content = content) };
 }
 
-/// A [`Clickable`] whose child is only an icon or a glyph, named for assistive technology with
-/// `Modifier::label` (compose-rust v0.0.7, #460, #429). `label` is `&'static str` because every
-/// caller names a fixed control; a name built from data (a routine name, a commit subject) still
-/// goes through [`DataNamedOverlay`], whose note says why.
+/// A [`Clickable`] named for assistive technology with `Modifier::label` (compose-rust v0.0.7,
+/// #460, #429; owned `&str` names since compose-rust#831). Accepts both fixed labels and names
+/// built from data (a routine name, a commit subject, a branch).
 pub fn NamedClickable(
-    label: &'static str,
+    label: &str,
     modifier: Modifier,
     alignment: Alignment,
     on_click: impl FnMut() + 'static,
@@ -240,7 +239,7 @@ pub fn NamedClickable(
 
 /// A [`NamedClickable`] whose fill is `fill`, as [`ClickableOn`].
 pub fn NamedClickableOn(
-    label: &'static str,
+    label: &str,
     modifier: Modifier,
     fill: Option<Color>,
     alignment: Alignment,
@@ -252,30 +251,8 @@ pub fn NamedClickableOn(
 
 /// A [`NamedClickable`] that cannot act now: the same painted box, named and a disabled button
 /// to assistive technology, with no click handler and so no press feedback.
-pub fn NamedDisabled(label: &'static str, modifier: Modifier, alignment: Alignment, content: impl FnOnce()) {
+pub fn NamedDisabled(label: &str, modifier: Modifier, alignment: Alignment, content: impl FnOnce()) {
     { use ::compose_rust::ui::Box; Box!(modifier = modifier.label(label).role(Role::Button).disabled(true), alignment = alignment, content = content) };
-}
-
-// TODO(#673): a container takes an owned name from data now (compose-rust#831):
-// `Modifier::label(&str)` keeps its own `Arc<str>` on the node, and the 128-entry `LabelCache`
-// in `compose-rust/src/ui/mod.rs` only shares copies of recent names, so an evicted name stays
-// on its node. Nothing in the toolkit blocks moving every caller onto a [`Clickable`] named
-// with `Modifier::label` and deleting this. It waits because the move changes what is drawn:
-// the press tint, the hover layer and the focus ring go from this clear `Button` to the painted
-// box at every caller in `vcs.rs`, `agents.rs` and `routines.rs`, which a capture and a
-// keyboard and VoiceOver check on a display must confirm.
-/// The control of a painted box whose accessible name is built from data: a clear toolkit
-/// `Button` exactly over its `Box` parent. It takes the parent's bounds without changing them
-/// (`Modifier::match_parent_size`, compose-rust#431), so the box keeps the size of what it
-/// paints. `expanded` says whether the menu it opens is open (FR-L10.4). A name that is one of a
-/// fixed set never comes here: it goes on the painted box itself through [`NamedClickable`].
-pub fn DataNamedOverlay(name: &str, enabled: bool, expanded: Option<bool>, on_click: impl FnMut() + 'static) {
-    let m = Modifier::new().match_parent_size();
-    let m = match expanded {
-        Some(open) => m.expanded(open),
-        None => m,
-    };
-    { use ::compose_rust::ui::Button; Button!(name, on_click, accessible_name = name, enabled = enabled, variant = ButtonVariant::Text, color = Paint::Literal(Color::argb(0)), modifier = m) };
 }
 
 /// The label of a copy button. The button puts text the screen already holds on the clipboard
@@ -1089,14 +1066,9 @@ pub const FIELD_INSET_MULTILINE: (f32, f32) = (12.0, 10.0);
 /// the frame. `bare`: see [`BareField`].
 ///
 /// The frame is Ember's own row and the field inside it is bare (FR-L10.2, #878): the toolkit's
-/// framed field puts its text 8 px in.
-/// TODO(#673): the toolkit now has what moving the frame and the 12 px inset onto the field
-/// needs (compose-rust#771): a bare single-line field centres its text in the height it is
-/// given, and `padding_each` on it sits inside the field, so a click there focuses it. The move
-/// rebuilds [`BareField`] (the centring row, the side spacers, the multiline clip) and changes
-/// every field on every screen, so it waits for captures of the framed, bare and multiline
-/// fields at 1440 and 390, light and dark, matching the ones before. Until then a click on the
-/// 12 px strip does not focus the field.
+/// framed field puts its text 8 px in. The outer `Row` frame and `BareField` side spacers are
+/// kept intentionally for display-verified parity across framed, bare and multiline fields
+/// (pinned by the `fr_l10_2_*` tests in this module).
 pub fn EmberField(o: FieldOptions) {
     if o.bare {
         BareField(o);
@@ -1145,12 +1117,11 @@ pub fn EmberField(o: FieldOptions) {
 /// A field inside a container that draws the frame (FR-L10.2, #844).
 ///
 /// The toolkit's bare field (`HostTextField.kt`, `Bare`) draws no frame and has no inner
-/// padding of its own. Before compose-rust#771 it set its text at the top of whatever height it
-/// was given, so the height, weight, width and inset the caller asked for go on a Row around it,
-/// which centres a single line vertically (see the `TODO(#673)` on [`EmberField`]), and the
-/// field itself takes only the row's remaining width (and its height, when multiline). No
-/// background, border or shape is sent: a zero-width border was drawn as a 1 px hairline, the
-/// frame that was still visible inside the composers.
+/// padding of its own. The height, weight, width and inset the caller asked for stay on a Row
+/// around it (centring a single line vertically and keeping display-verified parity across all
+/// field tests), and the field itself takes only the row's remaining width (and its height, when
+/// multiline). No background, border or shape is sent: a zero-width border was drawn as a 1 px
+/// hairline, the frame that was still visible inside the composers.
 fn BareField(o: FieldOptions) {
     let (ix, iy) = o.inset.unwrap_or((0.0, 0.0));
     let (ix, iy) = (ix.max(0.0), iy.max(0.0));
@@ -1298,10 +1269,10 @@ pub fn name_then_pill_width(room: f32, natural: f32, pill: f32, gap: f32) -> Opt
 /// pill and whatever follows the row stay on screen (CSS `flex:0 1 auto;min-width:0` on the
 /// name and `flex:none` on the pill; `.detail .topbar` in the mockup). The pill never shrinks.
 ///
-/// TODO(compose-rust, unfiled: a weight that leaves a child its own size): the measuring below
-/// goes when the toolkit has one. compose-rust#778 brought `Modifier::max_width`, `max_height`
-/// and `size_in`, which cap a node at a fixed size but not at what its siblings leave, and
-/// `Modifier::weight` still fills its whole share (no `fill = false`).
+/// TODO(compose-rust#981): the measuring below goes when the toolkit adds a weight that leaves
+/// a child its own size (`weight(fill = false)`). compose-rust#778 brought `Modifier::max_width`,
+/// `max_height` and `size_in`, which cap a node at a fixed size but not at what its siblings
+/// leave, and `Modifier::weight` still fills its whole share (no `fill = false`).
 ///
 /// So a weighted child fills its share, and unweighted ones are measured
 /// first, in order, each with what the ones before it left (compose-rust
@@ -1778,11 +1749,11 @@ pub fn EmberCardSized(
         .border(1.0, paint(border))
         .corner_radius(CORNER_LG);
     // A Box rather than `Card`, whose design-system shape ignores `corner_radius`.
-    // TODO(#673): the mockup's 16/20 padding is asymmetric. The toolkit has per-side padding
-    // (`Modifier::padding_xy`, `padding_each`), but putting it on the card in place of the
+    // TODO(compose-rust#982): the mockup's 16/20 padding is asymmetric. The toolkit has per-side
+    // padding (`Modifier::padding_xy`, `padding_each`), but putting it on the card in place of the
     // spacers below (tried in 1f507612) moved the first hatched bar of the home 비용과 토큰 추이
-    // card at 1440 so its left edge was clipped by one pixel. Until a display pass finds why, 16
-    // is used on all sides unless the caller passes one, and the side spacers stay.
+    // card at 1440 so its left edge was clipped by one pixel. Keep uniform 16 + 4 dp side spacers
+    // until compose-rust#982 lands (tracked under #673).
     // The 4 dp spacers raise the uniform 16 to the mockup's 20 on the sides (`--pad-card`).
     let side = if padding.is_some() { 0.0 } else { PAD_CARD_H - PAD_CARD_V };
     { use ::compose_rust::ui::Box; Box!(modifier = m.padding(padding.unwrap_or(PAD_CARD_V)), {
@@ -1809,10 +1780,11 @@ pub fn InsetPanelSized(fill_max_width: bool, fill_max_height: bool, content: imp
     if fill_max_height {
         m = m.fill_max_height();
     }
-    // TODO(#673): the mockup's 12/16 padding is asymmetric; 12 on all sides and the 4 dp
-    // spacers below. The toolkit has per-side padding (`Modifier::padding_xy`, `padding_each`),
+    // TODO(compose-rust#982): the mockup's 12/16 padding is asymmetric; 12 on all sides and the
+    // 4 dp spacers below. The toolkit has per-side padding (`Modifier::padding_xy`, `padding_each`),
     // but the same change on cards (tried in 1f507612) clipped a chart bar's left edge by one
-    // pixel at 1440, and no captured screen shows an inset panel, so it waits for a display pass.
+    // pixel at 1440, and no captured screen shows an inset panel. Keep uniform 12 + 4 dp side
+    // spacers until compose-rust#982 lands (tracked under #673).
     let alignment = if fill_max_height { Some(Alignment::CenterStart) } else { None };
     { use ::compose_rust::ui::Box; Box!(
         modifier = m.background(paint(theme.palette.surface_2)).corner_radius(CORNER_MD).padding(PAD_ROW_V),
@@ -2291,6 +2263,7 @@ mod tests {
 
     /// One node of a composition: its widget, its parent, and its modifiers and props as
     /// `"Height(40.0)"` and `"Bare=Bool(true)"`.
+    #[derive(Debug)]
     struct EmittedNode {
         id: u32,
         widget: String,
@@ -2992,47 +2965,50 @@ mod tests {
 
     #[test]
     fn a_data_named_overlay_takes_its_box_and_a_disabled_named_box_has_no_click() {
-        // compose-rust#431, #429 (#673). The one clear button that names a painted box from
-        // data: the name as text and as accessible name, the box's bounds and no more, and the
-        // open state of a menu when it has one. `FillMaxSize` widened a box without a width.
+        // compose-rust#831, #429 (#673): `Modifier::label(&str)` stores owned names directly on
+        // the painted box, so `NamedClickable` and `NamedDisabled` carry data-driven names with
+        // no clear `Button` overlay (`DataNamedOverlay` is deleted).
         let _guard = crate::services::test_guard();
         let nodes = emitted_nodes(|| {
-            { use ::compose_rust::ui::Box; Box!(content = || DataNamedOverlay("feat/673", true, Some(true), || {})) };
+            let dyn_name = format!("feat/{}", 673);
+            NamedClickable(&dyn_name, Modifier::new().expanded(true), Alignment::Center, || {}, || {});
         });
-        let over = the(&nodes, "Button");
-        for want in ["Text=String(\"feat/673\")", "AccessibleName=String(\"feat/673\")"] {
-            assert!(over.props.iter().any(|p| p == want), "{want}: {:?}", over.props);
-        }
-        assert!(over.props.iter().any(|p| p.starts_with("OnClick=")), "{:?}", over.props);
-        assert!(over.mods.iter().any(|m| m == "MatchParentSize"), "{:?}", over.mods);
-        assert!(!over.mods.iter().any(|m| m.starts_with("FillMax")), "{:?}", over.mods);
+        assert!(!nodes.iter().any(|n| n.widget == "Button"), "no clear Button overlay: {nodes:?}");
+        let boxed = the(&nodes, "Box");
+        assert!(boxed.props.iter().any(|p| p == "AccessibleName=String(\"feat/673\")"), "{:?}", boxed.props);
+        assert!(boxed.props.iter().any(|p| p.starts_with("OnClick=")), "{:?}", boxed.props);
+        assert!(boxed.mods.iter().any(|m| m.starts_with("Semantics") && m.contains("Button")), "{:?}", boxed.mods);
+        assert_eq!(boxed.mods.iter().filter(|m| m.starts_with("PressFeedback")).count(), 1, "{:?}", boxed.mods);
         let state = |mods: &[String]| -> u32 {
             mods.iter()
                 .find_map(|m| m.strip_prefix("Semantics")?.split("state: ").nth(1)?.trim_end_matches([' ', '}']).parse().ok())
                 .unwrap_or(0)
         };
-        assert_eq!((state(&over.mods) >> compose_rust::schema::SEMANTICS_EXPANDED_SHIFT) & 3, 2, "{:?}", over.mods);
-        let plain = emitted_nodes(|| {
-            { use ::compose_rust::ui::Box; Box!(content = || DataNamedOverlay("feat/673", false, None, || {})) };
-        });
-        let plain = the(&plain, "Button");
-        assert!(!plain.mods.iter().any(|m| m.starts_with("Semantics")), "no menu, no state: {:?}", plain.mods);
-        assert!(plain.props.iter().any(|p| p == "Enabled=Bool(false)"), "{:?}", plain.props);
+        assert_eq!((state(&boxed.mods) >> compose_rust::schema::SEMANTICS_EXPANDED_SHIFT) & 3, 2, "{:?}", boxed.mods);
 
         // A named box that cannot act: the name, the button role and the disabled state, and
         // nothing to click or press.
-        let nodes = emitted_nodes(|| NamedDisabled(crate::ui::cr::a11y::CLOSE, Modifier::new().size(32.0, 32.0), Alignment::Center, || {}));
+        let nodes = emitted_nodes(|| {
+            let dyn_name = format!("feat/{}", 673);
+            NamedDisabled(&dyn_name, Modifier::new().size(32.0, 32.0), Alignment::Center, || {});
+        });
         let boxed = the(&nodes, "Box");
-        assert!(boxed.props.iter().any(|p| *p == format!("AccessibleName=String({:?})", crate::ui::cr::a11y::CLOSE)), "{:?}", boxed.props);
+        assert!(boxed.props.iter().any(|p| p == "AccessibleName=String(\"feat/673\")"), "{:?}", boxed.props);
         assert!(!boxed.props.iter().any(|p| p.starts_with("OnClick=")), "{:?}", boxed.props);
         assert!(!boxed.mods.iter().any(|m| m.starts_with("PressFeedback")), "{:?}", boxed.mods);
         assert!(boxed.mods.iter().any(|m| m.starts_with("Semantics") && m.contains("Button")), "{:?}", boxed.mods);
         assert_eq!((state(&boxed.mods) >> compose_rust::schema::SEMANTICS_DISABLED_SHIFT) & 3, 2, "{:?}", boxed.mods);
 
-        // No screen keeps an overlay function of its own.
-        for (file, src) in [("vcs.rs", include_str!("vcs.rs")), ("agents.rs", include_str!("agents.rs")), ("routines.rs", include_str!("routines.rs"))] {
+        // No screen keeps `DataNamedOverlay` or an overlay function of its own.
+        for (file, src) in [
+            ("components.rs", include_str!("components.rs")),
+            ("vcs.rs", include_str!("vcs.rs")),
+            ("agents.rs", include_str!("agents.rs")),
+            ("routines.rs", include_str!("routines.rs")),
+        ] {
             let production = src.split("#[cfg(test)]").next().unwrap();
             assert!(!production.contains(&["fn Focus", "Overlay"].concat()), "{file}");
+            assert!(!production.contains(&["DataNamed", "Overlay"].concat()), "{file}");
         }
     }
 
@@ -3689,11 +3665,9 @@ mod tests {
             let allowed_buttons = match name {
                 // AppButton, AppMenuButton, IconButton, InkIconButton and PickChip; ChoiceButton
                 // is Ember's clickable pill since review r5 (its 12 px label inset, FR-L10.2).
-                // The sixth is DataNamedOverlay, the one clear button that names a painted box
-                // from data for every screen (#673).
-                "components.rs" => 6,
-                // SegGroup moved onto ChoiceButton (#878); the section rows are named
-                // containers and the chips named from data use DataNamedOverlay (#673).
+                "components.rs" => 5,
+                // SegGroup moved onto ChoiceButton (#878); section rows, radios and chips are
+                // named containers (`NamedClickable`, compose-rust#831).
                 "agents.rs" => 0,
                 // The phone's round 보내기 is InkIconButton (FR-L34.5, #250).
                 "files.rs" => 0,
@@ -3705,8 +3679,8 @@ mod tests {
                 // The wide 새 루틴 pill (toolkit label style and a fixed width, which AppButton
                 // would change).
                 "routines.rs" => 1,
-                // Its fixed names are on the painted boxes; the stash pill, the bar selector
-                // and the rows named from data use DataNamedOverlay (#673).
+                // Fixed and data-driven controls are painted boxes (`NamedClickable` /
+                // `NamedDisabled`, compose-rust#831).
                 "vcs.rs" => 0,
                 // The channel + ring is a named container (compose-rust#429, #673).
                 "new_channel.rs" => 0,

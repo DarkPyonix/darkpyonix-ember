@@ -418,7 +418,7 @@ fn fr_l31_13_rename_edits_the_open_document_and_writes_the_files_that_are_not_op
     let (bytes, write) = fx
         .iter()
         .find_map(|e| match e {
-            Effect::WriteFile { uri: u, bytes, token } if u.path == other => Some((bytes.clone(), *token)),
+            Effect::WriteFile { uri: u, bytes, token, .. } if u.path == other => Some((bytes.clone(), *token)),
             _ => None,
         })
         .expect("a write of the other file");

@@ -513,7 +513,8 @@ runtime turns "protocol stability" from a research risk into a release-engineeri
 | `ipc` | `IpcClient::start(conn, ctx)` → `(client, lifecycle_rx)`; `call(channel, cmd, IpcValue)`; `listen` / `unlisten`; `IpcValue`; `serialize` / `deserialize` |
 | `remote_fs` | `RemoteFs::{stat, read_file, write_file, readdir, mkdir, delete, rename, subscribe_changes, watch, unwatch}` |
 | `management` | `get_environment_data`, `scan_extensions`, `RemoteAgentConnectionContext` |
-| `exthost` | `InitDataParams::to_json`; `initialize(conn, &init)` → `(RpcPeer, RpcEvent rx)`; `bootstrap_calls`; `configuration_init_data`; typed `Call` builders for the subset; `MainThreadCall::parse`; `default_reply` |
+| `exthost` | `InitDataParams::to_json`; `initialize(conn, &init)` → `(RpcPeer, RpcEvent rx)`; `bootstrap_calls`; `configuration_init_data`; typed `Call` builders for the subset; `default_reply` |
+| `actors` | generated from `extHost.protocol.ts` at `PINNED_COMMIT`: per `MainThread*` actor a `Method` enum, `<Method>Args::{decode, encode}`, a trait whose methods default to `Outcome::Unimplemented`, and `dispatch`; `ember_editor`'s engine implements the traits it acts on |
 | `rpc` | `RpcMessage::{encode, decode}`; `RpcPeer::{start_call, call, fire, cancel, respond, connection}`; `Arg`; `Reply` |
 | `rpc_ids` | `id_of(name)`, `name_of(id)`, `PROXY_IDS` |
 | `document` | `DocumentMirror::{apply, replace_all, set_eol, position_from_byte, offset_at}`; `DocumentBridge::{open, open_in_editor, change, close, saved, set_language}` (`open_in_editor` also adds one visible, active editor) |

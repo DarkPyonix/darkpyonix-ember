@@ -3071,7 +3071,13 @@ pub mod page {
             let mut revision = revision;
             *revision.write() += 1;
         });
-        crate::ui::editor_terminals::ensure(&s.server_url, &s.computer, &s.folder, &s.project, on_change);
+        crate::ui::editor_terminals::ensure(
+            terminal_stream::TermReach::for_base(&s.server_url),
+            &s.computer,
+            &s.folder,
+            &s.project,
+            on_change,
+        );
         crate::ui::editor_terminals::active_handle()
     }
 

@@ -198,13 +198,12 @@ ember-server owner call POST /api/accounts <span class="s">'{"agent": "claude-co
         환경용입니다. 범위가 <code>full</code> 인 원격 장치는 전송 경로에서 승인에 대해 소유자로
         취급됩니다. 장치 목록 자체는 서버가 있는 컴퓨터에서만 관리합니다. Windows의 서버는 이름 있는 파이프로
         요청을 받고(<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/815">#815</a>),
-        <code>EMBER_OWNER_PRESENCE</code> 도 같은 방식으로 따릅니다. 기본값은 <code>warn</code> 이고,
-        <code>enforce</code> 로 하면 토큰만으로는 소유자 경로를 쓸 수 없습니다.
+        <code>EMBER_OWNER_PRESENCE</code> 도 같은 방식으로 따릅니다. 기본값은 <code>enforce</code> 이고,
+        <code>warn</code> 으로 설정하면 거부하지 않고 로그만 남깁니다.
       </p>
       <p>
-        <strong>막지 못하는 것.</strong> 기본값인 <code>warn</code> 에서는 아무것도 거부하지 않습니다.
-        <code>server-token</code> 을 읽은 프로세스는 이 경로를 그대로 호출할 수 있고, 서버는 로그만 남깁니다.
-        닫으려면 <code>EMBER_OWNER_PRESENCE=enforce</code> 를 설정하세요. 그렇게 해도, 내 계정으로 임의 코드를
+        <strong>막지 못하는 것.</strong> <code>EMBER_OWNER_PRESENCE=warn</code> 을 설정하면 거부하지 않고
+        로그만 남깁니다. 기본값인 <code>enforce</code> 를 쓰더라도, 내 계정으로 임의 코드를
         실행하고 샌드박스에 들어 있지 않은
         프로세스는 여전히 데이터 폴더의 Ember 데이터베이스와 키를 직접 읽거나 바꿀 수 있고, 앱에 붙거나,
         에이전트의 프로세스 트리를 벗어나 키를 요청해서 앱을 흉내 낼 수 있습니다. 콘솔 코드는 그 프로세스가

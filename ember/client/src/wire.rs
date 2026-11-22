@@ -16,6 +16,10 @@ pub struct EmberOseConnection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay: Option<String>,
     pub connection_token: String,
+    /// The Code-OSS commit of the OSE build, when the server reports it (SPEC FR-E10, #32); the
+    /// editor compares it with the commits it supports before connecting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ose_commit: Option<String>,
 }
 
 impl std::fmt::Debug for EmberOseConnection {

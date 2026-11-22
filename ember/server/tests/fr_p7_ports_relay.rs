@@ -85,3 +85,22 @@ async fn fr_p7_ports_relay_returns_the_node_list_and_errors_map() {
     })
     .await;
 }
+
+/// #981: the local computer (`local`) answers from the server's in-process node, not 400.
+#[tokio::test]
+async fn fr_p7_ports_relay_answers_for_the_local_computer_from_the_in_process_node() {
+    within(async {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let computers = Computers::new(Registry::new(store), computers::default_connector());
+        let app = computers::ports::router(computers);
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+
+        let r = reqwest::get(format!("{base}/api/computers/{}/ports", computers::LOCAL)).await.unwrap();
+        assert_eq!(r.status(), 200);
+        let got: PortsResponse = r.json().await.unwrap();
+        assert_eq!(got.supported, cfg!(any(target_os = "linux", target_os = "macos")));
+    })
+    .await;
+}

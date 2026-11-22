@@ -1,5 +1,6 @@
 {
-  "_todo": "TODO(owner, #84): the first real run on an OSE build fills this in. 'pass' = must activate; 'known-fail' = tracked failure, with a 'reason'. Every entry is an unverified 'pass' today.",
+  "_todo": "Filled from the first real run (Ember CI 44946499791, 2026-11-21, #84); the owner has not confirmed the list yet. 'pass' = must activate; 'known-fail' = tracked failure, with a 'reason'.",
+  "_runs": "44946499791, read from the ose-regress-<target> extension host logs (its results.json read every entry as not-activated because regress.sh split the log paths at spaces, fixed in #84): all five activated on linux-x64, darwin-x64 and darwin-arm64; on linux-arm64 four activated and ms-python.debugpy did not (no activation line, one 'TypeError: n is not iterable' in the extension host log), kept at 'pass' until a second run shows whether it repeats. Deep: mhutchie.git-graph failed on every target with 'unregistered command _setContext', a client gap fixed in #84, so it stays 'pass'; ms-python.debugpy reported not-run (#445).",
   "_deep": "deep.expect for an entry with a `deep` check in extensions.json (#929): 'pass' = the check must pass; 'known-fail' or 'not-built' with a 'reason'. Only a 'fail' where 'pass' is expected fails the deep run.",
   "results": {
     "redhat.vscode-yaml": {

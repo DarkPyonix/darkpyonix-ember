@@ -516,6 +516,20 @@ pub enum Push {
     ApproveAll { session_id: String, enabled: bool },
     /// A message was posted to a channel (FR-T10, FR-L12).
     ChannelMessage { channel_id: String, message: crate::channels::ChannelMessage },
+    /// A schedule was created (FR-A8), by a user or by an agent.
+    ScheduleCreated { schedule: Schedule },
+    /// A schedule was edited, paused or resumed: the whole record.
+    ScheduleUpdated { schedule: Schedule },
+    /// A schedule was deleted.
+    ScheduleDeleted { id: String, project: String },
+    /// A schedule run was recorded or changed status.
+    ScheduleRun { run: ScheduleRun },
+    /// A registered computer's reachability changed (FR-L3): the server's background probe
+    /// (every 30 s while a push client is connected). `reachable: None` is not known.
+    ComputerStatus { computer_id: String, reachable: Option<bool> },
+    /// A transfer was offered, moved or ended (FR-L27.8, throttled to 4 a second per transfer):
+    /// only its id; the files screen reads the snapshot again.
+    TransferUpdated { id: String },
 }
 
 // ---- teams and mentions (FR-T6, FR-T7; server `a2a::team`, `a2a::mention`) -------------------

@@ -28,7 +28,7 @@ pub use crate::ui::routines::{
     demo_session_title, draft_schedule_kind, event_field_text, finish_demo_run, has_running_remote_run,
     parse_ci_event, patch_is_empty,
     resolve_run_session_id, rollback_optimistic_run, run_is_simulated, run_now_busy, DEMO_RUN_BUSY, DEMO_RUN_DONE,
-    DEMO_RUN_MS, DEMO_RUN_STARTED, DEMO_SESSION_PREFIX, REMOTE_RUN_POLL_MS,
+    DEMO_RUN_MS, DEMO_RUN_STARTED, DEMO_SESSION_PREFIX,
     REMOTE_RUN_STARTED, SAMPLE_FLAG,
     not_saved_sentence, run_row_text, run_tile_sub, unsaved_fields,
     ago, big_time, civil_from_days, cron_valid, days_from_civil,
@@ -644,8 +644,11 @@ pub fn RoutinesScreen() {
     let _ = try_services().map(|s| s.ui.live.launcher.get());
     let is_demo = sample_mode();
     if !is_demo {
+        // Read at the start and again on every schedule push or reconnect (PR-1, #1049): the
+        // bridge bumps `live.schedules`, so a running run's progress comes without a timer.
+        let pushed = try_services().map(|s| s.ui.live.schedules.get()).unwrap_or(0);
         let tick_refresh = tick.clone();
-        launched_effect((), move || async move {
+        launched_effect(pushed, move || async move {
             refresh(tick_refresh);
         });
     }
@@ -775,32 +778,6 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
     }
     let cur_entries = entries_state.get();
     let cur_online = online_state.get();
-    let any_running = has_running_remote_run(sample_mode(), cur_online, &cur_entries);
-    if any_running {
-        let tick_poll = tick.clone();
-        let entries_poll = entries_state.clone();
-        let online_poll = online_state.clone();
-        launched_effect((any_running, tick.get()), move || async move {
-            if try_services().is_none() {
-                return;
-            }
-            run_shared(
-                async move {
-                    tokio::time::sleep(std::time::Duration::from_millis(REMOTE_RUN_POLL_MS)).await;
-                    let list = load_remote().await;
-                    if let Ok(sessions) = services().client.api().sessions(None).await {
-                        services().client.apply(ember_client::Input::SessionsLoaded(sessions));
-                    }
-                    list
-                },
-                move |list| {
-                    apply_load(list);
-                    sync_from_remote(&entries_poll, &online_poll);
-                    tick_poll.update(|v| *v += 1);
-                },
-            );
-        });
-    }
     let device_only = with_store(|s| !s.entries().is_empty());
     let now = now_local();
     let (computers, existing_projects) = live_choices();

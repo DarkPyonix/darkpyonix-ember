@@ -5,17 +5,15 @@
 //! The decisions (grouping, ordering, unread badges, bubble side, date dividers, filter and
 //! search, wire to room mapping, after-seq merging) are `ui::channels`' plain functions, used as
 //! they are. [`ChannelsScreen`] reads the server's channels (FR-T10, `GET /api/channels`), loads
-//! the open room's messages, polls `?after=seq` every [`POLL_EVERY`] while a room is open (the
-//! effect is keyed on the open room, so closing the room or leaving the screen stops it) and
+//! the open room's messages once, and reads `?after=seq` again when the server pushes a channel
+//! message or push reconnects (PR-1, #1049: the bridge bumps `live.channels`; no timer), and
 //! sends with `POST`. In demo mode the sample rooms stand in. [`ChannelsScreenWith`] takes rooms,
 //! for the preview window. Unread counts are not built on the server, so no badge is drawn.
 
 #![allow(non_snake_case)]
 
-use std::time::Duration;
-
 use compose_rust::runtime::{
-    delay, launched_effect, mutable_state_of, remember, remember_with_key, MutableState,
+    launched_effect, mutable_state_of, remember, remember_with_key, MutableState,
 };
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
@@ -73,9 +71,6 @@ pub fn Avatar(name: &str, harness: &str, size: f32) {
                 .shape_role(compose_rust::ShapeRole::Full), alignment = Alignment::Center, content = || Label(&initial, Fs::Sm, Weight::Semibold, Some(paint(fg)), None)) };
 }
 
-/// How often an open room asks the server for messages after the last seq it has.
-pub const POLL_EVERY: Duration = Duration::from_secs(2);
-
 /// What the live screen holds: the rooms read from the server and the state of that read.
 #[derive(Clone)]
 pub(super) struct Feed {
@@ -129,7 +124,8 @@ impl Feed {
         self.rooms.get_untracked().iter().find(|r| r.id == id).map(|r| last_seq(&r.messages)).unwrap_or(0)
     }
 
-    /// Loads the room's latest messages once, then polls `after=seq` until cancelled.
+    /// Loads the room's latest messages once. Later messages come by [`Feed::catch_up`], on a
+    /// push (PR-1).
     async fn follow(&self, id: String) {
         let first = {
             let id = id.clone();
@@ -141,21 +137,29 @@ impl Feed {
                 tracing::warn!("channel messages failed: {e}");
                 notice::post("메시지를 불러오지 못했습니다. 잠시 뒤 다시 시도합니다.".to_string())
             }
-            None => return,
+            None => {}
         }
-        loop {
-            delay(POLL_EVERY).await;
-            let after = self.after(&id);
-            let answer = {
-                let id = id.clone();
-                on_runtime(async move { crate::services::services().client.api().channel_messages(&id, &ember_client::channels::MessagesQuery { after: Some(after), ..Default::default() }).await }).await
-            };
-            match answer {
-                Some(Ok(list)) if !list.is_empty() => self.merge(&id, list.iter().map(message_from).collect()),
-                // A failed poll is tried again on the next beat; the room stays as it is.
-                Some(_) => {}
-                None => return,
+    }
+
+    /// A channel message was pushed or push reconnected (PR-1, #1049): the list (unread counts)
+    /// is read again, and the open room `open` reads the messages after its last seq and is
+    /// marked read when any came. A failed read leaves things as they are until the next push.
+    async fn catch_up(&self, open: Option<String>) {
+        self.refresh().await;
+        let Some(id) = open else { return };
+        let after = self.after(&id);
+        let answer = {
+            let id = id.clone();
+            on_runtime(async move { crate::services::services().client.api().channel_messages(&id, &ember_client::channels::MessagesQuery { after: Some(after), ..Default::default() }).await }).await
+        };
+        match answer {
+            Some(Ok(list)) if !list.is_empty() => {
+                self.merge(&id, list.iter().map(message_from).collect());
+                self.mark_read(&id);
             }
+            Some(Ok(_)) => {}
+            Some(Err(e)) => tracing::warn!("channel catch-up failed: {e}"),
+            None => {}
         }
     }
 
@@ -268,12 +272,24 @@ fn ChannelsView(rooms: Vec<Room>, load: Load, feed: Option<Feed>) {
         return;
     }
 
-    // Load and poll the open room's messages; the effect ends when the room or the screen closes.
+    // Load the open room's messages; the effect ends when the room or the screen closes.
     if let Some(f) = feed.clone() {
         let key = cur.clone();
         launched_effect(key.clone(), move || async move {
             if let Some(id) = key {
                 f.follow(id).await;
+            }
+        });
+        // A pushed channel message (or a reconnect) since this screen opened: read again
+        // (PR-1, #1049). The count at the first composition is the baseline, so opening the
+        // screen does not read twice.
+        let pushed = crate::services::try_services().map(|s| s.ui.live.channels.get()).unwrap_or(0);
+        let baseline = remember(|| pushed);
+        let f = f.clone();
+        let open_room = cur.clone();
+        launched_effect(pushed, move || async move {
+            if pushed != baseline {
+                f.catch_up(open_room).await;
             }
         });
     }

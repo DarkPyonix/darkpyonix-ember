@@ -117,6 +117,13 @@ pub struct Changes {
     pub resync_all: bool,
     /// Something persisted in the cache changed.
     pub persist: bool,
+    /// Channels (by id) that got a message (PR-1, FR-T10). Channels are read through the API by
+    /// the channels UI, not held here; this tells it which ones to read again.
+    pub channels: BTreeSet<String>,
+    /// A schedule or one of its runs changed (PR-1, FR-A8): the routines UI reads them again.
+    pub schedules: bool,
+    /// Transfers (by id) that moved (PR-1, FR-L27.8): the files screen reads its snapshot again.
+    pub transfers: BTreeSet<String>,
 }
 
 impl Changes {
@@ -135,6 +142,9 @@ impl Changes {
         self.resync.extend(other.resync);
         self.resync_all |= other.resync_all;
         self.persist |= other.persist;
+        self.channels.extend(other.channels);
+        self.schedules |= other.schedules;
+        self.transfers.extend(other.transfers);
     }
 }
 
@@ -443,8 +453,36 @@ impl State {
                     ch.sessions.insert(session_id);
                 }
             }
-            // Channels are read through the API by the channels UI, not held in the reducer.
-            Input::Push(Push::ChannelMessage { .. }) => {}
+            // Channels are read through the API by the channels UI, not held in the reducer; the
+            // change names the channel so the UI reads it again (PR-1, #1049).
+            Input::Push(Push::ChannelMessage { channel_id, .. }) => {
+                ch.channels.insert(channel_id);
+            }
+            Input::Push(
+                Push::ScheduleCreated { .. }
+                | Push::ScheduleUpdated { .. }
+                | Push::ScheduleDeleted { .. }
+                | Push::ScheduleRun { .. },
+            ) => ch.schedules = true,
+            // A computer's reachability, updated in place (FR-L3). A computer this client does
+            // not list yet waits for the next list read; `None` keeps what is shown.
+            Input::Push(Push::ComputerStatus { computer_id, reachable }) => {
+                let now = match reachable {
+                    Some(true) => Some(Reachability::Online),
+                    Some(false) => Some(Reachability::Offline),
+                    None => None,
+                };
+                if let (Some(now), Some(c)) = (now, self.computers.iter_mut().find(|c| c.id == computer_id)) {
+                    if c.reachability != now {
+                        c.reachability = now;
+                        ch.computers = true;
+                        ch.persist = true;
+                    }
+                }
+            }
+            Input::Push(Push::TransferUpdated { id }) => {
+                ch.transfers.insert(id);
+            }
             Input::Push(Push::TeamUpdated { team }) => self.put_team(team, &mut ch),
             Input::TeamLoaded { session_id, team: Some(team) } => {
                 if team.member(&session_id).is_none() {
@@ -793,6 +831,45 @@ mod tests {
     fn lagged_and_unknown_sessions_request_full_resync() {
         let mut s = State::new();
         assert!(s.apply(Input::Push(Push::Lagged { missed: 4 })).resync_all);
+    }
+
+    /// A channel message names its channel and a schedule push marks the schedules changed, so
+    /// the UI reads them again instead of polling (PR-1, #1049).
+    #[test]
+    fn pr_1_channel_and_schedule_pushes_reach_the_changes() {
+        let mut s = State::default();
+        let message: crate::channels::ChannelMessage =
+            serde_json::from_str(r#"{"id":"2","seq":2,"from":"s1","text":"hi","at":5}"#).unwrap();
+        let ch = s.apply(Input::Push(Push::ChannelMessage { channel_id: "c1".into(), message }));
+        assert_eq!(ch.channels, BTreeSet::from(["c1".to_string()]));
+        assert!(!ch.schedules && !ch.is_empty());
+        let ch = s.apply(Input::Push(Push::ScheduleDeleted { id: "sch1".into(), project: "p".into() }));
+        assert!(ch.schedules && ch.channels.is_empty());
+        let mut all = Changes::default();
+        all.merge(Changes { channels: BTreeSet::from(["a".to_string()]), ..Default::default() });
+        all.merge(Changes { channels: BTreeSet::from(["b".to_string()]), schedules: true, ..Default::default() });
+        assert_eq!(all.channels.len(), 2);
+        assert!(all.schedules);
+        let ch = s.apply(Input::Push(Push::TransferUpdated { id: "t1".into() }));
+        assert_eq!(ch.transfers, BTreeSet::from(["t1".to_string()]));
+    }
+
+    /// A pushed reachability updates the listed computer in place; an unknown computer and an
+    /// unknown reachability change nothing (FR-L3, PR-1, #1049).
+    #[test]
+    fn pr_1_reachability_push_updates_the_computer_in_place() {
+        let mut s = State::default();
+        let pc = Computer { id: "studio".into(), name: "Studio".into(), reachability: Reachability::Unknown, projects: vec![] };
+        s.apply(Input::ComputersLoaded(vec![pc]));
+        let push = |id: &str, r: Option<bool>| Input::Push(Push::ComputerStatus { computer_id: id.into(), reachable: r });
+        let ch = s.apply(push("studio", Some(false)));
+        assert!(ch.computers && ch.persist);
+        assert_eq!(s.computers()[0].reachability, Reachability::Offline);
+        assert!(s.apply(push("studio", Some(false))).is_empty(), "no change");
+        assert!(s.apply(push("studio", None)).is_empty(), "unknown keeps what is shown");
+        assert!(s.apply(push("ghost", Some(true))).is_empty(), "not listed yet");
+        assert!(s.apply(push("studio", Some(true))).computers);
+        assert_eq!(s.computers()[0].reachability, Reachability::Online);
         assert!(s.apply(push("ghost", 1, SessionStatus::Running, AgentEvent::Unknown)).resync_all);
     }
 

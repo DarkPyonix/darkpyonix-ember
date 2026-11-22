@@ -622,6 +622,9 @@ async fn refresh(book: &Mutex<Book>, api: &Api) -> Result<(), TransferError> {
 
 /// Reads the snapshot for as long as the app runs: every second while something moves or
 /// waits for an answer, every five otherwise, and rarely against a server without the API.
+///
+/// A pushed `transfer_updated` (PR-1, FR-L27.8, #1049) wakes it at once ([`poke`]); the timer
+/// stays until every server publishes those pushes (the server part comes separately).
 async fn poll(book: Arc<Mutex<Book>>, api: Api) {
     loop {
         let wait = match refresh(&book, &api).await {
@@ -638,8 +641,22 @@ async fn poll(book: Arc<Mutex<Book>>, api: Api) {
             // Progress and rates move without the snapshot's shape changing.
             redraw();
         }
-        tokio::time::sleep(Duration::from_secs(wait)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(wait)) => {}
+            _ = pushed().notified() => {}
+        }
     }
+}
+
+/// Wakes the poll task for a pushed transfer change.
+fn pushed() -> &'static tokio::sync::Notify {
+    static PUSHED: OnceLock<tokio::sync::Notify> = OnceLock::new();
+    PUSHED.get_or_init(tokio::sync::Notify::new)
+}
+
+/// A transfer push arrived (or push reconnected): the files screen reads the snapshot now.
+pub fn poke() {
+    pushed().notify_one();
 }
 
 /// One send, from reading the files to the end. Run again for a retry.

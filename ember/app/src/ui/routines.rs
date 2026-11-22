@@ -1347,8 +1347,6 @@ pub fn patch_is_empty(p: &SchedulePatch) -> bool {
 
 /// How long the simulated run shows "실행 중" before it finishes.
 pub const DEMO_RUN_MS: u64 = 2500;
-/// How often the Routines screen polls the server while a schedule run is `Running` (FR-L25, #494).
-pub const REMOTE_RUN_POLL_MS: u64 = 1000;
 /// The id prefix the demo gives a session it creates; a run linked to one is a simulation.
 pub const DEMO_SESSION_PREFIX: &str = "demo-new-";
 pub const DEMO_RUN_STARTED: &str = "예시 실행을 시작했습니다. 데모에서 시뮬레이션하는 실행입니다";
@@ -1390,7 +1388,8 @@ pub fn apply_server_run_started(e: &mut Entry, run: &ScheduleRun) -> String {
     }
 }
 
-/// Whether `entries` has any run still in `RunStatus::Running` that should be polled on the server.
+/// Whether `entries` has any run still in `RunStatus::Running` on the server (its progress comes
+/// by the schedule pushes, PR-1, #1049).
 pub fn has_running_remote_run(sample_mode: bool, online: bool, entries: &[Entry]) -> bool {
     !sample_mode
         && online
@@ -1401,7 +1400,7 @@ pub fn has_running_remote_run(sample_mode: bool, online: bool, entries: &[Entry]
 
 /// Whether 지금 실행 is busy for this routine: a run is in progress, either the optimistic
 /// placeholder that `begin_demo_run` put first or a server run still `Running` (the runs
-/// `has_running_remote_run` polls for). The button is disabled while this holds (FR-L25, #494).
+/// `has_running_remote_run` names). The button is disabled while this holds (FR-L25, #494).
 pub fn run_now_busy(e: &Entry) -> bool {
     e.runs.iter().any(|r| r.status == RunStatus::Running)
 }

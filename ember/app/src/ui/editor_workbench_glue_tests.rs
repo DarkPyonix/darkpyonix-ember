@@ -39,6 +39,7 @@ fn target() -> EditorTarget {
         server_url: String::new(),
         computer: String::new(),
         relay: String::new(),
+        vscode_url: String::new(),
     }
 }
 
@@ -1104,4 +1105,38 @@ fn fr_l31_the_editor_page_mounts_inside_a_compose_root() {
     let batch = dioxus_compose::protocol::decode_batch(bytes).expect("decode");
     let sent: Vec<String> = batch.iter().map(|m| format!("{m:?}")).collect();
     assert!(sent.iter().any(|m| m.contains("\"a.rs\"")), "the project tree row a.rs is not in the root's first batch");
+}
+
+// SPEC FR-E3 (#32 phase A step 7): a hover update for the active document draws the hover card over
+// the editor once the editor has said where the hovered word is; a hover for another place, or
+// none, draws nothing.
+#[test]
+fn fr_e3_a_hover_draws_the_card_where_the_editor_says_the_word_is() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open();
+    page.click_row();
+    page.deliver(opened(7));
+    let word = ember_editor::WidgetRange::new(ember_editor::WidgetPos::new(0, 3), ember_editor::WidgetPos::new(0, 7));
+    let popup = ember_editor::hover::HoverPopup {
+        doc: uri().key(),
+        generation: 7,
+        pos: ember_editor::WidgetPos::new(0, 5),
+        range: Some(word),
+        diagnostics: Vec::new(),
+        contents: vec![ember_editor::hover::MarkdownString { value: "fn main()".into(), is_trusted: false, support_theme_icons: false, support_html: false, raw: serde_json::Value::Null }],
+        complete: true,
+    };
+    page.deliver(SessionUpdate::Hover(popup));
+    assert!(page.find("data-ed", "hover-card").is_none(), "no card before the editor answers");
+    super::set_hover_rect((7, 0, 9), Some(compose_rust::code::CodeRect::new(40.0, 60.0, 2.0, 18.0)));
+    page.redraw();
+    assert!(page.find("data-ed", "hover-card").is_none(), "an answer for another position draws nothing");
+    super::set_hover_rect((7, 0, 3), Some(compose_rust::code::CodeRect::new(40.0, 60.0, 2.0, 18.0)));
+    page.redraw();
+    let card = page.find("data-ed", "hover-card").expect("the card is drawn");
+    assert!(page.attr(card, "style").unwrap_or_default().contains("top:80px;"));
+    assert!(page.text().contains("fn main()"));
+    page.deliver(SessionUpdate::HoverHidden { uri: uri() });
+    assert!(page.find("data-ed", "hover-card").is_none(), "the card goes with the hover");
+    super::set_hover_rect((0, 0, 0), None);
 }

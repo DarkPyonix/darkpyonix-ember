@@ -1024,6 +1024,18 @@ impl Computers {
         Ok(node_client(&c, self.dialer.as_ref())?)
     }
 
+    /// A [`NodeClient`] for any computer a relay route serves: this machine's in-process node for
+    /// [`LOCAL`] ([`Computers::local_node_client`]), else [`Computers::client`]. The metrics,
+    /// ports and file relays use it, so the local computer answers like a registered one instead
+    /// of 400 (#981).
+    pub fn relay_client(&self, id: &str) -> Result<NodeClient, ComputerError> {
+        if id == LOCAL {
+            self.local_node_client()
+        } else {
+            self.client(id)
+        }
+    }
+
     /// A [`NodeClient`] for this machine's in-process node, which is started on the first call
     /// (loopback, random token, rooted at `$HOME`). Needs a Tokio runtime (FR-W4, #455).
     pub fn local_node_client(&self) -> Result<NodeClient, ComputerError> {

@@ -174,9 +174,10 @@ start_server() {
   # When enforce becomes the default, this harness needs EMBER_OWNER_PRESENCE=warn or a claim.
   local extra_env=()
   [ -n "${SMOKE_CLAUDE_BIN:-}" ] && extra_env+=("EMBER_CLAUDE_BIN=$SMOKE_CLAUDE_BIN")
-  env -u EMBER_DEMO_DATA -u EMBER_TRANSPORT -u EMBER_GUEST_LISTEN -u EMBER_SERVER_TOKEN -u EMBER_OWNER_PRESENCE \
+  env -u EMBER_DEMO_DATA -u EMBER_TRANSPORT -u EMBER_GUEST_LISTEN -u EMBER_SERVER_TOKEN \
     -u EMBER_ACP_AGENTS -u EMBER_ACP_AGENTS_FILE -u EMBER_HOSTED \
     "${extra_env[@]}" \
+    EMBER_OWNER_PRESENCE=warn \
     EMBER_DATA_DIR="$SD" EMBER_LISTEN="127.0.0.1:$PORT" EMBER_SCRIPTED_AGENT=1 \
     EMBER_HUB_URL=off EMBER_SERVER_RELAY=off TMPDIR="$RUN/tmp" RUST_LOG="${RUST_LOG:-info}" \
     nohup "$SERVER_BIN" >>"$LOGS/server.log" 2>&1 &

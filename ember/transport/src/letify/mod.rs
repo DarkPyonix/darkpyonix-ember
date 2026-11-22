@@ -32,6 +32,7 @@
 
 mod link;
 mod pkarr;
+mod relay_guard;
 mod relay_url;
 
 use std::collections::{HashMap, VecDeque};
@@ -228,6 +229,7 @@ struct Inner {
     /// The relay to use: configured, or this endpoint's own relay role.
     relay: Mutex<Option<RelayTarget>>,
     own_relay: Option<RelayTarget>,
+    own_relay_standing: Option<RelayTarget>,
     relay_handle: Option<RelayHandle>,
     signal: Mutex<Option<Arc<SignalAdapter>>>,
     /// Devices admitted through an attached gate (canonical ids); `None` until a gate attaches.
@@ -307,22 +309,37 @@ impl LetifyBackend {
         // The relay role (the main server).
         let mut relay_handle = None;
         let mut own_relay = None;
+        let mut own_relay_standing = None;
         if let Some(addr) = cfg.relay_listen {
             let policy = if cfg.relay_open {
                 PeerPolicy::from_fn(|_| true)
             } else {
                 PeerPolicy::allow(vec![identity.node_id()])
             };
-            let relay = Relay::bind(&addr.to_string(), identity.clone(), policy, LinkRelayConfig::default())
+            // Bind the underlying relay on a private loopback port with headroom for both
+            // guarded public peers and the server's own standing requests. Public peers enter
+            // through `relay_guard` (per-source concurrency + sliding-window rate limit), while
+            // the server's own standing requests dial the private loopback port directly so a
+            // public connection flood cannot starve them (FR-N9, #920).
+            let backend_bind = match addr.ip() {
+                std::net::IpAddr::V6(_) => "[::1]:0",
+                std::net::IpAddr::V4(_) => "127.0.0.1:0",
+            };
+            let relay_cfg = LinkRelayConfig {
+                max_preauth: 256,
+                max_preauth_per_ip: 256,
+                ..LinkRelayConfig::default()
+            };
+            let relay = Relay::bind(backend_bind, identity.clone(), policy, relay_cfg)
                 .await
-                .map_err(|e| TransportError::Bind(format!("relay {addr}: {e}")))?;
-            let bound = relay.local_addr();
+                .map_err(|e| TransportError::Bind(format!("relay backend {backend_bind}: {e}")))?;
+            let backend_bound = relay.local_addr();
+            let (bound, guard_task) =
+                relay_guard::bind_relay_guard(addr, backend_bound, relay_guard::RelayGuardConfig::default())
+                    .await
+                    .map_err(|e| TransportError::Bind(format!("relay {addr}: {e}")))?;
             relay.allow(identity.node_id());
             relay_handle = Some(relay.handle());
-            // This endpoint dials its own relay where the relay listens: on loopback when it is
-            // bound to every address, else on the one address it is bound to (a relay bound to a
-            // LAN address does not answer on 127.0.0.1, and the standing requests would never
-            // be posted, FR-N9).
             let local = match bound.ip() {
                 ip if !ip.is_unspecified() => bound,
                 std::net::IpAddr::V6(_) => SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, bound.port())),
@@ -333,7 +350,13 @@ impl LetifyBackend {
                 node: identity.node_id(),
                 url: format!("letify://{me}@{local}"),
             });
+            own_relay_standing = Some(RelayTarget {
+                addr: backend_bound.to_string(),
+                node: identity.node_id(),
+                url: format!("letify://{me}@{backend_bound}"),
+            });
             bg.push(tokio::spawn(relay.run()));
+            bg.push(guard_task);
         }
 
         // The address observer role (the main server).
@@ -374,6 +397,7 @@ impl LetifyBackend {
             hints: Mutex::new(HashMap::new()),
             relay: Mutex::new(relay),
             own_relay,
+            own_relay_standing,
             relay_handle,
             signal: Mutex::new(None),
             admitted: Mutex::new(None),
@@ -947,7 +971,7 @@ impl Inner {
     /// Starts standing requests for queued peers while slots are free. Returns the peers started.
     fn fill_standing(self: &Arc<Self>, standing: &mut Standing) -> Vec<PeerId> {
         let mut started = Vec::new();
-        let Some(own) = self.own_relay.clone() else { return started };
+        let Some(own) = self.own_relay_standing.clone().or_else(|| self.own_relay.clone()) else { return started };
         let Ok(handle) = tokio::runtime::Handle::try_current() else { return started };
         if self.closed.load(Ordering::SeqCst) {
             return started;

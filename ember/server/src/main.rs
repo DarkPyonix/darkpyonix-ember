@@ -418,6 +418,14 @@ async fn serve_main() -> anyhow::Result<()> {
     {
         let c = computers.clone();
         a2a.set_placement_lookup(Arc::new(move |session_id: &str| c.placement(session_id)));
+        // FR-T8 reports name the computer and the account label, never the account id (#82 P3).
+        let (c, s, acc) = (computers.clone(), sessions.clone(), accounts.clone());
+        a2a.set_report_context(Arc::new(move |rec: &ember_server::store::SessionRecord| {
+            ember_server::a2a::report::TurnContext {
+                computer: c.current(&s, &rec.id).ok().map(|cur| cur.computer.name),
+                account_label: rec.account_id.as_deref().and_then(|id| acc.get(id).ok().flatten()).map(|a| a.label),
+            }
+        }));
         let weak = Arc::downgrade(&a2a);
         computers.on_move(Arc::new(move |out: &computers::SwitchOutcome, fell_back: bool| {
             let Some(a2a) = weak.upgrade() else { return };

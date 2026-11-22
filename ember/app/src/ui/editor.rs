@@ -60,6 +60,41 @@ pub fn fallback_sentence(fallback: &ember_editor::Fallback, has_vscode: bool) ->
     }
 }
 
+/// What the hover card shows (SPEC FR-E3, #32 phase A step 7): the diagnostics at the position
+/// first, as Code-OSS's hover does, then each provider's Markdown as text. `None` when there is
+/// nothing to show.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HoverCard {
+    pub diagnostics: Vec<String>,
+    pub contents: Vec<String>,
+}
+
+/// The card for `hover`, or `None` when it has no diagnostic and no non-empty content. Markdown is
+/// shown as its text for now (rendering it is a later step of the editor parity work).
+pub fn hover_card(hover: &ember_editor::hover::HoverPopup) -> Option<HoverCard> {
+    let diagnostics: Vec<String> = hover.diagnostics.iter().map(|d| d.message.clone()).filter(|m| !m.trim().is_empty()).collect();
+    let contents: Vec<String> = hover.contents.iter().map(|m| m.value.trim().to_string()).filter(|v| !v.is_empty()).collect();
+    (!diagnostics.is_empty() || !contents.is_empty()).then_some(HoverCard { diagnostics, contents })
+}
+
+/// Which position the card is anchored to: the start of the hovered range when a provider gave
+/// one (the word), else where the pointer rests; with the document generation.
+pub fn hover_key(generation: u64, hover: &ember_editor::hover::HoverPopup) -> (u64, u32, u32) {
+    let at = hover.range.map(|r| r.start).unwrap_or(hover.pos);
+    (generation, at.line, at.col)
+}
+
+/// Where the card goes: under the hovered line, or above it when it is in the lower part of the
+/// window. `rect` is the position's rectangle in the window's dp.
+pub fn hover_card_style(rect: compose_rust::code::CodeRect) -> String {
+    let frame = format!("position:fixed; z-index:41; left:{:.0}px; max-width:480px; max-height:320px; overflow:auto; padding:var(--sp1);", rect.x.max(0.0));
+    if rect.y > 360.0 {
+        format!("{frame} top:auto; bottom:calc(100vh - {:.0}px);", rect.y - 2.0)
+    } else {
+        format!("{frame} top:{:.0}px;", rect.y + rect.height + 2.0)
+    }
+}
+
 /// The label of the fallback button (SPEC FR-E10).
 pub const FALLBACK_BUTTON: &str = "VS Code에서 열기";
 
@@ -2054,6 +2089,37 @@ pub fn first_diff_line(old_text: &str, new_text: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
+
+    fn hover(range: Option<ember_editor::WidgetRange>, diag: &[&str], contents: &[&str]) -> ember_editor::hover::HoverPopup {
+        ember_editor::hover::HoverPopup {
+            doc: "d".into(),
+            generation: 3,
+            pos: ember_editor::WidgetPos::new(1, 9),
+            range,
+            diagnostics: diag
+                .iter()
+                .map(|m| ember_editor::diagnostics::HoverDiagnostic { owner: "o".into(), severity: ember_editor::Severity::Error, message: (*m).into(), source: None, code: None })
+                .collect(),
+            contents: contents.iter().map(|v| ember_editor::hover::MarkdownString { value: (*v).into(), is_trusted: false, support_theme_icons: false, support_html: false, raw: serde_json::Value::Null }).collect(),
+            complete: true,
+        }
+    }
+
+    /// SPEC FR-E3 (#32 phase A step 7): the card lists diagnostics first, then the providers' text;
+    /// it anchors at the hovered word's start when a range came back, else at the pointer; it goes
+    /// under the line near the top of the window and above it lower down.
+    #[test]
+    fn fr_e3_hover_card_text_anchor_and_placement() {
+        assert_eq!(hover_card(&hover(None, &[], &["  ", ""])), None, "nothing to show");
+        let h = hover(Some(ember_editor::WidgetRange::new(ember_editor::WidgetPos::new(1, 6), ember_editor::WidgetPos::new(1, 11))), &["expected ','"], &["**probe**", ""]);
+        assert_eq!(hover_card(&h), Some(HoverCard { diagnostics: vec!["expected ','".into()], contents: vec!["**probe**".into()] }));
+        assert_eq!(hover_key(3, &h), (3, 1, 6));
+        assert_eq!(hover_key(3, &hover(None, &[], &["x"])), (3, 1, 9));
+        let high = hover_card_style(compose_rust::code::CodeRect::new(100.0, 80.0, 2.0, 18.0));
+        assert!(high.contains("left:100px;") && high.contains("top:100px;"), "{high}");
+        let low = hover_card_style(compose_rust::code::CodeRect::new(-5.0, 600.0, 2.0, 18.0));
+        assert!(low.contains("left:0px;") && low.contains("bottom:calc(100vh - 598px);"), "{low}");
+    }
 
     /// SPEC FR-E10, Q-E2 (#32 phase A step 6): one sentence for the fallback, in 합니다체, naming a
     /// short commit or saying it is unknown, and offering VS Code only when a target exists.

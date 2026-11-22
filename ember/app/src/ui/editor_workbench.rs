@@ -117,6 +117,17 @@ pub(crate) fn now_ms() -> u64 {
 
 thread_local! { static ICON_DARK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 thread_local! { static MODIFIER_CLICK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+/// The hover card's anchor (SPEC FR-E3, #32 phase A step 7): the hover it was asked for (document
+/// generation, line, column) and the rectangle the editor answered for that position, in the
+/// window's dp. Asked once per hover; the card is drawn only while the answer matches the hover.
+thread_local! { static HOVER_ASKED: std::cell::Cell<Option<(u64, u32, u32)>> = const { std::cell::Cell::new(None) }; }
+thread_local! { static HOVER_RECT: std::cell::Cell<Option<((u64, u32, u32), compose_rust::code::CodeRect)>> = const { std::cell::Cell::new(None) }; }
+
+/// Record where the editor draws the hovered position (the answer to `query_position_rect`).
+pub(crate) fn set_hover_rect(key: (u64, u32, u32), rect: Option<compose_rust::code::CodeRect>) {
+    HOVER_RECT.with(|cell| cell.set(rect.map(|r| (key, r))));
+}
+
 thread_local! { static SHARED: RefCell<Option<Shared>> = const { RefCell::new(None) }; }
 pub(crate) fn shared() -> Shared { SHARED.with(|s| s.borrow().as_ref().expect("workbench initialized").clone()) }
 
@@ -303,6 +314,22 @@ fn editor_pane() -> Element {
     let generation = doc.generation;
     let uri = doc.uri.clone();
     let handle = dioxus_compose::use_code_editor();
+    // SPEC FR-E3 (#32 phase A step 7): a new hover asks the editor where its position is drawn;
+    // the answer places the card ([`hover_card`]).
+    if let Some(hover) = doc.hover.as_ref() {
+        let key = crate::ui::editor::hover_key(generation, hover);
+        if HOVER_ASKED.with(|cell| cell.get()) != Some(key) {
+            HOVER_ASKED.with(|cell| cell.set(Some(key)));
+            let revision = s.revision;
+            handle.query_position_rect(compose_rust::code::Position::new(key.1, key.2), move |rect| {
+                set_hover_rect(key, rect);
+                let mut revision = revision;
+                *revision.write() += 1;
+            });
+        }
+    } else {
+        HOVER_ASKED.with(|cell| cell.set(None));
+    }
     let version = {
         let mut map = s.editor_versions.borrow_mut();
         let current = map.entry(generation).or_insert(doc.version);
@@ -1270,6 +1297,31 @@ pub mod page {
         }
     }
 
+    /// The hover card over the editor, when the active document has a hover and its position's
+    /// rectangle is known (SPEC FR-E3).
+    pub(super) fn hover_card(s: &super::Shared) -> Element {
+        let doc = s.bridge.borrow().active_document().cloned();
+        let Some(doc) = doc else { return rsx! {} };
+        let Some(hover) = doc.hover.as_ref() else { return rsx! {} };
+        let Some(card) = crate::ui::editor::hover_card(hover) else { return rsx! {} };
+        let key = crate::ui::editor::hover_key(doc.generation, hover);
+        let Some((at, rect)) = super::HOVER_RECT.with(|cell| cell.get()) else { return rsx! {} };
+        if at != key {
+            return rsx! {};
+        }
+        let style = crate::ui::editor::hover_card_style(rect);
+        rsx! {
+            div { class: "ed-menu", role: "tooltip", "aria-label": "호버 정보", "data-ed": "hover-card", style: "{style}",
+                for (i, line) in card.diagnostics.iter().enumerate() {
+                    div { key: "d{i}", style: "padding:var(--sp1) var(--sp3); color:var(--danger);", "{line}" }
+                }
+                for (i, block) in card.contents.iter().enumerate() {
+                    div { key: "c{i}", style: "padding:var(--sp1) var(--sp3); white-space:pre-wrap;", "{block}" }
+                }
+            }
+        }
+    }
+
     pub(super) fn workbench_page() -> Element {
         let s = shared();
         // FR-L33.1 (#875): the window's safe area is 0 until the renderer first reports it, which
@@ -1626,6 +1678,7 @@ pub mod page {
                         {crate::ui::workspace_trust::view::prompt(&s)}
                         {crate::ui::editor_notifications::view::layer(&s)}
                         {crate::ui::editor_language::view::overlay(&s)}
+                        {hover_card(&s)}
                     }
                     {status_bar(&s, &agent_state, &branch, current.as_deref().filter(|_| active.is_some()), line, col, active.as_ref().map_or(4, |d| d.tab_width))}
                 }

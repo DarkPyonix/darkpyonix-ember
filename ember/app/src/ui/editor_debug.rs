@@ -13,6 +13,7 @@ use ember_editor::debugger::{
 use ember_editor_conn::uri::UriComponents;
 
 use super::editor_workbench::{Shared, page::icon_tone};
+use super::workspace_trust::{Restricted, view::blocked};
 use crate::editor_host::HostCommand;
 
 #[derive(Default)]
@@ -352,15 +353,21 @@ pub(crate) fn run_picker(s: &Shared) -> Element {
                 enabled: connected && state.run_command().is_some(),
                 select: move |name| debug.write().selected = Some(name),
                 run: move |_| {
-                    if let Some(blocked) = super::workspace_trust::view::blocked(&run, super::workspace_trust::Restricted::Run) {
-                        crate::ui::cr::notice::post(blocked);
+                    if let Some(reason) = blocked(&run, Restricted::Run) {
+                        crate::ui::cr::notice::post(reason);
                     } else if let Some(request) = debug.peek().run_command() {
                         run.host.send(HostCommand::Debug(request));
                     }
                 },
                 refresh: move |_| { if connected { refresh.send(HostCommand::Debug(DebugRequest::ListConfigurations)); } },
                 tasks: move |_| super::editor_tasks::view::open(&tasks),
-                run_task: move |_| super::editor_tasks::view::run_default(&run_task),
+                run_task: move |_| {
+                    if let Some(reason) = blocked(&run_task, Restricted::Task) {
+                        crate::ui::cr::notice::post(reason);
+                    } else {
+                        super::editor_tasks::view::run_default(&run_task);
+                    }
+                },
             }
             if let Some(session) = state.active.as_ref().filter(|_| connected) {
                 DebugToolbar { session: session.clone(), send: move |request| { stop.host.send(HostCommand::Debug(request)); } }

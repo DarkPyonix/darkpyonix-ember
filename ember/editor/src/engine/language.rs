@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use ember_editor_conn::exthost;
 use ember_editor_conn::language::{self as calls, CodeActionTrigger, CompletionTrigger, LanguageFeature, SignatureTrigger};
-use ember_editor_conn::rpc::{Arg, IncomingRequest, Reply};
+use ember_editor_conn::rpc::Reply;
 use ember_editor_conn::uri::UriComponents;
 use serde_json::Value;
 
@@ -631,13 +631,13 @@ impl SessionCore {
     /// `boolean` (extHost.protocol.ts L344): an extension's `workspace.applyEdit`, which is how
     /// the command of many code actions makes its change. Answered `true` once the edits are on
     /// their way; a file that then fails is reported in the summary.
-    pub(super) fn on_try_apply_workspace_edit(&mut self, r: &IncomingRequest) {
-        let edit = r.args.first().and_then(Arg::as_json).and_then(WorkspaceEdit::from_json);
+    pub(super) fn on_try_apply_workspace_edit(&mut self, req: u32, dto: &Value) {
+        let edit = WorkspaceEdit::from_json(dto);
         let applied = edit.is_some();
         if let Some(edit) = edit {
             self.lang_apply_workspace_edit(edit, Feature::CodeActions);
         }
-        self.respond(r.req, Ok(Reply::Json(Value::Bool(applied))));
+        self.respond(req, Ok(Reply::Json(Value::Bool(applied))));
     }
 
     // ---- code actions ---------------------------------------------------------------------------

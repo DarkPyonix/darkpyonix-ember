@@ -4538,7 +4538,10 @@ pub fn SessionScreen(focus: Option<String>) {
                                     let s_line = sub_line.clone();
                                     let mut proj_mod = Modifier::new().padding(2.0);
                                     if is_phone {
-                                        proj_mod = proj_mod.weight(1.0);
+                                        // FR-L36 (#770): keep the + button right after the title
+                                        // while capping long project names so + stays clear of the
+                                        // floating menu button.
+                                        proj_mod = proj_mod.max_width(phone_header_title_max_w(current_window_size().width_dp));
                                     }
                                     // The control says whether its menu is open; its text is its name.
                                     let proj_open = project_menu.get();
@@ -4599,7 +4602,9 @@ pub fn SessionScreen(focus: Option<String>) {
                                         ToolbarBtn(ICON_PLUS_SVG, "새 팀원", SESSION_HEADER_LABELS, false, None, move || nm.set(true));
                                     }
                                     if is_phone {
-                                        // Keep the first row clear of the shell's floating menu button.
+                                        // Fill the remaining row after + and keep clear of the
+                                        // shell's floating menu button.
+                                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                                         { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(super::project::PHONE_MENU_ROOM)) };
                                     } else {
                                         trailing();
@@ -4728,6 +4733,13 @@ pub fn SessionScreen(focus: Option<String>) {
             }
 
         }) };
+}
+
+/// Maximum width of the project title button in the phone session header (FR-L36, #770):
+/// reserves room for the drawer button, the + button right after the title, row padding, gaps,
+/// and `PHONE_MENU_ROOM` so long names ellipsize instead of pushing + under the floating menu.
+pub fn phone_header_title_max_w(window_w: f32) -> f32 {
+    (window_w - 150.0).max(80.0)
 }
 
 #[cfg(test)]
@@ -4905,6 +4917,16 @@ mod tests {
             assert!(!b.contains("OptionSheet("), "no centred option sheet is left in {b:.40}");
         }
         assert!(!src.contains("// Web pages OptionSheet"));
+    }
+
+    #[test]
+    fn fr_l36_phone_header_places_plus_right_after_title_and_clears_menu() {
+        assert_eq!(super::phone_header_title_max_w(390.0), 240.0);
+        assert_eq!(super::phone_header_title_max_w(360.0), 210.0);
+        assert_eq!(super::phone_header_title_max_w(200.0), 80.0);
+        let src = include_str!("session.rs").split("mod tests {").next().unwrap();
+        assert!(src.contains("proj_mod = proj_mod.max_width(phone_header_title_max_w(current_window_size().width_dp));"));
+        assert!(!src.contains("proj_mod = proj_mod.weight(1.0);"));
     }
 
     #[test]

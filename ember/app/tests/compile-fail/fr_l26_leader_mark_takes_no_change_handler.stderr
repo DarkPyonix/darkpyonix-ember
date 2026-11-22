@@ -1,0 +1,16 @@
+error[E0061]: this function takes 2 arguments but 3 arguments were supplied
+ --> tests/compile-fail/fr_l26_leader_mark_takes_no_change_handler.rs:7:5
+  |
+7 |     LeaderMark(true, "m-a", |_: bool| {});
+  |     ^^^^^^^^^^              ------------ unexpected argument #3 of type `{closure@$DIR/tests/compile-fail/fr_l26_leader_mark_takes_no_change_handler.rs:7:29: 7:38}`
+  |
+note: function defined here
+ --> src/ui/cr/project.rs
+  |
+  | pub fn LeaderMark(selected: bool, name: &str) {
+  |        ^^^^^^^^^^
+help: remove the extra argument
+  |
+7 -     LeaderMark(true, "m-a", |_: bool| {});
+7 +     LeaderMark(true, "m-a");
+  |

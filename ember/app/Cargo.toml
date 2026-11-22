@@ -30,8 +30,8 @@ path = "src/main.rs"
 # TODO: 배포되면 버전 의존성으로 바꾼다 (dioxus-compose is not yet published, and it takes compose-rust by git, so this does too: one copy).
 # compose-rust develop after the builder flip (#906): widgets are call macros. dioxus-compose
 # chore/compose-rust-fr39-flip pins the same rev.
-compose-rust = { git = "https://github.com/DarkPyonix/compose-rust", rev = "a85f02dec4b23b9f25af508fb84b3ab0bb7148dd", default-features = false }
-dioxus-compose = { git = "https://github.com/DarkPyonix/dioxus-compose", rev = "3758928bf86d4224f572467628b37d1d3966b487" }
+compose-rust = { git = "https://github.com/DarkPyonix/compose-rust", rev = "e52fbd396681ceb3017513107edda5812dee4920", default-features = false }
+dioxus-compose = { git = "https://github.com/DarkPyonix/dioxus-compose", rev = "5b6f707c531246d71cc3a34cd41662b1375b1513" }
 
 # Everything below the UI: sync engine, state reducer, transcript, cache.
 ember-client = { path = "../client" }
@@ -80,4 +80,6 @@ ember-server = { path = "../server" }
 # Serves the in-process server on a loopback listener for the editor relay over HTTP
 # (`tests/fr_n9_device_editor.rs`); the version ember-server uses.
 axum = "0.8"
+# Compile-fail cases (`tests/compile_fail.rs`): calls the UI API must refuse to build.
+trybuild = "1"
 

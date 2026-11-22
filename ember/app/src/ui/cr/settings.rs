@@ -494,7 +494,7 @@ mod tests {
     fn pointer_up_event(node_id: u32, handler_id: u64) -> compose_rust::protocol::HostEvent<'static> {
         use compose_rust::protocol::HostEvent;
         use compose_rust::EventPayload;
-        HostEvent { node_id, handler_id, payload: EventPayload::Clicked }
+        HostEvent::new(node_id, handler_id, EventPayload::Clicked)
     }
 
     #[test]

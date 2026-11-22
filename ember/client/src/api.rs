@@ -979,6 +979,21 @@ impl Api {
         true
     }
 
+    /// Where this `Api` looked for its server token, for a message after a 401 (FR-S11, #982):
+    /// `EMBER_SERVER_TOKEN` and the token files in lookup order ([`crate::token::TokenLookup`]),
+    /// or the one token file of [`Api::with_token_file`]. Empty when the token was given by the
+    /// caller or is not sent at all (over the transport). Never holds the token itself.
+    pub fn token_lookup(&self) -> Vec<String> {
+        if !matches!(self.reach, Reach::Http(_)) {
+            return Vec::new();
+        }
+        match &self.source {
+            TokenSource::Fixed => Vec::new(),
+            TokenSource::Env => crate::token::TokenLookup::from_process().describe(),
+            TokenSource::File(path) => vec![path.display().to_string()],
+        }
+    }
+
     fn check(raw: Raw) -> ApiResult<Raw> {
         if raw.status.is_success() {
             return Ok(raw);
@@ -1061,7 +1076,8 @@ impl Api {
             Reach::Peer { dialer, addr } => Box::new(dialer.open_bi(addr, SERVER_SERVICE).await.map_err(peer_err)?),
         };
         let request = self.push_request(&url)?;
-        let (ws, _) = tokio_tungstenite::client_async(request, io).await.map_err(|e| ApiError::Push(e.to_string()))?;
+        // A refused upgrade keeps its status: a 401 is `Unauthorized` (FR-S11, #982).
+        let (ws, _) = tokio_tungstenite::client_async(request, io).await.map_err(socket_error)?;
         Ok(ws)
     }
 

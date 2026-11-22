@@ -59,6 +59,11 @@ pub enum ConnectionState {
     Connected,
     /// Lost or failed; retrying after a backoff.
     Reconnecting { attempt: u32, retry_in_ms: u64, error: String },
+    /// The server refused the token on the push socket, also after reading it again once
+    /// (FR-S11, #982). Not retried on a timer: the same token would be refused again. `error` is
+    /// the server's message; `looked_in` names where the token was looked for
+    /// (`Api::token_lookup`, empty when the token was given by the caller).
+    Unauthorized { error: String, looked_in: Vec<String> },
 }
 
 /// Something that happened, fed to [`State::apply`].

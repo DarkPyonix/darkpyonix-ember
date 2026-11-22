@@ -777,6 +777,11 @@ impl EditorSession {
         self.send(Command::Input(Input::AnswerMessage { id, handle }))
     }
 
+    /// The window shows output channel `id`; the session reads a log channel again only while it is shown.
+    pub fn set_active_output_channel(&self, id: Option<String>) -> Result<(), Error> {
+        self.send(Command::Input(Input::ActiveOutputChannel { id }))
+    }
+
     /// Replace the chosen matches (FR-E7); answered with [`SessionUpdate::ReplaceDone`].
     pub fn replace(&self, id: u64, request: crate::search::ReplaceRequest) -> Result<(), Error> {
         self.send(Command::Input(Input::Replace { id, request }))
@@ -1194,18 +1199,22 @@ impl Driver {
                         continue;
                     }
                     let (fs, tx) = (Arc::clone(&self.fs), internal.clone());
+                    // An output channel's log file is named by the extension host with a server path. The
+                    // server's URI transformer usually maps it to `vscode-remote` already; a `file` URI is
+                    // a path on the server, never on this machine, so read it through the same authority.
+                    let target = if uri.scheme == "file" { UriComponents::remote(&self.authority, &uri.path) } else { uri.clone() };
                     // A grammar file comes from an extension on the server: ask how big it is before reading it.
                     let cap = matches!(purpose, crate::engine::ReadPurpose::Grammar { .. }).then_some(crate::textmate::MAX_GRAMMAR_BYTES);
                     tokio::spawn(async move {
                         let read = async {
                             if let Some(cap) = cap {
-                                match fs.stat(&uri).await {
+                                match fs.stat(&target).await {
                                     Ok(st) if st.size > cap => return Err("the grammar file is too large".to_owned()),
                                     Ok(_) => {}
                                     Err(e) => return Err(e.to_string()),
                                 }
                             }
-                            fs.read_file(&uri).await.map_err(|e| e.to_string())
+                            fs.read_file(&target).await.map_err(|e| e.to_string())
                         };
                         // A grammar read is bounded in time as well as in size.
                         let result = match cap {

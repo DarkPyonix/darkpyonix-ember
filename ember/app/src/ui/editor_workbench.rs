@@ -3461,6 +3461,7 @@ pub mod page {
                             let cid = id.clone();
                             let mut sel = selected_sig;
                             let bridge = s.bridge.clone();
+                            let host = s.host.clone();
                             rsx! {
                                 button {
                                     key: "{id}",
@@ -3469,6 +3470,7 @@ pub mod page {
                                     onclick: move |_| {
                                         sel.set(cid.clone());
                                         bridge.borrow_mut().set_active_output_channel(cid.clone());
+                                        host.send(HostCommand::ActiveOutputChannel(Some(cid.clone())));
                                     },
                                     "{label}"
                                 }

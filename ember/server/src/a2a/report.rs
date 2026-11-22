@@ -61,6 +61,28 @@ impl Default for ReportTimes {
     }
 }
 
+/// Where and as whom a session ran, for the report (#82 P3). Each `None` leaves its line out.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TurnContext {
+    /// The name of the computer the session is on now (the main server is "this server").
+    pub computer: Option<String>,
+    /// The account's display label, never its id.
+    pub account_label: Option<String>,
+}
+
+/// Looks up a session's [`TurnContext`]; installed by `main.rs` from the computers and the
+/// accounts (FR-T8 report fields of #82 P3).
+pub type ContextLookup = Arc<dyn Fn(&crate::store::SessionRecord) -> TurnContext + Send + Sync>;
+
+/// The place lines of one report: [`TurnContext`] plus the computer of the previous report when
+/// it differs (a move happens only between turns, FR-X3, so it is "since the last report").
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Place {
+    pub computer: Option<String>,
+    pub moved_from: Option<String>,
+    pub account_label: Option<String>,
+}
+
 /// What the reporter remembers per session.
 #[derive(Debug, Default)]
 pub struct ReportState {
@@ -76,6 +98,8 @@ pub struct ReportState {
     waiting_sent: HashSet<String>,
     /// The `last_seq` at which a stall was reported, per session.
     stalled_at: HashMap<String, i64>,
+    /// The computer named in the session's last report (#82 P3).
+    last_computer: HashMap<String, String>,
 }
 
 /// How a report's turn ended.
@@ -108,7 +132,7 @@ impl Outcome {
 }
 
 /// The report text, built from the events of the reported span (oldest first).
-pub fn build_report(session_id: &str, title: &str, outcome: &Outcome, events: &[StoredEvent]) -> String {
+pub fn build_report(session_id: &str, title: &str, outcome: &Outcome, place: &Place, events: &[StoredEvent]) -> String {
     let first = events.first().map(|e| e.seq).unwrap_or(0);
     let last = events.last().map(|e| e.seq).unwrap_or(0);
     let mut out = format!("Report: \"{title}\" (session {session_id}) {}.\n", match outcome {
@@ -124,6 +148,15 @@ pub fn build_report(session_id: &str, title: &str, outcome: &Outcome, events: &[
         Outcome::Stalled(secs) if *secs < 60 => out.push_str(&format!("No event for {secs} s while running\n")),
         Outcome::Stalled(secs) => out.push_str(&format!("No event for {} min while running\n", secs.div_ceil(60))),
         _ => {}
+    }
+    if let Some(c) = &place.computer {
+        match &place.moved_from {
+            Some(from) => out.push_str(&format!("Computer: {c} (moved from {from} since the last report)\n")),
+            None => out.push_str(&format!("Computer: {c}\n")),
+        }
+    }
+    if let Some(a) = &place.account_label {
+        out.push_str(&format!("Account: {a}\n"));
     }
     if let Some(err) = last_error(events) {
         out.push_str(&format!("Error: {}\n", clip(&err, 300)));
@@ -329,6 +362,20 @@ impl A2a {
         self.sessions.store().session(session).ok().flatten().map(|r| r.title).unwrap_or_default()
     }
 
+    /// The place lines for a report of `session` now, remembering its computer for the next.
+    fn place_of(&self, session: &str) -> Place {
+        let lookup = self.report_context.lock().unwrap().clone();
+        let Some(lookup) = lookup else { return Place::default() };
+        let Ok(Some(rec)) = self.sessions.store().session(session) else { return Place::default() };
+        let ctx = lookup(&rec);
+        let moved_from = ctx.computer.as_ref().and_then(|now| {
+            let mut st = self.report_state.lock().unwrap();
+            let before = st.last_computer.insert(session.to_string(), now.clone());
+            before.filter(|b| b != now)
+        });
+        Place { computer: ctx.computer, moved_from, account_label: ctx.account_label }
+    }
+
     /// Store one report and wake the receiver: at once, or after the batch time for a done one.
     async fn send_report(self: &Arc<Self>, from: &str, to: &str, text: &str, urgent: bool) {
         {
@@ -404,7 +451,7 @@ impl A2a {
             TurnOutcome::Failed => Outcome::Failed,
             TurnOutcome::Interrupted => Outcome::Interrupted,
         };
-        let text = build_report(session, &rec.title, &outcome, &events);
+        let text = build_report(session, &rec.title, &outcome, &self.place_of(session), &events);
         for d in to {
             self.send_report(session, &d, &text, outcome.urgent()).await;
         }
@@ -431,7 +478,7 @@ impl A2a {
         }
         let from = self.report_state.lock().unwrap().reported_upto.get(session).copied().unwrap_or(0);
         let events = self.sessions.store().events_after(session, from).unwrap_or_default();
-        let text = build_report(session, &self.title_of(session), &Outcome::NeedsInput(what), &events);
+        let text = build_report(session, &self.title_of(session), &Outcome::NeedsInput(what), &self.place_of(session), &events);
         for d in to {
             self.send_report(session, &d, &text, true).await;
         }
@@ -470,7 +517,7 @@ impl A2a {
             }
             let from = self.report_state.lock().unwrap().reported_upto.get(&sid).copied().unwrap_or(0);
             let events = self.sessions.store().events_after(&sid, from).unwrap_or_default();
-            let text = build_report(&sid, &rec.title, &Outcome::Stalled((idle_ms / 1000) as u64), &events);
+            let text = build_report(&sid, &rec.title, &Outcome::Stalled((idle_ms / 1000) as u64), &self.place_of(&sid), &events);
             for d in to {
                 self.send_report(&sid, &d, &text, true).await;
             }
@@ -514,7 +561,7 @@ mod tests {
         assert_eq!(files_changed(&events), vec!["/w/a.rs", "/w/c.rs"]);
         assert_eq!(commits(&events), vec!["git commit -m 'Fix: x'"]);
         assert_eq!(pull_requests(&events), vec!["https://github.com/acme/repo/pull/42"]);
-        let text = build_report("s1", "alice", &Outcome::Done, &events);
+        let text = build_report("s1", "alice", &Outcome::Done, &Place::default(), &events);
         assert!(text.starts_with("Report: \"alice\" (session s1) finished its turn.\nOutcome: done\n"), "{text}");
         assert!(text.contains("Last reply: Done. Opened https://github.com/acme/repo/pull/42 for review.\n"), "{text}");
         assert!(text.contains("Files changed: /w/a.rs, /w/c.rs\n"), "{text}");
@@ -530,15 +577,29 @@ mod tests {
             ev(1, AgentEvent::AssistantMessage { text: "x".repeat(SUMMARY_CHARS + 50) }),
             ev(2, AgentEvent::TurnError { code: "rate_limit".into(), message: "usage limit reached".into() }),
         ];
-        let failed = build_report("s", "t", &Outcome::Failed, &events);
+        let failed = build_report("s", "t", &Outcome::Failed, &Place::default(), &events);
         assert!(failed.contains("Outcome: failed\nError: usage limit reached\n"), "{failed}");
         let summary = failed.lines().find(|l| l.starts_with("Last reply: ")).unwrap();
         assert_eq!(summary.chars().count(), "Last reply: ".len() + SUMMARY_CHARS + 3);
-        let waiting = build_report("s", "t", &Outcome::NeedsInput("approval for Bash".into()), &[]);
+        let waiting = build_report("s", "t", &Outcome::NeedsInput("approval for Bash".into()), &Place::default(), &[]);
         assert!(waiting.contains("is waiting on a person.\nOutcome: needs input\nWaiting on: approval for Bash\n"), "{waiting}");
         assert!(waiting.contains("Last reply: none\nFiles changed: none recorded\n"), "{waiting}");
-        let stalled = build_report("s", "t", &Outcome::Stalled(601), &[]);
+        let stalled = build_report("s", "t", &Outcome::Stalled(601), &Place::default(), &[]);
         assert!(stalled.contains("Outcome: stalled\nNo event for 11 min while running\n"), "{stalled}");
+    }
+
+    // #82 P3: the report names the computer, a move since the last report and the account label.
+    #[test]
+    fn fr_t8_report_names_the_computer_and_account() {
+        let place = Place { computer: Some("pi".into()), moved_from: None, account_label: Some("Work (Codex)".into()) };
+        let text = build_report("s", "t", &Outcome::Done, &place, &[]);
+        assert!(text.contains("Outcome: done\nComputer: pi\nAccount: Work (Codex)\n"), "{text}");
+        let moved = Place { computer: Some("this server".into()), moved_from: Some("pi".into()), account_label: None };
+        let text = build_report("s", "t", &Outcome::Done, &moved, &[]);
+        assert!(text.contains("Computer: this server (moved from pi since the last report)\n"), "{text}");
+        assert!(!text.contains("Account:"), "{text}");
+        let none = build_report("s", "t", &Outcome::Done, &Place::default(), &[]);
+        assert!(!none.contains("Computer:") && !none.contains("Account:"), "{none}");
     }
 
     #[test]

@@ -193,6 +193,8 @@ pub struct A2a {
     computer_setter: StdMutex<Option<ComputerSetter>>,
     /// FR-T8 delegators, in-flight reports and what was already reported (#995).
     report_state: StdMutex<report::ReportState>,
+    /// Computer and account label of a reporting session (#82 P3).
+    report_context: StdMutex<Option<report::ContextLookup>>,
     dir_checker: StdMutex<Option<DirChecker>>,
     placement: StdMutex<Option<PlacementLookup>>,
     /// Recent channel posts per (session, channel), for the rate limit of `channel post`.
@@ -696,6 +698,7 @@ impl A2a {
             last_notice: StdMutex::new(HashMap::new()),
             computer_setter: StdMutex::new(None),
             report_state: StdMutex::new(report::ReportState::default()),
+            report_context: StdMutex::new(None),
             dir_checker: StdMutex::new(None),
             placement: StdMutex::new(None),
             channel_posts: StdMutex::new(HashMap::new()),
@@ -712,6 +715,11 @@ impl A2a {
     /// Let `team spawn --computer` refuse a computer without the project directory (FR-T7, #82).
     pub fn set_dir_checker(&self, checker: DirChecker) {
         *self.dir_checker.lock().unwrap() = Some(checker);
+    }
+
+    /// Let FR-T8 reports name the computer and the account label (#82 P3).
+    pub fn set_report_context(&self, lookup: report::ContextLookup) {
+        *self.report_context.lock().unwrap() = Some(lookup);
     }
 
     /// Let team views name each member's designated and current computer (FR-T7, #82).

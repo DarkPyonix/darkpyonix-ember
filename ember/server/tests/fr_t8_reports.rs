@@ -382,3 +382,34 @@ async fn fr_t8_a_report_into_a_failed_turn_is_delivered_once_more() {
     assert!(w.a2a.store().pending_for(&lead).unwrap().is_empty());
     assert_eq!(status(&w, &lead), SessionStatus::Failed);
 }
+
+// #82 P3 (FR-T8 report fields): the report names the computer the turn ended on, a move since
+// the last report, and the account's label (never its id).
+#[tokio::test]
+async fn fr_t8_report_names_the_computer_and_account() {
+    let w = world();
+    let computer = Arc::new(Mutex::new("pi".to_string()));
+    let c = computer.clone();
+    w.a2a.set_report_context(Arc::new(move |rec: &ember_server::store::SessionRecord| ember_server::a2a::report::TurnContext {
+        computer: Some(c.lock().unwrap().clone()),
+        account_label: Some(format!("Work ({})", rec.title.split(' ').next().unwrap_or(""))),
+    }));
+    let lead = leader(&w).await;
+    let alice = spawn(&w, &lead, "alice", "build").await;
+    wait_for("report 1", || count(&reports_to(&w, &lead), "Outcome: done") == 1).await;
+    let first = reports_to(&w, &lead).remove(0);
+    assert!(first.contains("Computer: pi\n") && first.contains("Account: Work (alice)\n"), "{first}");
+    assert!(!first.contains("moved from"), "{first}");
+
+    *computer.lock().unwrap() = "this server".into();
+    quiet().await;
+    wait_for("idle", || status(&w, &alice) == SessionStatus::Finished && status(&w, &lead) != SessionStatus::Running).await;
+    w.sessions.send(&alice, "again").await.unwrap();
+    wait_for("report 2", || count(&reports_to(&w, &lead), "Outcome: done") == 2).await;
+    let second = reports_to(&w, &lead).into_iter().find(|r| r.contains("did again")).unwrap();
+    assert!(second.contains("Computer: this server (moved from pi since the last report)\n"), "{second}");
+    let rec = w.sessions.store().session(&alice).unwrap().unwrap();
+    if let Some(id) = rec.account_id {
+        assert!(!second.contains(&id), "the account id leaked: {second}");
+    }
+}

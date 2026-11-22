@@ -1209,6 +1209,196 @@ pub async fn load_project_tile(api: &ember_client::api::Api, project: &str) -> T
     TileLoad::Loaded(out)
 }
 
+// ---------------------------------------------------------------------------------------------
+// The project page's 채널 tile (FR-L26, #327)
+// ---------------------------------------------------------------------------------------------
+
+pub const CHANNEL_TILE_LOADING: &str = "채널을 불러오는 중입니다";
+pub const CHANNEL_TILE_FAILED: &str = "채널을 불러오지 못했습니다";
+pub const CHANNEL_TILE_EMPTY: &str = "이 프로젝트에 채널이 없습니다";
+
+/// What the project page knows of its project's channels.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChannelTileLoad {
+    /// Asked, not answered yet.
+    Loading,
+    /// The list call failed.
+    Failed,
+    /// The server's channels of the project.
+    Loaded(Vec<crate::ui::channels::Room>),
+}
+
+/// One channel row of the project page's 채널 tile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelTileRow {
+    pub id: String,
+    pub name: String,
+    pub members: usize,
+    pub unread: u32,
+}
+
+/// The project page's 채널 tile as text. Loading, a failed call and an empty project each have a
+/// sentence in `summary` and no rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectChannelTile {
+    pub summary: String,
+    pub rows: Vec<ChannelTileRow>,
+    /// "외 2개" when more than [`TILE_MAX_ROWS`] channels exist.
+    pub more: Option<String>,
+}
+
+impl ProjectChannelTile {
+    /// The tile's lines, top to bottom: the summary, one line per row, then the rest count.
+    pub fn lines(&self) -> Vec<String> {
+        let mut out = vec![self.summary.clone()];
+        out.extend(self.rows.iter().map(|r| {
+            if r.unread > 0 {
+                format!("#{} \u{00b7} 멤버 {}명 \u{00b7} 읽지 않음 {}", r.name, r.members, r.unread)
+            } else {
+                format!("#{} \u{00b7} 멤버 {}명", r.name, r.members)
+            }
+        }));
+        out.extend(self.more.clone());
+        out
+    }
+}
+
+/// The 채널 tile for `project`: how many channels it has, then the first [`TILE_MAX_ROWS`] with
+/// member count and unread count.
+pub fn project_channel_tile(load: &ChannelTileLoad, project: &str) -> ProjectChannelTile {
+    let sentence = |text: &str| ProjectChannelTile { summary: text.to_string(), rows: Vec::new(), more: None };
+    let rooms: Vec<&crate::ui::channels::Room> = match load {
+        ChannelTileLoad::Loading => return sentence(CHANNEL_TILE_LOADING),
+        ChannelTileLoad::Failed => return sentence(CHANNEL_TILE_FAILED),
+        ChannelTileLoad::Loaded(all) => all.iter().filter(|r| same_project(&r.project, project)).collect(),
+    };
+    if rooms.is_empty() {
+        return sentence(CHANNEL_TILE_EMPTY);
+    }
+    let summary = format!("채널 {}개", rooms.len());
+    let rows = rooms
+        .iter()
+        .take(TILE_MAX_ROWS)
+        .map(|r| ChannelTileRow {
+            id: r.id.clone(),
+            name: r.name.clone(),
+            members: r.members.len(),
+            unread: r.unread,
+        })
+        .collect();
+    let rest = rooms.len().saturating_sub(TILE_MAX_ROWS);
+    ProjectChannelTile { summary, rows, more: (rest > 0).then(|| format!("외 {rest}개")) }
+}
+
+/// One project's channels for the project page's 채널 tile (FR-L26, #327).
+pub async fn load_project_channels(api: &ember_client::api::Api, project: &str) -> ChannelTileLoad {
+    match api.channels(Some(project)).await {
+        Ok(list) => ChannelTileLoad::Loaded(crate::ui::channels::rooms_from(&list, &[])),
+        Err(e) => {
+            tracing::warn!("loading the project's channels failed: {e}");
+            ChannelTileLoad::Failed
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The settings sheet's 연결 section (FR-L26, #327)
+// ---------------------------------------------------------------------------------------------
+
+/// Load state of one linked resource count in the project settings `연결` section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkCountLoad {
+    Loading,
+    Failed,
+    Loaded(usize),
+}
+
+/// Counts of routines and channels linked to a project in the settings sheet (FR-L26, #327).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProjectLinks {
+    pub routines: LinkCountLoad,
+    pub channels: LinkCountLoad,
+}
+
+impl ProjectLinks {
+    pub const fn loading() -> ProjectLinks {
+        ProjectLinks { routines: LinkCountLoad::Loading, channels: LinkCountLoad::Loading }
+    }
+
+    /// The label of the 루틴 link button.
+    pub fn routine_button_label(self) -> String {
+        link_button_label("루틴", self.routines)
+    }
+
+    /// The label of the 채널 link button.
+    pub fn channel_button_label(self) -> String {
+        link_button_label("채널", self.channels)
+    }
+
+    /// The summary line under the `연결` buttons: loading, failure, empty or live counts.
+    pub fn summary_line(self) -> String {
+        match (self.routines, self.channels) {
+            (LinkCountLoad::Loading, _) | (_, LinkCountLoad::Loading) => {
+                "연결된 루틴과 채널을 불러오는 중입니다".to_string()
+            }
+            (LinkCountLoad::Failed, LinkCountLoad::Failed) => {
+                "연결된 루틴과 채널을 불러오지 못했습니다".to_string()
+            }
+            (LinkCountLoad::Loaded(0), LinkCountLoad::Loaded(0)) => {
+                "이 프로젝트에 연결된 루틴과 채널이 없습니다".to_string()
+            }
+            (r, c) => format!("{} \u{00b7} {}", link_count_text("루틴", r), link_count_text("채널", c)),
+        }
+    }
+}
+
+fn link_button_label(name: &str, load: LinkCountLoad) -> String {
+    match load {
+        LinkCountLoad::Loaded(n) => format!("{name} ({n})"),
+        LinkCountLoad::Loading | LinkCountLoad::Failed => name.to_string(),
+    }
+}
+
+fn link_count_text(name: &str, load: LinkCountLoad) -> String {
+    match load {
+        LinkCountLoad::Loaded(0) => format!("{name} 없음"),
+        LinkCountLoad::Loaded(n) => format!("{name} {n}개"),
+        LinkCountLoad::Loading => format!("{name} 불러오는 중"),
+        LinkCountLoad::Failed => format!("{name} 불러오지 못함"),
+    }
+}
+
+/// Counts for a project from already-loaded sample or cached entries and rooms (demo mode, tests).
+pub fn project_links_from(project: &str, routines: &[Entry], rooms: &[crate::ui::channels::Room]) -> ProjectLinks {
+    ProjectLinks {
+        routines: LinkCountLoad::Loaded(
+            routines.iter().filter(|e| same_project(&e.routine.sel.project, project)).count(),
+        ),
+        channels: LinkCountLoad::Loaded(
+            rooms.iter().filter(|r| same_project(&r.project, project)).count(),
+        ),
+    }
+}
+
+/// Loads the project's routine and channel counts for the settings sheet `연결` section (FR-L26, #327).
+pub async fn load_project_links(api: &ember_client::api::Api, project: &str) -> ProjectLinks {
+    let routines = match api.schedules(Some(project)).await {
+        Ok(list) => LinkCountLoad::Loaded(list.len()),
+        Err(e) => {
+            tracing::warn!("loading the project's routine count failed: {e}");
+            LinkCountLoad::Failed
+        }
+    };
+    let channels = match api.channels(Some(project)).await {
+        Ok(list) => LinkCountLoad::Loaded(list.len()),
+        Err(e) => {
+            tracing::warn!("loading the project's channel count failed: {e}");
+            LinkCountLoad::Failed
+        }
+    };
+    ProjectLinks { routines, channels }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -2144,5 +2334,102 @@ mod tests {
         let one = entry(routine("1", "요약", crate::ui::home::DEFAULT_PROJECT, "0 9 * * *"), Vec::new());
         let tile = project_routine_tile(&TileLoad::Loaded(vec![one]), DEFAULT_PROJECT_ID, now);
         assert_eq!(tile.rows.len(), 1);
+    }
+
+    // ---- the project page's 채널 tile and settings 연결 section (FR-L26, #327) ----------------
+
+    fn room(id: &str, name: &str, project: &str, members: usize, unread: u32) -> crate::ui::channels::Room {
+        crate::ui::channels::Room {
+            id: id.into(),
+            name: name.into(),
+            project: project.into(),
+            members: (0..members)
+                .map(|i| crate::ui::channels::Member {
+                    id: format!("m{i}"),
+                    name: format!("멤버{i}"),
+                    is_agent: false,
+                    harness: String::new(),
+                })
+                .collect(),
+            messages: Vec::new(),
+            unread,
+        }
+    }
+
+    #[test]
+    fn fr_l26_channel_tile_says_loading_failed_and_empty() {
+        assert_eq!(project_channel_tile(&ChannelTileLoad::Loading, "ember").lines(), [CHANNEL_TILE_LOADING]);
+        assert_eq!(project_channel_tile(&ChannelTileLoad::Failed, "ember").lines(), [CHANNEL_TILE_FAILED]);
+        assert_eq!(project_channel_tile(&ChannelTileLoad::Loaded(Vec::new()), "ember").lines(), [CHANNEL_TILE_EMPTY]);
+        let other = room("r1", "잡담", "other", 2, 0);
+        let tile = project_channel_tile(&ChannelTileLoad::Loaded(vec![other]), "ember");
+        assert!(tile.rows.is_empty());
+        assert_eq!(tile.lines(), [CHANNEL_TILE_EMPTY]);
+    }
+
+    #[test]
+    fn fr_l26_channel_tile_lists_rooms_members_unread_and_rest() {
+        let rooms = vec![
+            room("r1", "배포 논의", "ember", 3, 2),
+            room("r2", "디자인 리뷰", "ember", 2, 0),
+            room("r3", "질문", "ember", 1, 0),
+            room("r4", "릴리즈", "ember", 4, 1),
+            room("r5", "다른 프로젝트", "other", 2, 5),
+        ];
+        let tile = project_channel_tile(&ChannelTileLoad::Loaded(rooms), "ember");
+        assert_eq!(tile.summary, "채널 4개");
+        assert_eq!(tile.rows.len(), TILE_MAX_ROWS);
+        assert_eq!(tile.more.as_deref(), Some("외 1개"));
+        let lines = tile.lines();
+        assert_eq!(lines[0], "채널 4개");
+        assert_eq!(lines[1], "#배포 논의 \u{00b7} 멤버 3명 \u{00b7} 읽지 않음 2");
+        assert_eq!(lines[2], "#디자인 리뷰 \u{00b7} 멤버 2명");
+        assert_eq!(lines[3], "#질문 \u{00b7} 멤버 1명");
+        assert_eq!(lines[4], "외 1개");
+        // Matches default project by id or display name.
+        let default_room = room("r0", "기본", crate::ui::home::DEFAULT_PROJECT, 1, 0);
+        let tile = project_channel_tile(&ChannelTileLoad::Loaded(vec![default_room]), DEFAULT_PROJECT_ID);
+        assert_eq!(tile.rows.len(), 1);
+    }
+
+    #[test]
+    fn fr_l26_project_links_labels_and_summary_cover_loading_failed_empty_and_live() {
+        let loading = ProjectLinks::loading();
+        assert_eq!(loading.routine_button_label(), "루틴");
+        assert_eq!(loading.channel_button_label(), "채널");
+        assert_eq!(loading.summary_line(), "연결된 루틴과 채널을 불러오는 중입니다");
+
+        let failed = ProjectLinks { routines: LinkCountLoad::Failed, channels: LinkCountLoad::Failed };
+        assert_eq!(failed.routine_button_label(), "루틴");
+        assert_eq!(failed.channel_button_label(), "채널");
+        assert_eq!(failed.summary_line(), "연결된 루틴과 채널을 불러오지 못했습니다");
+
+        let empty = ProjectLinks { routines: LinkCountLoad::Loaded(0), channels: LinkCountLoad::Loaded(0) };
+        assert_eq!(empty.routine_button_label(), "루틴 (0)");
+        assert_eq!(empty.channel_button_label(), "채널 (0)");
+        assert_eq!(empty.summary_line(), "이 프로젝트에 연결된 루틴과 채널이 없습니다");
+
+        let live = ProjectLinks { routines: LinkCountLoad::Loaded(2), channels: LinkCountLoad::Loaded(3) };
+        assert_eq!(live.routine_button_label(), "루틴 (2)");
+        assert_eq!(live.channel_button_label(), "채널 (3)");
+        assert_eq!(live.summary_line(), "루틴 2개 \u{00b7} 채널 3개");
+
+        let partial = ProjectLinks { routines: LinkCountLoad::Loaded(1), channels: LinkCountLoad::Failed };
+        assert_eq!(partial.routine_button_label(), "루틴 (1)");
+        assert_eq!(partial.channel_button_label(), "채널");
+        assert_eq!(partial.summary_line(), "루틴 1개 \u{00b7} 채널 불러오지 못함");
+
+        let routines = vec![
+            entry(routine("1", "아침 요약", "ember", "0 9 * * *"), Vec::new()),
+            entry(routine("2", "다른 프로젝트", "other", "0 9 * * *"), Vec::new()),
+        ];
+        let rooms = vec![
+            room("r1", "배포 논의", "ember", 3, 0),
+            room("r2", "디자인 리뷰", "ember", 2, 0),
+            room("r3", "자유", "other", 1, 0),
+        ];
+        let counted = project_links_from("ember", &routines, &rooms);
+        assert_eq!(counted, ProjectLinks { routines: LinkCountLoad::Loaded(1), channels: LinkCountLoad::Loaded(2) });
+        assert_eq!(counted.summary_line(), "루틴 1개 \u{00b7} 채널 2개");
     }
 }

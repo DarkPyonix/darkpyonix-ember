@@ -290,12 +290,13 @@ pub fn session_row(state: &State, id: &str, cx: &RowContext<'_>) -> Option<Sessi
     })
 }
 
-/// All projects, most recently active first, with their status summary. Archived sessions do
-/// not count toward a project's badges.
+/// All active (non-archived) projects, most recently active first, with their status summary.
+/// Archived sessions do not count toward a project's badges.
 pub fn project_cards(state: &State) -> Vec<ProjectCard> {
     let mut cards: Vec<ProjectCard> = state
         .projects()
         .into_iter()
+        .filter(|p| !state.project(&p.name).is_some_and(|pr| pr.archived))
         .map(|p| {
             let mut summary = ProjectSummary::default();
             let mut updated_at = 0;
@@ -1072,5 +1073,28 @@ mod tests {
         assert_eq!(fork_origin_label(&o, Some("Fix login")), "Forked from Fix login");
         assert_eq!(fork_origin_label(&o, Some("")), "Forked from abc");
         assert_eq!(fork_origin_label(&o, None), "Forked from abc");
+    }
+
+    #[test]
+    fn fr_l26_project_cards_exclude_archived_projects() {
+        let mut s = state(vec![
+            rec("a", "alpha", SessionStatus::Running, 30),
+            rec("b", "beta", SessionStatus::WaitingForApproval, 20),
+            rec("g", "gamma", SessionStatus::Idle, 10),
+        ]);
+        s.apply(Input::ProjectsLoaded(vec![
+            Project { name: "alpha".into(), archived: false, ..Default::default() },
+            Project { name: "beta".into(), archived: true, ..Default::default() },
+        ]));
+        let names: Vec<String> = project_cards(&s).into_iter().map(|c| c.name).collect();
+        assert_eq!(names, vec!["alpha", "gamma"]);
+
+        // Restoring an archived project brings its card back.
+        s.apply(Input::ProjectsLoaded(vec![
+            Project { name: "alpha".into(), archived: false, ..Default::default() },
+            Project { name: "beta".into(), archived: false, ..Default::default() },
+        ]));
+        let restored: Vec<String> = project_cards(&s).into_iter().map(|c| c.name).collect();
+        assert_eq!(restored, vec!["alpha", "beta", "gamma"]);
     }
 }

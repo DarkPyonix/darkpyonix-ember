@@ -7,7 +7,8 @@
 //! branch, new member defaults, character style and profile override per harness with
 //! `PATCH /api/projects/{name}` (FR-L26, #327). The danger zone archives and restores with the
 //! same PATCH and deletes with `DELETE /api/projects/{name}` after a second tap; the leader stays
-//! disabled (owner decision, #384). The full view's 루틴 tile lists the project's server routines.
+//! disabled (owner decision, #384). The full view's 루틴 and 채널 tiles list the project's server
+//! routines and channels and open their screens.
 
 #![allow(non_snake_case)]
 
@@ -40,7 +41,11 @@ use crate::model::status_rank;
 use crate::ide::{open_external, plan, IdeAction, IdeKind};
 use crate::server::IdeLaunch;
 use crate::services::{run_shared, services};
-use crate::ui::project::{archive_patch, danger_hint, danger_rows_for, delete_armed, delete_error_message, delete_step, full_after_removal, is_owner_refusal, project_routine_tile, DeleteStep, TileLoad};
+use crate::ui::project::{
+    archive_patch, danger_hint, danger_rows_for, delete_armed, delete_error_message, delete_step, full_after_removal,
+    is_owner_refusal, project_channel_tile, project_links_from, project_routine_tile, ChannelTileLoad, DeleteStep,
+    ProjectLinks, TileLoad,
+};
 use crate::ui::coexist::{shared_ui, SharedUi};
 use crate::ui::shell::NavMenu;
 
@@ -882,30 +887,55 @@ fn FullProject(b: &ProjectBox, chips: &[ComputerChip], st: &Ui, ui: &SharedUi, w
         ComputerStrip(&assigned, st);
     }
     KpiStrip(b, ui, w);
-    // The project's routines from the server (FR-L26, #327); the demo lists its samples.
+    // The project's routines and channels from the server (FR-L26, #327); the demo lists its samples.
     let routines = remember_with_key(b.id.clone(), || {
         mutable_state_of(if services().demo.is_some() { TileLoad::Loaded(super::routines::sample_entries()) } else { TileLoad::Loading })
     });
+    let channels = remember_with_key(b.id.clone(), || {
+        mutable_state_of(if services().demo.is_some() {
+            ChannelTileLoad::Loaded(super::channels::sample_rooms())
+        } else {
+            ChannelTileLoad::Loading
+        })
+    });
     if services().demo.is_none() {
         let (slot, id) = (routines.clone(), b.id.clone());
-        compose_rust::runtime::launched_effect(b.id.clone(), move || async move {
+        launched_effect(b.id.clone(), move || async move {
             run_shared(async move { crate::ui::project::load_project_tile(services().client.api(), &id).await }, move |l| slot.set(l));
+        });
+        let (slot, id) = (channels.clone(), b.id.clone());
+        launched_effect(b.id.clone(), move || async move {
+            run_shared(
+                async move { crate::ui::project::load_project_channels(services().client.api(), &id).await },
+                move |l| slot.set(l),
+            );
         });
     }
     let routine_lines = project_routine_tile(&routines.get(), &b.id, super::routines::now_local()).lines();
+    let channel_lines = project_channel_tile(&channels.get(), &b.id).lines();
     let members = || MembersCard(b, st, ui);
     let side = || {
         { use ::compose_rust::ui::Column; Column!(spacing = SP[4], modifier = Modifier::new().fill_max_width(), {
-            // TODO(channels screen, phase 7): the channel tile lists the project's channels here.
-            for (icon, title, empty) in [(shell::ICON_GAUGE_SVG, "루틴", "루틴이 없습니다"), (shell::ICON_HASH_SVG, "채널", "채널이 없습니다")] {
+            for (icon, title, menu, lines) in [
+                (shell::ICON_GAUGE_SVG, "루틴", NavMenu::Routines, &routine_lines),
+                (shell::ICON_HASH_SVG, "채널", NavMenu::Channels, &channel_lines),
+            ] {
+                let (u, id) = (ui.clone(), b.id.clone());
                 super::home::Tile(|| {
-                    super::home::CardHead(icon, title, || {});
-                    if title == "루틴" {
-                        for line in &routine_lines {
-                            Label(line, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(2));
-                        }
-                    } else {
-                        Label(&format!("{empty}. {SOON}"), Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(2));
+                    super::home::CardHead(icon, title, || {
+                        NamedClickable(
+                            super::a11y::OPEN_SCREEN,
+                            Modifier::new().size(30.0, 30.0).border(1.0, paint(p.line)).shape_role(ShapeRole::Full),
+                            Alignment::Center,
+                            move || {
+                                u.set_selected_project(Some(id.clone()));
+                                shell::choose(&u, menu);
+                            },
+                            || NavIcon(ICON_ARROW_RIGHT_SVG, p.muted.to_argb(), 16.0),
+                        );
+                    });
+                    for line in lines {
+                        Label(line, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(2));
                     }
                 });
             }
@@ -1669,6 +1699,27 @@ pub(super) fn SettingsSheet(
     let failure = remember_with_key(b.id.clone(), || mutable_state_of(None::<String>));
     let sheet_skip = SheetSkip::from_env();
     let confirm = remember_with_key(b.id.clone(), || mutable_state_of(false));
+    let links = remember_with_key(b.id.clone(), || {
+        mutable_state_of(if services().demo.is_some() {
+            project_links_from(
+                &b.id,
+                &super::routines::sample_entries(),
+                &super::channels::sample_rooms(),
+            )
+        } else {
+            ProjectLinks::loading()
+        })
+    });
+    if services().demo.is_none() {
+        let (slot, id) = (links.clone(), b.id.clone());
+        launched_effect(b.id.clone(), move || async move {
+            run_shared(
+                async move { crate::ui::project::load_project_links(services().client.api(), &id).await },
+                move |l| slot.set(l),
+            );
+        });
+    }
+    let links_now = links.get();
     let d = draft.get();
     let errors = validate_settings(&d, &b.id);
     let patch = build_patch(&server, &d);
@@ -1710,6 +1761,7 @@ pub(super) fn SettingsSheet(
                         FieldRow("이름", || {
                             EmberField(FieldOptions {
                                 fill_max_width: true,
+                                text: Some(if default_project { b.name.clone() } else { d.name.clone() }),
                                 placeholder: b.name.clone(),
                                 enabled: Some(part_supported(SettingsPart::Name) && !default_project),
                                 on_value_change: Some(Box::new(move |v| d1.update(|s| s.name = v))),
@@ -1721,7 +1773,8 @@ pub(super) fn SettingsSheet(
                                 FieldRow("저장소", || {
                                     EmberField(FieldOptions {
                                         fill_max_width: true,
-                                        placeholder: b.repo.clone().unwrap_or_else(|| "github.com/...".to_string()),
+                                        text: Some(d.repo.clone()),
+                                        placeholder: "github.com/...".to_string(),
                                         enabled: Some(part_supported(SettingsPart::Repository)),
                                         on_value_change: Some(Box::new(move |v| d2.update(|s| s.repo = v))),
                                         ..Default::default()
@@ -1732,7 +1785,8 @@ pub(super) fn SettingsSheet(
                                 FieldRow("기본 브랜치", || {
                                     EmberField(FieldOptions {
                                         fill_max_width: true,
-                                        placeholder: b.branch.clone().unwrap_or_else(|| "develop".to_string()),
+                                        text: Some(d.branch.clone()),
+                                        placeholder: "develop".to_string(),
                                         enabled: Some(part_supported(SettingsPart::Repository)),
                                         on_value_change: Some(Box::new(move |v| d3.update(|s| s.branch = v))),
                                         ..Default::default()
@@ -1781,12 +1835,11 @@ pub(super) fn SettingsSheet(
                             let dr = draft.clone();
                             // The model picker sheet of the new session screen needs the harness
                             // catalog (an Ember gap, not compose-rust#383, which is fixed); the id
-                            // is typed until it is shared. v0.0.7: #374 fixed (`TextField::text`);
-                            // workaround kept until checked on a display, so the server's current
-                            // model stays the placeholder.
+                            // is typed until it is shared.
                             EmberField(FieldOptions {
                                 fill_max_width: true,
-                                placeholder: server.member_defaults.as_ref().and_then(|m| m.model.clone()).unwrap_or_else(|| "비워 두면 하네스 기본값을 씁니다".to_string()),
+                                text: Some(d.model.clone()),
+                                placeholder: "비워 두면 하네스 기본값을 씁니다".to_string(),
                                 enabled: Some(part_supported(SettingsPart::MemberDefaults)),
                                 on_value_change: Some(Box::new(move |v| dr.update(|s| s.model = v))),
                                 ..Default::default()
@@ -1871,14 +1924,36 @@ pub(super) fn SettingsSheet(
                         Label("리더가 필요하면 프로젝트를 새로 만들어 옮기세요.", Fs::Md, Weight::Regular, Some(paint(p.text_2)), Some(1));
                     });
                 }
-                SkipSection(&sheet_skip, EST_SEC_LINKS, "연결", "이 프로젝트에 묶인 채널, 루틴, 버전 관리입니다. 채널과 루틴 연결은 서버가 아직 알려 주지 않습니다", false, || {
-                    // `.ps-chips` of outline chips; only 버전 관리 is known to the client.
-                    let (u, closed, id) = (shared_ui().clone(), closed.clone(), b.id.clone());
-                    AppButton("버전 관리", Some(IconRole::History), ButtonKind::Default, true, patch.is_empty() && !saving.get(), false, move || {
-                        closed.set(None);
-                        u.set_selected_project(Some(id.clone()));
-                        shell::choose(&u, NavMenu::VersionControl);
-                    });
+                SkipSection(&sheet_skip, EST_SEC_LINKS, "연결", "이 프로젝트에 묶인 루틴, 채널, 버전 관리로 바로 이동합니다", false, || {
+                    { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
+                        let nav_enabled = patch.is_empty() && !saving.get();
+                        { use ::compose_rust::ui::FlowRow; FlowRow!(horizontal_spacing = SP[1], vertical_spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
+                            let routine_label = links_now.routine_button_label();
+                            let channel_label = links_now.channel_button_label();
+                            let (u, closed_r, id) = (shared_ui().clone(), closed.clone(), b.id.clone());
+                            AppButton(&routine_label, None, ButtonKind::Default, true, nav_enabled, false, move || {
+                                closed_r.set(None);
+                                u.set_selected_project(Some(id.clone()));
+                                shell::choose(&u, NavMenu::Routines);
+                            });
+                            let (u, closed_c, id) = (shared_ui().clone(), closed.clone(), b.id.clone());
+                            AppButton(&channel_label, None, ButtonKind::Default, true, nav_enabled, false, move || {
+                                closed_c.set(None);
+                                u.set_selected_project(Some(id.clone()));
+                                shell::choose(&u, NavMenu::Channels);
+                            });
+                            let (u, closed_v, id) = (shared_ui().clone(), closed.clone(), b.id.clone());
+                            AppButton("버전 관리", Some(IconRole::History), ButtonKind::Default, true, nav_enabled, false, move || {
+                                closed_v.set(None);
+                                u.set_selected_project(Some(id.clone()));
+                                shell::choose(&u, NavMenu::VersionControl);
+                            });
+                        }) };
+                        Label(&links_now.summary_line(), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+                        if let Some(reason) = crate::ui::project::characters_link_reason(!patch.is_empty()) {
+                            Label(reason, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+                        }
+                    }) };
                 });
                 SkipSection(&sheet_skip, EST_SEC_DANGER, "위험 영역", danger_hint(&b.id), false, || {
                     { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
@@ -2734,6 +2809,60 @@ mod tests {
             batch.iter().any(|m| matches!(m, Mutation::SetModifier { modifier, .. } if format!("{modifier:?}").contains(&max_h))),
             "expected SizeIn with {max_h}"
         );
+    }
+
+    #[test]
+    fn fr_l26_settings_sheet_prefills_fields_and_wires_live_links() {
+        let src = include_str!("project.rs");
+        let production = src.split("#[cfg(test)]").next().unwrap();
+        let sheet = production.split("pub(super) fn SettingsSheet(").nth(1).unwrap().split("\nfn ").next().unwrap();
+        assert!(sheet.contains("text: Some(if default_project { b.name.clone() } else { d.name.clone() })"));
+        assert!(sheet.contains("text: Some(d.repo.clone())"));
+        assert!(sheet.contains("text: Some(d.branch.clone())"));
+        assert!(sheet.contains("text: Some(d.model.clone())"));
+        assert!(sheet.contains("load_project_links("));
+        assert!(sheet.contains("NavMenu::Routines"));
+        assert!(sheet.contains("NavMenu::Channels"));
+        assert!(sheet.contains("NavMenu::VersionControl"));
+        assert!(!sheet.contains("채널과 루틴 연결은 서버가 아직 알려 주지 않습니다"));
+
+        let _guard = crate::services::test_guard();
+        let mut host = Host::new(|| {
+            Box::new(Recomposer::new(|| {
+                let b = ProjectBox {
+                    id: "ember".into(),
+                    name: "ember".into(),
+                    members: vec![],
+                    running: 0,
+                    waiting: 0,
+                    computers: vec![],
+                    top: None,
+                    repo: Some("github.com/DarkPyonix/darkpyonix-ember".into()),
+                    branch: Some("develop".into()),
+                };
+                let closed = remember(|| mutable_state_of(Some("ember".to_string())));
+                let full = remember(|| mutable_state_of(None::<String>));
+                SettingsSheet(&b, &[], closed, full, || {});
+            }))
+        });
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let all = texts(&batch);
+        assert!(all.iter().any(|t| t == "ember"), "prefilled name text missing: {all:?}");
+        assert!(all.iter().any(|t| t.starts_with("루틴 (")), "live routine link missing: {all:?}");
+        assert!(all.iter().any(|t| t.starts_with("채널 (")), "live channel link missing: {all:?}");
+        assert!(all.iter().any(|t| t == "버전 관리"), "vcs link missing: {all:?}");
+    }
+
+    #[test]
+    fn fr_l26_full_project_tiles_wire_channels_and_navigate_to_routines_and_channels() {
+        let src = include_str!("project.rs");
+        let production = src.split("#[cfg(test)]").next().unwrap();
+        let full = production.split("fn FullProject(").nth(1).unwrap().split("\n// --- IDE").next().unwrap();
+        assert!(full.contains("load_project_channels("));
+        assert!(full.contains("project_channel_tile("));
+        assert!(full.contains("NavMenu::Routines"));
+        assert!(full.contains("NavMenu::Channels"));
+        assert!(!full.contains("{empty}. {SOON}"));
     }
 }
 

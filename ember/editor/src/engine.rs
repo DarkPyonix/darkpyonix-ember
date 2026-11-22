@@ -87,6 +87,8 @@ pub enum ReadPurpose {
     Replace { id: u64 },
     /// A file that is not open, read for workspace edit `id` (FR-L31.13).
     WorkspaceEdit { id: u64 },
+    /// The log file of output channel `id`, read after `MainThreadOutputService.$update`.
+    OutputChannel { id: String },
     /// A local resource request `request` of webview `handle` (FR-E8).
     WebviewResource { handle: String, request: u64 },
 }
@@ -1794,6 +1796,7 @@ impl SessionCore {
                 self.ui(SessionUpdate::Dirty { uri, dirty: false });
             }
             ReadPurpose::ExtHostOpen { req } => self.finish_exthost_open(uri, req, result),
+            ReadPurpose::OutputChannel { id } => self.finish_output_read(&id, result),
             ReadPurpose::Grammar { scope } => self.on_grammar_read(&scope, &uri, result),
             ReadPurpose::Replace { id } => self.on_replace_read(id, uri, result),
             ReadPurpose::WorkspaceEdit { id } => self.on_workspace_edit_read(id, uri, result),

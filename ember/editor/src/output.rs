@@ -3,7 +3,12 @@
 //! Output channels are registered by extensions with `MainThreadOutputService.$register`
 //! or created by the Ember workbench. Text appended to a channel is capped in memory
 //! at [`MAX_OUTPUT_CHANNEL_BYTES`] (64 KiB per channel).
+//!
+//! An extension's channel does not receive text over RPC. The extension host writes it to the
+//! channel's log file and tells the editor with `$update`; the editor then reads the file and
+//! shows it from the offset where the channel was last cleared or replaced.
 
+use ember_editor_conn::uri::UriComponents;
 use serde::{Deserialize, Serialize};
 
 /// Maximum bytes kept in memory for one output channel (old text is trimmed from the start).
@@ -15,6 +20,19 @@ pub struct OutputChannel {
     pub id: String,
     pub label: String,
     pub text: String,
+    /// The log file an extension's channel is written to (`$register`'s `file`); `None` for a
+    /// channel the workbench owns.
+    #[serde(default)]
+    pub file: Option<UriComponents>,
+    /// Byte offset in `file` where the shown text starts: the `till` of the last clear or replace.
+    #[serde(skip)]
+    pub start: u64,
+    /// A read of `file` is in flight.
+    #[serde(skip)]
+    pub reading: bool,
+    /// An `$update` arrived while a read was in flight; read once more when it lands.
+    #[serde(skip)]
+    pub dirty: bool,
 }
 
 impl OutputChannel {
@@ -23,7 +41,25 @@ impl OutputChannel {
             id: id.into(),
             label: label.into(),
             text: String::new(),
+            file: None,
+            start: 0,
+            reading: false,
+            dirty: false,
         }
+    }
+
+    /// A channel whose text lives in `file`.
+    pub fn with_file(id: impl Into<String>, label: impl Into<String>, file: UriComponents) -> Self {
+        Self { file: Some(file), ..Self::new(id, label) }
+    }
+
+    /// Show the contents of the channel's file from `start` on. The bytes are decoded as UTF-8,
+    /// lossily, and only the last [`MAX_OUTPUT_CHANNEL_BYTES`] are kept. A `start` past the end of
+    /// the file shows nothing.
+    pub fn show_file(&mut self, bytes: &[u8]) {
+        let from = usize::try_from(self.start).unwrap_or(usize::MAX).min(bytes.len());
+        self.text.clear();
+        self.append(&String::from_utf8_lossy(&bytes[from..]));
     }
 
     /// Append text to the channel buffer, capping the total length to `MAX_OUTPUT_CHANNEL_BYTES`.
@@ -146,6 +182,22 @@ mod tests {
         assert_eq!(ch.text, "hello\nworld\n");
         ch.clear();
         assert_eq!(ch.text, "");
+    }
+
+    #[test]
+    fn output_channel_show_file_starts_at_the_offset_and_decodes_lossily() {
+        let mut ch = OutputChannel::new("c1", "Test");
+        ch.show_file(b"one\ntwo\n");
+        assert_eq!(ch.text, "one\ntwo\n");
+        ch.start = 4;
+        ch.show_file(b"one\ntwo\n");
+        assert_eq!(ch.text, "two\n");
+        ch.start = 99;
+        ch.show_file(b"one\n");
+        assert_eq!(ch.text, "");
+        ch.start = 0;
+        ch.show_file(&[b'a', 0xFF, b'b']);
+        assert_eq!(ch.text, "a\u{FFFD}b");
     }
 
     #[test]

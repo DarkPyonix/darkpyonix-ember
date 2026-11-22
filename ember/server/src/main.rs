@@ -392,12 +392,37 @@ async fn serve_main() -> anyhow::Result<()> {
         a2a.set_computer_setter(Arc::new(move |session_id: String, computer_id: String| {
             let (computers, sessions) = (computers.clone(), sessions.clone());
             Box::pin(async move {
-                computers
-                    .switch(&sessions, &session_id, &computer_id)
-                    .await
-                    .map(|_| ())
-                    .map_err(|e| e.to_string())
+                computers.switch(&sessions, &session_id, &computer_id).await.map_err(|e| e.to_string())?;
+                // Designated too, so the D20 fallback moves the teammate to the main server
+                // when that computer stops answering, and back (FR-T7, #82).
+                computers.designate(&session_id, Some(&computer_id)).map_err(|e| e.to_string())
             }) as futures::future::BoxFuture<'static, Result<(), String>>
+        }));
+    }
+    // `team spawn --computer` refuses a computer without the leader's directory (FR-T7, #82).
+    {
+        let computers = computers.clone();
+        a2a.set_dir_checker(Arc::new(move |computer_id: String, path: String| {
+            let computers = computers.clone();
+            Box::pin(async move {
+                let node = computers.client(&computer_id).map_err(|e| e.to_string())?;
+                match node.stat(&path).await {
+                    Ok(st) if st.kind == ember_node::proto::FileKind::Dir => Ok(()),
+                    Ok(_) => Err(format!("{path} on computer {computer_id} is not a directory")),
+                    Err(e) => Err(format!("computer {computer_id} has no directory {path} ({e})")),
+                }
+            }) as futures::future::BoxFuture<'static, Result<(), String>>
+        }));
+    }
+    // Team views show where each member runs, and a teammate's move reaches its leader (#82).
+    {
+        let c = computers.clone();
+        a2a.set_placement_lookup(Arc::new(move |session_id: &str| c.placement(session_id)));
+        let weak = Arc::downgrade(&a2a);
+        computers.on_move(Arc::new(move |out: &computers::SwitchOutcome, fell_back: bool| {
+            let Some(a2a) = weak.upgrade() else { return };
+            let (sid, from, to) = (out.session_id.clone(), out.previous.name.clone(), out.computer.name.clone());
+            tokio::spawn(async move { a2a.teammate_moved(&sid, &from, &to, fell_back).await });
         }));
     }
 

@@ -607,6 +607,7 @@ impl Sessions {
             fork_from: None,
             mem_limit_mb: self.mem_limit_mb(rec.agent),
             allowed_tools: Vec::new(),
+            claude_post_tool_hook: None,
         };
         let prepare_hooks: Vec<PrepareHook> = self.prepare_hooks.lock().unwrap().clone();
         for hook in &prepare_hooks {
@@ -852,6 +853,44 @@ impl Sessions {
         };
         live.run.lock().await.send(&agent_text).await?;
         Ok(())
+    }
+
+    /// Deliver `text` into an already-running turn without starting or waking an idle session
+    /// (FR-T3). Returns `Ok(true)` if the live agent accepted the steer, or `Ok(false)` if no
+    /// agent is live, no turn is active, or the harness does not support steering.
+    pub async fn steer(&self, id: &str, text: &str) -> Result<bool, SessionError> {
+        let Some(live) = self.live.lock().await.get(id).cloned() else {
+            return Ok(false);
+        };
+        let accepted = live.run.lock().await.steer(text).await.map_err(SessionError::Other)?;
+        if accepted {
+            self.touch(id);
+            live.events
+                .send(AgentEvent::UserMessage { text: text.to_string() })
+                .await
+                .map_err(|_| anyhow::anyhow!("agent for session {id} has exited"))?;
+        }
+        Ok(accepted)
+    }
+
+    /// Record mid-turn input delivered outside [`Sessions::steer`] (for example through a
+    /// `PostToolUse` hook) on a live session (FR-T3). Returns `true` if the session has a live
+    /// event pump that accepted the event, `false` otherwise.
+    pub async fn record_mid_turn_input(&self, id: &str, text: &str) -> bool {
+        let Some(live) = self.live.lock().await.get(id).cloned() else {
+            return false;
+        };
+        if live
+            .events
+            .send(AgentEvent::UserMessage { text: text.to_string() })
+            .await
+            .is_ok()
+        {
+            self.touch(id);
+            true
+        } else {
+            false
+        }
     }
 
     /// A message the user typed: [`Sessions::send`], then the user-message hooks (mentions,

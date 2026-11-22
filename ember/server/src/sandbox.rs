@@ -295,18 +295,45 @@ pub fn from_env(denied: Vec<PathBuf>) -> Policy {
 /// Claude Code `--settings` JSON with `permissions.deny` rules for its file tools on each denied
 /// directory (`//` marks an absolute path in Claude Code rules). `None` when nothing is denied.
 pub fn claude_settings(denied: &[PathBuf]) -> Option<String> {
-    if denied.is_empty() {
+    claude_settings_json(denied, None)
+}
+
+/// Claude Code `--settings` JSON merging sandbox `permissions.deny` rules (when `denied` is
+/// non-empty) and a `PostToolUse` command hook (when `post_tool_hook` is set, FR-T3). `None`
+/// when neither is present.
+pub fn claude_settings_json(denied: &[PathBuf], post_tool_hook: Option<&str>) -> Option<String> {
+    let hook = post_tool_hook.filter(|h| !h.is_empty());
+    if denied.is_empty() && hook.is_none() {
         return None;
     }
-    let mut rules = Vec::new();
-    for d in denied {
-        let d = d.to_string_lossy();
-        let d = d.trim_end_matches('/');
-        for tool in ["Read", "Edit", "Write"] {
-            rules.push(format!("{tool}(/{d}/**)"));
+    let mut obj = serde_json::Map::new();
+    if !denied.is_empty() {
+        let mut rules = Vec::new();
+        for d in denied {
+            let d = d.to_string_lossy();
+            let d = d.trim_end_matches('/');
+            for tool in ["Read", "Edit", "Write"] {
+                rules.push(format!("{tool}(/{d}/**)"));
+            }
         }
+        obj.insert("permissions".into(), serde_json::json!({ "deny": rules }));
     }
-    Some(serde_json::json!({ "permissions": { "deny": rules } }).to_string())
+    if let Some(command) = hook {
+        obj.insert(
+            "hooks".into(),
+            serde_json::json!({
+                "PostToolUse": [
+                    {
+                        "matcher": "*",
+                        "hooks": [
+                            { "type": "command", "command": command }
+                        ]
+                    }
+                ]
+            }),
+        );
+    }
+    Some(serde_json::Value::Object(obj).to_string())
 }
 
 #[cfg(test)]

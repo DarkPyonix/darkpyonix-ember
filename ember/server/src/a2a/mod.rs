@@ -757,10 +757,12 @@ impl A2a {
         }));
         // FR-T12 (#380): Claude Code, Codex, Antigravity and ACP agents answer a mention through
         // the `channel_post` MCP tool.
+        // FR-T3 (#997): Claude Code drains queued A2A messages and reports via a PostToolUse hook.
         let weak = Arc::downgrade(self);
         self.sessions.add_start_config_hook(Arc::new(move |rec: &SessionRecord, req: &mut StartRequest| {
             if let Some(a) = weak.upgrade() {
                 a.channel_tool_config(rec, req);
+                a.post_tool_hook_config(rec, req);
             }
             Ok(())
         }));
@@ -968,6 +970,19 @@ impl A2a {
         } else if harness.allow_rule() && !req.allowed_tools.iter().any(|t| t == CHANNEL_POST_TOOL) {
             req.allowed_tools.push(CHANNEL_POST_TOOL.to_string());
         }
+    }
+
+    /// Start-config hook (FR-T3, FR-T8, #997): for Claude Code sessions, register a `PostToolUse`
+    /// hook command that drains queued A2A messages and reports into `additionalContext`.
+    fn post_tool_hook_config(&self, rec: &SessionRecord, req: &mut StartRequest) {
+        if rec.agent != AgentKind::ClaudeCode {
+            return;
+        }
+        let Some(cli_path) = self.config.cli_path.as_ref() else {
+            return;
+        };
+        let quoted = cli_path.display().to_string().replace('\'', "'\\''");
+        req.claude_post_tool_hook = Some(format!("'{quoted}' hook post-tool-use"));
     }
 
     /// Environment for an agent process: a fresh runtime token per process start.
@@ -1363,25 +1378,43 @@ impl A2a {
             .clone()
     }
 
-    /// Deliver everything queued for `target` if it is between turns. Returns whether a
-    /// delivery happened.
+    /// Deliver everything queued for `target`: mid-turn via `Sessions::steer` when the target is
+    /// busy and its harness supports steering (FR-T3, FR-T8, #997), otherwise at the turn boundary
+    /// via `Sessions::send`. Returns whether a delivery happened.
     pub async fn flush(self: &Arc<Self>, target: &str) -> anyhow::Result<bool> {
         let lock = self.flush_lock(target);
         let _guard = lock.lock().await;
-        if !self.settle_awaiting(target) {
-            return Ok(false);
-        }
+        let settled = self.settle_awaiting(target);
         let Some(rec) = self.sessions.store().session(target)? else {
             return Ok(false);
         };
-        if is_busy(rec.status) {
-            return Ok(false);
-        }
+        let busy = !settled || is_busy(rec.status);
         let pending = self.store.pending_for(target)?;
         if pending.is_empty() {
             return Ok(false);
         }
         let text = self.render(&rec, &pending)?;
+        if busy {
+            if !self.sessions.is_live(target).await {
+                return Ok(false);
+            }
+            match self.sessions.steer(target, &text).await {
+                Ok(true) => {
+                    let ids: Vec<String> = pending.iter().map(|m| m.id.clone()).collect();
+                    self.store.mark_delivered(&ids)?;
+                    self.note_delivered_mid_turn(target, &pending);
+                    return Ok(true);
+                }
+                Ok(false) => return Ok(false),
+                Err(e) => {
+                    tracing::warn!(
+                        target_session = %target,
+                        "A2A mid-turn steer failed, kept queued: {e:#}"
+                    );
+                    return Ok(false);
+                }
+            }
+        }
         // Before sending: the turn could end before `send` returns.
         self.awaiting
             .lock()
@@ -1395,6 +1428,27 @@ impl A2a {
         self.store.mark_delivered(&ids)?;
         self.note_delivered(target, &pending);
         Ok(true)
+    }
+
+    /// Drain all queued messages for `session_id` mid-turn (e.g. Claude Code's `PostToolUse` hook,
+    /// FR-T3, FR-T8, #997). Records a `UserMessage` event, marks the batch delivered, and appends
+    /// any reports to `inflight`. Returns `None` when nothing is queued.
+    pub async fn drain_mid_turn(&self, session_id: &str) -> Result<Option<String>, A2aError> {
+        let lock = self.flush_lock(session_id);
+        let _guard = lock.lock().await;
+        let Some(rec) = self.sessions.store().session(session_id)? else {
+            return Err(A2aError::NotFound(format!("session {session_id} not found")));
+        };
+        let pending = self.store.pending_for(session_id)?;
+        if pending.is_empty() {
+            return Ok(None);
+        }
+        let text = self.render(&rec, &pending)?;
+        let _ = self.sessions.record_mid_turn_input(session_id, &text).await;
+        let ids: Vec<String> = pending.iter().map(|m| m.id.clone()).collect();
+        self.store.mark_delivered(&ids)?;
+        self.note_delivered_mid_turn(session_id, &pending);
+        Ok(Some(text))
     }
 
     /// Whether `target`'s last delivered turn is over (or there is none). Checks the store, so

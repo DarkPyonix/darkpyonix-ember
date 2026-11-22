@@ -14,7 +14,8 @@
 //!   message of kind `report` and counts toward loop protection (FR-T3).
 //! - **Wake.** A done report waits the batch time before it wakes the receiver, so reports that
 //!   arrive together start one turn; any other report wakes at once. A busy receiver gets its
-//!   reports batched at its turn end: mid-turn delivery needs per-harness hooks (#997).
+//!   reports mid-turn when its harness supports steering or a `PostToolUse` hook (#997), and
+//!   otherwise batched at its turn end.
 //! - **Acknowledgement.** A report delivered into a turn that fails is queued again, once.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -316,6 +317,17 @@ impl A2a {
     /// Remember who delegated work by the messages just delivered into `target`, and which of
     /// them were reports (FR-T8). Called by `flush` after a successful send.
     pub(super) fn note_delivered(&self, target: &str, delivered: &[A2aMessage]) {
+        self.record_delivered(target, delivered, false);
+    }
+
+    /// Like [`A2a::note_delivered`], for mid-turn deliveries (FR-T3, FR-T8, #997): appends to
+    /// `inflight` instead of replacing it, so reports delivered earlier in the same turn are not
+    /// lost if the turn fails.
+    pub(super) fn note_delivered_mid_turn(&self, target: &str, delivered: &[A2aMessage]) {
+        self.record_delivered(target, delivered, true);
+    }
+
+    fn record_delivered(&self, target: &str, delivered: &[A2aMessage], append: bool) {
         let leader_of_target = self.leader_of(target);
         let mut st = self.report_state.lock().unwrap();
         let mut reports = Vec::new();
@@ -334,7 +346,13 @@ impl A2a {
             }
             st.senders.entry(target.to_string()).or_default().insert(from.to_string());
         }
-        st.inflight.insert(target.to_string(), reports);
+        if append {
+            if !reports.is_empty() {
+                st.inflight.entry(target.to_string()).or_default().extend(reports);
+            }
+        } else {
+            st.inflight.insert(target.to_string(), reports);
+        }
     }
 
     /// The leader of `session` when it is an active teammate.

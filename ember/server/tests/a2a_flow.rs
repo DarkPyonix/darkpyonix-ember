@@ -664,3 +664,222 @@ async fn the_ember_a2a_cli_lists_and_sends_over_http() {
     let out = cli(&["send"]).await.unwrap();
     assert_eq!(out.status.code(), Some(2));
 }
+
+#[derive(Clone, Default)]
+struct SteerTestAdapter {
+    reqs: Arc<Mutex<HashMap<String, StartRequest>>>,
+    /// 0 = return `Ok(false)`, 1 = return `Err(...)`.
+    mode: Arc<std::sync::atomic::AtomicU8>,
+    steer_calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+struct SteerTestRun {
+    inner: Box<dyn AgentRun>,
+    mode: Arc<std::sync::atomic::AtomicU8>,
+    steer_calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait]
+impl AgentAdapter for SteerTestAdapter {
+    fn kind(&self) -> AgentKind {
+        AgentKind::Scripted
+    }
+    async fn detect(&self) -> Detected {
+        ScriptedAdapter.detect().await
+    }
+    async fn start(
+        &self,
+        req: StartRequest,
+        events: mpsc::Sender<AgentEvent>,
+    ) -> anyhow::Result<Box<dyn AgentRun>> {
+        let id = req
+            .env
+            .iter()
+            .find(|(k, _)| k == "EMBER_SESSION_ID")
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default();
+        self.reqs.lock().unwrap().insert(id, req.clone());
+        let inner = ScriptedAdapter.start(req, events).await?;
+        Ok(Box::new(SteerTestRun {
+            inner,
+            mode: self.mode.clone(),
+            steer_calls: self.steer_calls.clone(),
+        }))
+    }
+}
+
+impl SteerTestAdapter {
+    fn token(&self, session: &str) -> String {
+        let seen = self.reqs.lock().unwrap();
+        let req = seen
+            .get(session)
+            .unwrap_or_else(|| panic!("session {session} never started"));
+        req.env
+            .iter()
+            .find(|(k, _)| k == "EMBER_RUNTIME_TOKEN")
+            .map(|(_, v)| v.clone())
+            .unwrap()
+    }
+}
+
+#[async_trait]
+impl AgentRun for SteerTestRun {
+    async fn send(&mut self, text: &str) -> anyhow::Result<()> {
+        self.inner.send(text).await
+    }
+    async fn steer(&mut self, _text: &str) -> anyhow::Result<bool> {
+        self.steer_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.mode.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            Ok(false)
+        } else {
+            Err(anyhow::anyhow!("steer transport failed"))
+        }
+    }
+    async fn answer(
+        &mut self,
+        approval_id: &str,
+        decision: ApprovalDecision,
+    ) -> anyhow::Result<()> {
+        self.inner.answer(approval_id, decision).await
+    }
+    async fn interrupt(&mut self) -> anyhow::Result<()> {
+        self.inner.interrupt().await
+    }
+    async fn shutdown(&mut self) -> anyhow::Result<()> {
+        self.inner.shutdown().await
+    }
+}
+
+#[tokio::test]
+async fn fr_t3_busy_delivery_stays_queued_when_steer_returns_false_or_errors() {
+    // FR-T3 (#997): when mid-turn `steer` returns `Ok(false)` or `Err(...)`, messages remain
+    // queued until `TurnEnded` and no duplicate `UserMessage` is recorded.
+    let agents = SteerTestAdapter::default();
+    let sessions = Sessions::new(
+        Arc::new(Store::open_in_memory().unwrap()),
+        vec![Arc::new(agents.clone()) as Arc<dyn AgentAdapter>],
+    );
+    let a2a = A2a::new(
+        sessions.clone(),
+        A2aStore::open_in_memory().unwrap(),
+        A2aConfig::new("http://127.0.0.1:1"),
+    );
+    a2a.install();
+    let app = ember_server::api::router(sessions.clone())
+        .merge(ember_server::a2a::api::router(a2a.clone()));
+
+    let a = new_session(&sessions, "alpha");
+    let b = new_session(&sessions, "beta");
+    sessions.send(&a, "start").await.unwrap();
+    wait_status(&sessions, &a, SessionStatus::WaitingForApproval).await;
+    sessions.send(&b, "busy work").await.unwrap();
+    wait_status(&sessions, &b, SessionStatus::WaitingForApproval).await;
+
+    // Case 1: steer returns Ok(false).
+    agents.mode.store(0, std::sync::atomic::Ordering::SeqCst);
+    let (st, r1) = call(
+        &app,
+        "POST",
+        "/api/a2a/messages",
+        Some(&agents.token(&a)),
+        Some(json!({ "to": b, "text": "first queued" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{r1}");
+    assert_eq!(r1["status"], "queued");
+    assert_eq!(user_messages(&sessions, &b), vec!["busy work".to_string()]);
+    assert_eq!(a2a.store().pending_for(&b).unwrap().len(), 1);
+
+    // Case 2: steer returns Err(...).
+    agents.mode.store(1, std::sync::atomic::Ordering::SeqCst);
+    let (st, r2) = call(
+        &app,
+        "POST",
+        "/api/a2a/messages",
+        Some(&agents.token(&a)),
+        Some(json!({ "to": b, "text": "second queued" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{r2}");
+    assert_eq!(r2["status"], "queued");
+    assert_eq!(user_messages(&sessions, &b), vec!["busy work".to_string()]);
+    assert_eq!(a2a.store().pending_for(&b).unwrap().len(), 2);
+    assert!(
+        agents
+            .steer_calls
+            .load(std::sync::atomic::Ordering::SeqCst)
+            >= 2
+    );
+
+    // Ending the turn delivers both queued messages together without duplicate UserMessage.
+    sessions
+        .answer(&b, "approval-1", ApprovalDecision::AllowOnce)
+        .await
+        .unwrap();
+    wait_for("delivery at turn end", || {
+        user_messages(&sessions, &b).len() == 2
+    })
+    .await;
+    let got = user_messages(&sessions, &b);
+    assert_eq!(got.len(), 2);
+    let first = got[1].find("first queued").unwrap();
+    let second = got[1].find("second queued").unwrap();
+    assert!(first < second);
+    assert!(a2a.store().pending_for(&b).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn fr_t3_post_tool_use_hook_drains_queued_messages_and_reports() {
+    // FR-T3 (#997): POST /api/a2a/inbox/drain with the session's runtime token drains queued
+    // messages and reports while busy, marks them delivered, records `UserMessage`, and returns
+    // `null` on a second call; missing or invalid tokens get 401.
+    let w = world();
+    let a = new_session(&w.sessions, "alpha");
+    let b = new_session(&w.sessions, "beta");
+    w.sessions.send(&a, "start").await.unwrap();
+    wait_status(&w.sessions, &a, SessionStatus::WaitingForApproval).await;
+    w.sessions.send(&b, "busy work").await.unwrap();
+    wait_status(&w.sessions, &b, SessionStatus::WaitingForApproval).await;
+
+    let (_, r1) = send(&w, &a, &b, "first note", None).await;
+    let (_, r2) = send(&w, &a, &b, "second note", None).await;
+    assert_eq!(r1["status"], "queued");
+    assert_eq!(r2["status"], "queued");
+    w.a2a
+        .store()
+        .insert_report(&a, &b, "Report: alpha finished")
+        .unwrap();
+
+    // Missing or wrong runtime token is rejected with 401.
+    let (st, v) = call(&w.app, "POST", "/api/a2a/inbox/drain", None, None).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    assert_eq!(v["code"], "unauthorized");
+    let (st, _) = call(&w.app, "POST", "/api/a2a/inbox/drain", Some("bad-token"), None).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+
+    // Draining with the target session's runtime token returns the batched text and marks delivered.
+    let b_token = w.agents.token(&b);
+    let (st, v) = call(&w.app, "POST", "/api/a2a/inbox/drain", Some(&b_token), None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let drained = v["text"].as_str().expect("drained text should be a string");
+    assert!(
+        drained.contains("first note")
+            && drained.contains("second note")
+            && drained.contains("[ember a2a] Report ")
+            && drained.contains("Report: alpha finished"),
+        "{drained}"
+    );
+    assert!(w.a2a.store().pending_for(&b).unwrap().is_empty());
+    wait_for("mid-turn UserMessage recorded", || user_messages(&w.sessions, &b).len() == 2).await;
+    let msgs = user_messages(&w.sessions, &b);
+    assert_eq!(msgs.len(), 2);
+    assert_eq!(msgs[0], "busy work");
+    assert_eq!(msgs[1], drained);
+
+    // Second drain returns null and does not record another UserMessage.
+    let (st, v) = call(&w.app, "POST", "/api/a2a/inbox/drain", Some(&b_token), None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert!(v["text"].is_null(), "{v}");
+    assert_eq!(user_messages(&w.sessions, &b).len(), 2);
+}

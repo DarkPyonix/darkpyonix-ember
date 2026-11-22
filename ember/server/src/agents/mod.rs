@@ -197,6 +197,9 @@ pub struct StartRequest {
     /// `mcp_servers.<server>.tools.<tool>.approval_mode="approve"` for a server this request
     /// registers. Other adapters ignore it: their approval flow asks the person.
     pub allowed_tools: Vec<String>,
+    /// Optional shell command registered as a Claude Code `PostToolUse` hook in `--settings`
+    /// (FR-T3). Other adapters ignore it.
+    pub claude_post_tool_hook: Option<String>,
 }
 
 /// The native session a fork starts from (FR-S5).
@@ -389,6 +392,13 @@ pub trait AgentRun: Send {
     /// Deliver a user (or A2A) message. The adapter must not emit `UserMessage` itself; the
     /// session records it.
     async fn send(&mut self, text: &str) -> anyhow::Result<()>;
+
+    /// Steer an already-running turn with `text` without starting a new turn (FR-T3).
+    /// Returns `Ok(true)` if the harness accepted the steer into the active turn, or `Ok(false)`
+    /// if no turn is active or this harness does not support mid-turn steering.
+    async fn steer(&mut self, _text: &str) -> anyhow::Result<bool> {
+        Ok(false)
+    }
 
     /// Answer a pending approval.
     async fn answer(&mut self, approval_id: &str, decision: ApprovalDecision)

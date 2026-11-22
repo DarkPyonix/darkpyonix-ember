@@ -118,8 +118,11 @@ impl ClaudeCodeAdapter {
         .into_iter()
         .map(String::from)
         .collect();
-        // FR-A11: deny its file tools on the agent sandbox's directories (none in tests).
-        if let Some(settings) = crate::sandbox::claude_settings(crate::sandbox::denied_dirs()) {
+        // FR-A11 / FR-T3: merge sandbox deny rules and optional PostToolUse hook into `--settings`.
+        if let Some(settings) = crate::sandbox::claude_settings_json(
+            crate::sandbox::denied_dirs(),
+            req.claude_post_tool_hook.as_deref(),
+        ) {
             args.push(format!("--settings={settings}"));
         }
         if let Some(model) = &req.model {
@@ -1458,6 +1461,7 @@ mod tests {
             fork_from: None,
             mem_limit_mb: None,
             allowed_tools: Vec::new(),
+            claude_post_tool_hook: None,
         };
         let args = ClaudeCodeAdapter::args(&req);
         assert!(!args.iter().any(|a| a.starts_with("--mcp-config")));
@@ -1608,6 +1612,63 @@ mod tests {
         let args = ClaudeCodeAdapter::args(&req);
         let i = args.iter().position(|a| a == "--allowedTools").unwrap();
         assert_eq!(args[i..], ["--allowedTools", "mcp__ember-channels__channel_post"]);
+    }
+
+    /// FR-T3: `--settings` merges sandbox deny rules with the `PostToolUse` command hook, and
+    /// works when only `post_tool_hook` is set.
+    #[test]
+    fn fr_t3_claude_settings_merges_sandbox_and_post_tool_hook() {
+        let hook = "/usr/local/bin/ember-a2a hook";
+        let merged = crate::sandbox::claude_settings_json(
+            &[PathBuf::from("/h/.ember/")],
+            Some(hook),
+        )
+        .unwrap();
+        let v: Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(
+            v["permissions"]["deny"],
+            json!(["Read(//h/.ember/**)", "Edit(//h/.ember/**)", "Write(//h/.ember/**)"])
+        );
+        assert_eq!(
+            v["hooks"]["PostToolUse"],
+            json!([{
+                "matcher": "*",
+                "hooks": [{ "type": "command", "command": hook }]
+            }])
+        );
+
+        let hook_only = crate::sandbox::claude_settings_json(&[], Some(hook)).unwrap();
+        let v: Value = serde_json::from_str(&hook_only).unwrap();
+        assert!(v.get("permissions").is_none());
+        assert_eq!(
+            v["hooks"]["PostToolUse"],
+            json!([{
+                "matcher": "*",
+                "hooks": [{ "type": "command", "command": hook }]
+            }])
+        );
+
+        assert!(crate::sandbox::claude_settings_json(&[], None).is_none());
+        assert!(crate::sandbox::claude_settings_json(&[], Some("")).is_none());
+
+        let req = StartRequest {
+            cwd: ".".into(),
+            claude_post_tool_hook: Some(hook.into()),
+            ..Default::default()
+        };
+        let args = ClaudeCodeAdapter::args(&req);
+        let settings_arg = args
+            .iter()
+            .find_map(|a| a.strip_prefix("--settings="))
+            .expect("--settings flag");
+        let parsed: Value = serde_json::from_str(settings_arg).unwrap();
+        assert_eq!(
+            parsed["hooks"]["PostToolUse"],
+            json!([{
+                "matcher": "*",
+                "hooks": [{ "type": "command", "command": hook }]
+            }])
+        );
     }
 
     #[cfg(unix)]

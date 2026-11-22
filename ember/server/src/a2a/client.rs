@@ -66,6 +66,8 @@ Channels (FR-T12):
       most). Use `-` (or no text) to read the text from stdin. `channel_post` is accepted too.
   ember-a2a mcp
       The stdio MCP server exposing the tool `channel_post`, started by the harness, not for people.
+  ember-a2a hook post-tool-use
+      Drain queued A2A messages and reports for a Claude Code PostToolUse hook, not for people.
 
 Environment (set by Ember for every agent session):
   EMBER_URL, EMBER_RUNTIME_TOKEN";
@@ -462,6 +464,10 @@ pub fn run(args: &[String]) -> i32 {
         }
         return super::mcp::run_stdio();
     }
+    // `hook` prints nothing on empty inbox or error and fails open with exit 0.
+    if args.first().map(String::as_str) == Some("hook") {
+        return run_hook(&args[1..]);
+    }
     match run_inner(args) {
         Ok(out) => {
             println!("{out}");
@@ -476,6 +482,43 @@ pub fn run(args: &[String]) -> i32 {
             1
         }
     }
+}
+
+fn run_hook(args: &[String]) -> i32 {
+    match args.first().map(String::as_str) {
+        Some("post-tool-use") => {
+            if let Some(output) = hook_post_tool_use_output() {
+                println!("{output}");
+            }
+            0
+        }
+        Some(other) => {
+            eprintln!("unknown hook command {other} (post-tool-use)\n\n{USAGE}");
+            2
+        }
+        None => {
+            eprintln!("missing hook command (post-tool-use)\n\n{USAGE}");
+            2
+        }
+    }
+}
+
+/// Calls `POST /api/a2a/inbox/drain` and formats the Claude Code `PostToolUse` hook response when
+/// messages were queued. Returns `None` on unset env, empty inbox, or any error (fail open).
+fn hook_post_tool_use_output() -> Option<String> {
+    let client = Client::from_env().ok()?;
+    let (status, v) = client.request("POST", "/api/a2a/inbox/drain", None).ok()?;
+    if !(200..300).contains(&status) {
+        return None;
+    }
+    let text = v.get("text").and_then(Value::as_str).filter(|s| !s.is_empty())?;
+    let payload = json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PostToolUse",
+            "additionalContext": text,
+        }
+    });
+    Some(payload.to_string())
 }
 
 enum CliError {

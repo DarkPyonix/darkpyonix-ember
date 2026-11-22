@@ -6,6 +6,7 @@
 //! - `POST /api/a2a/messages` `{to, text, reply_to?}` → `202 {id, to, status}` where status is
 //!   `delivered` or `queued`
 //! - `GET  /api/a2a/messages/{id}` → the message, if the caller sent or received it
+//! - `POST /api/a2a/inbox/drain` → `{text: String | null}` (mid-turn drain for hooks, FR-T3)
 //!
 //!
 //! Team routes for agents (FR-T7, token = the caller; see [`super::team`]):
@@ -61,6 +62,7 @@ pub fn router(a2a: Arc<A2a>) -> Router {
         .route("/api/a2a/targets", get(targets))
         .route("/api/a2a/messages", post(send))
         .route("/api/a2a/messages/{id}", get(message))
+        .route("/api/a2a/inbox/drain", post(drain_inbox))
         .route("/api/a2a/settings", get(get_settings).put(put_settings))
         .route(
             "/api/sessions/{id}/a2a",
@@ -154,6 +156,15 @@ async fn message(
         Some(m) if m.from_session == me || m.to_session == me => Ok(Json(m)),
         _ => Err(A2aError::NotFound(format!("message {id} not found"))),
     }
+}
+
+async fn drain_inbox(
+    State(a): State<Arc<A2a>>,
+    headers: HeaderMap,
+) -> ApiResult<impl IntoResponse> {
+    let me = caller(&a, &headers)?;
+    let text = a.drain_mid_turn(&me).await?;
+    Ok(Json(json!({ "text": text })))
 }
 
 #[derive(Deserialize)]

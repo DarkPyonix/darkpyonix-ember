@@ -203,14 +203,13 @@ ember-server owner call POST /api/accounts <span class="s">'{"agent": "claude-co
         scope <code>full</code> counts as the owner for approvals over the transport; the device list
         itself is managed only on the server's computer. A server on Windows takes claims over its
         named pipe (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/815">#815</a>) and
-        follows <code>EMBER_OWNER_PRESENCE</code> the same way: <code>warn</code> by default, and
-        <code>enforce</code> closes its owner routes to the token alone.
+        follows <code>EMBER_OWNER_PRESENCE</code> the same way: <code>enforce</code> by default, and
+        <code>warn</code> logs owner-route calls without refusing them.
       </p>
       <p>
-        <strong>What this does not stop.</strong> In the default <code>warn</code> mode nothing is
-        refused: a process that reads <code>server-token</code> can still call these routes, and the
-        server only logs it. Set <code>EMBER_OWNER_PRESENCE=enforce</code> to close them. Even
-        then, a process that runs arbitrary code as you and is
+        <strong>What this does not stop.</strong> Setting <code>EMBER_OWNER_PRESENCE=warn</code>
+        disables refusal (owner-route calls with only <code>server-token</code> are logged and
+        served). Even in the default <code>enforce</code> mode, a process that runs arbitrary code as you and is
         not sandboxed can still read or change Ember's database and keys in the data folder
         directly, attach to the app, or imitate it by leaving the agent's process tree and asking
         for a key. The console code stops the last one only while that process cannot read the

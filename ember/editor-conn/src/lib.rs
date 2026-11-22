@@ -65,13 +65,20 @@ pub const PINNED_VERSION: &str = "1.139.1";
 /// returns from `GET /version`). [`rpc_ids::PROXY_IDS`] was generated from this commit.
 pub const PINNED_COMMIT: &str = "04c0d99f4fb0d8afe6ce4f0c58e31e183ac3e4b1";
 
+/// Whether an editor server built at `commit` is one this crate can speak to: today exactly
+/// [`PINNED_COMMIT`]. [`check_server_commit`] and the IDE chooser both ask this, so the window
+/// and the menu in front of it cannot disagree.
+pub fn is_supported_commit(commit: &str) -> bool {
+    commit.trim() == PINNED_COMMIT
+}
+
 /// Refuse any server commit other than [`PINNED_COMMIT`]. A server without a commit (a dev build
 /// answers `GET /version` with an empty body) or a server returning non-version text (such as an
 /// HTML page from a reverse proxy) is refused with `server: None`: its commit and proxy numbering
 /// are unknown.
 pub fn check_server_commit(server_commit: &str) -> Result<()> {
     let server_commit = server_commit.trim();
-    if server_commit == PINNED_COMMIT {
+    if is_supported_commit(server_commit) {
         Ok(())
     } else {
         let server = (!server_commit.is_empty()
@@ -180,6 +187,13 @@ mod tests {
     fn pinned_commit_is_a_full_sha() {
         assert_eq!(PINNED_COMMIT.len(), 40);
         assert!(PINNED_COMMIT.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+    }
+
+    #[test]
+    fn fr_e10_is_supported_commit_accepts_only_the_pinned_commit() {
+        assert!(is_supported_commit(PINNED_COMMIT));
+        assert!(!is_supported_commit("0036dcb6c18a603d2168c00fa578be600987ac7b"));
+        assert!(!is_supported_commit(""));
     }
 
     #[test]

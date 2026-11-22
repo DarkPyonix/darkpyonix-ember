@@ -698,6 +698,11 @@ pub fn ConversationView(id: &str, embedded: bool) {
                     }
                 }
             }
+            if *k == IdeKind::Ember {
+                if let Some(n) = crate::ui::session::ember_ide_notice(ide_now.as_ref()) {
+                    label = format!("{label}: {n}");
+                }
+            }
             (*k, label)
         })
         .collect();

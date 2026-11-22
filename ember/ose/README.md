@@ -39,7 +39,22 @@ self-contained: it bundles the Node runtime pinned in upstream `remote/.npmrc`, 
 not need Node. Pushing a tag `ose-v<tag>` (for example `ose-v1.139.1`, or `ose-v1.139.1-dpx.2` for a
 rebuild) runs the matrix in `test-ose.yml`. When that run succeeds, `publish-ose.yml` downloads
 that run's archives, checks them against their checksums and publishes a GitHub release with all
-archives and `SHA256SUMS`, so the release holds exactly the files the build produced.
+archives and `SHA256SUMS`, so the release holds exactly the files the build produced. A release
+does not expire, unlike the 14-day workflow artifacts.
+
+An Ember install gets its OSE from that release (FR-W4 acceptance step 6, #83). The `ember-server`
+and `ember-node` archives of an Ember release carry `install-ose.sh` and an `OSE_VERSION` file with
+the matching tag (`ose-v<the tag in VERSION>`); running `./install-ose.sh` beside them downloads
+the archive for the machine with curl, checks it against the release's `SHA256SUMS`, unpacks it into
+`~/.local/share` and prints the launcher path. The OSE manager finds it there without
+`EMBER_OSE_SERVER`. When no OSE is found, the IDE target's reason and the extension routes say so and
+name this step. In a checkout, `ember/server/scripts/install-ose.sh` reads `ember/ose/VERSION`.
+
+Old "OSE build" runs with no jobs (2026-11-06 to 11-14, all `pull_request` on `release`): the
+release-sync pull requests (#964 and earlier) were opened by `github-actions[bot]`, and the
+workflow then still had a `pull_request` trigger. GitHub held those runs for approval
+(`action_required`) and later recorded them as failed with no jobs. No build failed. The trigger is
+gone since development CI became dispatch-only (`ci.yml` calls this workflow), so they do not recur.
 
 After the build, the **Live checks** job runs once per target on the same runner type
 (`docs/SPEC.md`, FR-W4 acceptance step 4). It downloads the archive the run built, verifies the

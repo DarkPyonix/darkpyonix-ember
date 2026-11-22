@@ -993,4 +993,143 @@ mod tests {
         assert_eq!(a.check_login(&x.id).await.unwrap().status, "logged_in");
         assert_eq!(a.check_login(&y.id).await.unwrap().status, "logged_out");
     }
+
+    // ---- FR-U1: ACP accounts ------------------------------------------------------------------
+
+    /// An ACP agent kind as stored, without registering it as a configured agent (the registry is
+    /// process-wide and other tests check what is offered).
+    fn acp(name: &str) -> AgentKind {
+        AgentKind::from_stored(name).unwrap()
+    }
+
+    fn lookup<'a>(env: &'a [(String, String)], name: &str) -> Option<&'a str> {
+        env.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn fr_u1_an_omp_account_process_gets_pi_coding_agent_dir_at_the_account_dir() {
+        let (_d, a) = setup();
+        let x = a.create(acp("omp"), "work").unwrap();
+        let env = a.start_env(acp("omp"), Some(&x.id));
+        assert_eq!(lookup(&env, "PI_CODING_AGENT_DIR"), Some(x.config_dir.as_str()), "{env:?}");
+        // omp honours PI_CODING_AGENT_DIR only in its default profile, so a profile set in the
+        // server's environment is overridden.
+        assert_eq!(lookup(&env, "OMP_PROFILE"), Some("default"), "{env:?}");
+        assert_eq!(lookup(&env, "EMBER_ACP_HOME"), None);
+    }
+
+    #[test]
+    fn fr_u1_a_gemini_account_process_gets_gemini_cli_home_at_the_account_dir() {
+        let (_d, a) = setup();
+        let x = a.create(acp("gemini"), "work").unwrap();
+        let env = a.start_env(acp("gemini"), Some(&x.id));
+        assert_eq!(lookup(&env, "GEMINI_CLI_HOME"), Some(x.config_dir.as_str()), "{env:?}");
+        assert_eq!(lookup(&env, "GEMINI_FORCE_FILE_STORAGE"), Some("true"), "{env:?}");
+        assert_eq!(lookup(&env, "EMBER_ACP_HOME"), None);
+    }
+
+    #[test]
+    fn fr_u1_two_acp_accounts_get_different_dirs() {
+        let (_d, a) = setup();
+        for (agent, var) in [("omp", "PI_CODING_AGENT_DIR"), ("gemini", "GEMINI_CLI_HOME")] {
+            let x = a.create(acp(agent), "x").unwrap();
+            let y = a.create(acp(agent), "y").unwrap();
+            let ex = a.start_env(acp(agent), Some(&x.id));
+            let ey = a.start_env(acp(agent), Some(&y.id));
+            assert_ne!(lookup(&ex, var), lookup(&ey, var), "{agent}");
+            assert_eq!(lookup(&ex, var), Some(x.config_dir.as_str()));
+            assert_eq!(lookup(&ey, var), Some(y.config_dir.as_str()));
+        }
+    }
+
+    #[test]
+    fn fr_u1_an_acp_agent_without_isolation_is_refused_with_the_reason() {
+        let (d, a) = setup();
+        let err = a.create(acp("acp-noiso"), "x").unwrap_err().to_string();
+        assert!(err.contains("acp-noiso"), "{err}");
+        assert!(err.contains("credentials"), "{err}");
+        assert!(isolation(acp("acp-noiso")).is_err());
+        assert!(a.list(None).unwrap().is_empty());
+        // No directory was made for the refused account.
+        let made = std::fs::read_dir(d.path().join("accounts")).unwrap().count();
+        assert_eq!(made, 0);
+        // Antigravity stays refused, for its own reason.
+        let err = a.create(AgentKind::Antigravity, "x").unwrap_err().to_string();
+        assert!(err.contains("Antigravity"), "{err}");
+    }
+
+    #[test]
+    fn fr_u1_an_old_account_of_an_acp_agent_without_isolation_is_never_routed() {
+        let (_d, a) = setup();
+        // A row made before accounts were refused for such agents.
+        a.store()
+            .conn()
+            .execute(
+                "INSERT INTO accounts (id, agent, label, config_dir, created_at) VALUES ('old', 'acp-noiso', 'old', '/x/old', 1)",
+                [],
+            )
+            .unwrap();
+        let err = a.route(acp("acp-noiso"), None).unwrap_err();
+        assert!(err.contains("credentials"), "{err}");
+        let err = a.route(acp("acp-noiso"), Some("old")).unwrap_err();
+        assert!(err.contains("credentials"), "{err}");
+        assert!(a.start_env(acp("acp-noiso"), Some("old")).is_empty());
+    }
+
+    #[test]
+    fn fr_u1_the_default_login_and_the_existing_agents_are_unchanged() {
+        let (_d, a) = setup();
+        // No account (the server's own login): no isolation variable for any agent.
+        for agent in [acp("omp"), acp("gemini"), AgentKind::ClaudeCode, AgentKind::Codex] {
+            assert!(a.start_env(agent, None).is_empty(), "{}", agent.as_str());
+        }
+        // Claude Code and Codex accounts get exactly the one variable they had.
+        let c = a.create(AgentKind::ClaudeCode, "c").unwrap();
+        let x = a.create(AgentKind::Codex, "x").unwrap();
+        assert_eq!(
+            a.start_env(AgentKind::ClaudeCode, Some(&c.id)),
+            vec![("CLAUDE_CONFIG_DIR".to_string(), c.config_dir.clone())]
+        );
+        assert_eq!(
+            a.start_env(AgentKind::Codex, Some(&x.id)),
+            vec![("CODEX_HOME".to_string(), x.config_dir.clone())]
+        );
+        // The default account of an ACP agent is isolated like any other of its accounts.
+        let g = a.create(acp("gemini"), "g").unwrap();
+        a.set_default(&g.id).unwrap();
+        let env = a.start_env(acp("gemini"), Some(&g.id));
+        assert_eq!(lookup(&env, "GEMINI_CLI_HOME"), Some(g.config_dir.as_str()));
+    }
+
+    #[test]
+    fn fr_u1_acp_login_instructions_carry_the_isolation_variables() {
+        let (_d, a) = setup();
+        let g = a.create(acp("gemini"), "g").unwrap();
+        let how = a.login_instructions(&g);
+        assert_eq!(how.env["GEMINI_CLI_HOME"], g.config_dir);
+        assert_eq!(how.env["GEMINI_FORCE_FILE_STORAGE"], "true");
+        assert!(how.login.starts_with("GEMINI_CLI_HOME="), "{}", how.login);
+        assert!(how.login.contains("GEMINI_FORCE_FILE_STORAGE=true"), "{}", how.login);
+        let o = a.create(acp("omp"), "o").unwrap();
+        let how = a.login_instructions(&o);
+        assert_eq!(how.env["PI_CODING_AGENT_DIR"], o.config_dir);
+        assert_eq!(how.env["OMP_PROFILE"], "default");
+        assert!(how.login.starts_with("OMP_PROFILE=default PI_CODING_AGENT_DIR="), "{}", how.login);
+    }
+
+    #[test]
+    fn fr_u1_every_account_dir_variable_is_carved_out_of_the_agent_sandbox() {
+        let (d, a) = setup();
+        let denied = vec![d.path().to_path_buf()];
+        for agent in [AgentKind::ClaudeCode, AgentKind::Codex, acp("omp"), acp("gemini")] {
+            let x = a.create(agent, "x").unwrap();
+            let env = a.start_env(agent, Some(&x.id));
+            assert_eq!(
+                crate::sandbox::allowed_for(&env, &denied),
+                vec![PathBuf::from(&x.config_dir)],
+                "{}",
+                agent.as_str()
+            );
+        }
+    }
 }

@@ -576,6 +576,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// FR-T2a (#102): a database from before token lifetimes (one row per session, keyed by the
+    /// session) is rebuilt so a session may hold more than one token; its tokens keep working.
+    #[test]
+    fn fr_t2a_the_one_token_per_session_table_is_migrated_and_keeps_its_tokens() {
+        let dir = std::env::temp_dir().join(format!("ember-a2a-tok-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ember.db");
+        let token = "ember_rt_old";
+        {
+            let old = Connection::open(&path).unwrap();
+            old.execute_batch(
+                "CREATE TABLE a2a_tokens (session_id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE,
+                 created_at INTEGER NOT NULL);",
+            )
+            .unwrap();
+            old.execute(
+                "INSERT INTO a2a_tokens VALUES ('s1', ?1, ?2)",
+                params![hash_token(token), now_ms()],
+            )
+            .unwrap();
+        }
+        let s = A2aStore::open(&path).unwrap();
+        let again = A2aStore::open(&path).unwrap();
+        assert_eq!(s.session_for_token(token).unwrap().as_deref(), Some("s1"));
+        // Two tokens of one session side by side (a rejoined agent and its run's next process).
+        let beside = again.issue_token_beside("s1").unwrap();
+        assert_eq!(s.session_for_token(token).unwrap().as_deref(), Some("s1"));
+        assert_eq!(s.session_for_token(&beside).unwrap().as_deref(), Some("s1"));
+        assert_eq!(s.revoke_session_tokens("s1").unwrap(), 2);
+        assert_eq!(s.session_for_token(token).unwrap(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn switches_default_on() {
         let s = A2aStore::open_in_memory().unwrap();

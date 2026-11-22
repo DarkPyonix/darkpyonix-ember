@@ -223,9 +223,15 @@ pub async fn initialize(conn: Connection, init: &Value) -> Result<(RpcPeer, mpsc
     Ok(RpcPeer::start(handle, events))
 }
 
-/// Ask the extension host to exit (`RemoteExtensionHost.disconnect`).
-pub fn terminate(peer_conn: &crate::connection::ConnectionHandle) {
+/// Send `MSG_TERMINATE` without closing the socket yet so the extension host can finish
+/// `deactivate()` (for example persisting storage updates) before disconnecting.
+pub fn send_terminate(peer_conn: &crate::connection::ConnectionHandle) {
     peer_conn.send(vec![MSG_TERMINATE]);
+}
+
+/// Ask the extension host to exit (`RemoteExtensionHost.disconnect`) and close the socket.
+pub fn terminate(peer_conn: &crate::connection::ConnectionHandle) {
+    send_terminate(peer_conn);
     peer_conn.close();
 }
 

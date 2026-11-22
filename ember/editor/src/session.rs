@@ -431,7 +431,10 @@ impl EditorSession {
         core.set_settings(settings.clone());
         core.set_grammar_catalog(crate::textmate::GrammarCatalog::from_extensions(&extensions));
         core.set_workspace_trust(crate::trust::WorkspaceTrust::new(config.workspace_trusted, extensions.clone()));
+        let global_storage_dir = storage_roots.global_dir.clone();
+        let local_storage_watch_dir = local_storage.then(|| std::path::PathBuf::from(&storage_roots.global_dir.path));
         core.set_storage_roots(storage_roots);
+        core.register_storage_extensions(running.iter().map(|e| e.id.clone()));
         let driver = Driver {
             core,
             highlight: None,
@@ -439,6 +442,9 @@ impl EditorSession {
             fs: Arc::clone(&fs),
             authority: authority.clone(),
             local_storage,
+            global_storage_dir,
+            shared_storage_watch: Arc::new(tokio::sync::OnceCell::new()),
+            local_storage_watch_dir,
             storage_hub,
             storage_session_id,
             ipc: ipc.clone(),
@@ -857,6 +863,9 @@ struct Driver {
     fs: Arc<RemoteFs>,
     authority: String,
     local_storage: bool,
+    global_storage_dir: UriComponents,
+    shared_storage_watch: Arc<tokio::sync::OnceCell<()>>,
+    local_storage_watch_dir: Option<std::path::PathBuf>,
     storage_hub: Option<crate::storage::StorageHub>,
     storage_session_id: u64,
     ipc: IpcClient,
@@ -942,6 +951,39 @@ async fn ensure_remote_dir(fs: &RemoteFs, authority: &str, dir_path: &str) -> Re
     Ok(())
 }
 
+/// Lazily ensure the remote global `ember-storage` directory exists and is watched via `RemoteFs`,
+/// once per session on the first `shared = true` storage access.
+async fn ensure_shared_storage_watch(
+    fs: &RemoteFs,
+    authority: &str,
+    global_dir: &UriComponents,
+    once: &tokio::sync::OnceCell<()>,
+) {
+    let _ = once
+        .get_or_init(|| async {
+            if let Err(e) = ensure_remote_dir(fs, authority, &global_dir.path).await {
+                tracing::warn!(
+                    "ember-editor: cannot ensure global storage dir {}: {e}",
+                    global_dir.path
+                );
+                return;
+            }
+            let watch_opts = WatchOptions {
+                recursive: true,
+                excludes: Vec::new(),
+                includes: None,
+                correlation_id: None,
+            };
+            if let Err(e) = fs.watch(global_dir, &watch_opts).await {
+                tracing::warn!(
+                    "ember-editor: cannot watch global storage dir {}: {e}",
+                    global_dir.path
+                );
+            }
+        })
+        .await;
+}
+
 /// Atomically write (`Some`) or delete (`None`) one storage file on the remote server.
 async fn write_remote_storage(
     fs: &RemoteFs,
@@ -1021,8 +1063,83 @@ async fn recv_broadcast_opt(
     }
 }
 
-/// Maximum time shutdown waits for in-flight/queued storage writes to finish before closing IPC.
+/// Maximum time shutdown waits for `deactivate()` and pending storage writes before closing IPC.
 const SHUTDOWN_STORAGE_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Polling interval for the lightweight local global-storage directory watcher used when
+/// `SessionConfig::storage_dir` is set.
+const LOCAL_STORAGE_WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
+fn snapshot_local_storage_dir(dir: &std::path::Path) -> HashMap<String, (u64, Option<std::time::SystemTime>)> {
+    let mut map = HashMap::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return map;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.ends_with(".json") || name.starts_with('.') {
+            continue;
+        }
+        if let Ok(meta) = entry.metadata() {
+            if meta.is_file() {
+                map.insert(name, (meta.len(), meta.modified().ok()));
+            }
+        }
+    }
+    map
+}
+
+fn spawn_local_storage_watcher(
+    dir: std::path::PathBuf,
+    internal_tx: mpsc::UnboundedSender<Input>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut prev = snapshot_local_storage_dir(&dir);
+        let mut interval = tokio::time::interval(LOCAL_STORAGE_WATCH_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if internal_tx.is_closed() {
+                break;
+            }
+            let dir_clone = dir.clone();
+            let curr = match tokio::task::spawn_blocking(move || snapshot_local_storage_dir(&dir_clone)).await {
+                Ok(m) => m,
+                Err(_) => break,
+            };
+            let mut changes = Vec::new();
+            for (name, sig) in &curr {
+                match prev.get(name) {
+                    None => changes.push(ember_editor_conn::remote_fs::FileChange {
+                        kind: ember_editor_conn::remote_fs::FileChangeType::Added,
+                        resource: UriComponents::file(dir.join(name).to_string_lossy().as_ref()),
+                        correlation_id: None,
+                    }),
+                    Some(old) if old != sig => changes.push(ember_editor_conn::remote_fs::FileChange {
+                        kind: ember_editor_conn::remote_fs::FileChangeType::Updated,
+                        resource: UriComponents::file(dir.join(name).to_string_lossy().as_ref()),
+                        correlation_id: None,
+                    }),
+                    _ => {}
+                }
+            }
+            for name in prev.keys() {
+                if !curr.contains_key(name) {
+                    changes.push(ember_editor_conn::remote_fs::FileChange {
+                        kind: ember_editor_conn::remote_fs::FileChangeType::Deleted,
+                        resource: UriComponents::file(dir.join(name).to_string_lossy().as_ref()),
+                        correlation_id: None,
+                    });
+                }
+            }
+            prev = curr;
+            if !changes.is_empty() && internal_tx.send(Input::FilesChanged(changes)).is_err() {
+                break;
+            }
+        }
+    })
+}
 
 impl Driver {
     async fn run(
@@ -1035,12 +1152,17 @@ impl Driver {
     ) {
         let (internal_tx, mut internal_rx) = mpsc::unbounded_channel::<Input>();
         self.highlight = Some(spawn_highlighter(internal_tx.clone()));
+        let local_watch_task = self
+            .local_storage_watch_dir
+            .clone()
+            .map(|dir| spawn_local_storage_watcher(dir, internal_tx.clone()));
         if !self.commands.is_empty() {
             let _ = self.updates.send(SessionUpdate::Commands { commands: self.commands.clone() });
         }
         let _ = self.updates.send(SessionUpdate::Languages { languages: self.core.language_list() });
         let mut changes = Some(changes);
         let mut lifecycle = Some(ipc_lifecycle);
+        let mut exthost_alive = true;
         loop {
             let wake = self.core.next_wake();
             let sleep = async move {
@@ -1072,10 +1194,12 @@ impl Driver {
                     Some(RpcEvent::Request(r)) => Some(Input::ExtHostRequest(r)),
                     Some(RpcEvent::Cancel(_)) => None,
                     Some(RpcEvent::Lost(reason)) => {
+                        exthost_alive = false;
                         let _ = self.updates.send(SessionUpdate::ConnectionLost { reason: format!("extension host connection lost ({reason:?})") });
                         break;
                     }
                     Some(RpcEvent::Disconnected) | None => {
+                        exthost_alive = false;
                         let _ = self.updates.send(SessionUpdate::ConnectionLost { reason: "extension host disconnected".into() });
                         break;
                     }
@@ -1110,8 +1234,8 @@ impl Driver {
                     }
                     Ok(_) => None,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                        tracing::warn!("ember-editor: storage hub lagged by {skipped} updates");
-                        None
+                        tracing::warn!("ember-editor: storage hub lagged by {skipped} updates; resyncing shared keys");
+                        Some(Input::ResyncSharedStorage)
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         storage_rx = None;
@@ -1128,23 +1252,32 @@ impl Driver {
             let effects = self.core.handle(Instant::now(), input);
             self.execute(effects, &internal_tx);
         }
-        self.drain_storage(&internal_tx, &mut internal_rx).await;
-        exthost::terminate(self.peer.connection());
+        if let Some(task) = local_watch_task {
+            task.abort();
+        }
+        if exthost_alive {
+            exthost::send_terminate(self.peer.connection());
+        }
+        self.drain_shutdown(&internal_tx, &mut internal_rx, &mut rpc_events, exthost_alive).await;
+        self.peer.connection().close();
         self.ipc.connection().close();
     }
 
-    /// Wait for any in-flight, queued, or retry-scheduled extension storage writes to finish before
-    /// closing the management connection.
-    async fn drain_storage(
+    /// Drain queued `rpc_events` (including any pipelined `$setValue` and writes emitted by the
+    /// extension host during `deactivate()`) and all pending storage reads/writes/quarantines/retries
+    /// until the extension host disconnects and no storage writes remain pending (bounded by 10 s).
+    async fn drain_shutdown(
         &mut self,
         internal_tx: &mpsc::UnboundedSender<Input>,
         internal_rx: &mut mpsc::UnboundedReceiver<Input>,
+        rpc_events: &mut mpsc::UnboundedReceiver<RpcEvent>,
+        mut exthost_alive: bool,
     ) {
-        if !self.core.has_pending_storage_writes() {
+        if !exthost_alive && !self.core.has_pending_storage_writes() {
             return;
         }
         let deadline = tokio::time::Instant::now() + SHUTDOWN_STORAGE_DRAIN_TIMEOUT;
-        while self.core.has_pending_storage_writes() {
+        while exthost_alive || self.core.has_pending_storage_writes() {
             let wake = self.core.storage_next_wake();
             let retry_sleep = async move {
                 match wake {
@@ -1154,11 +1287,26 @@ impl Driver {
             };
             tokio::select! {
                 _ = tokio::time::sleep_until(deadline) => {
-                    tracing::warn!("ember-editor: timed out draining pending extension storage writes at shutdown");
+                    tracing::warn!("ember-editor: timed out draining extension host deactivate and storage writes at shutdown");
                     break;
                 }
+                ev = rpc_events.recv(), if exthost_alive => match ev {
+                    Some(RpcEvent::Request(r)) => {
+                        if r.proxy == Some(exthost::proxy::MAIN_THREAD_STORAGE) {
+                            let effects = self.core.handle(Instant::now(), Input::ExtHostRequest(r));
+                            self.execute(effects, internal_tx);
+                        } else {
+                            let reply = exthost::default_reply(r.proxy, &r.method);
+                            self.peer.respond(r.req, Ok(reply));
+                        }
+                    }
+                    Some(RpcEvent::Cancel(_)) => {}
+                    Some(RpcEvent::Lost(_)) | Some(RpcEvent::Disconnected) | None => {
+                        exthost_alive = false;
+                    }
+                },
                 i = internal_rx.recv() => match i {
-                    Some(input @ (Input::StorageWritten { .. } | Input::StorageQuarantined { .. })) => {
+                    Some(input @ (Input::StorageWritten { .. } | Input::StorageQuarantined { .. } | Input::StorageRead { .. })) => {
                         let effects = self.core.handle(Instant::now(), input);
                         self.execute(effects, internal_tx);
                     }
@@ -1315,13 +1463,43 @@ impl Driver {
                         });
                     } else {
                         let fs = Arc::clone(&self.fs);
+                        let authority = self.authority.clone();
+                        let global_dir = self.global_storage_dir.clone();
+                        let watch_once = Arc::clone(&self.shared_storage_watch);
                         tokio::spawn(async move {
+                            if shared {
+                                ensure_shared_storage_watch(&fs, &authority, &global_dir, &watch_once).await;
+                            }
                             let result = match fs.read_file(&uri).await {
                                 Ok(bytes) => Ok(Some(bytes)),
                                 Err(e) if is_not_found(&e) => Ok(None),
                                 Err(e) => Err(e.to_string()),
                             };
                             let _ = tx.send(Input::StorageRead { shared, extension_id, result });
+                        });
+                    }
+                }
+                Effect::ReloadSharedStorage { uri, extension_id } => {
+                    let tx = internal.clone();
+                    if self.local_storage {
+                        let path = std::path::PathBuf::from(&uri.path);
+                        tokio::spawn(async move {
+                            let result = tokio::task::spawn_blocking(move || {
+                                crate::storage::read_local_optional(&path).map_err(|e| e.to_string())
+                            })
+                            .await
+                            .unwrap_or_else(|e| Err(e.to_string()));
+                            let _ = tx.send(Input::SharedStorageReloaded { extension_id, result });
+                        });
+                    } else {
+                        let fs = Arc::clone(&self.fs);
+                        tokio::spawn(async move {
+                            let result = match fs.read_file(&uri).await {
+                                Ok(bytes) => Ok(Some(bytes)),
+                                Err(e) if is_not_found(&e) => Ok(None),
+                                Err(e) => Err(e.to_string()),
+                            };
+                            let _ = tx.send(Input::SharedStorageReloaded { extension_id, result });
                         });
                     }
                 }
@@ -1364,7 +1542,13 @@ impl Driver {
                         });
                     } else {
                         let (fs, authority) = (Arc::clone(&self.fs), self.authority.clone());
+                        let global_dir = self.global_storage_dir.clone();
+                        let watch_once = Arc::clone(&self.shared_storage_watch);
+                        let is_global = uri.path.starts_with(global_dir.path.trim_end_matches('/'));
                         tokio::spawn(async move {
+                            if is_global {
+                                ensure_shared_storage_watch(&fs, &authority, &global_dir, &watch_once).await;
+                            }
                             let result = write_remote_storage(&fs, &authority, &uri, bytes).await;
                             let _ = tx.send(Input::StorageWritten { token, result });
                         });

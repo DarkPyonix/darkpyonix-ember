@@ -40,8 +40,16 @@ pub const STORAGE_SUBDIR: &str = "ember-storage";
 /// giving up and logging an error.
 pub const MAX_WRITE_RETRIES: u32 = 5;
 
-/// Base backoff delay for retrying a failed storage write.
+/// Number of retries after an initial transient read failure before rejecting pending
+/// `$initializeExtensionStorage` waiters (1 initial attempt + 3 retries = 4 total attempts).
+pub const MAX_READ_RETRIES: u32 = 3;
+
+/// Base backoff delay for retrying a failed storage read or write.
 const RETRY_BASE_DELAY: Duration = Duration::from_millis(50);
+
+/// Monotonic sequence suffix for quarantine filenames so two corruptions never collide even
+/// within the same millisecond.
+static CORRUPT_BACKUP_SEQ: AtomicU64 = AtomicU64::new(1);
 
 fn retry_delay(attempt: u32) -> Duration {
     let shift = attempt.saturating_sub(1).min(4);
@@ -143,16 +151,47 @@ pub fn encode_extension_key(extension_id: &str) -> String {
     format!("{prefix}-{:016x}", fnv1a64(lower.as_bytes()))
 }
 
-/// Encode a workspace identity (server authority plus one or more workspace folder paths) into a
-/// single safe directory name.
-///
-/// Trailing slashes are stripped from each path (except `"/"` itself) so `/work/app` and
-/// `/work/app/` share the same workspace storage. Including the authority guarantees that two
-/// servers with the same workspace path never collide in `workspaceState`. Multiple folder paths
-/// are hashed in order with a NUL separator for multi-root workspaces.
-pub fn encode_workspace_identity(authority: &str, workspace_paths: &[&str]) -> String {
-    let norm_authority = authority.to_ascii_lowercase();
-    let normalized: Vec<&str> = workspace_paths
+/// Normalize a server authority so spelling differences (`localhost`, `127.0.0.1`, `[::1]`, case)
+/// map to the same canonical key.
+pub fn canonicalize_authority(authority: &str) -> String {
+    let trimmed = authority.trim().to_ascii_lowercase();
+    let (host, port, bracketed) = if let Some(rest) = trimmed.strip_prefix('[') {
+        if let Some((h, after)) = rest.split_once(']') {
+            (h, after.strip_prefix(':').unwrap_or(""), true)
+        } else {
+            (trimmed.as_str(), "", false)
+        }
+    } else if trimmed.matches(':').count() == 1 {
+        let (h, p) = trimmed.split_once(':').unwrap();
+        (h, p, false)
+    } else {
+        (trimmed.as_str(), "", false)
+    };
+    let norm_host = match host {
+        "localhost" | "localhost." | "127.0.0.1" | "::1" | "0:0:0:0:0:0:0:1" => "localhost",
+        other => other,
+    };
+    if norm_host == "localhost" {
+        if port.is_empty() {
+            "localhost".to_owned()
+        } else {
+            format!("localhost:{port}")
+        }
+    } else if bracketed {
+        if port.is_empty() {
+            format!("[{norm_host}]")
+        } else {
+            format!("[{norm_host}]:{port}")
+        }
+    } else if port.is_empty() {
+        norm_host.to_owned()
+    } else {
+        format!("{norm_host}:{port}")
+    }
+}
+
+fn normalize_workspace_paths<'a>(workspace_paths: &'a [&'a str]) -> Vec<&'a str> {
+    workspace_paths
         .iter()
         .map(|p| {
             if *p == "/" {
@@ -161,12 +200,44 @@ pub fn encode_workspace_identity(authority: &str, workspace_paths: &[&str]) -> S
                 p.trim_end_matches(['/', '\\'])
             }
         })
-        .collect();
+        .collect()
+}
+
+fn workspace_leaf_prefix(normalized: &[&str]) -> String {
     let leaf = normalized
         .first()
         .and_then(|p| p.rsplit(['/', '\\']).find(|s| !s.is_empty()))
         .unwrap_or("ws");
-    let prefix = safe_prefix(leaf, 32, false, "ws");
+    safe_prefix(leaf, 32, false, "ws")
+}
+
+/// Encode one or more workspace folder paths into a single safe directory name without an
+/// authority component. Used in remote mode where storage already lives under that server's own
+/// `workspaceStorageHome`, so endpoint spelling or port changes never orphan `workspaceState`.
+pub fn encode_workspace_paths(workspace_paths: &[&str]) -> String {
+    let normalized = normalize_workspace_paths(workspace_paths);
+    let prefix = workspace_leaf_prefix(&normalized);
+    let mut input = Vec::new();
+    for (idx, p) in normalized.iter().enumerate() {
+        if idx > 0 {
+            input.push(0);
+        }
+        input.extend_from_slice(p.as_bytes());
+    }
+    format!("{prefix}-{:016x}", fnv1a64(&input))
+}
+
+/// Encode a workspace identity (canonicalized server authority plus one or more workspace folder
+/// paths) into a single safe directory name.
+///
+/// Trailing slashes are stripped from each path (except `"/"` itself) so `/work/app` and
+/// `/work/app/` share the same workspace storage. Including the canonicalized authority guarantees
+/// that two servers with the same workspace path never collide in local `workspaceState`, while
+/// loopback spellings (`localhost`, `127.0.0.1`, `[::1]`) stay unified.
+pub fn encode_workspace_identity(authority: &str, workspace_paths: &[&str]) -> String {
+    let norm_authority = canonicalize_authority(authority);
+    let normalized = normalize_workspace_paths(workspace_paths);
+    let prefix = workspace_leaf_prefix(&normalized);
 
     let mut input = Vec::new();
     input.extend_from_slice(norm_authority.as_bytes());
@@ -195,9 +266,15 @@ fn uri_with_path(base: &UriComponents, path: &str) -> UriComponents {
     UriComponents::new(&base.scheme, &base.authority, path)
 }
 
-/// Sibling quarantine URI for a corrupt storage file (`<path>.corrupt`).
+/// Unique sibling quarantine URI for a corrupt storage file (`<path>.corrupt.<millis>-<seq>`), so
+/// quarantining a second corrupt file never overwrites an earlier backup.
 pub fn corrupt_backup_uri(uri: &UriComponents) -> UriComponents {
-    uri_with_path(uri, &format!("{}.corrupt", uri.path))
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let seq = CORRUPT_BACKUP_SEQ.fetch_add(1, Ordering::Relaxed);
+    uri_with_path(uri, &format!("{}.corrupt.{millis}-{seq}", uri.path))
 }
 
 /// The global and workspace storage directory URIs for one editor session.
@@ -222,6 +299,10 @@ impl StorageRoots {
     }
 
     /// Multi-root variant of [`Self::from_env`].
+    ///
+    /// In remote mode, storage already lives under the server's `workspaceStorageHome`, so the
+    /// workspace directory key hashes only the normalized workspace folder paths without tying to
+    /// endpoint spelling or port.
     pub fn from_env_folders(
         authority: &str,
         global_storage_home: &UriComponents,
@@ -229,7 +310,7 @@ impl StorageRoots {
         workspace_paths: &[&str],
     ) -> Self {
         let global_path = join_uri_path(&global_storage_home.path, STORAGE_SUBDIR);
-        let ws_key = encode_workspace_identity(authority, workspace_paths);
+        let ws_key = encode_workspace_paths(workspace_paths);
         let ws_base = join_uri_path(&workspace_storage_home.path, STORAGE_SUBDIR);
         let ws_path = join_uri_path(&ws_base, &ws_key);
         Self {
@@ -350,6 +431,13 @@ pub enum InitAction {
     Wait,
 }
 
+/// One persistence read to execute for a single [`StorageKey`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReadCommand {
+    pub uri: UriComponents,
+    pub key: StorageKey,
+}
+
 /// One persistence write to execute for a single [`StorageKey`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct WriteCommand {
@@ -363,9 +451,18 @@ pub struct WriteCommand {
 pub struct ReadOutcome {
     /// Replies for waiting `$initializeExtensionStorage` requests.
     pub replies: Vec<(u32, Result<Reply, Option<Value>>)>,
-    /// When the file holds corrupt JSON, move it aside from `from` to `to` (`*.corrupt`) before
-    /// resolving the waiting initialize requests or allowing any writes.
+    /// When the file holds corrupt JSON, move it aside from `from` to `to` (`*.corrupt.<millis>-<seq>`)
+    /// before resolving waiting initialize requests or allowing any writes.
     pub quarantine: Option<(UriComponents, UriComponents, StorageKey)>,
+    /// A queued write that waited behind this read and can now proceed.
+    pub write: Option<WriteCommand>,
+}
+
+/// Result of [`ExtensionStorage::on_tick`].
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TickOutcome {
+    pub writes: Vec<WriteCommand>,
+    pub reads: Vec<ReadCommand>,
 }
 
 /// Result of [`ExtensionStorage::on_quarantine_done`].
@@ -380,16 +477,28 @@ pub struct QuarantineOutcome {
 /// Result of [`ExtensionStorage::on_set_value`].
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SetOutcome {
-    /// Write to start immediately when no write/quarantine is in flight for this key.
+    /// Write to start immediately when no read/write/quarantine is in flight for this key.
     pub write: Option<WriteCommand>,
     /// When `shared == true`, `(extension_id, value)` to broadcast to other sessions.
     pub broadcast: Option<(String, Option<String>)>,
 }
 
 #[derive(Debug, Clone)]
+struct PendingRead {
+    waiters: Vec<u32>,
+    attempts_failed: u32,
+    /// `Some(due)` while waiting for backoff before issuing the next read attempt;
+    /// `None` while a read attempt is currently in flight.
+    retry_due: Option<Instant>,
+}
+
+#[derive(Debug, Clone)]
 struct InFlightWrite {
     bytes: Option<Vec<u8>>,
     attempt: u32,
+    /// True when an external shared change superseded this write while it was in flight; if the
+    /// write fails, it must not schedule a retry over the newer external value.
+    superseded_by_external: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -399,26 +508,31 @@ struct ScheduledRetry {
     due: Instant,
 }
 
-/// Pure state machine for `MainThreadStorage`: in-memory cache, coalesced reads, corrupt-file
-/// quarantine, serialized per-key writes with retry backoff, and registered sync keys.
+/// Pure state machine for `MainThreadStorage`: in-memory cache, coalesced reads with retry
+/// backoff, corrupt-file quarantine, serialized per-key writes with retry backoff, external
+/// shared-storage reload tracking, and registered sync keys.
 #[derive(Debug, Default)]
 pub struct ExtensionStorage {
     roots: Option<StorageRoots>,
     cache: HashMap<StorageKey, Option<String>>,
-    pending_reads: HashMap<StorageKey, Vec<u32>>,
-    /// Keys whose last read or quarantine failed; writes are blocked until a read succeeds so an
-    /// unreadable file is never silently overwritten.
+    pending_reads: HashMap<StorageKey, PendingRead>,
+    /// Keys whose last read (after retries) or quarantine failed; writes are blocked until a read
+    /// succeeds so an unreadable file is never silently overwritten.
     read_failed: HashSet<StorageKey>,
-    /// Keys currently moving a corrupt file aside to `*.corrupt`, holding waiting init requests.
+    /// Keys currently moving a corrupt file aside to `*.corrupt.<millis>-<seq>`, holding waiting
+    /// init requests.
     quarantining: HashMap<StorageKey, Vec<u32>>,
     /// At most one in-flight write per key.
     in_flight_writes: HashMap<StorageKey, InFlightWrite>,
     /// Reverse lookup from write token to its key.
     write_tokens: HashMap<Token, StorageKey>,
-    /// Latest pending value waiting behind an in-flight write or quarantine for the same key.
+    /// Latest pending value waiting behind an in-flight read, write, or quarantine for the same key.
     queued_writes: HashMap<StorageKey, Option<Vec<u8>>>,
     /// Failed writes scheduled for retry after a backoff delay.
     retry_writes: HashMap<StorageKey, ScheduledRetry>,
+    /// Reverse lookup from `<encode_extension_key(id)>.json` to lowercased `extension_id` for
+    /// matching directory watch events on `global_dir`.
+    shared_file_index: HashMap<String, String>,
     sync_keys: HashMap<String, Vec<String>>,
 }
 
@@ -429,6 +543,14 @@ impl ExtensionStorage {
 
     pub fn roots(&self) -> Option<&StorageRoots> {
         self.roots.as_ref()
+    }
+
+    /// Remember an extension id so file watcher events on `global_dir` can map its hashed filename
+    /// back to the extension id.
+    pub fn register_shared_extension(&mut self, extension_id: &str) {
+        let lower = extension_id.to_ascii_lowercase();
+        let file_name = format!("{}.json", encode_extension_key(&lower));
+        self.shared_file_index.insert(file_name, lower);
     }
 
     /// Cached JSON string for `(shared, extension_id)`: `None` if not loaded yet,
@@ -450,14 +572,57 @@ impl ExtensionStorage {
             || !self.quarantining.is_empty()
     }
 
-    /// Earliest deadline for a scheduled write retry, if any.
+    /// Earliest deadline for a scheduled storage read or write retry, if any.
     pub fn next_wake(&self) -> Option<Instant> {
-        self.retry_writes.values().map(|r| r.due).min()
+        let write_wake = self.retry_writes.values().map(|r| r.due);
+        let read_wake = self.pending_reads.values().filter_map(|p| p.retry_due);
+        write_wake.chain(read_wake).min()
+    }
+
+    /// Resolve a changed file path under `global_dir` to `(file_uri, extension_id)` for reloading,
+    /// skipping keys with a local write or quarantine currently in progress.
+    pub fn shared_extension_for_path(&self, path: &str) -> Option<(UriComponents, String)> {
+        let roots = self.roots.as_ref()?;
+        let dir = roots.global_dir.path.trim_end_matches('/');
+        let rest = path.strip_prefix(dir)?.strip_prefix('/')?;
+        if rest.contains('/') {
+            return None;
+        }
+        let ext_id = self.shared_file_index.get(rest)?;
+        let key = StorageKey::new(true, ext_id);
+        if self.in_flight_writes.contains_key(&key)
+            || self.queued_writes.contains_key(&key)
+            || self.quarantining.contains_key(&key)
+        {
+            return None;
+        }
+        Some((roots.file_uri(true, ext_id), ext_id.clone()))
+    }
+
+    /// All cached `shared = true` keys that should be reloaded from disk after a broadcast lag,
+    /// skipping keys with a local write or quarantine currently in progress.
+    pub fn cached_shared_keys(&self) -> Vec<(UriComponents, String)> {
+        let Some(roots) = self.roots.as_ref() else {
+            return Vec::new();
+        };
+        self.cache
+            .keys()
+            .filter(|k| {
+                k.shared
+                    && !self.in_flight_writes.contains_key(k)
+                    && !self.queued_writes.contains_key(k)
+                    && !self.quarantining.contains_key(k)
+            })
+            .map(|k| (roots.file_uri(true, &k.extension_id), k.extension_id.clone()))
+            .collect()
     }
 
     /// Handle `MainThreadStorage.$initializeExtensionStorage(shared, extensionId)`.
     pub fn on_initialize(&mut self, req: u32, shared: bool, extension_id: &str) -> InitAction {
         let key = StorageKey::new(shared, extension_id);
+        if shared {
+            self.register_shared_extension(&key.extension_id);
+        }
         if let Some(entry) = self.cache.get(&key) {
             return InitAction::Reply(reply_for_entry(entry.as_deref()));
         }
@@ -468,48 +633,62 @@ impl ExtensionStorage {
             waiters.push(req);
             return InitAction::Wait;
         }
-        let waiters = self.pending_reads.entry(key.clone()).or_default();
-        let first = waiters.is_empty();
-        waiters.push(req);
-        if first {
-            let uri = roots.file_uri(key.shared, &key.extension_id);
-            InitAction::Read { uri, key }
-        } else {
-            InitAction::Wait
+        if let Some(pending) = self.pending_reads.get_mut(&key) {
+            pending.waiters.push(req);
+            return InitAction::Wait;
         }
+        self.pending_reads.insert(
+            key.clone(),
+            PendingRead { waiters: vec![req], attempts_failed: 0, retry_due: None },
+        );
+        let uri = roots.file_uri(key.shared, &key.extension_id);
+        InitAction::Read { uri, key }
     }
 
     /// Finish an in-flight storage read.
     ///
-    /// * Valid JSON or absent file: caches the result and replies to waiting requests.
-    /// * Corrupt JSON: leaves cache untouched and requests moving the file to `*.corrupt` first.
-    /// * Transient/fs `Err`: does NOT cache `None`, marks the key as unreadable so writes cannot
-    ///   clobber the file, and rejects waiting requests.
+    /// * Valid JSON or absent file: caches the result (preserving any newer in-memory value),
+    ///   replies to waiting requests, and starts any write queued behind the read.
+    /// * Corrupt JSON: ALWAYS moves the file aside to `*.corrupt.<millis>-<seq>` first, even if a
+    ///   racing `$setValue` or broadcast already populated the cache.
+    /// * Transient/fs `Err`: retries up to [`MAX_READ_RETRIES`] times with backoff before marking
+    ///   `read_failed`, dropping any queued write, and rejecting waiting requests.
     pub fn on_read_done(
         &mut self,
+        now: Instant,
         shared: bool,
         extension_id: &str,
         result: Result<Option<Vec<u8>>, String>,
+        next_token: impl FnOnce() -> Token,
     ) -> ReadOutcome {
         let key = StorageKey::new(shared, extension_id);
-        let waiters = self.pending_reads.remove(&key).unwrap_or_default();
-        // If `$setValue` wrote a value while the read was in flight, keep the newer in-memory value.
-        if let Some(existing) = self.cache.get(&key).cloned() {
-            let reply = reply_for_entry(existing.as_deref());
-            return ReadOutcome {
-                replies: waiters.into_iter().map(|req| (req, Ok(reply.clone()))).collect(),
-                quarantine: None,
-            };
-        }
+        let pending = self
+            .pending_reads
+            .remove(&key)
+            .unwrap_or(PendingRead { waiters: Vec::new(), attempts_failed: 0, retry_due: None });
         match result {
             Ok(Some(bytes)) => match decode_persisted_bytes(&bytes) {
                 Ok(loaded) => {
                     self.read_failed.remove(&key);
-                    self.cache.insert(key, loaded.clone());
-                    let reply = reply_for_entry(loaded.as_deref());
+                    let effective = match self.cache.get(&key).cloned() {
+                        Some(existing) => existing,
+                        None => {
+                            self.cache.insert(key.clone(), loaded.clone());
+                            loaded
+                        }
+                    };
+                    let reply = reply_for_entry(effective.as_deref());
+                    let write = if !self.in_flight_writes.contains_key(&key) && !self.quarantining.contains_key(&key) {
+                        self.queued_writes
+                            .remove(&key)
+                            .and_then(|b| self.start_write(key, b, 0, next_token))
+                    } else {
+                        None
+                    };
                     ReadOutcome {
-                        replies: waiters.into_iter().map(|req| (req, Ok(reply.clone()))).collect(),
+                        replies: pending.waiters.into_iter().map(|req| (req, Ok(reply.clone()))).collect(),
                         quarantine: None,
+                        write,
                     }
                 }
                 Err(reason) => {
@@ -521,42 +700,82 @@ impl ExtensionStorage {
                     if let Some(roots) = &self.roots {
                         let from = roots.file_uri(key.shared, &key.extension_id);
                         let to = corrupt_backup_uri(&from);
-                        self.quarantining.entry(key.clone()).or_default().extend(waiters);
-                        ReadOutcome { replies: Vec::new(), quarantine: Some((from, to, key)) }
+                        self.quarantining.entry(key.clone()).or_default().extend(pending.waiters);
+                        ReadOutcome { replies: Vec::new(), quarantine: Some((from, to, key)), write: None }
                     } else {
-                        self.cache.insert(key, None);
+                        let effective = self.cache.entry(key).or_insert(None).clone();
+                        let reply = reply_for_entry(effective.as_deref());
                         ReadOutcome {
-                            replies: waiters.into_iter().map(|req| (req, Ok(Reply::Empty))).collect(),
+                            replies: pending.waiters.into_iter().map(|req| (req, Ok(reply.clone()))).collect(),
                             quarantine: None,
+                            write: None,
                         }
                     }
                 }
             },
             Ok(None) => {
                 self.read_failed.remove(&key);
-                self.cache.insert(key, None);
+                let effective = match self.cache.get(&key).cloned() {
+                    Some(existing) => existing,
+                    None => {
+                        self.cache.insert(key.clone(), None);
+                        None
+                    }
+                };
+                let reply = reply_for_entry(effective.as_deref());
+                let write = if !self.in_flight_writes.contains_key(&key) && !self.quarantining.contains_key(&key) {
+                    self.queued_writes
+                        .remove(&key)
+                        .and_then(|b| self.start_write(key, b, 0, next_token))
+                } else {
+                    None
+                };
                 ReadOutcome {
-                    replies: waiters.into_iter().map(|req| (req, Ok(Reply::Empty))).collect(),
+                    replies: pending.waiters.into_iter().map(|req| (req, Ok(reply.clone()))).collect(),
                     quarantine: None,
+                    write,
                 }
             }
             Err(e) => {
+                let failed = pending.attempts_failed + 1;
+                if failed <= MAX_READ_RETRIES {
+                    tracing::warn!(
+                        "ember-editor: cannot read extension storage for {} (shared={}) (attempt {}/{}): {e}; retrying",
+                        key.extension_id,
+                        key.shared,
+                        failed,
+                        MAX_READ_RETRIES + 1
+                    );
+                    self.pending_reads.insert(
+                        key,
+                        PendingRead {
+                            waiters: pending.waiters,
+                            attempts_failed: failed,
+                            retry_due: Some(now + retry_delay(failed)),
+                        },
+                    );
+                    return ReadOutcome::default();
+                }
                 tracing::warn!(
-                    "ember-editor: cannot read extension storage for {} (shared={}): {e}",
+                    "ember-editor: cannot read extension storage for {} (shared={}) after {} attempts: {e}",
                     key.extension_id,
-                    key.shared
+                    key.shared,
+                    failed
                 );
-                self.read_failed.insert(key);
+                self.read_failed.insert(key.clone());
+                self.cache.remove(&key);
+                self.queued_writes.remove(&key);
                 let err = Some(js_error("Error", &e));
                 ReadOutcome {
-                    replies: waiters.into_iter().map(|req| (req, Err(err.clone()))).collect(),
+                    replies: pending.waiters.into_iter().map(|req| (req, Err(err.clone()))).collect(),
                     quarantine: None,
+                    write: None,
                 }
             }
         }
     }
 
-    /// Finish moving a corrupt storage file aside to `*.corrupt`.
+    /// Finish moving a corrupt storage file aside to `*.corrupt.<millis>-<seq>`.
     pub fn on_quarantine_done(
         &mut self,
         shared: bool,
@@ -596,8 +815,9 @@ impl ExtensionStorage {
 
     /// Handle `MainThreadStorage.$setValue(shared, extensionId, value)`.
     ///
-    /// Updates the in-memory cache and enqueues a serialized disk write (coalescing if a write is
-    /// already in flight). The caller answers `$setValue` immediately without waiting on disk I/O.
+    /// Updates the in-memory cache and enqueues a serialized disk write (coalescing if a read,
+    /// write, or quarantine is already in flight). The caller answers `$setValue` immediately
+    /// without waiting on disk I/O.
     pub fn on_set_value(
         &mut self,
         shared: bool,
@@ -606,6 +826,9 @@ impl ExtensionStorage {
         next_token: impl FnOnce() -> Token,
     ) -> SetOutcome {
         let key = StorageKey::new(shared, extension_id);
+        if shared {
+            self.register_shared_extension(&key.extension_id);
+        }
         if self.read_failed.contains(&key) {
             tracing::warn!(
                 "ember-editor: refusing to overwrite unreadable extension storage for {} (shared={}) until a read succeeds",
@@ -639,7 +862,10 @@ impl ExtensionStorage {
         }
         // A newer value supersedes any pending retry for this key.
         self.retry_writes.remove(&key);
-        if self.in_flight_writes.contains_key(&key) || self.quarantining.contains_key(&key) {
+        if self.in_flight_writes.contains_key(&key)
+            || self.quarantining.contains_key(&key)
+            || self.pending_reads.contains_key(&key)
+        {
             self.queued_writes.insert(key, bytes);
             return SetOutcome { write: None, broadcast };
         }
@@ -648,7 +874,8 @@ impl ExtensionStorage {
     }
 
     /// Finish an in-flight storage write. Starts the latest queued write if one arrived while this
-    /// write was in flight; otherwise schedules a bounded retry if the write failed.
+    /// write was in flight; otherwise schedules a bounded retry if the write failed (unless
+    /// superseded by an external shared change).
     pub fn on_write_done(
         &mut self,
         now: Instant,
@@ -672,7 +899,7 @@ impl ExtensionStorage {
         if let Some(next_bytes) = self.queued_writes.remove(&key) {
             return self.start_write(key, next_bytes, 0, next_token);
         }
-        if result.is_err() {
+        if result.is_err() && !in_flight.superseded_by_external {
             let next_attempt = in_flight.attempt + 1;
             if next_attempt < MAX_WRITE_RETRIES {
                 let due = now + retry_delay(next_attempt);
@@ -689,30 +916,92 @@ impl ExtensionStorage {
         None
     }
 
-    /// Fire any failed writes whose retry backoff has elapsed.
-    pub fn on_tick(&mut self, now: Instant, mut next_token: impl FnMut() -> Token) -> Vec<WriteCommand> {
-        let due_keys: Vec<StorageKey> = self
+    /// Fire any failed storage writes or reads whose retry backoff has elapsed.
+    pub fn on_tick(&mut self, now: Instant, mut next_token: impl FnMut() -> Token) -> TickOutcome {
+        let due_write_keys: Vec<StorageKey> = self
             .retry_writes
             .iter()
             .filter(|(_, r)| r.due <= now)
             .map(|(k, _)| k.clone())
             .collect();
-        let mut cmds = Vec::new();
-        for key in due_keys {
+        let mut writes = Vec::new();
+        for key in due_write_keys {
             if let Some(retry) = self.retry_writes.remove(&key) {
                 if let Some(cmd) = self.start_write(key, retry.bytes, retry.attempt, &mut next_token) {
-                    cmds.push(cmd);
+                    writes.push(cmd);
                 }
             }
         }
-        cmds
+
+        let mut reads = Vec::new();
+        if let Some(roots) = &self.roots {
+            for (key, pending) in &mut self.pending_reads {
+                if pending.retry_due.is_some_and(|due| due <= now) {
+                    pending.retry_due = None;
+                    let uri = roots.file_uri(key.shared, &key.extension_id);
+                    reads.push(ReadCommand { uri, key: key.clone() });
+                }
+            }
+        }
+
+        TickOutcome { writes, reads }
     }
 
-    /// Apply a `shared = true` (`globalState`) change broadcast by another session.
+    /// Apply a `shared = true` (`globalState`) change broadcast by another session or reloaded
+    /// from disk. Cancels any pending local retry or queued write so an older local blob cannot
+    /// overwrite the newer external value.
     pub fn on_external_shared_change(&mut self, extension_id: &str, value: Option<String>) {
         let key = StorageKey::new(true, extension_id);
+        self.register_shared_extension(&key.extension_id);
         self.read_failed.remove(&key);
+        self.retry_writes.remove(&key);
+        self.queued_writes.remove(&key);
+        if let Some(in_flight) = self.in_flight_writes.get_mut(&key) {
+            in_flight.superseded_by_external = true;
+        }
         self.cache.insert(key, value);
+    }
+
+    /// Apply the result of reloading a `shared = true` file after a directory watch event or hub
+    /// lag. Returns `Some(new_value)` only when the disk content differs from the current cache
+    /// (filtering self-echoes and already-delivered hub updates).
+    pub fn on_shared_reload_done(
+        &mut self,
+        extension_id: &str,
+        result: Result<Option<Vec<u8>>, String>,
+    ) -> Option<Option<String>> {
+        let key = StorageKey::new(true, extension_id);
+        if self.in_flight_writes.contains_key(&key)
+            || self.queued_writes.contains_key(&key)
+            || self.quarantining.contains_key(&key)
+        {
+            return None;
+        }
+        let loaded = match result {
+            Ok(Some(bytes)) => match decode_persisted_bytes(&bytes) {
+                Ok(v) => v,
+                Err(reason) => {
+                    tracing::warn!(
+                        "ember-editor: ignoring corrupt external shared storage reload for {}: {reason}",
+                        key.extension_id
+                    );
+                    return None;
+                }
+            },
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!(
+                    "ember-editor: cannot reload external shared storage for {}: {e}",
+                    key.extension_id
+                );
+                return None;
+            }
+        };
+        if self.cache.get(&key) == Some(&loaded) {
+            return None;
+        }
+        self.on_external_shared_change(&key.extension_id, loaded.clone());
+        Some(loaded)
     }
 
     /// Handle `MainThreadStorage.$registerExtensionStorageKeysToSync(extension, keys)`.
@@ -736,7 +1025,10 @@ impl ExtensionStorage {
         let roots = self.roots.as_ref()?;
         let token = next_token();
         let uri = roots.file_uri(key.shared, &key.extension_id);
-        self.in_flight_writes.insert(key.clone(), InFlightWrite { bytes: bytes.clone(), attempt });
+        self.in_flight_writes.insert(
+            key.clone(),
+            InFlightWrite { bytes: bytes.clone(), attempt, superseded_by_external: false },
+        );
         self.write_tokens.insert(token, key);
         Some(WriteCommand { uri, bytes, token })
     }
@@ -793,11 +1085,37 @@ mod tests {
             encode_workspace_key("server-a:8000", "/work/one/app"),
             encode_workspace_key("server-b:8000", "/work/one/app")
         );
-        // Authority comparison is case-insensitive.
+        // Authority comparison is case-insensitive and normalizes loopback spellings.
         assert_eq!(
             encode_workspace_key("Server-A:8000", "/work/one/app"),
             encode_workspace_key("server-a:8000", "/work/one/app")
         );
+        assert_eq!(canonicalize_authority("localhost:8000"), "localhost:8000");
+        assert_eq!(canonicalize_authority("127.0.0.1:8000"), "localhost:8000");
+        assert_eq!(canonicalize_authority("[::1]:8000"), "localhost:8000");
+        assert_eq!(canonicalize_authority("LOCALHOST"), "localhost");
+        assert_eq!(
+            encode_workspace_key("localhost:8000", "/work/one/app"),
+            encode_workspace_key("127.0.0.1:8000", "/work/one/app")
+        );
+        assert_eq!(
+            encode_workspace_key("localhost:8000", "/work/one/app"),
+            encode_workspace_key("[::1]:8000", "/work/one/app")
+        );
+        // Remote mode workspace_dir ignores endpoint spelling and port.
+        let r_a = StorageRoots::from_env(
+            "localhost:8000",
+            &UriComponents::remote("localhost:8000", "/data/globalStorage"),
+            &UriComponents::remote("localhost:8000", "/data/workspaceStorage"),
+            "/work/one/app",
+        );
+        let r_b = StorageRoots::from_env(
+            "127.0.0.1:9999",
+            &UriComponents::remote("127.0.0.1:9999", "/data/globalStorage"),
+            &UriComponents::remote("127.0.0.1:9999", "/data/workspaceStorage"),
+            "/work/one/app/",
+        );
+        assert_eq!(r_a.workspace_dir.path, r_b.workspace_dir.path);
         // Trailing slash normalization keeps the same workspace key.
         assert_eq!(
             encode_workspace_key("host:8000", "/work/one/app"),
@@ -870,16 +1188,18 @@ mod tests {
         assert!(matches!(act1, InitAction::Read { .. }));
         assert_eq!(store.on_initialize(2, true, "pub.ext"), InitAction::Wait);
 
-        // A `$setValue` arrives while the read is still in flight.
+        // A `$setValue` arrives while the read is still in flight: cache updates and broadcast
+        // fires immediately, while the disk write waits behind the in-flight read so a corrupt or
+        // unreadable file on disk is never clobbered before the read finishes.
         let mut tok = 10u64;
         let out1 = store.on_set_value(true, "pub.ext", json!({"v": 1}), || {
             tok += 1;
             tok
         });
-        assert_eq!(out1.write.as_ref().map(|w| w.token), Some(11));
+        assert!(out1.write.is_none());
         assert!(out1.broadcast.is_some());
 
-        // Overlapping `$setValue` calls while token 11 is in flight coalesce to the latest value.
+        // Overlapping `$setValue` calls while the read is in flight coalesce to the latest value.
         let out2 = store.on_set_value(true, "pub.ext", json!({"v": 2}), || {
             tok += 1;
             tok
@@ -891,8 +1211,12 @@ mod tests {
         });
         assert!(out3.write.is_none());
 
-        // The stale disk read finishes: it must not overwrite the newer `$setValue`.
-        let read_out = store.on_read_done(true, "pub.ext", Ok(Some(br#"{"stale":true}"#.to_vec())));
+        // The stale disk read finishes: it keeps the newer `$setValue` and launches the coalesced
+        // write for v=3 (skipping v=1 and v=2).
+        let read_out = store.on_read_done(t0, true, "pub.ext", Ok(Some(br#"{"stale":true}"#.to_vec())), || {
+            tok += 1;
+            tok
+        });
         assert!(read_out.quarantine.is_none());
         assert_eq!(
             read_out.replies,
@@ -902,8 +1226,15 @@ mod tests {
             ]
         );
         assert_eq!(store.cached(true, "pub.ext"), Some(Some(r#"{"v":3}"#)));
+        let started = read_out.write.expect("queued write should start once read finishes");
+        assert_eq!(started.token, 11);
+        assert_eq!(started.bytes.as_deref(), Some(br#"{"v":3}"#.as_slice()));
 
-        // Completing write 11 launches the coalesced write for v=3 (skipping v=2).
+        // Overlapping `$setValue` calls while write 11 is in flight coalesce to v=5 (skipping v=4).
+        assert!(store.on_set_value(true, "pub.ext", json!({"v": 4}), || { tok += 1; tok }).write.is_none());
+        assert!(store.on_set_value(true, "pub.ext", json!({"v": 5}), || { tok += 1; tok }).write.is_none());
+
+        // Completing write 11 launches the coalesced write for v=5.
         let next = store
             .on_write_done(t0, 11, Ok(()), || {
                 tok += 1;
@@ -911,7 +1242,7 @@ mod tests {
             })
             .expect("queued write should start");
         assert_eq!(next.token, 12);
-        assert_eq!(next.bytes.as_deref(), Some(br#"{"v":3}"#.as_slice()));
+        assert_eq!(next.bytes.as_deref(), Some(br#"{"v":5}"#.as_slice()));
 
         // A transient failure on write 12 schedules a retry.
         assert!(store
@@ -922,26 +1253,29 @@ mod tests {
             .is_none());
         assert!(store.has_pending_writes());
         let wake = store.next_wake().expect("retry deadline scheduled");
-        let retries = store.on_tick(wake, || {
+        let tick = store.on_tick(wake, || {
             tok += 1;
             tok
         });
-        assert_eq!(retries.len(), 1);
-        assert_eq!(retries[0].bytes.as_deref(), Some(br#"{"v":3}"#.as_slice()));
+        assert_eq!(tick.writes.len(), 1);
+        assert_eq!(tick.writes[0].bytes.as_deref(), Some(br#"{"v":5}"#.as_slice()));
         assert!(store
-            .on_write_done(wake, retries[0].token, Ok(()), || {
+            .on_write_done(wake, tick.writes[0].token, Ok(()), || {
                 tok += 1;
                 tok
             })
             .is_none());
         assert!(!store.has_pending_writes());
 
-        // Corrupt read triggers quarantine to `*.corrupt` before resolving as Empty.
+        // Corrupt read triggers quarantine to `*.corrupt.<millis>-<seq>` before resolving as Empty.
         assert!(matches!(store.on_initialize(4, false, "pub.bad"), InitAction::Read { .. }));
-        let bad_out = store.on_read_done(false, "pub.bad", Ok(Some(b"{corrupt".to_vec())));
+        let bad_out = store.on_read_done(t0, false, "pub.bad", Ok(Some(b"{corrupt".to_vec())), || {
+            tok += 1;
+            tok
+        });
         assert!(bad_out.replies.is_empty());
         let (from, to, _) = bad_out.quarantine.expect("quarantine expected");
-        assert!(to.path == format!("{}.corrupt", from.path));
+        assert!(to.path.starts_with(&format!("{}.corrupt.", from.path)), "unexpected backup path: {}", to.path);
         let q_out = store.on_quarantine_done(false, "pub.bad", Ok(()), || {
             tok += 1;
             tok
@@ -949,9 +1283,28 @@ mod tests {
         assert_eq!(q_out.replies, vec![(4, Ok(Reply::Empty))]);
         assert_eq!(store.cached(false, "pub.bad"), Some(None));
 
-        // Transient read error is NOT cached and blocks overwrites until a read succeeds.
+        // Transient read errors retry MAX_READ_RETRIES times with backoff before rejecting,
+        // never caching None, and blocking overwrites once exhausted.
         assert!(matches!(store.on_initialize(5, false, "pub.err"), InitAction::Read { .. }));
-        let err_out = store.on_read_done(false, "pub.err", Err("EIO".into()));
+        let mut now = t0;
+        for _ in 0..MAX_READ_RETRIES {
+            let err_out = store.on_read_done(now, false, "pub.err", Err("EIO".into()), || {
+                tok += 1;
+                tok
+            });
+            assert!(err_out.replies.is_empty(), "transient read error should retry before rejecting");
+            let wake = store.next_wake().expect("read retry deadline scheduled");
+            now = wake;
+            let tick = store.on_tick(now, || {
+                tok += 1;
+                tok
+            });
+            assert_eq!(tick.reads.len(), 1);
+        }
+        let err_out = store.on_read_done(now, false, "pub.err", Err("EIO".into()), || {
+            tok += 1;
+            tok
+        });
         assert_eq!(err_out.replies.len(), 1);
         assert!(err_out.replies[0].1.is_err());
         assert_eq!(store.cached(false, "pub.err"), None);

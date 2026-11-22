@@ -140,12 +140,16 @@ pub enum Input {
     Webview(crate::webview::WebviewEvent),
     /// Result of reading one persisted extension storage file (`MainThreadStorage`).
     StorageRead { shared: bool, extension_id: String, result: Result<Option<Vec<u8>>, String> },
-    /// Result of moving a corrupt extension storage file aside to `*.corrupt`.
+    /// Result of moving a corrupt extension storage file aside to `*.corrupt.<millis>-<seq>`.
     StorageQuarantined { shared: bool, extension_id: String, result: Result<(), String> },
     /// Result of writing or deleting one persisted extension storage file (`MainThreadStorage`).
     StorageWritten { token: Token, result: Result<(), String> },
     /// A `shared = true` (`globalState`) update broadcast from another session on the same hub.
     SharedStorageChanged { extension_id: String, value: Option<String> },
+    /// Result of reloading a `shared = true` storage file after a watcher event or hub lag.
+    SharedStorageReloaded { extension_id: String, result: Result<Option<Vec<u8>>, String> },
+    /// Resync all cached `shared = true` keys from disk (e.g. after `StorageHub` broadcast lag).
+    ResyncSharedStorage,
     /// Nothing happened; run due timers.
     Tick,
 }
@@ -163,7 +167,11 @@ pub enum Effect {
     WriteFile { uri: UriComponents, bytes: Vec<u8>, token: Token },
     /// Read one extension storage file; answered with [`Input::StorageRead`].
     ReadStorage { uri: UriComponents, shared: bool, extension_id: String },
-    /// Move a corrupt extension storage file aside (`*.corrupt`); answered with [`Input::StorageQuarantined`].
+    /// Reload one `shared = true` storage file after a watcher event or hub lag; answered with
+    /// [`Input::SharedStorageReloaded`].
+    ReloadSharedStorage { uri: UriComponents, extension_id: String },
+    /// Move a corrupt extension storage file aside (`*.corrupt.<millis>-<seq>`); answered with
+    /// [`Input::StorageQuarantined`].
     QuarantineStorage { from: UriComponents, to: UriComponents, shared: bool, extension_id: String },
     /// Atomically write (`Some`) or delete (`None`) one extension storage file; answered with [`Input::StorageWritten`].
     WriteStorage { uri: UriComponents, bytes: Option<Vec<u8>>, token: Token },
@@ -490,7 +498,8 @@ impl SessionCore {
                 self.apply_webview(out);
             }
             Input::StorageRead { shared, extension_id, result } => {
-                let outcome = self.storage.on_read_done(shared, &extension_id, result);
+                let next = self.next_token + 1;
+                let outcome = self.storage.on_read_done(self.now, shared, &extension_id, result, || next);
                 for (req, reply) in outcome.replies {
                     self.respond(req, reply);
                 }
@@ -501,6 +510,10 @@ impl SessionCore {
                         shared: key.shared,
                         extension_id: key.extension_id,
                     });
+                }
+                if let Some(write) = outcome.write {
+                    self.next_token = write.token;
+                    self.out.push(Effect::WriteStorage { uri: write.uri, bytes: write.bytes, token: write.token });
                 }
             }
             Input::StorageQuarantined { shared, extension_id, result } => {
@@ -525,6 +538,17 @@ impl SessionCore {
                 self.storage.on_external_shared_change(&extension_id, value.clone());
                 let raw = value.as_deref().unwrap_or("{}");
                 self.rpc(ember_editor_conn::exthost::accept_storage_value(true, &extension_id, raw));
+            }
+            Input::SharedStorageReloaded { extension_id, result } => {
+                if let Some(value) = self.storage.on_shared_reload_done(&extension_id, result) {
+                    let raw = value.as_deref().unwrap_or("{}");
+                    self.rpc(ember_editor_conn::exthost::accept_storage_value(true, &extension_id, raw));
+                }
+            }
+            Input::ResyncSharedStorage => {
+                for (uri, extension_id) in self.storage.cached_shared_keys() {
+                    self.out.push(Effect::ReloadSharedStorage { uri, extension_id });
+                }
             }
             Input::Tick => {}
         }
@@ -623,6 +647,13 @@ impl SessionCore {
     /// in memory for the lifetime of this core.
     pub fn set_storage_roots(&mut self, roots: crate::storage::StorageRoots) {
         self.storage.set_roots(roots);
+    }
+
+    /// Register known extension ids so global storage watch events can map filenames back to them.
+    pub fn register_storage_extensions(&mut self, ids: impl IntoIterator<Item = String>) {
+        for id in ids {
+            self.storage.register_shared_extension(&id);
+        }
     }
 
     /// The extension storage state of this session.
@@ -2175,7 +2206,14 @@ impl SessionCore {
     }
 
     fn on_files_changed(&mut self, changes: Vec<FileChange>) {
+        let mut reload_shared: HashSet<String> = HashSet::new();
         for c in changes {
+            if let Some((uri, extension_id)) = self.storage.shared_extension_for_path(&c.resource.path) {
+                if reload_shared.insert(extension_id.clone()) {
+                    self.out.push(Effect::ReloadSharedStorage { uri, extension_id });
+                }
+                continue;
+            }
             // Match by path: the server's URI transformer decides the authority it sends back.
             let Some(uri) = self.docs.values().find(|d| d.uri.path == c.resource.path).map(|d| d.uri.clone()) else { continue };
             match c.kind {
@@ -2276,13 +2314,20 @@ impl SessionCore {
             self.fire_semantic(&k);
         }
         let mut next_tok = self.next_token;
-        let retry_writes = self.storage.on_tick(now, || {
+        let tick = self.storage.on_tick(now, || {
             next_tok += 1;
             next_tok
         });
         self.next_token = next_tok;
-        for write in retry_writes {
+        for write in tick.writes {
             self.out.push(Effect::WriteStorage { uri: write.uri, bytes: write.bytes, token: write.token });
+        }
+        for read in tick.reads {
+            self.out.push(Effect::ReadStorage {
+                uri: read.uri,
+                shared: read.key.shared,
+                extension_id: read.key.extension_id,
+            });
         }
     }
 

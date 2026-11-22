@@ -476,7 +476,7 @@ Rejected: failing tool actions while the computer is away; wording the notice as
 This closes Q2 (who moves a session): the user designates, and the server moves it on a connection
 change. An agent-triggered `switch_computer` is not part of this decision.
 
-**Status.** Not built; today only the user switches (#34).
+**Status.** Built, not verified on two physical computers (#82 V4). The designated computer, the probes (2 x 10 s, `EMBER_FALLBACK_PROBES` and `EMBER_FALLBACK_INTERVAL_SECS`), the fall back to the main server, the return, and the "now working on X (moved from Y)" notice are in `ember/server/src/computers/mod.rs` (`fr_x3_disconnect_moves_to_main_server_with_a_moved_notice`, `fr_x3_reconnect_moves_back_with_a_notice`). A teammate spawned with `--computer` is designated as well, and its leader is told of each move (FR-T7, #82). This corrects the earlier "Not built" line, which had gone stale; the decision itself is unchanged.
 
 ### D21: A low-level terminal view of other sessions, apart from team messages
 

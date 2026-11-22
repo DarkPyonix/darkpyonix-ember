@@ -5,7 +5,8 @@
 #   bridged  the session decodes the call and answers from its own state;
 #   acked    the empty answer is correct, confirmed by a person (name and date in the actor's `note`);
 #   out      out of scope; the actor's `note` says why and who decided;
-#   todo     not built yet: answered with the fallback reply and recorded with the calling extension.
+#   todo     not built yet: answered with the fallback reply; a call that returns a value is recorded
+#            (actor, method, count, and the extension when an argument names it).
 # `fr_e9_ledger_covers_generated_protocol` fails when the generated protocol has an actor or method
 # this file lacks, or this file names one the protocol does not have. A pin bump adds new methods
 # here as `todo` or `out` (docs/design/POST-1-0-EDITOR-CORE.md 4.4).
@@ -198,7 +199,8 @@ note = "owner, 2026-11-23 (Q-E7, INTENT D54): VS Code AI chat is not supported f
 "$closeGroup" = "todo"
 
 [MainThreadErrors]
-"$onUnexpectedError" = "todo"
+note = "leader, 2026-11-23 (Q2): Code-OSS only logs it; the session logs it as a warning (ember/editor/src/engine/actors.rs fallback_reply)."
+"$onUnexpectedError" = "acked"
 
 [MainThreadTreeViews]
 "$registerTreeViewDataProvider" = "todo"

@@ -11,6 +11,11 @@
 
 use std::sync::OnceLock;
 
+use serde_json::Value;
+
+use crate::actors::ActorInfo;
+use crate::rpc::Arg;
+
 /// What Ember does with one `MainThread*` method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Status {
@@ -20,7 +25,7 @@ pub enum Status {
     Acked,
     /// Out of scope; the actor's note says why.
     Out,
-    /// Not built yet: the fallback reply, and the call is recorded with the calling extension.
+    /// Not built yet: the fallback reply; a call that returns a value is recorded (FR-E9).
     Todo,
 }
 
@@ -78,6 +83,44 @@ pub fn ledger() -> &'static Ledger {
 /// id, a method outside the pinned protocol).
 pub fn status(proxy: &str, method: &str) -> Option<Status> {
     ledger().actor(proxy).and_then(|a| a.status(method))
+}
+
+/// Whether the pinned protocol declares `proxy.method` to return a value (not `void`, `undefined`
+/// or a `Promise` of those). `false` for a method the protocol does not have.
+pub fn returns_value(proxy: &str, method: &str) -> bool {
+    let Some(m) = ActorInfo::by_proxy(proxy).and_then(|a| a.method(method)) else { return false };
+    let t = m.returns.trim();
+    let t = t.strip_prefix("Promise<").and_then(|t| t.strip_suffix('>')).unwrap_or(t).trim();
+    !matches!(t, "void" | "undefined" | "never")
+}
+
+/// The extension a call names in its arguments, if any (SPEC FR-E9: the RPC wire does not say
+/// which extension called, so this is the only exact source). A parameter counts when it is named
+/// like an extension id or typed `ExtensionIdentifier` / `IExtensionDescription`; its value is
+/// read as a string, an `ExtensionIdentifier` (`{ value }`) or a description (`{ identifier }`).
+pub fn calling_extension(proxy: &str, method: &str, args: &[Arg]) -> Option<String> {
+    let m = ActorInfo::by_proxy(proxy)?.method(method)?;
+    m.params.iter().enumerate().find_map(|(i, p)| {
+        let named = matches!(p.name, "extensionId" | "extension" | "extensionIdentifier" | "extId");
+        let typed = p.ts_type.contains("ExtensionIdentifier") || p.ts_type.contains("IExtensionDescription");
+        if !named && !typed {
+            return None;
+        }
+        extension_id(args.get(i)?.as_json()?)
+    })
+}
+
+fn extension_id(v: &Value) -> Option<String> {
+    let id = match v {
+        Value::String(s) => Some(s.as_str()),
+        Value::Object(o) => match o.get("identifier") {
+            Some(Value::String(s)) => Some(s.as_str()),
+            Some(i) => i.get("value").and_then(Value::as_str),
+            None => o.get("value").and_then(Value::as_str),
+        },
+        _ => None,
+    }?;
+    (!id.is_empty()).then(|| id.to_owned())
 }
 
 impl Ledger {
@@ -185,6 +228,32 @@ mod tests {
         assert_eq!(status("ExtHostDocuments", "$acceptModelChanged"), None);
         let bridged = ledger().actors.iter().flat_map(|a| &a.methods).filter(|(_, s)| *s == Status::Bridged).count();
         assert!(bridged >= 60, "{bridged}");
+    }
+
+    #[test]
+    fn fr_e9_records_know_value_returns_and_the_named_extension() {
+        use serde_json::json;
+        assert!(returns_value("MainThreadSecretState", "$getPassword"));
+        assert!(returns_value("MainThreadPower", "$isOnBatteryPower"));
+        assert!(!returns_value("MainThreadTelemetry", "$publicLog2"));
+        assert!(!returns_value("MainThreadSecretState", "$setPassword"));
+        assert!(!returns_value("MainThreadSecretState", "$nope"));
+
+        let j = |v: Value| Arg::Json(v);
+        // $getPassword(extensionId: string, key: string)
+        let args = [j(json!("pub.ext")), j(json!("k"))];
+        assert_eq!(calling_extension("MainThreadSecretState", "$getPassword", &args).as_deref(), Some("pub.ext"));
+        // $registerTextEditorDecorationType(extensionId: ExtensionIdentifier, ...)
+        let args = [j(json!({"value": "Pub.Deco", "_lower": "pub.deco"})), j(json!("key")), j(json!({}))];
+        assert_eq!(calling_extension("MainThreadTextEditors", "$registerTextEditorDecorationType", &args).as_deref(), Some("Pub.Deco"));
+        // $getSession(providerId, scopeListOrRequest, extensionId, extensionName, options)
+        let args = [j(json!("github")), j(json!(["repo"])), j(json!("pub.auth")), j(json!("Auth")), j(json!({}))];
+        assert_eq!(calling_extension("MainThreadAuthentication", "$getSession", &args).as_deref(), Some("pub.auth"));
+        // No extension parameter, a missing argument, an empty id.
+        assert_eq!(calling_extension("MainThreadPower", "$isOnBatteryPower", &[]), None);
+        assert_eq!(calling_extension("MainThreadSecretState", "$getPassword", &[]), None);
+        assert_eq!(calling_extension("MainThreadSecretState", "$getPassword", &[j(json!(""))]), None);
+        assert_eq!(calling_extension("ExtHostDocuments", "$acceptModelChanged", &[]), None);
     }
 
     #[test]

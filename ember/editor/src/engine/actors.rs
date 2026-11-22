@@ -7,11 +7,12 @@
 //! [`SessionCore::unimplemented_calls`], which says where behaviour is needed next.
 
 use ember_editor_conn::actors::generated::{
-    main_thread_bulk_edits, main_thread_commands, main_thread_diagnostics, main_thread_documents, main_thread_language_features,
+    main_thread_bulk_edits, main_thread_commands, main_thread_diagnostics, main_thread_documents, main_thread_errors, main_thread_language_features,
     main_thread_languages, main_thread_message_service, main_thread_output_service, main_thread_search, main_thread_storage,
     main_thread_window, main_thread_workspace,
 };
 use ember_editor_conn::actors::{Ctx, Outcome};
+use ember_editor_conn::coverage;
 use ember_editor_conn::exthost::{DocumentFilter, MarkerData, SemanticTokensLegend};
 use ember_editor_conn::language::LanguageFeature;
 use ember_editor_conn::rpc::{IncomingRequest, Reply};
@@ -124,18 +125,37 @@ impl SessionCore {
         true
     }
 
+    /// Count a call no trait method answered, unless the coverage ledger says the fallback reply
+    /// is the decided answer (`acked`, `out`). A call that returns a value is also reported as a
+    /// [`SessionUpdate::ProtocolGap`] (FR-E9).
     fn count_unimplemented(&mut self, r: &IncomingRequest) {
+        if let Some(p) = r.proxy {
+            if matches!(coverage::status(p, &r.method), Some(coverage::Status::Acked | coverage::Status::Out)) {
+                return;
+            }
+        }
         let proxy = r.proxy.map_or_else(|| format!("rpc{}", r.rpc_id), str::to_owned);
         let count = self.unimplemented.entry((proxy.clone(), r.method.clone())).or_insert(0);
         *count += 1;
-        if *count == 1 {
+        let count = *count;
+        if count == 1 {
             tracing::info!("ember-editor: unimplemented {proxy}.{}", r.method);
+        }
+        if let Some(p) = r.proxy.filter(|p| coverage::returns_value(p, &r.method)) {
+            let extension = coverage::calling_extension(p, &r.method, &r.args);
+            self.ui(SessionUpdate::ProtocolGap { proxy, method: r.method.clone(), extension, count });
         }
     }
 
     /// The reply for a request no trait method answered: workspace trust first (it needs no
     /// decoded arguments), then [`session_reply`].
     fn fallback_reply(&mut self, r: &IncomingRequest) {
+        // `acked` in the coverage ledger on the condition that the session logs it, as Code-OSS does.
+        if r.proxy == Some(main_thread_errors::PROXY) && r.method == "$onUnexpectedError" {
+            let err = r.args.first().and_then(|a| a.as_json());
+            let field = |k: &str| err.and_then(|e| e.get(k)).and_then(Value::as_str).unwrap_or("");
+            tracing::warn!("ember-editor: extension host error: {}: {}\n{}", field("name"), field("message"), field("stack"));
+        }
         match self.trust.on_request(r.proxy, &r.method, r.req) {
             Some(TrustAnswer::Now(reply)) => self.respond(r.req, Ok(reply)),
             Some(TrustAnswer::Ask) => self.out.push(Effect::Ui(SessionUpdate::WorkspaceTrustRequested)),

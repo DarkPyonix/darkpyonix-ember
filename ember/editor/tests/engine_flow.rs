@@ -735,12 +735,16 @@ fn fr_e1_unimplemented_main_thread_calls_fall_back_and_are_counted() {
     let mut c = core(t0);
     assert!(c.unimplemented_calls().is_empty());
 
+    // `$readText` returns a value, so the call is also a protocol gap record (FR-E9).
+    let gap = |count| {
+        Effect::Ui(SessionUpdate::ProtocolGap { proxy: "MainThreadClipboard".into(), method: "$readText".into(), extension: None, count })
+    };
     let fx = c.handle(t0, request(1, "MainThreadClipboard", "$readText", vec![json!("text/plain")]));
-    assert_eq!(fx, vec![Effect::Respond { req: 1, result: Ok(Reply::Empty) }]);
+    assert_eq!(fx, vec![gap(1), Effect::Respond { req: 1, result: Ok(Reply::Empty) }]);
     let key = ("MainThreadClipboard".to_string(), "$readText".to_string());
     assert_eq!(c.unimplemented_calls().get(&key), Some(&1));
     let fx = c.handle(t0, request(2, "MainThreadClipboard", "$readText", vec![json!("text/plain")]));
-    assert_eq!(fx, vec![Effect::Respond { req: 2, result: Ok(Reply::Empty) }]);
+    assert_eq!(fx, vec![gap(2), Effect::Respond { req: 2, result: Ok(Reply::Empty) }]);
     assert_eq!(c.unimplemented_calls().get(&key), Some(&2));
 
     // A method of an implemented actor that no trait method covers is counted too.

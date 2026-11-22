@@ -243,6 +243,10 @@ pub enum SessionUpdate {
     Language(crate::language::LanguageUpdate),
     /// An extension webview changed (FR-E8): the window applies it to its webview host and panes.
     Webview(crate::webview::WebviewUpdate),
+    /// A call to a `todo` method of the coverage ledger that returns a value got the fallback
+    /// reply (FR-E9). `count` is the number of such calls to `proxy.method` in this session so
+    /// far; `extension` is set only when an argument of this call names the extension.
+    ProtocolGap { proxy: String, method: String, extension: Option<String>, count: u32 },
 }
 
 #[derive(Debug, Clone)]

@@ -138,6 +138,10 @@ pub enum Input {
     Language(crate::language::LanguageRequest),
     /// An event of an extension webview or its host (FR-E8).
     Webview(crate::webview::WebviewEvent),
+    /// Result of reading one persisted extension storage file (`MainThreadStorage`).
+    StorageRead { shared: bool, extension_id: String, result: Result<Option<Vec<u8>>, String> },
+    /// Result of writing or deleting one persisted extension storage file (`MainThreadStorage`).
+    StorageWritten { token: Token, result: Result<(), String> },
     /// Nothing happened; run due timers.
     Tick,
 }
@@ -153,6 +157,10 @@ pub enum Effect {
     Respond { req: u32, result: Result<Reply, Option<Value>> },
     ReadFile { uri: UriComponents, purpose: ReadPurpose },
     WriteFile { uri: UriComponents, bytes: Vec<u8>, token: Token },
+    /// Read one extension storage file; answered with [`Input::StorageRead`].
+    ReadStorage { uri: UriComponents, shared: bool, extension_id: String },
+    /// Atomically write (`Some`) or delete (`None`) one extension storage file; answered with [`Input::StorageWritten`].
+    WriteStorage { uri: UriComponents, bytes: Option<Vec<u8>>, token: Token },
     Watch { uri: UriComponents },
     Unwatch { uri: UriComponents },
     /// Work for the highlighting thread; its answer comes back as [`Input::Highlighted`].
@@ -328,6 +336,8 @@ pub struct SessionCore {
     lang: language::LangState,
     /// Extension webviews (FR-E8).
     webviews: crate::webview::Webviews,
+    /// Persistent extension storage (`MainThreadStorage`).
+    storage: crate::storage::ExtensionStorage,
     next_token: Token,
     next_generation: u64,
     next_editor: u64,
@@ -397,6 +407,7 @@ impl SessionCore {
             replace_writes: HashMap::new(),
             lang: language::LangState::default(),
             webviews: crate::webview::Webviews::new(),
+            storage: crate::storage::ExtensionStorage::default(),
             next_token: 0,
             next_generation: 0,
             next_editor: 0,
@@ -469,6 +480,16 @@ impl SessionCore {
             Input::Webview(event) => {
                 let out = self.webviews.on_event(event);
                 self.apply_webview(out);
+            }
+            Input::StorageRead { shared, extension_id, result } => {
+                for (req, reply) in self.storage.on_read_done(shared, &extension_id, result) {
+                    self.respond(req, Ok(reply));
+                }
+            }
+            Input::StorageWritten { token, result } => {
+                if let Some((req, reply)) = self.storage.on_write_done(token, result) {
+                    self.respond(req, reply);
+                }
             }
             Input::Tick => {}
         }
@@ -550,6 +571,17 @@ impl SessionCore {
     /// first input.
     pub fn set_workspace_trust(&mut self, trust: crate::trust::WorkspaceTrust) {
         self.trust = trust;
+    }
+
+    /// Configure persistent storage roots for `MainThreadStorage`; without roots, storage stays
+    /// in memory for the lifetime of this core.
+    pub fn set_storage_roots(&mut self, roots: crate::storage::StorageRoots) {
+        self.storage.set_roots(roots);
+    }
+
+    /// The extension storage state of this session.
+    pub fn storage(&self) -> &crate::storage::ExtensionStorage {
+        &self.storage
     }
 
     /// The extension-host requests that fell back to the default reply because no actor trait

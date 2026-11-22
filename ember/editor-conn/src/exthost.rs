@@ -773,14 +773,29 @@ pub(crate) fn arg_json(args: &[Arg], i: usize) -> Value {
 /// * `MainThreadWorkspace.$isResourceTrusted` / `$requestWorkspaceTrust` (L1986 / L1985): trusted
 ///   (the session answers these from its workspace trust first, see `ember_editor::trust`).
 /// * `MainThreadCommands.$getCommands` (L139): empty list.
+/// * Every other method whose declared result is an array (`T[]` or `Promise<T[]>`): an empty
+///   list. The extension host iterates those results, and `undefined` throws
+///   `TypeError: ... is not iterable` (seen with `MainThreadWorkspace.$loadCertificates`, which
+///   the extension host's proxy resolver calls once an extension makes an https request).
 pub fn default_reply(proxy: Option<&str>, method: &str) -> Reply {
     match (proxy, method) {
         (Some(proxy::MAIN_THREAD_WINDOW), "$getInitialState") => Reply::Json(json!({ "isFocused": true, "isActive": true })),
         (Some(proxy::MAIN_THREAD_WORKSPACE), "$checkExists") => Reply::Json(Value::Bool(false)),
         (Some(proxy::MAIN_THREAD_WORKSPACE), "$isResourceTrusted" | "$requestWorkspaceTrust") => Reply::Json(Value::Bool(true)),
         (Some(proxy::MAIN_THREAD_COMMANDS), "$getCommands") => Reply::Json(json!([])),
+        _ if returns_array(proxy, method) => Reply::Json(json!([])),
         _ => Reply::Empty,
     }
+}
+
+/// The pinned protocol declares `proxy.method` to return an array (bare or in a `Promise`).
+fn returns_array(proxy: Option<&str>, method: &str) -> bool {
+    let Some(m) = proxy.and_then(crate::actors::ActorInfo::by_proxy).and_then(|a| a.method(method)) else {
+        return false;
+    };
+    let t = m.returns.trim();
+    let t = t.strip_prefix("Promise<").and_then(|t| t.strip_suffix('>')).unwrap_or(t).trim();
+    t.ends_with("[]")
 }
 
 #[cfg(test)]
@@ -979,6 +994,22 @@ mod tests {
             default_reply(Some(proxy::MAIN_THREAD_WINDOW), "$getInitialState"),
             Reply::Json(json!({"isFocused": true, "isActive": true}))
         );
+    }
+
+    #[test]
+    fn fr_e1_unimplemented_methods_returning_an_array_default_to_an_empty_list() {
+        for (p, m) in [
+            ("MainThreadWorkspace", "$loadCertificates"),
+            ("MainThreadLanguageModels", "$selectChatModels"),
+            ("MainThreadLanguageModelTools", "$getTools"),
+            ("MainThreadSecretState", "$getKeys"),
+            ("MainThreadFileSystem", "$readdir"),
+        ] {
+            assert_eq!(default_reply(Some(p), m), Reply::Json(json!([])), "{p}.{m}");
+        }
+        assert_eq!(default_reply(Some("MainThreadStatusBar"), "$setEntry"), Reply::Empty);
+        assert_eq!(default_reply(Some("MainThreadWorkspace"), "$nope"), Reply::Empty);
+        assert_eq!(default_reply(None, "$loadCertificates"), Reply::Empty);
     }
 
     // `$append` and `$clear` are not methods of MainThreadOutputService at the pinned commit

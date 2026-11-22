@@ -225,10 +225,9 @@ pub fn ClickableAs(
 }
 
 /// A [`Clickable`] whose child is only an icon or a glyph, named for assistive technology with
-/// `Modifier::label` (compose-rust v0.0.7, #460, #429). `label` is `&'static str` on purpose:
-/// the toolkit keeps a 128-entry LRU cache of distinct labels (`compose-rust/src/ui/mod.rs`
-/// `LabelCache`, compose-rust#456, v0.0.11), so a name built from data (a routine name, a commit
-/// subject) takes a `Button`'s `accessible_name` instead.
+/// `Modifier::label` (compose-rust v0.0.7, #460, #429). `label` is `&'static str` because every
+/// caller names a fixed control; a name built from data (a routine name, a commit subject) still
+/// goes through [`DataNamedOverlay`], whose note says why.
 pub fn NamedClickable(
     label: &'static str,
     modifier: Modifier,
@@ -257,14 +256,14 @@ pub fn NamedDisabled(label: &'static str, modifier: Modifier, alignment: Alignme
     { use ::compose_rust::ui::Box; Box!(modifier = modifier.label(label).role(Role::Button).disabled(true), alignment = alignment, content = content) };
 }
 
-// TODO(compose-rust#831): a container
-// takes its name from `Modifier::label` only (`compose-rust/src/ui/mod.rs` `LabelCache`, a
-// 128-entry LRU cache in v0.0.11), and a `Button` with content insets its children by the design
-// system's 16 dp by default (`HostButton.kt` `labelPadding`; `Button::content_padding` is in
-// v0.0.11, compose-rust#789). So a painted box whose name is built from data (a path, a commit
-// subject, a profile name) keeps a clear `Button` over it for the name, the focus and the click.
-// When a container takes an owned name, move every caller onto [`Clickable`] with that name and
-// delete this.
+// TODO(#673): a container takes an owned name from data now (compose-rust#831):
+// `Modifier::label(&str)` keeps its own `Arc<str>` on the node, and the 128-entry `LabelCache`
+// in `compose-rust/src/ui/mod.rs` only shares copies of recent names, so an evicted name stays
+// on its node. Nothing in the toolkit blocks moving every caller onto a [`Clickable`] named
+// with `Modifier::label` and deleting this. It waits because the move changes what is drawn:
+// the press tint, the hover layer and the focus ring go from this clear `Button` to the painted
+// box at every caller in `vcs.rs`, `agents.rs` and `routines.rs`, which a capture and a
+// keyboard and VoiceOver check on a display must confirm.
 /// The control of a painted box whose accessible name is built from data: a clear toolkit
 /// `Button` exactly over its `Box` parent. It takes the parent's bounds without changing them
 /// (`Modifier::match_parent_size`, compose-rust#431), so the box keeps the size of what it
@@ -1090,10 +1089,14 @@ pub const FIELD_INSET_MULTILINE: (f32, f32) = (12.0, 10.0);
 /// the frame. `bare`: see [`BareField`].
 ///
 /// The frame is Ember's own row and the field inside it is bare (FR-L10.2, #878): the toolkit's
-/// framed field puts its text 8 px in, and a per-side inner padding would also have to keep a
-/// single line centred in the 40 px height, which `TextField` cannot do yet.
-/// TODO(compose-rust#771): move the frame and the 12 px inset onto the field once it takes
-/// per-side content padding; until then a click on the 12 px strip does not focus the field.
+/// framed field puts its text 8 px in.
+/// TODO(#673): the toolkit now has what moving the frame and the 12 px inset onto the field
+/// needs (compose-rust#771): a bare single-line field centres its text in the height it is
+/// given, and `padding_each` on it sits inside the field, so a click there focuses it. The move
+/// rebuilds [`BareField`] (the centring row, the side spacers, the multiline clip) and changes
+/// every field on every screen, so it waits for captures of the framed, bare and multiline
+/// fields at 1440 and 390, light and dark, matching the ones before. Until then a click on the
+/// 12 px strip does not focus the field.
 pub fn EmberField(o: FieldOptions) {
     if o.bare {
         BareField(o);
@@ -1141,13 +1144,13 @@ pub fn EmberField(o: FieldOptions) {
 
 /// A field inside a container that draws the frame (FR-L10.2, #844).
 ///
-/// The toolkit's bare field (compose-rust v0.0.7 `HostTextField.kt`, `Bare`) draws no frame,
-/// has no inner padding and sets its text at the top of whatever height it is given
-/// (`contentAlignment = TopStart`). So the height, weight, width and inset the caller asked for
-/// go on a Row around it, which centres a single line vertically, and the field itself takes
-/// only the row's remaining width (and its height, when multiline). No background, border or
-/// shape is sent: a zero-width border is drawn as a 1 px hairline, the frame that was still
-/// visible inside the composers.
+/// The toolkit's bare field (`HostTextField.kt`, `Bare`) draws no frame and has no inner
+/// padding of its own. Before compose-rust#771 it set its text at the top of whatever height it
+/// was given, so the height, weight, width and inset the caller asked for go on a Row around it,
+/// which centres a single line vertically (see the `TODO(#673)` on [`EmberField`]), and the
+/// field itself takes only the row's remaining width (and its height, when multiline). No
+/// background, border or shape is sent: a zero-width border was drawn as a 1 px hairline, the
+/// frame that was still visible inside the composers.
 fn BareField(o: FieldOptions) {
     let (ix, iy) = o.inset.unwrap_or((0.0, 0.0));
     let (ix, iy) = (ix.max(0.0), iy.max(0.0));
@@ -1295,11 +1298,12 @@ pub fn name_then_pill_width(room: f32, natural: f32, pill: f32, gap: f32) -> Opt
 /// pill and whatever follows the row stay on screen (CSS `flex:0 1 auto;min-width:0` on the
 /// name and `flex:none` on the pill; `.detail .topbar` in the mockup). The pill never shrinks.
 ///
-/// TODO(compose-rust#778, after v0.0.11): the measuring below goes when the pin has a weight that
-/// leaves a child its own size.
+/// TODO(compose-rust, unfiled: a weight that leaves a child its own size): the measuring below
+/// goes when the toolkit has one. compose-rust#778 brought `Modifier::max_width`, `max_height`
+/// and `size_in`, which cap a node at a fixed size but not at what its siblings leave, and
+/// `Modifier::weight` still fills its whole share (no `fill = false`).
 ///
-/// The toolkit has no weight that leaves a child its own size (Compose `weight(fill = false)`)
-/// and no maximum width: a weighted child fills its share, and unweighted ones are measured
+/// So a weighted child fills its share, and unweighted ones are measured
 /// first, in order, each with what the ones before it left (compose-rust
 /// `renderer/desktop/src/renderer/RenderNode.kt` `WeightedStackPolicy`). So the row measures:
 /// the room, the pill and the name's own width (a copy in clear ink, left out of the
@@ -3742,6 +3746,25 @@ mod tests {
         assert!(!inset.iter().any(|n| n.widget == "Spacer"), "no side spacers in an inset panel");
         let production = include_str!("components.rs").split("#[cfg(test)]").next().unwrap();
         assert!(!production.contains(concat!("TODO(compose-rust#", "826")));
+    }
+
+    #[test]
+    fn no_todo_cites_a_toolkit_issue_that_is_closed_in_the_pin() {
+        // #673: each of these compose-rust issues is closed and its feature is in the pin, so a
+        // `TODO(compose-rust#N)` naming one is false. What still waits names what blocks it.
+        let files = [
+            ("components.rs", include_str!("components.rs")),
+            ("channel_owner.rs", include_str!("channel_owner.rs")),
+            ("vcs.rs", include_str!("vcs.rs")),
+            ("ui/home.rs", include_str!("../home.rs")),
+            ("terminal_input.rs", include_str!("../../terminal_input.rs")),
+        ];
+        for (name, src) in files {
+            let production = src.split("#[cfg(test)]").next().unwrap();
+            for issue in ["389", "521", "546", "771", "778", "826", "831"] {
+                assert!(!production.contains(&format!("TODO(compose-rust#{issue}")), "{name} cites closed #{issue}");
+            }
+        }
     }
 
     #[test]

@@ -2778,8 +2778,9 @@ impl Api {
         serde_json::from_slice(&raw.body).map_err(|e| ProjectPatchError::Api(ApiError::Decode(e.to_string())))
     }
 
-    /// `DELETE /projects/{name}` (FR-L26, #384): deletes an empty project. A refusal keeps
-    /// status and `code` (`project_not_empty` 409, `protected_project` 403, `not_found` 404).
+    /// `DELETE /projects/{name}` (FR-L26, D52 Q2/Q4, #327, #384): deletes an archived project and
+    /// its records. A refusal keeps status and `code` (`project_not_archived` 409,
+    /// `sessions_running` 409, `protected_project` 403, `not_found` 404).
     pub async fn delete_project(&self, name: &str) -> Result<(), ProjectPatchError> {
         let raw = self.send(Method::DELETE, &format!("/projects/{}", seg(name)), None).await?;
         if !raw.status.is_success() {
@@ -2846,9 +2847,28 @@ mod project_patch_tests {
     }
 
     #[test]
+    fn fr_l26_leader_session_serializes_and_decodes() {
+        let set = ProjectPatch { leader_session: Some(Some("sess-1".into())), ..Default::default() };
+        assert!(!set.is_empty());
+        assert_eq!(serde_json::to_value(&set).unwrap(), json!({"leader_session": "sess-1"}));
+        let clear = ProjectPatch { leader_session: Some(None), ..Default::default() };
+        assert!(!clear.is_empty());
+        assert_eq!(serde_json::to_value(&clear).unwrap(), json!({"leader_session": null}));
+        let omit = ProjectPatch::default();
+        assert_eq!(serde_json::to_value(&omit).unwrap(), json!({}));
+
+        let p: Project = serde_json::from_value(json!({"name": "p", "leader_session": "sess-1"})).unwrap();
+        assert_eq!(p.leader_session.as_deref(), Some("sess-1"));
+        let p_none: Project = serde_json::from_value(json!({"name": "p"})).unwrap();
+        assert_eq!(p_none.leader_session, None);
+    }
+
+    #[test]
     fn fr_l26_a_delete_refusal_keeps_status_and_code() {
-        let e = ProjectPatchError::from_answer(409, br#"{"error":"busy","code":"project_not_empty","sessions":2}"#);
-        assert_eq!((e.status(), e.code()), (Some(409), Some("project_not_empty")));
+        let e = ProjectPatchError::from_answer(409, br#"{"error":"archive first","code":"project_not_archived"}"#);
+        assert_eq!((e.status(), e.code()), (Some(409), Some("project_not_archived")));
+        let e = ProjectPatchError::from_answer(409, br#"{"error":"busy","code":"sessions_running","running":2}"#);
+        assert_eq!((e.status(), e.code()), (Some(409), Some("sessions_running")));
     }
 
     #[test]

@@ -240,8 +240,11 @@ Answered by `replies::session_reply` = `exthost::default_reply` plus what `live_
 
 ## 8. Not yet
 
-Reconnect (a lost connection ends the session with `ConnectionLost`; `handshake::reconnect_loop`
-is the building block), several workspace folders, runtime configuration changes
-(`$acceptConfigurationChanged`), `$acceptEditorPropertiesChanged` (selections), save participants
-(`$participateInSave`, format on save), `$tryApplyWorkspaceEdit` (rename, code actions), encodings
-other than UTF-8, first-line language detection, semantic tokens / syntax spans.
+Reconnect that resumes the session (a lost connection ends the session with `ConnectionLost`;
+`handshake::reconnect_loop` is the building block, SPEC FR-E11), several workspace folders,
+`$acceptEditorPropertiesChanged` (selections), save participants (`$participateInSave`, format on
+save), first-line language detection (`firstLine`).
+
+Built since this list was written: runtime configuration changes (`$acceptConfigurationChanged`,
+`session.rs` `apply_settings`), `$tryApplyWorkspaceEdit` (`engine/language.rs`), encodings other
+than UTF-8 (`text_format.rs`), semantic tokens (`semantic.rs`).

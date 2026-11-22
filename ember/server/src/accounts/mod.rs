@@ -15,6 +15,12 @@
 //! | ----- | -------- | ------- | --------------------- |
 //! | Claude Code | `CLAUDE_CONFIG_DIR` | Claude Code docs, "Environment variables" (code.claude.com/docs/en/env-vars): where Claude Code keeps its configuration and data files; the 2.1.288 binary also validates it (it must be an absolute path). | `CLAUDE_CONFIG_DIR=<empty tmp> claude auth status` (2.1.288) printed `"loggedIn": false`, `"authMethod": "none"`, `"configDirectory": <tmp>`, `"projectsDirectory": <tmp>/projects`, and wrote only `<tmp>/.claude.json` and `<tmp>/backups/`; the same command without the variable reports the real login as `"loggedIn": true`. So the macOS keychain login of the default config is not picked up by another config dir. |
 //! | Codex | `CODEX_HOME` | Codex docs (github.com/openai/codex `docs/config.md`, developers.openai.com/codex/config): defaults to `~/.codex`, holds `config.toml`, `auth.json` and `sessions/`; `codex login --help` (0.155.1) refers to `~/.codex/config.toml`; `cli_auth_credentials_store` (file/keyring) is read from that config. | `CODEX_HOME=<empty tmp> codex login status` (0.155.1) printed `Not logged in` (exit 1) and created only `<tmp>/tmp/`; without the variable it prints `Logged in using ChatGPT`. |
+//! | Gemini CLI (ACP `gemini`) | `GEMINI_CLI_HOME`, plus `GEMINI_FORCE_FILE_STORAGE=true` | Read from source at google-gemini/gemini-cli v0.70.0 (also present in v0.40.0), not run: `packages/core/src/utils/paths.ts` `homedir()` returns `GEMINI_CLI_HOME` when set, and `Storage` (`config/storage.ts`) puts `.gemini/` (settings, `oauth_creds.json`) under it; `docs/reference/configuration.md` documents the variable ("keeping CLI state isolated"). A key or token kept through `HybridTokenStorage` (the API key entered in the CLI, `apiKeyCredentialStorage.ts`; OAuth with `GEMINI_FORCE_ENCRYPTED_FILE_STORAGE`) goes to the OS keychain under a fixed service name, which every account would share; `GEMINI_FORCE_FILE_STORAGE=true` (`services/keychainService.ts`) sends it to `FileKeychain`, `<GEMINI_CLI_HOME>/.gemini/gemini-credentials.json` (`services/fileKeychain.ts`). | Not run: the CLI is not installed here. |
+//! | OMP (ACP `omp`) | `PI_CODING_AGENT_DIR`, plus `OMP_PROFILE=default` | Read from source at can1357/oh-my-pi v19.1.0 (same code in v18.5.0), not run: `packages/utils/src/dirs.ts` takes the agent directory from `PI_CODING_AGENT_DIR` (default `~/.omp/agent`), only in the default profile (`OMP_PROFILE` wins over `PI_PROFILE`; `default` means the default profile), and with an overridden agent dir the XDG data paths are not used; `agent.db`, the SQLite store of API keys and OAuth logins (`commands/auth.ts`, `getAgentDbPath`), lives in the agent dir. `docs/environment-variables.md` documents the override. | Not run: OMP is not installed here. |
+//!
+//! Any other ACP agent has no isolation Ember knows of, so [`Accounts::create`] refuses its
+//! accounts with the reason, and an older row of such an agent is never routed: a session must not
+//! run under a label that suggests a separate login while it shares the server's.
 //!
 //! Neither check logged anything in or out. Login is never automated here: the API returns the
 //! exact command (the agent's own login, run with the account's variable) for the user to run on
@@ -66,19 +72,47 @@ use secrets::SecretBox;
 pub const DEFAULT_COOLDOWN_MS: i64 = 60 * 60 * 1000;
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 
-/// The variable that points `agent` at an account's directory.
-pub fn config_env_var(agent: AgentKind) -> &'static str {
+/// How an agent is pointed at an account's directory (see the table in the module docs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Isolation {
+    /// The agent's own variable for its configuration root; set to the account's directory.
+    pub dir_var: &'static str,
+    /// Fixed variables that make the agent keep its credentials under that root.
+    pub fixed: &'static [(&'static str, &'static str)],
+}
+
+impl Isolation {
+    /// The variables for an account whose directory is `dir`: the directory variable first.
+    pub fn env(&self, dir: &str) -> Vec<(String, String)> {
+        let mut env = vec![(self.dir_var.to_string(), dir.to_string())];
+        env.extend(self.fixed.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+        env
+    }
+}
+
+/// How accounts of `agent` are isolated, or why they cannot be (the reason for the user).
+pub fn isolation(agent: AgentKind) -> Result<Isolation, String> {
+    let dir = |dir_var: &'static str| -> Result<Isolation, String> { Ok(Isolation { dir_var, fixed: &[] }) };
     match agent {
-        AgentKind::ClaudeCode => "CLAUDE_CONFIG_DIR",
-        AgentKind::Codex => "CODEX_HOME",
-        // agy has no configuration-directory variable (`~/.gemini` is fixed, agy 1.2.10), so
-        // accounts are refused for it (`Accounts::create`); this name is never read by agy.
-        AgentKind::Antigravity => "EMBER_AGY_ACCOUNT_DIR",
-        AgentKind::Scripted => "EMBER_SCRIPTED_HOME",
-        // ACP agents have no documented config-directory variable Ember can rely on (each agent
-        // differs); the account directory is exported under this name and the agent ignores it.
-        // Account isolation for ACP agents is not implemented (`docs/INTENT.md` Q6).
-        AgentKind::Acp(_) => "EMBER_ACP_HOME",
+        AgentKind::ClaudeCode => dir("CLAUDE_CONFIG_DIR"),
+        AgentKind::Codex => dir("CODEX_HOME"),
+        AgentKind::Scripted => dir("EMBER_SCRIPTED_HOME"),
+        // agy has no configuration-directory variable (`~/.gemini` is fixed, agy 1.2.10).
+        AgentKind::Antigravity => Err("Antigravity accounts are not supported yet: agy keeps its \
+             login in ~/.gemini and has no variable to point it at another directory"
+            .to_string()),
+        AgentKind::Acp(name) => match name.as_str() {
+            "gemini" => Ok(Isolation {
+                dir_var: "GEMINI_CLI_HOME",
+                fixed: &[("GEMINI_FORCE_FILE_STORAGE", "true")],
+            }),
+            "omp" => Ok(Isolation { dir_var: "PI_CODING_AGENT_DIR", fixed: &[("OMP_PROFILE", "default")] }),
+            other => Err(format!(
+                "accounts are not supported for the ACP agent {other}: Ember knows no variable or \
+                 flag that makes it keep its credentials in another directory, so an account would \
+                 silently share the server's login (supported ACP agents: gemini, omp)"
+            )),
+        },
     }
 }
 
@@ -206,7 +240,15 @@ impl Accounts {
 
     /// Apply accounts to `sessions`: the env of each agent start, the router, limit detection.
     pub fn install(self: &Arc<Self>, sessions: &Sessions) {
-        for var in ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "CODEX_API_KEY"] {
+        for var in [
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "CODEX_API_KEY",
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "OMP_AUTH_BROKER_URL",
+        ] {
             if std::env::var_os(var).is_some() {
                 tracing::warn!(
                     "{var} is set in the server's environment; it reaches every agent process and \
@@ -215,10 +257,7 @@ impl Accounts {
             }
         }
         let this = self.clone();
-        sessions.add_start_hook(Arc::new(move |rec| match &rec.account_id {
-            Some(id) => vec![(config_env_var(rec.agent).to_string(), this.dir_of(id))],
-            None => Vec::new(),
-        }));
+        sessions.add_start_hook(Arc::new(move |rec| this.start_env(rec.agent, rec.account_id.as_deref())));
         let this = self.clone();
         sessions.add_event_hook(Arc::new(move |ev| {
             if let Err(e) = this.on_event(ev) {
@@ -231,6 +270,16 @@ impl Accounts {
         }));
     }
 
+    /// The environment that isolates a session of `agent` on `account_id` (FR-U1). Empty for the
+    /// server's own login (`None`), and for an agent without isolation: [`Accounts::route`] never
+    /// picks such an account, so this only covers a session stored before that rule.
+    pub fn start_env(&self, agent: AgentKind, account_id: Option<&str>) -> Vec<(String, String)> {
+        match (account_id, isolation(agent)) {
+            (Some(id), Ok(iso)) => iso.env(&self.dir_of(id)),
+            _ => Vec::new(),
+        }
+    }
+
     /// The account's directory. Derived from the id when the row is gone, so a session never
     /// silently runs under another login (FR-U2): the agent then reports not-logged-in.
     fn dir_of(&self, id: &str) -> String {
@@ -241,11 +290,9 @@ impl Accounts {
     }
 
     pub fn create(&self, agent: AgentKind, label: &str) -> anyhow::Result<Account> {
-        anyhow::ensure!(
-            agent != AgentKind::Antigravity,
-            "Antigravity accounts are not supported yet: agy keeps its login in ~/.gemini and has \
-             no variable to point it at another directory"
-        );
+        if let Err(reason) = isolation(agent) {
+            anyhow::bail!(reason);
+        }
         let id = uuid::Uuid::new_v4().to_string();
         let dir = self.root.join(&id);
         make_private_dir(&dir)?;
@@ -357,17 +404,20 @@ impl Accounts {
 
     /// The agent's own login/status/logout commands for this account.
     pub fn login_instructions(&self, acc: &Account) -> LoginInstructions {
-        let var = config_env_var(acc.agent);
-        let bin = self
-            .bins
-            .get(&acc.agent)
-            .map(|b| b.to_string_lossy().into_owned())
-            .unwrap_or_else(|| acc.agent.as_str().to_string());
-        let prefix = format!(
-            "{var}={} {}",
-            shell_quote(&acc.config_dir),
-            shell_quote(&bin)
-        );
+        let env = isolation(acc.agent).map(|iso| iso.env(&acc.config_dir)).unwrap_or_default();
+        let bin = match (self.bins.get(&acc.agent), acc.agent) {
+            (Some(b), _) => b.clone(),
+            (None, AgentKind::Acp(name)) if name.as_str() == "gemini" => {
+                bin_from_env("EMBER_GEMINI_BIN", "gemini")
+            }
+            (None, AgentKind::Acp(name)) if name.as_str() == "omp" => bin_from_env("EMBER_OMP_BIN", "omp"),
+            (None, agent) => agent.as_str().into(),
+        };
+        let mut prefix: String = env
+            .iter()
+            .map(|(k, v)| format!("{k}={} ", shell_quote(v)))
+            .collect();
+        prefix.push_str(&shell_quote(&bin.to_string_lossy()));
         let (login, status, logout, note) = match acc.agent {
             AgentKind::ClaudeCode => (
                 format!("{prefix} auth login"),
@@ -390,16 +440,42 @@ impl Accounts {
                 "Antigravity accounts are not supported yet.",
             ),
             AgentKind::Scripted => (String::new(), String::new(), String::new(), "test agent"),
+            // Neither CLI has a non-interactive login or status command: the login is the CLI's
+            // own interactive one, started with the account's variables.
+            AgentKind::Acp(name) if name.as_str() == "gemini" => (
+                prefix,
+                String::new(),
+                String::new(),
+                "Run on the server as the user ember runs as, then sign in with /auth (or enter an \
+                 API key there). GEMINI_API_KEY or GOOGLE_API_KEY in the server's environment \
+                 overrides the account's login.",
+            ),
+            AgentKind::Acp(name) if name.as_str() == "omp" => (
+                prefix,
+                String::new(),
+                String::new(),
+                "Run on the server as the user ember runs as, then sign in with /login. Provider \
+                 keys in the server's environment (ANTHROPIC_API_KEY, OPENAI_API_KEY, ...) \
+                 override the account's login.",
+            ),
             AgentKind::Acp(_) => (
                 String::new(),
                 String::new(),
                 String::new(),
-                "ACP agent: log in with the agent's own CLI on the server. Ember does not isolate \
-                 accounts for ACP agents yet.",
+                "ACP agent: Ember knows no way to keep this agent's credentials apart, so it has no \
+                 accounts. Log in with the agent's own CLI on the server.",
             ),
         };
+        let env = match isolation(acc.agent) {
+            Ok(iso) => {
+                let mut env = HashMap::from([(iso.dir_var, acc.config_dir.clone())]);
+                env.extend(iso.fixed.iter().map(|(k, v)| (*k, v.to_string())));
+                env
+            }
+            Err(_) => HashMap::new(),
+        };
         LoginInstructions {
-            env: HashMap::from([(var, acc.config_dir.clone())]),
+            env,
             login,
             status,
             logout,
@@ -429,7 +505,7 @@ impl Accounts {
                 };
                 let out = tokio::process::Command::new(&bin)
                     .args(args)
-                    .env(config_env_var(agent), &acc.config_dir)
+                    .envs(isolation(agent).map(|iso| iso.env(&acc.config_dir)).unwrap_or_default())
                     .stdin(std::process::Stdio::null())
                     .kill_on_drop(true)
                     .output();
@@ -511,6 +587,11 @@ impl Accounts {
         requested: Option<&str>,
     ) -> Result<Option<AccountChoice>, String> {
         let now = now_ms();
+        if let Err(reason) = isolation(agent) {
+            // Accounts of such an agent can only be rows from before the rule (FR-U1).
+            let has_accounts = requested.is_some() || !self.list(Some(agent)).map_err(|e| format!("{e:#}"))?.is_empty();
+            return if has_accounts { Err(reason) } else { Ok(None) };
+        }
         if let Some(id) = requested {
             let acc = self
                 .get(id)
@@ -992,5 +1073,145 @@ mod tests {
         std::fs::write(Path::new(&x.config_dir).join("marker"), "").unwrap();
         assert_eq!(a.check_login(&x.id).await.unwrap().status, "logged_in");
         assert_eq!(a.check_login(&y.id).await.unwrap().status, "logged_out");
+    }
+
+    // ---- FR-U1: ACP accounts ------------------------------------------------------------------
+
+    /// An ACP agent kind as stored, without registering it as a configured agent (the registry is
+    /// process-wide and other tests check what is offered).
+    fn acp(name: &str) -> AgentKind {
+        AgentKind::from_stored(name).unwrap()
+    }
+
+    fn lookup<'a>(env: &'a [(String, String)], name: &str) -> Option<&'a str> {
+        env.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn fr_u1_an_omp_account_process_gets_pi_coding_agent_dir_at_the_account_dir() {
+        let (_d, a) = setup();
+        let x = a.create(acp("omp"), "work").unwrap();
+        let env = a.start_env(acp("omp"), Some(&x.id));
+        assert_eq!(lookup(&env, "PI_CODING_AGENT_DIR"), Some(x.config_dir.as_str()), "{env:?}");
+        // omp honours PI_CODING_AGENT_DIR only in its default profile, so a profile set in the
+        // server's environment is overridden.
+        assert_eq!(lookup(&env, "OMP_PROFILE"), Some("default"), "{env:?}");
+        assert_eq!(lookup(&env, "EMBER_ACP_HOME"), None);
+    }
+
+    #[test]
+    fn fr_u1_a_gemini_account_process_gets_gemini_cli_home_at_the_account_dir() {
+        let (_d, a) = setup();
+        let x = a.create(acp("gemini"), "work").unwrap();
+        let env = a.start_env(acp("gemini"), Some(&x.id));
+        assert_eq!(lookup(&env, "GEMINI_CLI_HOME"), Some(x.config_dir.as_str()), "{env:?}");
+        assert_eq!(lookup(&env, "GEMINI_FORCE_FILE_STORAGE"), Some("true"), "{env:?}");
+        assert_eq!(lookup(&env, "EMBER_ACP_HOME"), None);
+    }
+
+    #[test]
+    fn fr_u1_two_acp_accounts_get_different_dirs() {
+        let (_d, a) = setup();
+        for (agent, var) in [("omp", "PI_CODING_AGENT_DIR"), ("gemini", "GEMINI_CLI_HOME")] {
+            let x = a.create(acp(agent), "x").unwrap();
+            let y = a.create(acp(agent), "y").unwrap();
+            let ex = a.start_env(acp(agent), Some(&x.id));
+            let ey = a.start_env(acp(agent), Some(&y.id));
+            assert_ne!(lookup(&ex, var), lookup(&ey, var), "{agent}");
+            assert_eq!(lookup(&ex, var), Some(x.config_dir.as_str()));
+            assert_eq!(lookup(&ey, var), Some(y.config_dir.as_str()));
+        }
+    }
+
+    #[test]
+    fn fr_u1_an_acp_agent_without_isolation_is_refused_with_the_reason() {
+        let (d, a) = setup();
+        let err = a.create(acp("acp-noiso"), "x").unwrap_err().to_string();
+        assert!(err.contains("acp-noiso"), "{err}");
+        assert!(err.contains("credentials"), "{err}");
+        assert!(isolation(acp("acp-noiso")).is_err());
+        assert!(a.list(None).unwrap().is_empty());
+        // No directory was made for the refused account.
+        let made = std::fs::read_dir(d.path().join("accounts")).unwrap().count();
+        assert_eq!(made, 0);
+        // Antigravity stays refused, for its own reason.
+        let err = a.create(AgentKind::Antigravity, "x").unwrap_err().to_string();
+        assert!(err.contains("Antigravity"), "{err}");
+    }
+
+    #[test]
+    fn fr_u1_an_old_account_of_an_acp_agent_without_isolation_is_never_routed() {
+        let (_d, a) = setup();
+        // A row made before accounts were refused for such agents.
+        a.store()
+            .conn()
+            .execute(
+                "INSERT INTO accounts (id, agent, label, config_dir, created_at) VALUES ('old', 'acp-noiso', 'old', '/x/old', 1)",
+                [],
+            )
+            .unwrap();
+        let err = a.route(acp("acp-noiso"), None).unwrap_err();
+        assert!(err.contains("credentials"), "{err}");
+        let err = a.route(acp("acp-noiso"), Some("old")).unwrap_err();
+        assert!(err.contains("credentials"), "{err}");
+        assert!(a.start_env(acp("acp-noiso"), Some("old")).is_empty());
+    }
+
+    #[test]
+    fn fr_u1_the_default_login_and_the_existing_agents_are_unchanged() {
+        let (_d, a) = setup();
+        // No account (the server's own login): no isolation variable for any agent.
+        for agent in [acp("omp"), acp("gemini"), AgentKind::ClaudeCode, AgentKind::Codex] {
+            assert!(a.start_env(agent, None).is_empty(), "{}", agent.as_str());
+        }
+        // Claude Code and Codex accounts get exactly the one variable they had.
+        let c = a.create(AgentKind::ClaudeCode, "c").unwrap();
+        let x = a.create(AgentKind::Codex, "x").unwrap();
+        assert_eq!(
+            a.start_env(AgentKind::ClaudeCode, Some(&c.id)),
+            vec![("CLAUDE_CONFIG_DIR".to_string(), c.config_dir.clone())]
+        );
+        assert_eq!(
+            a.start_env(AgentKind::Codex, Some(&x.id)),
+            vec![("CODEX_HOME".to_string(), x.config_dir.clone())]
+        );
+        // The default account of an ACP agent is isolated like any other of its accounts.
+        let g = a.create(acp("gemini"), "g").unwrap();
+        a.set_default(&g.id).unwrap();
+        let env = a.start_env(acp("gemini"), Some(&g.id));
+        assert_eq!(lookup(&env, "GEMINI_CLI_HOME"), Some(g.config_dir.as_str()));
+    }
+
+    #[test]
+    fn fr_u1_acp_login_instructions_carry_the_isolation_variables() {
+        let (_d, a) = setup();
+        let g = a.create(acp("gemini"), "g").unwrap();
+        let how = a.login_instructions(&g);
+        assert_eq!(how.env["GEMINI_CLI_HOME"], g.config_dir);
+        assert_eq!(how.env["GEMINI_FORCE_FILE_STORAGE"], "true");
+        assert!(how.login.starts_with("GEMINI_CLI_HOME="), "{}", how.login);
+        assert!(how.login.contains("GEMINI_FORCE_FILE_STORAGE=true"), "{}", how.login);
+        let o = a.create(acp("omp"), "o").unwrap();
+        let how = a.login_instructions(&o);
+        assert_eq!(how.env["PI_CODING_AGENT_DIR"], o.config_dir);
+        assert_eq!(how.env["OMP_PROFILE"], "default");
+        assert!(how.login.starts_with("PI_CODING_AGENT_DIR="), "{}", how.login);
+        assert!(how.login.contains("OMP_PROFILE=default"), "{}", how.login);
+    }
+
+    #[test]
+    fn fr_u1_every_account_dir_variable_is_carved_out_of_the_agent_sandbox() {
+        let (d, a) = setup();
+        let denied = vec![d.path().to_path_buf()];
+        for agent in [AgentKind::ClaudeCode, AgentKind::Codex, acp("omp"), acp("gemini")] {
+            let x = a.create(agent, "x").unwrap();
+            let env = a.start_env(agent, Some(&x.id));
+            assert_eq!(
+                crate::sandbox::allowed_for(&env, &denied),
+                vec![PathBuf::from(&x.config_dir)],
+                "{}",
+                agent.as_str()
+            );
+        }
     }
 }

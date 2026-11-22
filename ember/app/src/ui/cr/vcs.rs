@@ -39,7 +39,7 @@ use crate::ui::Route;
 
 use super::components::{
     AppButton, ButtonKind, Choice, ChoiceButton, ChoiceRow, EmberCard, EmberField, EmberSheetSized, FieldOptions, InsetPanel, Label, PopExtra, PopKind, PopMenu, PopRow, PopoverMenuWith,
-    Clickable, DataNamedOverlay, NamedClickable, Pill, PillTone, Txt,
+    Clickable, NamedClickable, NamedClickableOn, NamedDisabled, Pill, PillTone, Txt,
 };
 use super::notice;
 use super::shell::NavIcon;
@@ -369,7 +369,12 @@ pub const CONFLICT_GLYPH: f32 = 14.0;
 fn ConflictFileRow(path: &str, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let shown = path.to_string();
-    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().height(CONFLICT_ROW_H).corner_radius(CORNER_SM), alignment = Alignment::CenterStart, content = move || {
+    NamedClickable(
+        path,
+        Modifier::new().fill_max_width().height(CONFLICT_ROW_H).corner_radius(CORNER_SM),
+        Alignment::CenterStart,
+        on_click,
+        move || {
             { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = CONFLICT_ROW_GAP, modifier = Modifier::new().fill_max_width().fill_max_height(), {
                 // `.vcs-cflist .vcs-file{padding-left:10px}`; the row gap adds 6.
                 { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(10.0 - CONFLICT_ROW_GAP)) };
@@ -378,8 +383,8 @@ fn ConflictFileRow(path: &str, on_click: impl FnMut() + 'static) {
                 }) };
                 Txt(&shown, TypeRole::Mono, Some(paint(p.text)), Some(1), Some(TextOverflow::Ellipsis), Some(1.0), None);
             }) };
-            DataNamedOverlay(&shown, true, None, on_click);
-        }) };
+        },
+    );
 }
 
 /// FR-L19 (audit P2, #517): the text of the screen's own inputs, buttons and chips is the small
@@ -531,7 +536,14 @@ pub const VCS_SEL_H: f32 = 36.0;
 /// One picker of the repository bar: its icon, the value and a chevron on one line.
 fn BarSelector(icon: &'static str, name: &str, expanded: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
-    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().height(VCS_SEL_H), content = move || {
+    // The painted box itself is the control: named by the value it shows (a repository or a
+    // branch, compose-rust#831) and saying whether its menu is open (FR-L10.4).
+    NamedClickable(
+        name,
+        Modifier::new().fill_max_width().height(VCS_SEL_H).expanded(expanded),
+        Alignment::TopStart,
+        on_click,
+        move || {
             { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_size(), {
                     NavIcon(icon, p.text.to_argb(), 18.0);
                     { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(6.0)) };
@@ -539,10 +551,8 @@ fn BarSelector(icon: &'static str, name: &str, expanded: bool, on_click: impl Fn
                     { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(6.0)) };
                     NavIcon(ICON_CHEVRON_DOWN_SVG, p.muted.to_argb(), 16.0);
                 }) };
-            // The clear button over the row is the control: named by the value it shows (a
-            // repository or a branch, so data), and it says whether its menu is open (FR-L10.4).
-            DataNamedOverlay(name, true, Some(expanded), on_click);
-        }) };
+        },
+    );
 }
 
 /// Selector row for repository in the bar.
@@ -628,10 +638,16 @@ fn RemoteMainButton(
     let pill_fg = if enabled { p.ink } else { p.surface_2 };
     let label = action.label();
 
-    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
-                .size(100.0, 32.0)
-                .background(paint(btn_bg))
-                .shape_role(ShapeRole::Full), alignment = Alignment::Center, content = move || {
+    NamedClickableOn(
+        &label,
+        Modifier::new()
+            .size(100.0, 32.0)
+            .background(paint(btn_bg))
+            .shape_role(ShapeRole::Full),
+        Some(btn_bg),
+        Alignment::Center,
+        on_click,
+        move || {
             { use ::compose_rust::ui::Row; Row!(alignment = Alignment::Center, spacing = 6.0, modifier = Modifier::new().fill_max_size(), {
                     { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[0])) };
                     NavIcon(action_icon, btn_fg.to_argb(), 16.0);
@@ -652,8 +668,8 @@ fn RemoteMainButton(
                     }
                     { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[0])) };
                 }) };
-            DataNamedOverlay(&label, true, None, on_click);
-        }) };
+        },
+    );
 }
 
 /// Ahead/behind counters with arrows and relative fetch age.
@@ -1605,10 +1621,22 @@ fn FilesTree(
                     TreeRow::Dir { label, path, depth, open } => {
                         let f_state = folded.clone();
                         let pth = path.clone();
-                        { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
-                                    .fill_max_width()
-                                    .height(34.0)
-                                    .corner_radius(CORNER_XS), content = move || {
+                        let dir_label = label.clone();
+                        NamedClickable(
+                            &dir_label,
+                            Modifier::new()
+                                .fill_max_width()
+                                .height(34.0)
+                                .corner_radius(CORNER_XS),
+                            Alignment::TopStart,
+                            move || {
+                                let mut f = f_state.get();
+                                if !f.remove(&pth) {
+                                    f.insert(pth.clone());
+                                }
+                                f_state.set(f);
+                            },
+                            move || {
                                 { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_size(), {
                                         if depth > 0 {
                                             { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(depth as f32 * 14.0)) };
@@ -1627,14 +1655,8 @@ fn FilesTree(
                                             Some(1),
                                         );
                                     }) };
-                                DataNamedOverlay(&label, true, None, move || {
-                                    let mut f = f_state.get();
-                                    if !f.remove(&pth) {
-                                        f.insert(pth.clone());
-                                    }
-                                    f_state.set(f);
-                                });
-                            }) };
+                            },
+                        );
                     }
                     TreeRow::File { index, name, depth } => {
                         let is_selected = index == sel;
@@ -1669,7 +1691,16 @@ fn FilesTree(
                                 });
                                 { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(4.0)) };
                                 let file_name = name.clone();
-                                { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().weight(1.0).height(34.0), content = move || {
+                                let file_label = file_name.clone();
+                                NamedClickable(
+                                    &file_label,
+                                    Modifier::new().weight(1.0).height(34.0),
+                                    Alignment::TopStart,
+                                    move || {
+                                        sel_state.set(index);
+                                        on_tab_file(tab_after_select(PaneTab::Files));
+                                    },
+                                    move || {
                                         { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_size(), {
                                                 Label(
                                                     &file_name,
@@ -1693,11 +1724,8 @@ fn FilesTree(
                                                     }) };
                                                 { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[1])) };
                                             }) };
-                                        DataNamedOverlay(&file_name, true, None, move || {
-                                            sel_state.set(index);
-                                            on_tab_file(tab_after_select(PaneTab::Files));
-                                        });
-                                    }) };
+                                    },
+                                );
                             }) };
                     }
                 }
@@ -2013,17 +2041,10 @@ fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<P
 
     match layout {
         PaneLayout::Two => {
-            // The panes scroll on their own inside a bounded row. A row in an unbounded
-            // scroll centres its shorter children vertically (TODO(#673): the toolkit has
-            // `Row::equal_height(true)` with `fill_max_height` children, which sizes the row to
-            // its tallest child (compose-rust#389), and a scrolling child of fixed height now
-            // measures at that height (compose-rust#766). It is not used here because it is a
-            // layout choice the toolkit cannot settle. The row is sized by the intrinsic
-            // heights of wrapped code in the diff pane, and one page scroll would take the
-            // files card out of view while a long diff is read, which the mockup's sticky
-            // `.vcs-files` avoids. A capture of this layout with `equal_height` in a page scroll
-            // must show the files card as tall as the diff and still in view before this
-            // changes).
+            // The panes scroll independently inside a bounded row. Keeping each pane in its own
+            // `ScrollColumn` (rather than one outer page scroll with `equal_height`) keeps the
+            // files card in view while a long diff is read, matching the mockup's sticky
+            // `.vcs-files`.
             let d_files = diffs.clone();
             let st_files = staging.clone();
             let fold_files = folded.clone();
@@ -2682,7 +2703,8 @@ fn HistoryRow(e: &HistoryEntry, layout: PaneLayout, selected: bool, on_select: i
     if selected {
         frame = frame.border(1.0, paint(p.line));
     }
-    { use ::compose_rust::ui::Box; Box!(modifier = frame, content = move || {
+    let row_label = format!("커밋 {} {}", e.short, e.subject);
+    NamedClickableOn(&row_label, frame, Some(fill), Alignment::TopStart, on_select, move || {
         { use ::compose_rust::ui::Row; Row!(alignment = Alignment::TopStart, spacing = SP[2], modifier = Modifier::new().fill_max_width().padding(SP[2]), {
             // TODO(compose-rust#308): lane graph indicator dot. Full SVG/Canvas parent-edge curves wait on compose-rust#308.
             let dot_color = if e.is_merge { p.sky.strong } else { p.blue.strong };
@@ -2713,8 +2735,7 @@ fn HistoryRow(e: &HistoryEntry, layout: PaneLayout, selected: bool, on_select: i
                 }
             }) };
         }) };
-        DataNamedOverlay(&format!("커밋 {} {}", e.short, e.subject), true, None, on_select);
-    }) };
+    });
 }
 
 /// Commits for the review captures (`EMBER_CR_ROUTE=vcs`): the only path that reaches `HistoryPane`
@@ -3371,7 +3392,8 @@ fn PullRequestRow(e: &PrEntry, selected: bool, on_select: impl FnMut() + 'static
     if selected {
         frame = frame.border(2.0, paint(p.ink));
     }
-    { use ::compose_rust::ui::Box; Box!(modifier = frame, content = move || {
+    let row_label = format!("풀 리퀘스트 #{} {}", e.number, e.title);
+    NamedClickableOn(&row_label, frame, Some(fill), Alignment::TopStart, on_select, move || {
         { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width().padding(SP[2]), {
             Txt(&format!("#{} {}", e.number, e.title), TypeRole::BodyStrong, Some(paint(p.text)), Some(2), Some(TextOverflow::Ellipsis), None, None);
             Txt(&pr_meta(e), TypeRole::Caption, Some(paint(p.text_2)), Some(2), Some(TextOverflow::Ellipsis), None, None);
@@ -3386,8 +3408,7 @@ fn PullRequestRow(e: &PrEntry, selected: bool, on_select: impl FnMut() + 'static
             let gate = if e.can_merge { paint(p.green.strong) } else { paint(p.text_2) };
             Label(&e.gate_text, Fs::Sm, Weight::Regular, Some(gate), None);
         }) };
-        DataNamedOverlay(&format!("풀 리퀘스트 #{} {}", e.number, e.title), true, None, on_select);
-    }) };
+    });
 }
 
 /// The sample detail of a sample pull request (captures and a screen without a server).
@@ -4619,10 +4640,15 @@ fn TeamRowView(
                                 };
                                 let pr_num = *number;
                                 let on_pr_click = on_pr.clone();
-                                { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().shape_role(ShapeRole::Full), content = move || {
-                                    Pill(label, tone, true);
-                                    DataNamedOverlay(label, true, None, move || on_pr_click(pr_num));
-                                }) };
+                                NamedClickable(
+                                    label,
+                                    Modifier::new().shape_role(ShapeRole::Full),
+                                    Alignment::TopStart,
+                                    move || on_pr_click(pr_num),
+                                    move || {
+                                        Pill(label, tone, true);
+                                    },
+                                );
                             }
                         }
 
@@ -5069,21 +5095,26 @@ fn StashRow(e: &StashEntry, layout: PaneLayout, busy: bool, dirty: bool, armed: 
     }
 }
 
-// The pill is painted and its accessible name is built from data (the stash's index and message),
-// so the clear button of `components::DataNamedOverlay` carries it (the gap is filed there).
 /// A small pill whose visible text is `text` and whose accessible name is `access`. It is as wide
-/// as its label and [`VCS_PILL_PAD_X`] at each side.
+/// as its label and [`VCS_PILL_PAD_X`] at each side, named directly on the painted box
+/// (`NamedClickableOn` / `NamedDisabled`, compose-rust#831).
 fn StashPill(text: &str, access: &str, kind: ButtonKind, enabled: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let s = super::components::button_style_for(kind, true, enabled, p);
-    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
-                .height(s.height)
-                .background(paint(s.fill))
-                .border(1.0, paint(s.border))
-                .shape_role(ShapeRole::Full), alignment = Alignment::Center, content = move || {
+    let m = Modifier::new()
+        .height(s.height)
+        .background(paint(s.fill))
+        .border(1.0, paint(s.border))
+        .shape_role(ShapeRole::Full);
+    if enabled {
+        NamedClickableOn(access, m, Some(s.fill), Alignment::Center, on_click, move || {
             PillLabel(text, s.fs, s.text);
-            DataNamedOverlay(access, enabled, None, on_click);
-        }) };
+        });
+    } else {
+        NamedDisabled(access, m, Alignment::Center, move || {
+            PillLabel(text, s.fs, s.text);
+        });
+    }
 }
 
 /// The screen wired as 버전 관리.
@@ -5907,10 +5938,10 @@ mod tests {
         assert_eq!(items.len(), 2);
         let sel = format!("{:?}", compose_rust::schema::Modifier::Background(paint(ember_theme().palette.sel)));
         assert_eq!(items.iter().filter(|n| n.1.contains(&sel)).count(), 1, "the chosen row is on sel");
-        // The control is a button named by the shown project that says the menu is open.
+        // The control is a clickable box named by the shown project that says the menu is open.
         let control = nodes
             .iter()
-            .find(|n| n.0 == "Button" && n.2.iter().any(|p| p.contains("core")) && n.1.iter().any(|m| m == "MatchParentSize"))
+            .find(|n| n.0 == "Box" && n.2.iter().any(|p| p == "AccessibleName=String(\"core\")") && n.2.iter().any(|p| p.starts_with("OnClick=")))
             .expect("the control");
         let state: u32 = control
             .1
@@ -6641,7 +6672,11 @@ mod tests {
             fn scan(&mut self, batch: &[Mutation<'_>]) {
                 for m in batch {
                     match m {
-                        Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                        Mutation::SetProp {
+                            node_id,
+                            property: PropertyKind::Text | PropertyKind::AccessibleName,
+                            value: PropertyValue::String(s),
+                        } => {
                             self.texts.insert(*node_id, s.to_string());
                         }
                         Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
@@ -7116,7 +7151,7 @@ mod tests {
         let mut handlers = std::collections::HashMap::new();
         for m in &batch {
             match m {
-                Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                Mutation::SetProp { node_id, property: PropertyKind::Text | PropertyKind::AccessibleName, value: PropertyValue::String(s) } => {
                     texts.insert(*node_id, s.to_string());
                 }
                 Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
@@ -8301,9 +8336,9 @@ mod tests {
         let _guard = crate::services::test_guard();
         assert_eq!(VCS_PILL_PAD_X, 14.0);
         let nodes = nodes_of(|| StashPill("적용", "스태시 1 적용", ButtonKind::Default, true, || {}));
-        let over = nodes.iter().find(|n| n.widget == "Button").expect("the pill's button");
-        assert!(over.props.iter().any(|x| x == "AccessibleName=String(\"스태시 1 적용\")"), "{:?}", over.props);
-        let pill = nodes.iter().find(|n| Some(n.id) == over.parent).expect("the pill");
+        assert!(!nodes.iter().any(|n| n.widget == "Button"), "no clear button overlay on pill");
+        let pill = nodes.iter().find(|n| n.widget == "Box" && n.props.iter().any(|x| x == "AccessibleName=String(\"스태시 1 적용\")")).expect("the pill");
+        assert!(pill.props.iter().any(|x| x.starts_with("OnClick=")), "{:?}", pill.props);
         assert!(pill.mods.iter().any(|m| *m == format!("Height({H_CTL:?})")), "{:?}", pill.mods);
         assert!(!pill.mods.iter().any(|m| m.starts_with("Width(") || m.starts_with("Size(") || m.starts_with("FillMax")), "{:?}", pill.mods);
         let label = with_text(&nodes, "적용");
@@ -8377,23 +8412,18 @@ mod tests {
         assert!(hit.mods.iter().any(|m| m == "Width(44.0)") && hit.mods.iter().any(|m| m.starts_with("ShapeRole(Full")), "{:?}", hit.mods);
         assert!(hit.mods.iter().any(|m| m == "MinTouchTarget { size: 44.0 }"), "{:?}", hit.mods);
 
-        // A row named by a path: one clear button with the path as text and name, exactly over
-        // its box, which keeps its own size.
+        // A row named by a path: the painted box itself is the control (compose-rust#831), with
+        // no clear `Button` overlay.
         let nodes = nodes_of(|| ConflictFileRow("docs/SPEC.md", || {}));
-        let buttons: Vec<&N> = nodes.iter().filter(|n| n.widget == "Button").collect();
-        assert_eq!(buttons.len(), 1);
-        let over = buttons[0];
-        assert!(over.props.iter().any(|x| x == "Text=String(\"docs/SPEC.md\")"), "{:?}", over.props);
-        assert!(over.props.iter().any(|x| x == "AccessibleName=String(\"docs/SPEC.md\")"), "{:?}", over.props);
-        assert!(over.props.iter().any(|x| x.starts_with("OnClick=")), "{:?}", over.props);
-        assert!(over.mods.iter().any(|m| m == "MatchParentSize"), "{:?}", over.mods);
-        assert!(!over.mods.iter().any(|m| m.starts_with("FillMax")), "it does not widen its box: {:?}", over.mods);
-        let row = nodes.iter().find(|n| Some(n.id) == over.parent).expect("its box");
+        assert!(!nodes.iter().any(|n| n.widget == "Button"), "no clear button overlay on row");
+        let row = &nodes[named(&nodes, "docs/SPEC.md")];
         assert!(row.widget == "Box" && row.mods.iter().any(|m| *m == format!("Height({CONFLICT_ROW_H:?})")), "{:?}", row.mods);
-        assert!(!row.props.iter().any(|x| x.starts_with("OnClick=")), "one tap target, not two");
+        assert!(row.props.iter().any(|x| x.starts_with("OnClick=")), "{:?}", row.props);
+        assert!(button_role(row) && press(row) == 1, "{:?}", row.mods);
 
         let production = include_str!("vcs.rs").split("#[cfg(test)]").next().unwrap();
         assert!(!production.contains(&["Focus", "Overlay("].concat()), "the per-screen overlay is gone");
+        assert!(!production.contains(&["DataNamed", "Overlay"].concat()), "DataNamedOverlay is gone");
         assert!(!production.contains(&["cu::", "Button("].concat()), "no direct toolkit button is left");
         compose_rust::window::reset_window_size();
     }
@@ -8409,6 +8439,12 @@ mod tests {
             for m in batch {
                 match m {
                     Mutation::Create { node_id, widget: WidgetKind::Button } => {
+                        button_nodes.insert(*node_id);
+                    }
+                    Mutation::SetModifier { node_id, modifier, .. }
+                        if matches!(modifier, compose_rust::Modifier::Semantics { .. })
+                            && format!("{modifier:?}").contains("role: Button,") =>
+                    {
                         button_nodes.insert(*node_id);
                     }
                     Mutation::SetProp { node_id, property: PropertyKind::Text | PropertyKind::AccessibleName, value: PropertyValue::String(s) } => {
@@ -8487,6 +8523,12 @@ mod tests {
             for m in batch {
                 match m {
                     Mutation::Create { node_id, widget: WidgetKind::Button } => {
+                        button_nodes.insert(*node_id);
+                    }
+                    Mutation::SetModifier { node_id, modifier, .. }
+                        if matches!(modifier, compose_rust::Modifier::Semantics { .. })
+                            && format!("{modifier:?}").contains("role: Button,") =>
+                    {
                         button_nodes.insert(*node_id);
                     }
                     Mutation::SetProp { node_id, property: PropertyKind::Text | PropertyKind::AccessibleName, value: PropertyValue::String(s) } => {
@@ -8571,6 +8613,12 @@ mod tests {
                 for m in batch {
                     match m {
                         Mutation::Create { node_id, widget: WidgetKind::Button } => {
+                            tab_nodes.insert(*node_id);
+                        }
+                        Mutation::SetModifier { node_id, modifier, .. }
+                            if matches!(modifier, compose_rust::Modifier::Semantics { .. })
+                                && format!("{modifier:?}").contains("role: Button,") =>
+                        {
                             tab_nodes.insert(*node_id);
                         }
                         // A painted control that takes its own name is a clickable box (compose-rust#429, #673).
@@ -8874,7 +8922,11 @@ mod tests {
         let mut clickables: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
         for m in &batch_matched {
             match m {
-                Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                Mutation::SetProp {
+                    node_id,
+                    property: PropertyKind::Text | PropertyKind::AccessibleName,
+                    value: PropertyValue::String(s),
+                } => {
                     texts_matched.insert(*node_id, s.to_string());
                 }
                 Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
@@ -8966,7 +9018,11 @@ mod tests {
 
         for m in &batch {
             match m {
-                Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                Mutation::SetProp {
+                    node_id,
+                    property: PropertyKind::Text | PropertyKind::AccessibleName,
+                    value: PropertyValue::String(s),
+                } => {
                     button_texts.insert(*node_id, s.to_string());
                 }
                 Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
@@ -8976,7 +9032,7 @@ mod tests {
             }
         }
 
-        // The painted pill carries the text twice (its label and the button over it); the button is the clickable one.
+        // The painted pill is a clickable box named with AccessibleName (`NamedClickable`); find the clickable node.
         let br_button = button_texts.iter().find(|(id, text)| *text == "브랜치 보기" && clickables.contains_key(id)).map(|(id, _)| *id);
         assert!(br_button.is_some(), "expected '브랜치 보기' button");
 

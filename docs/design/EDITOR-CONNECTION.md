@@ -366,7 +366,7 @@ Read "→EH" as Ember calling the extension host, and "EH→" as the extension h
 | →EH | `ExtHostConfiguration.$initializeConfiguration` | Defaults from extension manifests + Ember core defaults |
 | →EH | `ExtHostWorkspace.$initializeWorkspace` | Workspace folders as `vscode-remote` URIs |
 | →EH | `ExtHostExtensionService.$activateByEvent` | `onLanguage:`, `onCommand:`, … |
-| EH→ | `MainThreadStorage.$initializeExtensionStorage` → `undefined` | Awaited in every activation; must answer |
+| EH→ | `MainThreadStorage.$initializeExtensionStorage` / `$setValue` / `$registerExtensionStorageKeysToSync` | Persisted per extension (`globalState` and `workspaceState`); returns stored JSON string or `undefined` when absent, moves corrupt files to `*.corrupt`, serializes/retries writes, and broadcasts `shared=true` updates via `ExtHostStorage.$acceptValue` |
 | EH→ | everything else | Reply per `exthost::default_reply` (mostly `undefined`) so the extension host never stalls |
 
 **Documents (FR-E1 bridge)**

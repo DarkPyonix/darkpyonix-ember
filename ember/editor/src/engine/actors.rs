@@ -557,16 +557,17 @@ impl main_thread_storage::Storage for SessionCore {
         }
     }
 
-    fn set_value(&mut self, cx: &Ctx, args: main_thread_storage::SetValueArgs) -> Outcome {
+    fn set_value(&mut self, _cx: &Ctx, args: main_thread_storage::SetValueArgs) -> Outcome {
         let next = self.next_token + 1;
-        match self.storage.on_set_value(cx.req, args.shared, &args.extension_id, args.value, || next) {
-            crate::storage::SetAction::Reply(reply) => Outcome::Reply(reply),
-            crate::storage::SetAction::Write { uri, bytes, token } => {
-                self.next_token = token;
-                self.out.push(Effect::WriteStorage { uri, bytes, token });
-                Outcome::Deferred
-            }
+        let outcome = self.storage.on_set_value(args.shared, &args.extension_id, args.value, || next);
+        if let Some(write) = outcome.write {
+            self.next_token = write.token;
+            self.out.push(Effect::WriteStorage { uri: write.uri, bytes: write.bytes, token: write.token });
         }
+        if let Some((extension_id, value)) = outcome.broadcast {
+            self.out.push(Effect::BroadcastStorage { extension_id, value });
+        }
+        empty()
     }
 
     fn register_extension_storage_keys_to_sync(

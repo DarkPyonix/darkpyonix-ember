@@ -84,7 +84,7 @@ pub use crate::coords::{WidgetPos, WidgetRange};
 pub use crate::language::{LanguageRequest, LanguageUpdate};
 pub use crate::session::{DirLister, EditorSession, ServerSettingsFile, SessionConfig};
 pub use crate::settings::{EditorSettings, SettingsLayer, SettingsScope, SettingsScopes};
-pub use crate::storage::StorageRoots;
+pub use crate::storage::{SharedStorageChange, StorageHub, StorageRoots};
 pub use crate::output::{ExtensionMessage, MessageAction, MessageSeverity, OutputChannel, MAX_OUTPUT_CHANNEL_BYTES};
 pub use crate::widget::{
     Decoration, DecorationId, DecorationKind, HoverPhase, Severity, WidgetCommand, WidgetEvent,

@@ -91,6 +91,9 @@ pub struct SessionConfig {
     /// `workspaceState`). When `None` (default), storage persists under the server's
     /// `globalStorageHome` and `workspaceStorageHome` via `RemoteFs`.
     pub storage_dir: Option<std::path::PathBuf>,
+    /// Optional shared broadcast bus for propagating `shared = true` (`globalState`) updates
+    /// across sessions on the same server/storage scope via `ExtHostStorage.$acceptValue`.
+    pub storage_hub: Option<crate::storage::StorageHub>,
 }
 
 impl SessionConfig {
@@ -113,6 +116,7 @@ impl SessionConfig {
             workspace_trusted: true,
             disabled_extensions: Vec::new(),
             storage_dir: None,
+            storage_hub: None,
         }
     }
 
@@ -318,7 +322,7 @@ impl EditorSession {
         let (ipc, ipc_lifecycle) = IpcClient::start(mconn, ctx);
         let env = management::get_environment_data(&ipc, &authority, None).await?;
         let storage_roots = match &config.storage_dir {
-            Some(dir) => crate::storage::StorageRoots::from_local_dir(dir, &config.workspace_path),
+            Some(dir) => crate::storage::StorageRoots::from_local_dir(dir, &authority, &config.workspace_path),
             None => crate::storage::StorageRoots::from_env(
                 &authority,
                 &env.global_storage_home,
@@ -327,6 +331,9 @@ impl EditorSession {
             ),
         };
         let local_storage = config.storage_dir.is_some();
+        let storage_hub = config.storage_hub.clone();
+        let storage_session_id = storage_hub.as_ref().map_or(0, crate::storage::StorageHub::next_session_id);
+        let storage_rx = storage_hub.as_ref().map(crate::storage::StorageHub::subscribe);
         // `IRemoteAgentEnvironment.settingsPath` (remoteAgentEnvironment.ts): the server's Machine settings.json.
         let machine_settings_path =
             env.raw.get("settingsPath").and_then(|u| u.get("path")).and_then(Value::as_str).filter(|p| !p.is_empty()).map(str::to_owned);
@@ -432,6 +439,8 @@ impl EditorSession {
             fs: Arc::clone(&fs),
             authority: authority.clone(),
             local_storage,
+            storage_hub,
+            storage_session_id,
             ipc: ipc.clone(),
             updates: updates_tx,
             reqs: HashMap::new(),
@@ -442,7 +451,7 @@ impl EditorSession {
             scope_table: scope_table.clone(),
             user_files: config.user_files.iter().map(|p| crate::settings::user_data_uri(p).key()).collect(),
         };
-        let task = tokio::spawn(driver.run(rx, rpc_events, changes, ipc_lifecycle));
+        let task = tokio::spawn(driver.run(rx, rpc_events, changes, ipc_lifecycle, storage_rx));
 
         let configuration = settings.configuration_data(&scope_table);
         for call in exthost::bootstrap_calls(Some(&workspace), config.workspace_trusted, &configuration) {
@@ -848,6 +857,8 @@ struct Driver {
     fs: Arc<RemoteFs>,
     authority: String,
     local_storage: bool,
+    storage_hub: Option<crate::storage::StorageHub>,
+    storage_session_id: u64,
     ipc: IpcClient,
     updates: mpsc::UnboundedSender<SessionUpdate>,
     /// core token → RPC request id, for `Cancel`.
@@ -1001,6 +1012,18 @@ async fn recv_opt<T>(rx: &mut Option<mpsc::UnboundedReceiver<T>>) -> Option<T> {
     }
 }
 
+async fn recv_broadcast_opt(
+    rx: &mut Option<tokio::sync::broadcast::Receiver<crate::storage::SharedStorageChange>>,
+) -> Result<crate::storage::SharedStorageChange, tokio::sync::broadcast::error::RecvError> {
+    match rx.as_mut() {
+        Some(r) => r.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Maximum time shutdown waits for in-flight/queued storage writes to finish before closing IPC.
+const SHUTDOWN_STORAGE_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 impl Driver {
     async fn run(
         mut self,
@@ -1008,6 +1031,7 @@ impl Driver {
         mut rpc_events: mpsc::UnboundedReceiver<RpcEvent>,
         changes: mpsc::UnboundedReceiver<WatchEvent>,
         ipc_lifecycle: mpsc::UnboundedReceiver<IpcLifecycle>,
+        mut storage_rx: Option<tokio::sync::broadcast::Receiver<crate::storage::SharedStorageChange>>,
     ) {
         let (internal_tx, mut internal_rx) = mpsc::unbounded_channel::<Input>();
         self.highlight = Some(spawn_highlighter(internal_tx.clone()));
@@ -1077,6 +1101,23 @@ impl Driver {
                         None
                     }
                 },
+                s = recv_broadcast_opt(&mut storage_rx) => match s {
+                    Ok(change) if change.origin_session != self.storage_session_id => {
+                        Some(Input::SharedStorageChanged {
+                            extension_id: change.extension_id,
+                            value: change.value,
+                        })
+                    }
+                    Ok(_) => None,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!("ember-editor: storage hub lagged by {skipped} updates");
+                        None
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        storage_rx = None;
+                        None
+                    }
+                },
                 i = internal_rx.recv() => i,
                 _ = sleep => Some(Input::Tick),
             };
@@ -1087,8 +1128,49 @@ impl Driver {
             let effects = self.core.handle(Instant::now(), input);
             self.execute(effects, &internal_tx);
         }
+        self.drain_storage(&internal_tx, &mut internal_rx).await;
         exthost::terminate(self.peer.connection());
         self.ipc.connection().close();
+    }
+
+    /// Wait for any in-flight, queued, or retry-scheduled extension storage writes to finish before
+    /// closing the management connection.
+    async fn drain_storage(
+        &mut self,
+        internal_tx: &mpsc::UnboundedSender<Input>,
+        internal_rx: &mut mpsc::UnboundedReceiver<Input>,
+    ) {
+        if !self.core.has_pending_storage_writes() {
+            return;
+        }
+        let deadline = tokio::time::Instant::now() + SHUTDOWN_STORAGE_DRAIN_TIMEOUT;
+        while self.core.has_pending_storage_writes() {
+            let wake = self.core.storage_next_wake();
+            let retry_sleep = async move {
+                match wake {
+                    Some(t) => tokio::time::sleep_until(tokio::time::Instant::from_std(t)).await,
+                    None => std::future::pending::<()>().await,
+                }
+            };
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => {
+                    tracing::warn!("ember-editor: timed out draining pending extension storage writes at shutdown");
+                    break;
+                }
+                i = internal_rx.recv() => match i {
+                    Some(input @ (Input::StorageWritten { .. } | Input::StorageQuarantined { .. })) => {
+                        let effects = self.core.handle(Instant::now(), input);
+                        self.execute(effects, internal_tx);
+                    }
+                    Some(_) => {}
+                    None => break,
+                },
+                _ = retry_sleep => {
+                    let effects = self.core.handle(Instant::now(), Input::Tick);
+                    self.execute(effects, internal_tx);
+                }
+            }
+        }
     }
 
     /// The local file behind a `vscode-userdata:` URI: `Some(Ok(path))` for one of the caller's
@@ -1243,6 +1325,31 @@ impl Driver {
                         });
                     }
                 }
+                Effect::QuarantineStorage { from, to, shared, extension_id } => {
+                    let tx = internal.clone();
+                    if self.local_storage {
+                        let from_path = std::path::PathBuf::from(&from.path);
+                        let to_path = std::path::PathBuf::from(&to.path);
+                        tokio::spawn(async move {
+                            let result = tokio::task::spawn_blocking(move || {
+                                crate::storage::quarantine_local(&from_path, &to_path).map_err(|e| e.to_string())
+                            })
+                            .await
+                            .unwrap_or_else(|e| Err(e.to_string()));
+                            let _ = tx.send(Input::StorageQuarantined { shared, extension_id, result });
+                        });
+                    } else {
+                        let fs = Arc::clone(&self.fs);
+                        tokio::spawn(async move {
+                            let result = match fs.rename(&from, &to, true).await {
+                                Ok(()) => Ok(()),
+                                Err(e) if is_not_found(&e) => Ok(()),
+                                Err(e) => Err(e.to_string()),
+                            };
+                            let _ = tx.send(Input::StorageQuarantined { shared, extension_id, result });
+                        });
+                    }
+                }
                 Effect::WriteStorage { uri, bytes, token } => {
                     let tx = internal.clone();
                     if self.local_storage {
@@ -1261,6 +1368,11 @@ impl Driver {
                             let result = write_remote_storage(&fs, &authority, &uri, bytes).await;
                             let _ = tx.send(Input::StorageWritten { token, result });
                         });
+                    }
+                }
+                Effect::BroadcastStorage { extension_id, value } => {
+                    if let Some(hub) = &self.storage_hub {
+                        hub.publish(self.storage_session_id, extension_id, value);
                     }
                 }
                 // A file on the client machine is not watched: only this window writes it.

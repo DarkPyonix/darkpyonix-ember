@@ -140,8 +140,12 @@ pub enum Input {
     Webview(crate::webview::WebviewEvent),
     /// Result of reading one persisted extension storage file (`MainThreadStorage`).
     StorageRead { shared: bool, extension_id: String, result: Result<Option<Vec<u8>>, String> },
+    /// Result of moving a corrupt extension storage file aside to `*.corrupt`.
+    StorageQuarantined { shared: bool, extension_id: String, result: Result<(), String> },
     /// Result of writing or deleting one persisted extension storage file (`MainThreadStorage`).
     StorageWritten { token: Token, result: Result<(), String> },
+    /// A `shared = true` (`globalState`) update broadcast from another session on the same hub.
+    SharedStorageChanged { extension_id: String, value: Option<String> },
     /// Nothing happened; run due timers.
     Tick,
 }
@@ -159,8 +163,12 @@ pub enum Effect {
     WriteFile { uri: UriComponents, bytes: Vec<u8>, token: Token },
     /// Read one extension storage file; answered with [`Input::StorageRead`].
     ReadStorage { uri: UriComponents, shared: bool, extension_id: String },
+    /// Move a corrupt extension storage file aside (`*.corrupt`); answered with [`Input::StorageQuarantined`].
+    QuarantineStorage { from: UriComponents, to: UriComponents, shared: bool, extension_id: String },
     /// Atomically write (`Some`) or delete (`None`) one extension storage file; answered with [`Input::StorageWritten`].
     WriteStorage { uri: UriComponents, bytes: Option<Vec<u8>>, token: Token },
+    /// Broadcast a `shared = true` (`globalState`) update to peer sessions on the same [`crate::storage::StorageHub`].
+    BroadcastStorage { extension_id: String, value: Option<String> },
     Watch { uri: UriComponents },
     Unwatch { uri: UriComponents },
     /// Work for the highlighting thread; its answer comes back as [`Input::Highlighted`].
@@ -482,14 +490,41 @@ impl SessionCore {
                 self.apply_webview(out);
             }
             Input::StorageRead { shared, extension_id, result } => {
-                for (req, reply) in self.storage.on_read_done(shared, &extension_id, result) {
-                    self.respond(req, Ok(reply));
+                let outcome = self.storage.on_read_done(shared, &extension_id, result);
+                for (req, reply) in outcome.replies {
+                    self.respond(req, reply);
+                }
+                if let Some((from, to, key)) = outcome.quarantine {
+                    self.out.push(Effect::QuarantineStorage {
+                        from,
+                        to,
+                        shared: key.shared,
+                        extension_id: key.extension_id,
+                    });
+                }
+            }
+            Input::StorageQuarantined { shared, extension_id, result } => {
+                let next = self.next_token + 1;
+                let outcome = self.storage.on_quarantine_done(shared, &extension_id, result, || next);
+                for (req, reply) in outcome.replies {
+                    self.respond(req, reply);
+                }
+                if let Some(write) = outcome.write {
+                    self.next_token = write.token;
+                    self.out.push(Effect::WriteStorage { uri: write.uri, bytes: write.bytes, token: write.token });
                 }
             }
             Input::StorageWritten { token, result } => {
-                if let Some((req, reply)) = self.storage.on_write_done(token, result) {
-                    self.respond(req, reply);
+                let next = self.next_token + 1;
+                if let Some(write) = self.storage.on_write_done(self.now, token, result, || next) {
+                    self.next_token = write.token;
+                    self.out.push(Effect::WriteStorage { uri: write.uri, bytes: write.bytes, token: write.token });
                 }
+            }
+            Input::SharedStorageChanged { extension_id, value } => {
+                self.storage.on_external_shared_change(&extension_id, value.clone());
+                let raw = value.as_deref().unwrap_or("{}");
+                self.rpc(ember_editor_conn::exthost::accept_storage_value(true, &extension_id, raw));
             }
             Input::Tick => {}
         }
@@ -507,13 +542,24 @@ impl SessionCore {
         self.highlights.set_catalog(catalog);
     }
 
-    /// When [`Input::Tick`] must be delivered next (earliest debounce deadline).
+    /// When [`Input::Tick`] must be delivered next (earliest debounce or storage retry deadline).
     pub fn next_wake(&self) -> Option<Instant> {
         let a = self.inline.values().filter_map(|s| s.debounce.deadline());
         let b = self.codelens_due.values().filter_map(|d| d.deadline());
         let c = self.folding_due.values().filter_map(|d| d.deadline());
         let d = self.semantic_due.values().filter_map(|d| d.deadline());
-        a.chain(b).chain(c).chain(d).min()
+        let e = self.storage.next_wake().into_iter();
+        a.chain(b).chain(c).chain(d).chain(e).min()
+    }
+
+    /// Whether any extension storage write, retry, or quarantine is still pending.
+    pub fn has_pending_storage_writes(&self) -> bool {
+        self.storage.has_pending_writes()
+    }
+
+    /// Earliest deadline for a pending storage write retry.
+    pub fn storage_next_wake(&self) -> Option<Instant> {
+        self.storage.next_wake()
     }
 
     /// Every known language with its display name (FR-L31.7).
@@ -2228,6 +2274,15 @@ impl SessionCore {
             self.semantic_due.iter_mut().filter_map(|(k, d)| d.take_due(now).then(|| k.clone())).collect();
         for k in due_sem {
             self.fire_semantic(&k);
+        }
+        let mut next_tok = self.next_token;
+        let retry_writes = self.storage.on_tick(now, || {
+            next_tok += 1;
+            next_tok
+        });
+        self.next_token = next_tok;
+        for write in retry_writes {
+            self.out.push(Effect::WriteStorage { uri: write.uri, bytes: write.bytes, token: write.token });
         }
     }
 

@@ -46,6 +46,9 @@ impl SessionCore {
             self.fallback_reply(&r);
             return;
         }
+        if r.proxy == Some(main_thread_output_service::PROXY) && self.on_output_text(&r) {
+            return;
+        }
         let cx = Ctx { req: r.req, cancellable: r.cancellable };
         let (method, args) = (r.method.as_str(), r.args.as_slice());
         let routed = match r.proxy {
@@ -86,6 +89,38 @@ impl SessionCore {
                 self.fallback_reply(&r);
             }
         }
+    }
+
+    /// `$append` and `$clear` are not in the generated output service, and the output panel
+    /// needs them, so the session answers them here. So is `$register`: only its label is
+    /// used, and the generated decoder would reject a missing or odd `file`, which the session
+    /// has always tolerated. Returns false when the call is not one of these or its arguments
+    /// are malformed, so the caller falls through to the generated dispatch.
+    fn on_output_text(&mut self, r: &IncomingRequest) -> bool {
+        let text = |i: usize| r.args.get(i).and_then(|a| a.as_json()).and_then(Value::as_str);
+        let Some(channel_id) = text(0) else { return false };
+        if r.method == "$register" {
+            let reply = self.register_output_channel(channel_id.to_owned());
+            self.respond(r.req, Ok(reply));
+            return true;
+        }
+        let value = match r.method.as_str() {
+            "$append" => match text(1) {
+                Some(v) => Some(v),
+                None => return false,
+            },
+            "$clear" => None,
+            _ => return false,
+        };
+        if let Some(ch) = self.output_channels.iter_mut().find(|c| c.id == channel_id) {
+            match value {
+                Some(v) => ch.append(v),
+                None => ch.clear(),
+            }
+            self.output_changed(None);
+        }
+        self.respond(r.req, Ok(Reply::Empty));
+        true
     }
 
     fn count_unimplemented(&mut self, r: &IncomingRequest) {
@@ -137,6 +172,14 @@ impl SessionCore {
     fn output_changed(&mut self, active_id: Option<String>) {
         let channels = self.output_channels.clone();
         self.ui(SessionUpdate::OutputChannels { channels, active_id });
+    }
+
+    fn register_output_channel(&mut self, label: String) -> Reply {
+        self.output_seq += 1;
+        let id = format!("ember-output-{}", self.output_seq);
+        self.output_channels.push(crate::output::OutputChannel::new(id.clone(), label));
+        self.output_changed(Some(id.clone()));
+        Reply::Json(json!(id))
     }
 
     fn dispose_output_channel(&mut self, channel_id: &str) -> Outcome {
@@ -201,11 +244,7 @@ impl main_thread_commands::Commands for SessionCore {
 
 impl main_thread_output_service::OutputService for SessionCore {
     fn register(&mut self, _cx: &Ctx, args: main_thread_output_service::RegisterArgs) -> Outcome {
-        self.output_seq += 1;
-        let id = format!("ember-output-{}", self.output_seq);
-        self.output_channels.push(crate::output::OutputChannel::new(id.clone(), args.label));
-        self.output_changed(Some(id.clone()));
-        Outcome::Reply(Reply::Json(json!(id)))
+        Outcome::Reply(self.register_output_channel(args.label))
     }
 
     fn update(&mut self, _cx: &Ctx, _args: main_thread_output_service::UpdateArgs) -> Outcome {

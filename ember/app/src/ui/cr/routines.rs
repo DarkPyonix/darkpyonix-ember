@@ -48,7 +48,7 @@ use crate::ui::home::{
 };
 use super::components::{
     pill_colors, pill_metrics, pressable_on, AppButton, BackButton, ButtonKind, EmberCard, EmberField, EmberSheet, InsetPanel, SearchField,
-    ChoiceRow, CloseButton, DataNamedOverlay, FieldOptions, Label, MonoLabel, NamedClickable, NamedClickableOn, NamedDisabled, NamedSelect, Pill, PillTone, SheetFooter,
+    ChoiceRow, CloseButton, FieldOptions, Label, MonoLabel, NamedClickable, NamedClickableOn, NamedDisabled, NamedSelect, Pill, PillTone, SheetFooter,
 };
 use super::characters::{CharState, Character};
 use super::compat::Spinner;
@@ -1556,19 +1556,24 @@ fn SegChoices(
 fn FilterSegButton(text: &str, selected: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let (bg, border, fg) = seg_colors(selected, p);
-    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
-                .height(H_CTL)
-                .background(paint(bg))
-                .border(1.0, paint(border))
-                .shape_role(ShapeRole::Full), alignment = Alignment::Center, content = move || {
+    NamedClickableOn(
+        text,
+        Modifier::new()
+            .height(H_CTL)
+            .background(paint(bg))
+            .border(1.0, paint(border))
+            .shape_role(ShapeRole::Full),
+        Some(bg),
+        Alignment::Center,
+        on_click,
+        move || {
             { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, {
                 { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SEG_PAD_X)) };
                 Label(text, SEG_FS, Weight::Medium, Some(paint(fg)), Some(1));
                 { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SEG_PAD_X)) };
             }) };
-            // A project's name is data, so the button over the pill carries it.
-            DataNamedOverlay(text, true, None, on_click);
-        }) };
+        },
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1878,16 +1883,21 @@ fn RoutineRow(
     let row_border = if selected { p.ink } else { p.line };
     let row_alpha = if routine_enabled { 1.0 } else { 0.6 };
 
-    // The row is named by its routine (data), so a clear button under its content carries the
-    // name and the click (`DataNamedOverlay`); the switch above it keeps its own.
-    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
-                .fill_max_width()
-                .height(103.0)
-                .background(paint(p.surface))
-                .border(1.0, paint(row_border))
-                .corner_radius(CORNER_MD)
-                .alpha(row_alpha), content = move || {
-            DataNamedOverlay(&routine_name, true, None, move || on_open(open_id.clone()));
+    // The row is named by its routine directly on the painted box (`NamedClickable`,
+    // compose-rust#831); the switch inside keeps its own handler.
+    let row_label = routine_name.clone();
+    NamedClickable(
+        &row_label,
+        Modifier::new()
+            .fill_max_width()
+            .height(103.0)
+            .background(paint(p.surface))
+            .border(1.0, paint(row_border))
+            .corner_radius(CORNER_MD)
+            .alpha(row_alpha),
+        Alignment::TopStart,
+        move || on_open(open_id.clone()),
+        move || {
             { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new()
                         .fill_max_width()
                         .height(103.0)
@@ -1925,7 +1935,8 @@ fn RoutineRow(
                             }
                         }) };
                 }) };
-        }) };
+        },
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -4142,30 +4153,53 @@ mod tests {
         assert!(pill.2.iter().any(|m| *m == format!("Height({H_CTL:?})")) && pill.2.iter().any(|m| m.starts_with("Background")), "{:?}", pill.2);
 
         let nodes = composed(|| FilterSegButton("ember", true, || {}));
-        let over = nodes.iter().find(|n| n.1 == "Button").expect("the button over a pill named from data");
-        assert!(over.3.iter().any(|p| p == "Text=String(\"ember\")") && over.3.iter().any(|p| p == "AccessibleName=String(\"ember\")"), "{:?}", over.3);
-        assert!(over.2.iter().any(|m| m == "MatchParentSize") && !over.2.iter().any(|m| m.starts_with("FillMax")), "{:?}", over.2);
+        assert!(!nodes.iter().any(|n| n.1 == "Button"), "no clear button over a pill named from data");
+        let seg = nodes.iter().find(|n| n.3.iter().any(|p| p == "AccessibleName=String(\"ember\")")).expect("the named filter pill");
+        assert_eq!(seg.1, "Box");
+        assert!(seg.3.iter().any(|p| p.starts_with("OnClick=")), "{:?}", seg.3);
+        assert!(seg.2.iter().any(|m| m.starts_with("Semantics") && m.contains("Button")), "{:?}", seg.2);
+        assert_eq!(seg.2.iter().filter(|m| m.starts_with("PressFeedback")).count(), 1, "{:?}", seg.2);
 
         let production = include_str!("routines.rs").split("#[cfg(test)]").next().unwrap().to_string();
-        for gone in [["Focus", "Overlay("].concat(), ["Named", "Overlay("].concat(), ["Disabled", "Overlay("].concat()] {
-            // `DataNamedOverlay(` (compose-rust#831) is the kept overlay, not the old one.
-            assert!(!production.replace("DataNamedOverlay(", "").contains(&gone), "{gone} is gone");
+        for gone in [["Focus", "Overlay("].concat(), ["Named", "Overlay("].concat(), ["Disabled", "Overlay("].concat(), ["DataNamed", "Overlay("].concat()] {
+            assert!(!production.contains(&gone), "{gone} is gone");
         }
         assert!(production.contains("NamedDisabled(RUN_NOW_BUSY_LABEL, run_box"), "the busy square is named and disabled, with no click");
         compose_rust::window::reset_window_size();
     }
 
     fn extract_buttons<'a>(mutations: &'a [Mutation<'a>]) -> Vec<(u32, Option<&'a str>)> {
-        use std::collections::HashMap;
+        use std::collections::{HashMap, HashSet};
         let mut buttons: HashMap<u32, Option<&'a str>> = HashMap::new();
+        let mut created_boxes: HashSet<u32> = HashSet::new();
         for m in mutations {
-            if let Mutation::Create { node_id, widget: WidgetKind::Button } = m {
-                buttons.insert(*node_id, None);
+            match m {
+                Mutation::Create { node_id, widget: WidgetKind::Button } => {
+                    buttons.insert(*node_id, None);
+                }
+                Mutation::Create { node_id, widget: WidgetKind::Box } => {
+                    created_boxes.insert(*node_id);
+                }
+                _ => {}
+            }
+        }
+        for m in mutations {
+            if let Mutation::SetModifier { node_id, modifier, .. } = m {
+                if created_boxes.contains(node_id)
+                    && matches!(modifier, compose_rust::Modifier::Semantics { .. })
+                    && format!("{modifier:?}").contains("role: Button,")
+                {
+                    buttons.entry(*node_id).or_insert(None);
+                }
             }
         }
         for m in mutations {
             match m {
-                Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                Mutation::SetProp {
+                    node_id,
+                    property: PropertyKind::Text | PropertyKind::AccessibleName,
+                    value: PropertyValue::String(s),
+                } => {
                     if let Some(slot) = buttons.get_mut(node_id) {
                         *slot = Some(s);
                     }

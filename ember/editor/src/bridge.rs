@@ -183,6 +183,22 @@ impl WidgetBridge {
         match update {
             SessionUpdate::Opened { uri, generation, text, language_id, tab_width } => {
                 let key = uri.key();
+                // Opening a document that is already open (a click on its explorer row or its tab)
+                // brings it forward. Its unsaved state, pending edits, conflict bar, save error and
+                // decorations stay: rebuilding them would show an unsaved buffer as saved, and
+                // closing that tab would then skip the save prompt.
+                if let Some(doc) = self.docs.get_mut(&key).filter(|d| d.generation == generation) {
+                    if doc.text != text || doc.tab_width != tab_width {
+                        let lines: Vec<String> = text.split('\n').map(str::to_owned).collect();
+                        let indent = compute_indent_folds(&lines, tab_width);
+                        doc.folds = merge_folds(0, lines.len(), &[], &indent, &std::collections::HashSet::new());
+                    }
+                    doc.text = text;
+                    doc.language_id = language_id;
+                    doc.tab_width = tab_width;
+                    self.active = Some(key);
+                    return BridgeAction::None;
+                }
                 let lines: Vec<String> = text.split('\n').map(str::to_owned).collect();
                 let indent = compute_indent_folds(&lines, tab_width);
                 let folds = merge_folds(0, lines.len(), &[], &indent, &std::collections::HashSet::new());
@@ -358,6 +374,8 @@ impl WidgetBridge {
             SessionUpdate::SearchHits { .. } | SessionUpdate::SearchDone { .. } | SessionUpdate::ReplaceDone { .. } => BridgeAction::None,
             // Language feature answers are the window's lists and boxes, not a document's props (FR-L31.13).
             SessionUpdate::Language(_) => BridgeAction::None,
+            // Sessions, stacks, variables and breakpoints are the Run and Debug tool window's.
+            SessionUpdate::Debug(_) => BridgeAction::None,
             SessionUpdate::Webview(update) => {
                 self.webview_panes.apply(&update);
                 BridgeAction::Webview(update)

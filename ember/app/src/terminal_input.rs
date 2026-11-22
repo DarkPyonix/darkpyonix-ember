@@ -141,22 +141,112 @@ impl ImeInput {
     }
 }
 
-/// The Korean notice for a paste chord while the editor window does not read the clipboard.
-/// The toolkit reads it (`compose_rust::clipboard::read_text`, compose-rust#546); what is
-/// missing is Ember's multi-line paste confirmation, see the `TODO(#673)` at the chord in
-/// `ui/editor_workbench.rs`.
-pub const PASTE_UNAVAILABLE: &str = "이 창에서는 아직 붙여넣기를 할 수 없습니다. 여러 줄 붙여넣기 확인이 준비되지 않았습니다.";
+/// Result of handling a clipboard read for a terminal paste chord (FR-L31.21).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PasteAction {
+    /// Send these bytes to the terminal immediately.
+    Send(Vec<u8>),
+    /// Ask the user to confirm before pasting this multi-line text.
+    Confirm(String),
+    /// Nothing to paste (empty clipboard text).
+    Empty,
+}
+
+/// Decides whether pasted clipboard text goes straight to the terminal or waits for multi-line
+/// confirmation (FR-L31.21).
+pub fn plan_paste(text: &str, setting: MultiLinePasteWarning, bracketed: bool) -> PasteAction {
+    if text.is_empty() {
+        return PasteAction::Empty;
+    }
+    if needs_multiline_warning(text, setting, bracketed) {
+        PasteAction::Confirm(text.to_owned())
+    } else {
+        PasteAction::Send(paste_bytes(text, bracketed))
+    }
+}
+
+/// Pending multi-line paste confirmation state in the editor terminal panel (FR-L31.21).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PendingPaste {
+    text: Option<String>,
+}
+
+impl PendingPaste {
+    /// The text waiting for confirmation, if any.
+    pub fn text(&self) -> Option<&str> {
+        self.text.as_deref()
+    }
+
+    /// True while a multi-line paste confirmation is open.
+    pub fn is_open(&self) -> bool {
+        self.text.is_some()
+    }
+
+    /// Stores `text` for confirmation, replacing any earlier pending paste.
+    pub fn ask(&mut self, text: String) {
+        self.text = Some(text);
+    }
+
+    /// Resolves the pending paste with `choice`, clearing the pending state and returning the bytes
+    /// to send to the terminal (or `None` when cancelled or nothing was pending).
+    pub fn decide(&mut self, choice: PasteChoice, bracketed: bool) -> Option<Vec<u8>> {
+        let pending = self.text.take()?;
+        let resolved = resolve_paste(&pending, choice)?;
+        Some(paste_bytes(&resolved, bracketed))
+    }
+}
+
+/// Korean notice when clipboard text exceeds the toolkit's single-read limit
+/// (`compose_rust::clipboard::MAX_TEXT_BYTES`).
+pub const PASTE_TOO_LONG: &str = "클립보드 텍스트가 너무 길어 붙여넣을 수 없습니다.";
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn fr_l31_21_the_paste_notice_gives_the_true_reason() {
-        // The toolkit reads the clipboard (compose-rust#546); what is not built is the
-        // multi-line paste confirmation, so the notice says that and not that the read fails.
-        assert!(PASTE_UNAVAILABLE.contains("여러 줄 붙여넣기 확인"), "{PASTE_UNAVAILABLE}");
-        assert!(!PASTE_UNAVAILABLE.contains("클립보드를 읽을 수 없"), "{PASTE_UNAVAILABLE}");
+    fn fr_l31_21_single_line_pastes_immediately_and_multiline_confirms() {
+        // Single-line text sends bytes directly without asking.
+        assert_eq!(plan_paste("ls -la", MultiLinePasteWarning::Auto, false), PasteAction::Send(b"ls -la".to_vec()));
+        assert_eq!(plan_paste("ls\n", MultiLinePasteWarning::Auto, false), PasteAction::Send(b"ls\r".to_vec()));
+        assert_eq!(plan_paste("", MultiLinePasteWarning::Auto, false), PasteAction::Empty);
+        // Multi-line text without bracketed paste asks for confirmation.
+        assert_eq!(
+            plan_paste("echo a\necho b", MultiLinePasteWarning::Auto, false),
+            PasteAction::Confirm("echo a\necho b".to_string()),
+        );
+        // With bracketed paste on in Auto mode, multi-line text sends bracketed bytes directly.
+        assert_eq!(
+            plan_paste("echo a\necho b", MultiLinePasteWarning::Auto, true),
+            PasteAction::Send(b"\x1b[200~echo a\recho b\x1b[201~".to_vec()),
+        );
+        // Notice for over-long clipboard text is in Korean 합니다체.
+        assert!(PASTE_TOO_LONG.ends_with("없습니다."), "{PASTE_TOO_LONG}");
+    }
+
+    #[test]
+    fn fr_l31_21_pending_paste_state_transitions() {
+        let mut pending = PendingPaste::default();
+        assert!(!pending.is_open());
+        assert_eq!(pending.text(), None);
+        assert_eq!(pending.decide(PasteChoice::Paste, false), None);
+
+        // Confirm as multi-line: sends bytes and clears state.
+        pending.ask("a\nb".to_string());
+        assert!(pending.is_open());
+        assert_eq!(pending.text(), Some("a\nb"));
+        assert_eq!(pending.decide(PasteChoice::Paste, false), Some(b"a\rb".to_vec()));
+        assert!(!pending.is_open());
+
+        // Confirm as single-line: strips line breaks, sends bytes, clears state.
+        pending.ask("a\r\nb".to_string());
+        assert_eq!(pending.decide(PasteChoice::SingleLine, true), Some(b"\x1b[200~ab\x1b[201~".to_vec()));
+        assert!(!pending.is_open());
+
+        // Cancel: sends nothing and clears state.
+        pending.ask("x\ny".to_string());
+        assert_eq!(pending.decide(PasteChoice::Cancel, false), None);
+        assert!(!pending.is_open());
     }
 
     #[test]

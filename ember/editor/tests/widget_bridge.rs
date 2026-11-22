@@ -7,7 +7,7 @@ use ember_editor::engine::{ReadPurpose, Token};
 use ember_editor::languages::LanguageRegistry;
 use ember_editor::{
     apply_text_change, BridgeAction, CoreOptions, Decoration, DecorationId, DecorationKind, Effect, HoverPhase, Input,
-    SessionCore, Severity, WidgetBridge, WidgetCommand, WidgetEvent, WidgetPos, WidgetRange,
+    SessionCore, SessionUpdate, Severity, WidgetBridge, WidgetCommand, WidgetEvent, WidgetPos, WidgetRange,
     DECORATION_RECORD_LEN,
 };
 use ember_editor_conn::exthost::Call;
@@ -658,4 +658,75 @@ fn bridge_closed_clears_markers_for_that_file() {
     bridge.apply(ember_editor::SessionUpdate::Closed { uri: u1 });
     assert_eq!(bridge.problems().len(), 1);
     assert_eq!(bridge.problems()[0].uri.path, "/w/b.rs");
+}
+
+// A click on the explorer row (or the tab) of a document that is already open sends
+// `Input::Open` again. The window must keep showing the buffer as unsaved: before this fix the
+// bridge rebuilt the document from the second `Opened` with `dirty: false`, so the tab lost its
+// unsaved mark and closing it skipped the save prompt.
+#[test]
+fn fr_l31_6_reopening_an_unsaved_document_keeps_it_unsaved() {
+    let t0 = Instant::now();
+    let langs = LanguageRegistry::from_extensions(&[json!({
+        "contributes": {"languages": [{"id": "markdown", "extensions": [".md"]}]}
+    })]);
+    let mut core = SessionCore::new(langs, CoreOptions::default(), t0);
+    let mut bridge = WidgetBridge::new();
+    let u = uri("/w/README.md");
+
+    core.handle(t0, Input::Open { uri: u.clone() });
+    let fx = core.handle(t0, Input::FileRead { uri: u.clone(), purpose: ReadPurpose::Open, result: Ok(b"# ws\n".to_vec()) });
+    apply_all(&mut bridge, &fx);
+    let generation = bridge.document(&u).expect("opened").generation;
+
+    let (u_ev, gen_ev, chg_ev) = bridge.on_code_changed(&u, 1, WidgetRange::empty(p(0, 4)), "hello".into()).unwrap();
+    let fx = core.handle(t0, Input::Widget { uri: u_ev, generation: gen_ev, event: chg_ev });
+    apply_all(&mut bridge, &fx);
+    assert!(bridge.document(&u).unwrap().dirty, "typing makes the buffer unsaved");
+
+    // The second open, as the explorer row click sends it.
+    let fx = core.handle(t0, Input::Open { uri: u.clone() });
+    assert!(fx.iter().all(|e| !matches!(e, Effect::ReadFile { .. })), "an open document is not read again");
+    assert!(
+        fx.iter().any(|e| matches!(e, Effect::Ui(SessionUpdate::Dirty { dirty: true, .. }))),
+        "the engine says again that the buffer is unsaved"
+    );
+    apply_all(&mut bridge, &fx);
+    let doc = bridge.document(&u).unwrap();
+    assert!(doc.dirty, "reopening keeps the unsaved mark");
+    assert_eq!(doc.generation, generation);
+    assert_eq!(doc.text, "# wshello\n", "the typed text stays in the buffer");
+    assert_eq!(doc.version, 1, "the widget version is not reset by a reopen");
+}
+
+// The bridge alone: a second `Opened` with the same generation keeps what the first one built
+// up (unsaved mark, version, pending edits), and a new generation replaces it.
+#[test]
+fn fr_l31_6_bridge_keeps_document_state_on_a_repeated_opened() {
+    let mut bridge = WidgetBridge::new();
+    let u = uri("/src/main.rs");
+    let opened = |generation: u64, text: &str| {
+        vec![Effect::Ui(SessionUpdate::Opened {
+            uri: u.clone(),
+            generation,
+            text: text.to_string(),
+            language_id: "rust".to_string(),
+            tab_width: 4,
+        })]
+    };
+    apply_all(&mut bridge, &opened(7, "fn a() {}"));
+    bridge.on_code_changed(&u, 3, WidgetRange::empty(p(0, 9)), "\n".to_string()).unwrap();
+    apply_all(&mut bridge, &[Effect::Ui(SessionUpdate::Dirty { uri: u.clone(), dirty: true })]);
+
+    apply_all(&mut bridge, &opened(7, "fn a() {}\n"));
+    let doc = bridge.document(&u).unwrap();
+    assert!(doc.dirty);
+    assert_eq!(doc.version, 3);
+
+    // A reload gives a new generation: that is a new widget, so the state starts over.
+    apply_all(&mut bridge, &opened(8, "fn b() {}"));
+    let doc = bridge.document(&u).unwrap();
+    assert!(!doc.dirty);
+    assert_eq!(doc.version, 0);
+    assert_eq!(doc.generation, 8);
 }

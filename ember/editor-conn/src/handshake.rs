@@ -231,10 +231,17 @@ fn parse_version_response(raw: &[u8]) -> Result<String> {
     let end = find_header_end(raw).ok_or_else(|| Error::Handshake("GET /version: truncated response".into()))?;
     let head = String::from_utf8_lossy(&raw[..end]);
     let status = head.lines().next().unwrap_or_default();
-    if status.split_whitespace().nth(1) != Some("200") {
+    match status.split_whitespace().nth(1) {
+        Some("200") => {}
         // No `/version` route (not a Code-OSS agent server, or one too old/new to tell): the
         // commit is unknown, which the version gate treats like a mismatch.
-        return Err(Error::UnsupportedServerVersion { server: None });
+        Some("404") => return Err(Error::UnsupportedServerVersion { server: None }),
+        // A wrong or missing connection token (the agent server checks it before `/version`),
+        // or an auth gate in front of it. FR-E10: auth errors never switch targets.
+        Some(code @ ("401" | "403")) => return Err(Error::Refused(format!("GET /version: HTTP {code}"))),
+        // A relay or proxy that cannot reach the server (502, 503, 504), or a server error.
+        // FR-E10: network errors never switch targets.
+        code => return Err(Error::Handshake(format!("GET /version: HTTP {}", code.unwrap_or("status missing")))),
     }
     let body = &raw[end + 4..];
     let chunked = head.lines().skip(1).any(|l| {
@@ -541,13 +548,28 @@ mod tests {
             parse_version_response(b"HTTP/1.1 404 Not Found\r\n\r\n"),
             Err(Error::UnsupportedServerVersion { server: None })
         ));
-        assert!(matches!(
-            parse_version_response(b"HTTP/1.1 500 Internal Server Error\r\n\r\n"),
-            Err(Error::UnsupportedServerVersion { server: None })
-        ));
         // empty body: dev build without a commit
         let empty = parse_version_response(b"HTTP/1.1 200 OK\r\n\r\n").unwrap();
         assert!(matches!(crate::check_server_commit(&empty), Err(Error::UnsupportedServerVersion { .. })));
+    }
+
+    #[test]
+    fn fr_e10_network_and_auth_errors_on_version_do_not_fall_back() {
+        for (raw, auth) in [
+            (&b"HTTP/1.1 401 Unauthorized\r\n\r\n"[..], true),
+            (b"HTTP/1.1 403 Forbidden\r\n\r\nForbidden.", true),
+            (b"HTTP/1.1 500 Internal Server Error\r\n\r\n", false),
+            (b"HTTP/1.1 502 Bad Gateway\r\n\r\n", false),
+            (b"HTTP/1.1 503 Service Unavailable\r\n\r\n", false),
+            (b"HTTP/1.1 504 Gateway Timeout\r\n\r\n", false),
+            (b"garbage\r\n\r\n", false),
+        ] {
+            let err = parse_version_response(raw).unwrap_err();
+            let line = String::from_utf8_lossy(raw).lines().next().unwrap_or_default().to_owned();
+            assert!(!matches!(err, Error::UnsupportedServerVersion { .. }), "{line}: {err}");
+            assert_eq!(matches!(err, Error::Refused(_)), auth, "{line}: {err}");
+            assert!(!is_permanent(&err) || auth, "{line}: a network error must stay retryable: {err}");
+        }
     }
 
     #[tokio::test]

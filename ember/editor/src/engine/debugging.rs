@@ -17,7 +17,11 @@ fn empty() -> Outcome {
 impl SessionCore {
     /// What a debug request may need from the rest of the session.
     fn debug_env(&self) -> Env {
-        let active_file = self.active.as_ref().and_then(|key| self.docs.get(key)).map(|doc| doc.uri.path.clone());
+        let active_file = self
+            .active
+            .as_ref()
+            .and_then(|key| self.docs.get(key))
+            .map(|doc| doc.uri.path.clone());
         Env { active_file }
     }
 
@@ -37,7 +41,10 @@ impl SessionCore {
                 }
                 Out::Respond { req, result } => self.respond(req, result),
                 Out::Ui(update) => self.ui(SessionUpdate::Debug(update)),
-                Out::ReadLaunchJson { uri, start } => self.out.push(Effect::ReadFile { uri, purpose: ReadPurpose::LaunchJson { start } }),
+                Out::ReadLaunchJson { uri, start } => self.out.push(Effect::ReadFile {
+                    uri,
+                    purpose: ReadPurpose::LaunchJson { start },
+                }),
             }
         }
     }
@@ -47,7 +54,11 @@ impl SessionCore {
         self.with_debug(|d| d.request(request, &env));
     }
 
-    pub(super) fn on_debug_reply(&mut self, pending: crate::debugger::Pending, result: Result<Value, String>) {
+    pub(super) fn on_debug_reply(
+        &mut self,
+        pending: crate::debugger::Pending,
+        result: Result<Value, String>,
+    ) {
         self.with_debug(|d| d.on_reply(pending, result));
     }
 
@@ -81,7 +92,10 @@ impl actor::DebugService for SessionCore {
     fn accept_da_message(&mut self, _cx: &Ctx, args: actor::AcceptDAMessageArgs) -> Outcome {
         match DapMessage::from_value(&args.message) {
             Ok(message) => self.with_debug(|d| d.on_dap(args.handle, message)),
-            Err(e) => tracing::warn!("ember-editor: cannot decode a message of debug adapter {}: {e}", args.handle),
+            Err(e) => tracing::warn!(
+                "ember-editor: cannot decode a message of debug adapter {}: {e}",
+                args.handle
+            ),
         }
         empty()
     }
@@ -96,7 +110,11 @@ impl actor::DebugService for SessionCore {
         empty()
     }
 
-    fn register_debug_configuration_provider(&mut self, _cx: &Ctx, args: actor::RegisterDebugConfigurationProviderArgs) -> Outcome {
+    fn register_debug_configuration_provider(
+        &mut self,
+        _cx: &Ctx,
+        args: actor::RegisterDebugConfigurationProviderArgs,
+    ) -> Outcome {
         self.debug.register_provider(Provider {
             handle: args.handle,
             debug_type: args.r#type,
@@ -108,17 +126,29 @@ impl actor::DebugService for SessionCore {
         empty()
     }
 
-    fn register_debug_adapter_descriptor_factory(&mut self, _cx: &Ctx, args: actor::RegisterDebugAdapterDescriptorFactoryArgs) -> Outcome {
+    fn register_debug_adapter_descriptor_factory(
+        &mut self,
+        _cx: &Ctx,
+        args: actor::RegisterDebugAdapterDescriptorFactoryArgs,
+    ) -> Outcome {
         self.debug.register_factory(args.r#type, args.handle);
         empty()
     }
 
-    fn unregister_debug_configuration_provider(&mut self, _cx: &Ctx, args: actor::UnregisterDebugConfigurationProviderArgs) -> Outcome {
+    fn unregister_debug_configuration_provider(
+        &mut self,
+        _cx: &Ctx,
+        args: actor::UnregisterDebugConfigurationProviderArgs,
+    ) -> Outcome {
         self.debug.unregister_provider(args.handle);
         empty()
     }
 
-    fn unregister_debug_adapter_descriptor_factory(&mut self, _cx: &Ctx, args: actor::UnregisterDebugAdapterDescriptorFactoryArgs) -> Outcome {
+    fn unregister_debug_adapter_descriptor_factory(
+        &mut self,
+        _cx: &Ctx,
+        args: actor::UnregisterDebugAdapterDescriptorFactoryArgs,
+    ) -> Outcome {
         self.debug.unregister_factory(args.handle);
         empty()
     }
@@ -127,7 +157,9 @@ impl actor::DebugService for SessionCore {
     fn start_debugging(&mut self, cx: &Ctx, args: actor::StartDebuggingArgs) -> Outcome {
         let env = self.debug_env();
         let req = cx.req;
-        self.with_debug(|d| d.ext_start_debugging(req, args.folder, args.name_or_config, &args.options, &env));
+        self.with_debug(|d| {
+            d.ext_start_debugging(req, args.folder, args.name_or_config, &args.options, &env)
+        });
         Outcome::Deferred
     }
 
@@ -137,18 +169,30 @@ impl actor::DebugService for SessionCore {
         Outcome::Deferred
     }
 
-    fn set_debug_session_name(&mut self, _cx: &Ctx, args: actor::SetDebugSessionNameArgs) -> Outcome {
+    fn set_debug_session_name(
+        &mut self,
+        _cx: &Ctx,
+        args: actor::SetDebugSessionNameArgs,
+    ) -> Outcome {
         self.with_debug(|d| d.ext_set_session_name(&args.id, args.name));
         empty()
     }
 
-    fn custom_debug_adapter_request(&mut self, cx: &Ctx, args: actor::CustomDebugAdapterRequestArgs) -> Outcome {
+    fn custom_debug_adapter_request(
+        &mut self,
+        cx: &Ctx,
+        args: actor::CustomDebugAdapterRequestArgs,
+    ) -> Outcome {
         let req = cx.req;
         self.with_debug(|d| d.ext_custom_request(req, &args.id, &args.command, args.args));
         Outcome::Deferred
     }
 
-    fn get_debug_protocol_breakpoint(&mut self, cx: &Ctx, args: actor::GetDebugProtocolBreakpointArgs) -> Outcome {
+    fn get_debug_protocol_breakpoint(
+        &mut self,
+        cx: &Ctx,
+        args: actor::GetDebugProtocolBreakpointArgs,
+    ) -> Outcome {
         let req = cx.req;
         self.with_debug(|d| d.ext_protocol_breakpoint(req, &args.id, &args.breakpoin_id));
         Outcome::Deferred
@@ -164,7 +208,11 @@ impl actor::DebugService for SessionCore {
         empty()
     }
 
-    fn unregister_breakpoints(&mut self, _cx: &Ctx, args: actor::UnregisterBreakpointsArgs) -> Outcome {
+    fn unregister_breakpoints(
+        &mut self,
+        _cx: &Ctx,
+        args: actor::UnregisterBreakpointsArgs,
+    ) -> Outcome {
         let mut ids = args.breakpoint_ids;
         ids.extend(args.function_breakpoint_ids);
         self.with_debug(|d| d.unregister_breakpoints(&ids));

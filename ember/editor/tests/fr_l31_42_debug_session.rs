@@ -9,7 +9,9 @@
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
-use ember_editor::debugger::{ConfigSelector, DebugRequest, DebugUpdate, EvalContext, EvalResult, SessionInfo, SessionState};
+use ember_editor::debugger::{
+    ConfigSelector, DebugRequest, DebugUpdate, EvalContext, EvalResult, SessionInfo, SessionState,
+};
 use ember_editor::languages::LanguageRegistry;
 use ember_editor::{CoreOptions, Effect, Input, SessionCore, SessionUpdate};
 use ember_editor_conn::rpc::{Arg, IncomingRequest, Reply};
@@ -83,18 +85,33 @@ impl Adapter {
                     out.push(resp(&launch, Value::Null));
                 }
                 if self.armed {
-                    out.push(event("stopped", json!({"reason": "breakpoint", "threadId": 1, "allThreadsStopped": true})));
+                    out.push(event(
+                        "stopped",
+                        json!({"reason": "breakpoint", "threadId": 1, "allThreadsStopped": true}),
+                    ));
                 }
                 out
             }
-            "threads" => vec![resp(req, json!({"threads": [{"id": 1, "name": "MainThread"}]}))],
+            "threads" => vec![resp(
+                req,
+                json!({"threads": [{"id": 1, "name": "MainThread"}]}),
+            )],
             "stackTrace" => vec![resp(
                 req,
                 json!({"stackFrames": [{"id": 10, "name": "<module>", "source": {"name": "main.py", "path": "/w/main.py"}, "line": 2, "column": 1}], "totalFrames": 1}),
             )],
-            "scopes" => vec![resp(req, json!({"scopes": [{"name": "Locals", "variablesReference": 100, "expensive": false}]}))],
-            "variables" => vec![resp(req, json!({"variables": [{"name": "x", "value": "41", "type": "int", "variablesReference": 0}]}))],
-            "evaluate" => vec![resp(req, json!({"result": "42", "type": "int", "variablesReference": 0}))],
+            "scopes" => vec![resp(
+                req,
+                json!({"scopes": [{"name": "Locals", "variablesReference": 100, "expensive": false}]}),
+            )],
+            "variables" => vec![resp(
+                req,
+                json!({"variables": [{"name": "x", "value": "41", "type": "int", "variablesReference": 0}]}),
+            )],
+            "evaluate" => vec![resp(
+                req,
+                json!({"result": "42", "type": "int", "variablesReference": 0}),
+            )],
             "continue" => vec![
                 resp(req, json!({"allThreadsContinued": true})),
                 event("output", json!({"category": "stdout", "output": "42\n"})),
@@ -128,7 +145,11 @@ struct Rig {
 impl Rig {
     fn new() -> Self {
         let t0 = Instant::now();
-        let mut core = SessionCore::new(LanguageRegistry::from_extensions(&[]), CoreOptions::default(), t0);
+        let mut core = SessionCore::new(
+            LanguageRegistry::from_extensions(&[]),
+            CoreOptions::default(),
+            t0,
+        );
         core.set_workspace_folder(uri("/w"));
         Rig {
             core,
@@ -149,10 +170,21 @@ impl Rig {
     /// registered as it does at activation.
     fn fixture() -> Self {
         let mut rig = Rig::new();
-        rig.files.insert("/w/.vscode/launch.json".into(), LAUNCH_JSON.into());
+        rig.files
+            .insert("/w/.vscode/launch.json".into(), LAUNCH_JSON.into());
         rig.open("/w/main.py", MAIN_PY);
         rig.ext("$registerDebugTypes", vec![json!(["debugpy"])]);
-        rig.ext("$registerDebugConfigurationProvider", vec![json!("debugpy"), json!(1), json!(false), json!(true), json!(true), json!(7)]);
+        rig.ext(
+            "$registerDebugConfigurationProvider",
+            vec![
+                json!("debugpy"),
+                json!(1),
+                json!(false),
+                json!(true),
+                json!(true),
+                json!(7),
+            ],
+        );
         rig.calls.clear();
         rig.ui.clear();
         rig
@@ -201,7 +233,11 @@ impl Rig {
             for e in fx {
                 match e {
                     Effect::Rpc { token, call } => {
-                        let args: Vec<Value> = call.args.iter().map(|a| a.as_json().cloned().unwrap_or(Value::Null)).collect();
+                        let args: Vec<Value> = call
+                            .args
+                            .iter()
+                            .map(|a| a.as_json().cloned().unwrap_or(Value::Null))
+                            .collect();
                         self.calls.push((call.method.to_owned(), args.clone()));
                         match call.method {
                             "$sendDAMessage" => {
@@ -211,35 +247,57 @@ impl Rig {
                                 if message["type"] == "request" {
                                     self.dap.push(message.clone());
                                     for answer in self.adapter.answer(&message) {
-                                        let input = self.request("$acceptDAMessage", vec![json!(handle), answer]);
+                                        let input = self.request(
+                                            "$acceptDAMessage",
+                                            vec![json!(handle), answer],
+                                        );
                                         queue.push_back(input);
                                     }
                                 }
                             }
                             "$startDASession" => {
                                 if let Some(t) = token {
-                                    queue.push_back(Input::RpcReply { token: t, result: Ok(Value::Null) });
+                                    queue.push_back(Input::RpcReply {
+                                        token: t,
+                                        result: Ok(Value::Null),
+                                    });
                                 }
                                 let id = args[1]["id"].clone();
                                 let cached = self.request("$sessionCached", vec![id]);
                                 queue.push_back(cached);
                             }
-                            "$resolveDebugConfiguration" | "$resolveDebugConfigurationWithSubstitutedVariables" => {
+                            "$resolveDebugConfiguration"
+                            | "$resolveDebugConfigurationWithSubstitutedVariables" => {
                                 if let Some(t) = token {
-                                    let answer = self.resolve.clone().unwrap_or_else(|| args[2].clone());
-                                    queue.push_back(Input::RpcReply { token: t, result: Ok(answer) });
+                                    let answer =
+                                        self.resolve.clone().unwrap_or_else(|| args[2].clone());
+                                    queue.push_back(Input::RpcReply {
+                                        token: t,
+                                        result: Ok(answer),
+                                    });
                                 }
                             }
                             _ => {
                                 if let Some(t) = token {
-                                    queue.push_back(Input::RpcReply { token: t, result: Ok(Value::Null) });
+                                    queue.push_back(Input::RpcReply {
+                                        token: t,
+                                        result: Ok(Value::Null),
+                                    });
                                 }
                             }
                         }
                     }
                     Effect::ReadFile { uri, purpose } => {
-                        let result = self.files.get(&uri.path).map(|t| t.as_bytes().to_vec()).ok_or_else(|| "EntryNotFound (FileSystemError)".to_owned());
-                        queue.push_back(Input::FileRead { uri, purpose, result });
+                        let result = self
+                            .files
+                            .get(&uri.path)
+                            .map(|t| t.as_bytes().to_vec())
+                            .ok_or_else(|| "EntryNotFound (FileSystemError)".to_owned());
+                        queue.push_back(Input::FileRead {
+                            uri,
+                            purpose,
+                            result,
+                        });
                     }
                     Effect::Respond { req, result } => self.responses.push((req, result)),
                     Effect::Ui(SessionUpdate::Debug(update)) => self.ui.push(update),
@@ -254,15 +312,27 @@ impl Rig {
     }
 
     fn calls_of(&self, method: &str) -> Vec<&Vec<Value>> {
-        self.calls.iter().filter(|(m, _)| m == method).map(|(_, a)| a).collect()
+        self.calls
+            .iter()
+            .filter(|(m, _)| m == method)
+            .map(|(_, a)| a)
+            .collect()
     }
 
     fn dap_commands(&self) -> Vec<String> {
-        self.dap.iter().map(|m| m["command"].as_str().unwrap_or("").to_owned()).collect()
+        self.dap
+            .iter()
+            .map(|m| m["command"].as_str().unwrap_or("").to_owned())
+            .collect()
     }
 
     fn dap_request(&self, command: &str) -> Value {
-        self.dap.iter().rev().find(|m| m["command"] == command).cloned().unwrap_or_else(|| panic!("no {command} request in {:#?}", self.dap))
+        self.dap
+            .iter()
+            .rev()
+            .find(|m| m["command"] == command)
+            .cloned()
+            .unwrap_or_else(|| panic!("no {command} request in {:#?}", self.dap))
     }
 
     fn sessions(&self) -> Vec<SessionInfo> {
@@ -281,16 +351,27 @@ impl Rig {
     }
 
     fn response(&self, req: u32) -> &Result<Reply, Option<Value>> {
-        &self.responses.iter().rev().find(|(r, _)| *r == req).unwrap_or_else(|| panic!("no response to {req}: {:?}", self.responses)).1
+        &self
+            .responses
+            .iter()
+            .rev()
+            .find(|(r, _)| *r == req)
+            .unwrap_or_else(|| panic!("no response to {req}: {:?}", self.responses))
+            .1
     }
 
     /// Start the configuration of `launch.json` and let the adapter run to its first stop.
     fn start_python(&mut self) {
-        self.debug(DebugRequest::Start { selector: ConfigSelector::Name("Python: Current File".into()) });
+        self.debug(DebugRequest::Start {
+            selector: ConfigSelector::Name("Python: Current File".into()),
+        });
     }
 
     fn toggle(&mut self, line: u32) {
-        self.debug(DebugRequest::ToggleBreakpoint { uri: uri("/w/main.py"), line });
+        self.debug(DebugRequest::ToggleBreakpoint {
+            uri: uri("/w/main.py"),
+            line,
+        });
     }
 }
 
@@ -311,15 +392,33 @@ fn fr_l31_42_start_from_launch_json_resolves_and_starts_the_adapter() {
         ],
         "{names:?}"
     );
-    let events: Vec<Value> = rig.calls_of("$activateByEvent").iter().take(3).map(|a| a[0].clone()).collect();
-    assert_eq!(events, vec![json!("onDebugResolve"), json!("onDebug"), json!("onDebugResolve:debugpy")]);
+    let events: Vec<Value> = rig
+        .calls_of("$activateByEvent")
+        .iter()
+        .take(3)
+        .map(|a| a[0].clone())
+        .collect();
+    assert_eq!(
+        events,
+        vec![
+            json!("onDebugResolve"),
+            json!("onDebug"),
+            json!("onDebugResolve:debugpy")
+        ]
+    );
 
     let resolve = rig.calls_of("$resolveDebugConfiguration")[0].clone();
     assert_eq!(resolve[0], json!(7));
     assert_eq!(resolve[1]["path"], "/w");
-    assert_eq!(resolve[2]["program"], "${file}", "providers see the configuration before substitution");
+    assert_eq!(
+        resolve[2]["program"], "${file}",
+        "providers see the configuration before substitution"
+    );
     let resolved = rig.calls_of("$resolveDebugConfigurationWithSubstitutedVariables")[0].clone();
-    assert_eq!(resolved[2]["program"], "/w/main.py", "the second chain sees the substituted values");
+    assert_eq!(
+        resolved[2]["program"], "/w/main.py",
+        "the second chain sees the substituted values"
+    );
 
     let started = rig.calls_of("$startDASession")[0].clone();
     assert_eq!(started[0], json!(1));
@@ -345,17 +444,32 @@ fn fr_l31_42_a_missing_launch_json_an_unknown_name_and_an_unsupported_type_fail_
     rig.start_python();
     rig.debug(DebugRequest::Stop { session: None });
     rig.ui.clear();
-    rig.debug(DebugRequest::Start { selector: ConfigSelector::Name("Nope".into()) });
-    assert!(failure(&rig).unwrap().contains("no configuration"), "{:?}", failure(&rig));
+    rig.debug(DebugRequest::Start {
+        selector: ConfigSelector::Name("Nope".into()),
+    });
+    assert!(
+        failure(&rig).unwrap().contains("no configuration"),
+        "{:?}",
+        failure(&rig)
+    );
 
     let mut rig = Rig::fixture();
     rig.files.remove("/w/.vscode/launch.json");
     rig.start_python();
-    assert!(failure(&rig).is_some(), "a missing file is no configuration");
+    assert!(
+        failure(&rig).is_some(),
+        "a missing file is no configuration"
+    );
 
     let mut rig = Rig::fixture();
-    rig.debug(DebugRequest::Start { selector: ConfigSelector::Config(json!({"type": "nope", "request": "launch", "name": "x"})) });
-    assert!(failure(&rig).unwrap().contains("'nope' is not supported"), "{:?}", failure(&rig));
+    rig.debug(DebugRequest::Start {
+        selector: ConfigSelector::Config(json!({"type": "nope", "request": "launch", "name": "x"})),
+    });
+    assert!(
+        failure(&rig).unwrap().contains("'nope' is not supported"),
+        "{:?}",
+        failure(&rig)
+    );
     assert!(!rig.methods().contains(&"$startDASession"));
 }
 
@@ -363,10 +477,15 @@ fn fr_l31_42_a_missing_launch_json_an_unknown_name_and_an_unsupported_type_fail_
 fn fr_l31_42_a_provider_that_answers_null_cancels_the_start() {
     let mut rig = Rig::fixture();
     rig.resolve = Some(Value::Null);
-    let config = json!({"type": "debugpy", "request": "launch", "name": "ext", "program": "/w/a.py"});
+    let config =
+        json!({"type": "debugpy", "request": "launch", "name": "ext", "program": "/w/a.py"});
     let req = rig.ext("$startDebugging", vec![Value::Null, config, json!({})]);
     assert!(!rig.methods().contains(&"$startDASession"));
-    assert!(matches!(rig.response(req), Ok(Reply::Json(Value::Bool(false)))), "{:?}", rig.response(req));
+    assert!(
+        matches!(rig.response(req), Ok(Reply::Json(Value::Bool(false)))),
+        "{:?}",
+        rig.response(req)
+    );
 }
 
 #[test]
@@ -376,7 +495,14 @@ fn fr_l31_42_dap_initialize_launch_breakpoints_configuration_done_order() {
     rig.start_python();
     assert_eq!(
         rig.dap_commands()[..6].to_vec(),
-        vec!["initialize", "launch", "setBreakpoints", "setFunctionBreakpoints", "setExceptionBreakpoints", "configurationDone"],
+        vec![
+            "initialize",
+            "launch",
+            "setBreakpoints",
+            "setFunctionBreakpoints",
+            "setExceptionBreakpoints",
+            "configurationDone"
+        ],
         "{:?}",
         rig.dap_commands()
     );
@@ -384,12 +510,18 @@ fn fr_l31_42_dap_initialize_launch_breakpoints_configuration_done_order() {
     assert_eq!(initialize["arguments"]["adapterID"], "debugpy");
     assert_eq!(initialize["arguments"]["linesStartAt1"], true);
     assert_eq!(initialize["arguments"]["pathFormat"], "path");
-    assert_eq!(initialize["arguments"]["supportsRunInTerminalRequest"], false);
+    assert_eq!(
+        initialize["arguments"]["supportsRunInTerminalRequest"],
+        false
+    );
     let launch = rig.dap_request("launch");
     assert_eq!(launch["arguments"]["program"], "/w/main.py");
     assert_eq!(launch["arguments"]["console"], "internalConsole");
     let set = rig.dap_request("setBreakpoints");
-    assert_eq!(set["arguments"]["source"], json!({"name": "main.py", "path": "/w/main.py"}));
+    assert_eq!(
+        set["arguments"]["source"],
+        json!({"name": "main.py", "path": "/w/main.py"})
+    );
     assert_eq!(set["arguments"]["lines"], json!([2]));
     assert_eq!(set["arguments"]["breakpoints"], json!([{"line": 2}]));
     // The sequence numbers count up from 1 and never repeat.
@@ -408,7 +540,10 @@ fn fr_l31_42_dap_initialize_launch_breakpoints_configuration_done_order() {
         _ => None,
     });
     let source = verified.expect("a breakpoints update");
-    assert!(source[0].verified && source[0].adapter_line == Some(2), "{source:?}");
+    assert!(
+        source[0].verified && source[0].adapter_line == Some(2),
+        "{source:?}"
+    );
 }
 
 #[test]
@@ -417,7 +552,13 @@ fn fr_l31_42_a_session_without_breakpoints_still_sends_configuration_done_and_ru
     rig.start_python();
     assert_eq!(
         rig.dap_commands()[..5].to_vec(),
-        vec!["initialize", "launch", "setFunctionBreakpoints", "setExceptionBreakpoints", "configurationDone"]
+        vec![
+            "initialize",
+            "launch",
+            "setFunctionBreakpoints",
+            "setExceptionBreakpoints",
+            "configurationDone"
+        ]
     );
     assert_eq!(rig.sessions()[0].state, SessionState::Running);
 }
@@ -437,8 +578,16 @@ fn fr_l31_42_stopped_event_loads_threads_and_stack_and_updates_the_session() {
     );
     assert_eq!((session.thread_id, session.frame_id), (Some(1), Some(10)));
     let commands = rig.dap_commands();
-    let after = &commands[commands.iter().position(|c| c == "configurationDone").unwrap()..];
-    assert!(after.contains(&"threads".to_owned()) && after.contains(&"stackTrace".to_owned()) && after.contains(&"scopes".to_owned()), "{commands:?}");
+    let after = &commands[commands
+        .iter()
+        .position(|c| c == "configurationDone")
+        .unwrap()..];
+    assert!(
+        after.contains(&"threads".to_owned())
+            && after.contains(&"stackTrace".to_owned())
+            && after.contains(&"scopes".to_owned()),
+        "{commands:?}"
+    );
     assert_eq!(rig.dap_request("stackTrace")["arguments"]["threadId"], 1);
     assert_eq!(rig.dap_request("scopes")["arguments"]["frameId"], 10);
 
@@ -450,7 +599,12 @@ fn fr_l31_42_stopped_event_loads_threads_and_stack_and_updates_the_session() {
     assert_eq!((threads[0].id, threads[0].name.as_str()), (1, "MainThread"));
     assert!(threads[0].stopped);
     let stack = rig.ui.iter().find_map(|u| match u {
-        DebugUpdate::CallStack { session, thread_id, frames, .. } => Some((session.clone(), *thread_id, frames.clone())),
+        DebugUpdate::CallStack {
+            session,
+            thread_id,
+            frames,
+            ..
+        } => Some((session.clone(), *thread_id, frames.clone())),
         _ => None,
     });
     let (stack_session, thread_id, frames) = stack.expect("a call stack");
@@ -458,13 +612,20 @@ fn fr_l31_42_stopped_event_loads_threads_and_stack_and_updates_the_session() {
     assert_eq!((frames[0].id, frames[0].line, frames[0].column), (10, 2, 1));
     assert_eq!(frames[0].uri, Some(uri("/w/main.py")));
     let scopes = rig.ui.iter().find_map(|u| match u {
-        DebugUpdate::Scopes { frame_id: 10, scopes, .. } => Some(scopes.clone()),
+        DebugUpdate::Scopes {
+            frame_id: 10,
+            scopes,
+            ..
+        } => Some(scopes.clone()),
         _ => None,
     });
     assert_eq!(scopes.expect("scopes")[0].variables_reference, 100);
     // The extension host is told which frame has the focus.
     let focus = rig.calls_of("$acceptStackFrameFocus")[0][0].clone();
-    assert_eq!((focus["kind"].as_str(), focus["frameId"].as_i64()), (Some("stackFrame"), Some(10)));
+    assert_eq!(
+        (focus["kind"].as_str(), focus["frameId"].as_i64()),
+        (Some("stackFrame"), Some(10))
+    );
 }
 
 #[test]
@@ -473,12 +634,31 @@ fn fr_l31_42_stepping_runs_the_session_and_a_stop_without_a_thread_uses_the_firs
     rig.toggle(2);
     rig.start_python();
     let id = rig.session_id();
-    rig.debug(DebugRequest::StepOver { session: id.clone(), thread_id: 1 });
+    rig.debug(DebugRequest::StepOver {
+        session: id.clone(),
+        thread_id: 1,
+    });
     assert_eq!(rig.dap_request("next")["arguments"], json!({"threadId": 1}));
-    assert_eq!(rig.sessions()[0].state, SessionState::Running, "a step the adapter answered without `stopped` leaves the thread running");
-    rig.adapter_says(1, event("stopped", json!({"reason": "pause", "allThreadsStopped": true})));
-    assert!(matches!(&rig.sessions()[0].state, SessionState::Stopped { reason, thread_id: None, .. } if reason == "pause"));
-    assert_eq!(rig.dap_request("stackTrace")["arguments"]["threadId"], 1, "the first listed thread");
+    assert_eq!(
+        rig.sessions()[0].state,
+        SessionState::Running,
+        "a step the adapter answered without `stopped` leaves the thread running"
+    );
+    rig.adapter_says(
+        1,
+        event(
+            "stopped",
+            json!({"reason": "pause", "allThreadsStopped": true}),
+        ),
+    );
+    assert!(
+        matches!(&rig.sessions()[0].state, SessionState::Stopped { reason, thread_id: None, .. } if reason == "pause")
+    );
+    assert_eq!(
+        rig.dap_request("stackTrace")["arguments"]["threadId"],
+        1,
+        "the first listed thread"
+    );
 }
 
 #[test]
@@ -503,7 +683,9 @@ fn fr_l31_42_breakpoint_change_during_a_session_sends_set_breakpoints_and_a_delt
         .iter()
         .rev()
         .find_map(|u| match u {
-            DebugUpdate::Breakpoints { source, .. } => source.iter().find(|b| b.line == 3).map(|b| b.id.clone()),
+            DebugUpdate::Breakpoints { source, .. } => {
+                source.iter().find(|b| b.line == 3).map(|b| b.id.clone())
+            }
             _ => None,
         })
         .unwrap();
@@ -515,35 +697,71 @@ fn fr_l31_42_breakpoint_change_during_a_session_sends_set_breakpoints_and_a_delt
         enabled: true,
     });
     let set = rig.dap_request("setBreakpoints");
-    assert_eq!(set["arguments"]["breakpoints"][1], json!({"line": 3, "condition": "x > 40", "hitCondition": "2", "logMessage": "x is {x}"}));
+    assert_eq!(
+        set["arguments"]["breakpoints"][1],
+        json!({"line": 3, "condition": "x > 40", "hitCondition": "2", "logMessage": "x is {x}"})
+    );
     let changed = rig.calls_of("$acceptBreakpointsDelta")[1][0].clone();
     assert_eq!(changed["changed"][0]["condition"], "x > 40");
     assert_eq!(changed["changed"][0]["logMessage"], "x is {x}");
 
     // Disabling leaves the line out; removing the last ones sends the file empty.
-    rig.debug(DebugRequest::EditBreakpoint { id: id.clone(), condition: None, hit_condition: None, log_message: None, enabled: false });
-    assert_eq!(rig.dap_request("setBreakpoints")["arguments"]["lines"], json!([2]));
+    rig.debug(DebugRequest::EditBreakpoint {
+        id: id.clone(),
+        condition: None,
+        hit_condition: None,
+        log_message: None,
+        enabled: false,
+    });
+    assert_eq!(
+        rig.dap_request("setBreakpoints")["arguments"]["lines"],
+        json!([2])
+    );
     rig.debug(DebugRequest::RemoveBreakpoint { id });
     rig.toggle(2);
-    assert_eq!(rig.dap_request("setBreakpoints")["arguments"]["lines"], json!([]));
+    assert_eq!(
+        rig.dap_request("setBreakpoints")["arguments"]["lines"],
+        json!([])
+    );
     let last = rig.calls_of("$acceptBreakpointsDelta").last().unwrap()[0].clone();
     assert_eq!(last["removed"].as_array().map(Vec::len), Some(1));
 }
 
 #[test]
-fn fr_l31_42_breakpoints_from_the_extension_api_join_the_registry_and_function_breakpoints_are_sent() {
+fn fr_l31_42_breakpoints_from_the_extension_api_join_the_registry_and_function_breakpoints_are_sent(
+) {
     let mut rig = Rig::fixture();
     rig.start_python();
     let dto = json!({"type": "sourceMulti", "uri": uri("/w/main.py"), "lines": [{"id": "ext-1", "enabled": true, "line": 2, "character": 0, "condition": "y"}]});
     rig.ext("$registerBreakpoints", vec![json!([dto])]);
     let set = rig.dap_request("setBreakpoints");
-    assert_eq!(set["arguments"]["breakpoints"], json!([{"line": 3, "condition": "y"}]));
-    rig.debug(DebugRequest::AddFunctionBreakpoint { name: "main".into() });
-    assert_eq!(rig.dap_request("setFunctionBreakpoints")["arguments"]["breakpoints"], json!([{"name": "main"}]));
-    rig.debug(DebugRequest::SetExceptionFilter { filter: "raised".into(), enabled: true });
-    assert_eq!(rig.dap_request("setExceptionBreakpoints")["arguments"]["filters"], json!(["raised"]));
-    rig.ext("$unregisterBreakpoints", vec![json!(["ext-1"]), json!([]), json!([])]);
-    assert_eq!(rig.dap_request("setBreakpoints")["arguments"]["lines"], json!([]));
+    assert_eq!(
+        set["arguments"]["breakpoints"],
+        json!([{"line": 3, "condition": "y"}])
+    );
+    rig.debug(DebugRequest::AddFunctionBreakpoint {
+        name: "main".into(),
+    });
+    assert_eq!(
+        rig.dap_request("setFunctionBreakpoints")["arguments"]["breakpoints"],
+        json!([{"name": "main"}])
+    );
+    rig.debug(DebugRequest::SetExceptionFilter {
+        filter: "raised".into(),
+        enabled: true,
+    });
+    assert_eq!(
+        rig.dap_request("setExceptionBreakpoints")["arguments"]["filters"],
+        json!(["raised"])
+    );
+    rig.ext(
+        "$unregisterBreakpoints",
+        vec![json!(["ext-1"]), json!([]), json!([])],
+    );
+    assert_eq!(
+        rig.dap_request("setBreakpoints")["arguments"]["lines"],
+        json!([])
+    );
     let removed = rig.calls_of("$acceptBreakpointsDelta").last().unwrap()[0]["removed"].clone();
     assert_eq!(removed, json!(["ext-1"]));
 }
@@ -554,20 +772,36 @@ fn fr_l31_42_output_and_append_debug_console_reach_the_console() {
     rig.toggle(2);
     rig.start_python();
     let id = rig.session_id();
-    rig.debug(DebugRequest::Continue { session: id.clone(), thread_id: 1 });
-    assert_eq!(rig.dap_request("continue")["arguments"], json!({"threadId": 1}));
+    rig.debug(DebugRequest::Continue {
+        session: id.clone(),
+        thread_id: 1,
+    });
+    assert_eq!(
+        rig.dap_request("continue")["arguments"],
+        json!({"threadId": 1})
+    );
     let lines: Vec<(Option<String>, String, String)> = rig
         .ui
         .iter()
         .filter_map(|u| match u {
-            DebugUpdate::Console { session, entry } => Some((session.clone(), entry.category.clone(), entry.text.clone())),
+            DebugUpdate::Console { session, entry } => {
+                Some((session.clone(), entry.category.clone(), entry.text.clone()))
+            }
             _ => None,
         })
         .collect();
-    assert_eq!(lines, vec![(Some(id.clone()), "stdout".to_owned(), "42\n".to_owned())]);
+    assert_eq!(
+        lines,
+        vec![(Some(id.clone()), "stdout".to_owned(), "42\n".to_owned())]
+    );
 
     // The adapter ended the program: the session is gone from the list after one `Terminated`.
-    assert!(rig.sessions().iter().all(|s| s.state == SessionState::Terminated) || rig.sessions().is_empty());
+    assert!(
+        rig.sessions()
+            .iter()
+            .all(|s| s.state == SessionState::Terminated)
+            || rig.sessions().is_empty()
+    );
     assert!(rig.dap_commands().contains(&"disconnect".to_owned()));
 
     // Text an extension appends goes to the console too, marked as a notice.
@@ -581,7 +815,10 @@ fn fr_l31_42_output_and_append_debug_console_reach_the_console() {
         _ => None,
     });
     let (session, entry) = entry.expect("a console line");
-    assert_eq!((session, entry.category.as_str(), entry.text.as_str()), (Some(id), "important", "from the extension\n"));
+    assert_eq!(
+        (session, entry.category.as_str(), entry.text.as_str()),
+        (Some(id), "important", "from the extension\n")
+    );
 }
 
 #[test]
@@ -590,37 +827,100 @@ fn fr_l31_42_evaluate_and_variables_round_trip() {
     rig.toggle(2);
     rig.start_python();
     let id = rig.session_id();
-    rig.debug(DebugRequest::Variables { session: id.clone(), reference: 100 });
-    assert_eq!(rig.dap_request("variables")["arguments"], json!({"variablesReference": 100}));
+    rig.debug(DebugRequest::Variables {
+        session: id.clone(),
+        reference: 100,
+    });
+    assert_eq!(
+        rig.dap_request("variables")["arguments"],
+        json!({"variablesReference": 100})
+    );
     let vars = rig.ui.iter().rev().find_map(|u| match u {
-        DebugUpdate::Variables { reference: 100, variables, error, .. } => Some((variables.clone(), error.clone())),
+        DebugUpdate::Variables {
+            reference: 100,
+            variables,
+            error,
+            ..
+        } => Some((variables.clone(), error.clone())),
         _ => None,
     });
     let (variables, error) = vars.expect("variables");
     assert_eq!(error, None);
-    assert_eq!((variables[0].name.as_str(), variables[0].value.as_str(), variables[0].type_name.as_deref()), ("x", "41", Some("int")));
+    assert_eq!(
+        (
+            variables[0].name.as_str(),
+            variables[0].value.as_str(),
+            variables[0].type_name.as_deref()
+        ),
+        ("x", "41", Some("int"))
+    );
 
-    rig.debug(DebugRequest::Evaluate { id: 5, session: id.clone(), frame_id: Some(10), expression: "x + 1".into(), context: EvalContext::Repl });
-    assert_eq!(rig.dap_request("evaluate")["arguments"], json!({"expression": "x + 1", "context": "repl", "frameId": 10}));
+    rig.debug(DebugRequest::Evaluate {
+        id: 5,
+        session: id.clone(),
+        frame_id: Some(10),
+        expression: "x + 1".into(),
+        context: EvalContext::Repl,
+    });
+    assert_eq!(
+        rig.dap_request("evaluate")["arguments"],
+        json!({"expression": "x + 1", "context": "repl", "frameId": 10})
+    );
     let evaluated = rig.ui.iter().rev().find_map(|u| match u {
         DebugUpdate::Evaluated { id: 5, result, .. } => Some(result.clone()),
         _ => None,
     });
-    assert_eq!(evaluated, Some(Ok(EvalResult { result: "42".into(), type_name: Some("int".into()), variables_reference: 0 })));
+    assert_eq!(
+        evaluated,
+        Some(Ok(EvalResult {
+            result: "42".into(),
+            type_name: Some("int".into()),
+            variables_reference: 0
+        }))
+    );
 
     // A watch asks in its own context, and a session that is not there answers with an error.
-    rig.debug(DebugRequest::Evaluate { id: 6, session: id, frame_id: None, expression: "y".into(), context: EvalContext::Watch });
-    assert_eq!(rig.dap_request("evaluate")["arguments"], json!({"expression": "y", "context": "watch"}));
-    rig.debug(DebugRequest::Evaluate { id: 7, session: "nope".into(), frame_id: None, expression: "y".into(), context: EvalContext::Repl });
-    assert!(rig.ui.iter().any(|u| matches!(u, DebugUpdate::Evaluated { id: 7, result: Err(_), .. })));
+    rig.debug(DebugRequest::Evaluate {
+        id: 6,
+        session: id,
+        frame_id: None,
+        expression: "y".into(),
+        context: EvalContext::Watch,
+    });
+    assert_eq!(
+        rig.dap_request("evaluate")["arguments"],
+        json!({"expression": "y", "context": "watch"})
+    );
+    rig.debug(DebugRequest::Evaluate {
+        id: 7,
+        session: "nope".into(),
+        frame_id: None,
+        expression: "y".into(),
+        context: EvalContext::Repl,
+    });
+    assert!(rig.ui.iter().any(|u| matches!(
+        u,
+        DebugUpdate::Evaluated {
+            id: 7,
+            result: Err(_),
+            ..
+        }
+    )));
 }
 
 #[test]
 fn fr_l31_42_extension_start_debugging_and_stop_debugging() {
     let mut rig = Rig::fixture();
     let config = json!({"type": "debugpy", "request": "launch", "name": "ext", "program": "${workspaceFolder}/a.py"});
-    let started = rig.ext("$startDebugging", vec![json!(uri("/w")), config, json!({"noDebug": true})]);
-    assert!(matches!(rig.response(started), Ok(Reply::Json(Value::Bool(true)))), "{:?}", rig.response(started));
+    let started = rig.ext(
+        "$startDebugging",
+        vec![json!(uri("/w")), config, json!({"noDebug": true})],
+    );
+    assert!(
+        matches!(rig.response(started), Ok(Reply::Json(Value::Bool(true)))),
+        "{:?}",
+        rig.response(started)
+    );
     let launch = rig.dap_request("launch");
     assert_eq!(launch["arguments"]["program"], "/w/a.py");
     assert_eq!(launch["arguments"]["noDebug"], true);
@@ -628,16 +928,34 @@ fn fr_l31_42_extension_start_debugging_and_stop_debugging() {
     assert_eq!(rig.sessions()[0].name, "ext");
 
     let stopped = rig.ext("$stopDebugging", vec![json!(id.clone())]);
-    assert_eq!(rig.dap_request("disconnect")["arguments"], json!({"restart": false, "terminateDebuggee": true}));
-    assert!(matches!(rig.response(stopped), Ok(Reply::Empty)), "{:?}", rig.response(stopped));
+    assert_eq!(
+        rig.dap_request("disconnect")["arguments"],
+        json!({"restart": false, "terminateDebuggee": true})
+    );
+    assert!(
+        matches!(rig.response(stopped), Ok(Reply::Empty)),
+        "{:?}",
+        rig.response(stopped)
+    );
     let methods = rig.methods();
-    assert!(methods.contains(&"$stopDASession") && methods.contains(&"$acceptDebugSessionTerminated"), "{methods:?}");
+    assert!(
+        methods.contains(&"$stopDASession") && methods.contains(&"$acceptDebugSessionTerminated"),
+        "{methods:?}"
+    );
     let ended = rig.ui.iter().rev().find_map(|u| match u {
-        DebugUpdate::Sessions { sessions, .. } if sessions.iter().any(|s| s.state == SessionState::Terminated) => Some(sessions.clone()),
+        DebugUpdate::Sessions { sessions, .. }
+            if sessions.iter().any(|s| s.state == SessionState::Terminated) =>
+        {
+            Some(sessions.clone())
+        }
         _ => None,
     });
     assert_eq!(ended.expect("one update with the ended session")[0].id, id);
-    assert!(rig.core.unimplemented_calls().is_empty(), "{:?}", rig.core.unimplemented_calls());
+    assert!(
+        rig.core.unimplemented_calls().is_empty(),
+        "{:?}",
+        rig.core.unimplemented_calls()
+    );
 
     let unknown = rig.ext("$stopDebugging", vec![json!("not-a-session")]);
     assert!(matches!(rig.response(unknown), Err(Some(_))));
@@ -652,7 +970,11 @@ fn fr_l31_42_a_disconnect_the_adapter_never_answers_ends_after_the_timeout() {
     rig.start_python();
     let id = rig.session_id();
     rig.debug(DebugRequest::Stop { session: Some(id) });
-    assert_eq!(rig.sessions()[0].state, SessionState::Running, "waiting for the adapter");
+    assert_eq!(
+        rig.sessions()[0].state,
+        SessionState::Running,
+        "waiting for the adapter"
+    );
     let wake = rig.core.next_wake().expect("a deadline");
     assert!(wake > rig.now, "the disconnect timeout lies ahead");
     rig.now += Duration::from_millis(600);
@@ -667,9 +989,25 @@ fn fr_l31_42_adapter_requests_run_in_terminal_is_refused_and_start_debugging_sta
     rig.start_python();
     let parent = rig.session_id();
     rig.adapter_says(1, json!({"type": "request", "seq": 50, "command": "runInTerminal", "arguments": {"args": ["python"], "cwd": "/w"}}));
-    let refused = rig.dap_all.iter().rev().find(|m| m["request_seq"] == 50).cloned().expect("an answer");
-    assert_eq!((refused["type"].as_str(), refused["success"].as_bool(), refused["command"].as_str()), (Some("response"), Some(false), Some("runInTerminal")));
-    assert!(refused["message"].as_str().unwrap().contains("internalConsole"));
+    let refused = rig
+        .dap_all
+        .iter()
+        .rev()
+        .find(|m| m["request_seq"] == 50)
+        .cloned()
+        .expect("an answer");
+    assert_eq!(
+        (
+            refused["type"].as_str(),
+            refused["success"].as_bool(),
+            refused["command"].as_str()
+        ),
+        (Some("response"), Some(false), Some("runInTerminal"))
+    );
+    assert!(refused["message"]
+        .as_str()
+        .unwrap()
+        .contains("internalConsole"));
 
     rig.adapter_says(
         1,
@@ -677,15 +1015,31 @@ fn fr_l31_42_adapter_requests_run_in_terminal_is_refused_and_start_debugging_sta
     );
     let child = rig.calls_of("$startDASession").last().unwrap()[1].clone();
     assert_eq!(child["parent"], json!(parent));
-    assert_eq!(child["type"], "debugpy", "the child is of the parent's type");
+    assert_eq!(
+        child["type"], "debugpy",
+        "the child is of the parent's type"
+    );
     assert_eq!(child["configuration"]["program"], "/w/child.py");
-    let answer = rig.dap_all.iter().rev().find(|m| m["request_seq"] == 51).cloned().expect("an answer to startDebugging");
+    let answer = rig
+        .dap_all
+        .iter()
+        .rev()
+        .find(|m| m["request_seq"] == 51)
+        .cloned()
+        .expect("an answer to startDebugging");
     assert_eq!(answer["success"], true);
     assert_eq!(rig.sessions().len(), 2);
 
     // The child ends with its parent.
-    rig.debug(DebugRequest::Stop { session: Some(parent) });
-    assert!(rig.sessions().iter().all(|s| s.state == SessionState::Terminated) || rig.sessions().is_empty());
+    rig.debug(DebugRequest::Stop {
+        session: Some(parent),
+    });
+    assert!(
+        rig.sessions()
+            .iter()
+            .all(|s| s.state == SessionState::Terminated)
+            || rig.sessions().is_empty()
+    );
     assert_eq!(rig.calls_of("$stopDASession").len(), 2);
 }
 
@@ -694,7 +1048,9 @@ fn fr_l31_42_restart_without_the_request_stops_and_starts_the_same_configuration
     let mut rig = Rig::fixture();
     rig.start_python();
     let first = rig.session_id();
-    rig.debug(DebugRequest::Restart { session: first.clone() });
+    rig.debug(DebugRequest::Restart {
+        session: first.clone(),
+    });
     let started = rig.calls_of("$startDASession");
     assert_eq!(started.len(), 2, "a second session started");
     assert_ne!(started[1][1]["id"], json!(first));
@@ -703,26 +1059,57 @@ fn fr_l31_42_restart_without_the_request_stops_and_starts_the_same_configuration
 }
 
 #[test]
-fn fr_l31_42_list_configurations_reads_launch_json_and_provided_configurations_come_from_the_provider() {
+fn fr_l31_42_list_configurations_reads_launch_json_and_provided_configurations_come_from_the_provider(
+) {
     let mut rig = Rig::fixture();
     rig.debug(DebugRequest::ListConfigurations);
     let list = rig.ui.iter().find_map(|u| match u {
-        DebugUpdate::Configurations { configurations, error } => Some((configurations.clone(), error.clone())),
+        DebugUpdate::Configurations {
+            configurations,
+            error,
+        } => Some((configurations.clone(), error.clone())),
         _ => None,
     });
     let (configs, error) = list.expect("a list");
     assert_eq!(error, None);
-    assert_eq!((configs[0].name.as_str(), configs[0].debug_type.as_str(), configs[0].request.as_str()), ("Python: Current File", "debugpy", "launch"));
+    assert_eq!(
+        (
+            configs[0].name.as_str(),
+            configs[0].debug_type.as_str(),
+            configs[0].request.as_str()
+        ),
+        ("Python: Current File", "debugpy", "launch")
+    );
 
-    rig.ext("$registerDebugConfigurationProvider", vec![json!("debugpy"), json!(1), json!(true), json!(false), json!(false), json!(8)]);
-    rig.debug(DebugRequest::ProvideConfigurations { debug_type: "debugpy".into() });
+    rig.ext(
+        "$registerDebugConfigurationProvider",
+        vec![
+            json!("debugpy"),
+            json!(1),
+            json!(true),
+            json!(false),
+            json!(false),
+            json!(8),
+        ],
+    );
+    rig.debug(DebugRequest::ProvideConfigurations {
+        debug_type: "debugpy".into(),
+    });
     assert_eq!(rig.calls_of("$provideDebugConfigurations")[0][0], json!(8));
 }
 
 #[test]
 fn fr_l31_42_extension_host_calls_without_behaviour_are_counted_not_answered_wrong() {
     let mut rig = Rig::fixture();
-    let req = rig.ext("$registerDebugVisualizer", vec![json!("ext.id"), json!("viz")]);
+    let req = rig.ext(
+        "$registerDebugVisualizer",
+        vec![json!("ext.id"), json!("viz")],
+    );
     assert!(matches!(rig.response(req), Ok(Reply::Empty)));
-    assert_eq!(rig.core.unimplemented_calls().get(&(PROXY.to_owned(), "$registerDebugVisualizer".to_owned())), Some(&1));
+    assert_eq!(
+        rig.core
+            .unimplemented_calls()
+            .get(&(PROXY.to_owned(), "$registerDebugVisualizer".to_owned())),
+        Some(&1)
+    );
 }

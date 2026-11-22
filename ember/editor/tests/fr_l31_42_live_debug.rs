@@ -17,7 +17,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use ember_editor::debugger::{ConfigSelector, DebugRequest, DebugUpdate, ScopeInfo, SessionInfo, SessionState, VariableInfo};
+use ember_editor::debugger::{
+    ConfigSelector, DebugRequest, DebugUpdate, ScopeInfo, SessionInfo, SessionState, VariableInfo,
+};
 use ember_editor::{EditorSession, SessionConfig, SessionUpdate};
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -41,26 +43,47 @@ impl Server {
         let data = root.join("data");
         let machine = data.join("data").join("Machine");
         std::fs::create_dir_all(&machine).unwrap();
-        std::fs::write(machine.join("settings.json"), "{ \"extensions.verifySignature\": false }\n").unwrap();
-        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        std::fs::write(
+            machine.join("settings.json"),
+            "{ \"extensions.verifySignature\": false }\n",
+        )
+        .unwrap();
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
         let log = std::fs::File::create(root.join("server.log")).unwrap();
         let log_err = log.try_clone().unwrap();
         let mut cmd = Command::new(bin);
-        cmd.args(["--host", "127.0.0.1", "--port", &port.to_string(), "--without-connection-token", "--accept-server-license-terms"])
-            .arg("--server-data-dir")
-            .arg(&data)
-            .arg("--extensions-dir")
-            .arg(extensions)
-            .args(["--telemetry-level", "off"])
-            .stdin(Stdio::null())
-            .stdout(log)
-            .stderr(log_err);
+        cmd.args([
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+            "--without-connection-token",
+            "--accept-server-license-terms",
+        ])
+        .arg("--server-data-dir")
+        .arg(&data)
+        .arg("--extensions-dir")
+        .arg(extensions)
+        .args(["--telemetry-level", "off"])
+        .stdin(Stdio::null())
+        .stdout(log)
+        .stderr(log_err);
         {
             use std::os::unix::process::CommandExt;
             cmd.process_group(0);
         }
-        let child = cmd.spawn().unwrap_or_else(|e| panic!("spawn {}: {e}", bin.display()));
-        Self { child: Some(child), port, root: root.to_path_buf() }
+        let child = cmd
+            .spawn()
+            .unwrap_or_else(|e| panic!("spawn {}: {e}", bin.display()));
+        Self {
+            child: Some(child),
+            port,
+            root: root.to_path_buf(),
+        }
     }
 }
 
@@ -103,7 +126,9 @@ struct Seen {
 
 impl Seen {
     fn stopped(&self) -> bool {
-        self.sessions.iter().any(|s| matches!(s.state, SessionState::Stopped { .. }))
+        self.sessions
+            .iter()
+            .any(|s| matches!(s.state, SessionState::Stopped { .. }))
     }
 
     fn take(&mut self, update: DebugUpdate) {
@@ -122,14 +147,21 @@ impl Seen {
 }
 
 /// Read updates into `seen` until `done` says so; `false` on timeout.
-async fn pump(rx: &mut UnboundedReceiver<SessionUpdate>, seen: &mut Seen, until: Duration, mut done: impl FnMut(&Seen) -> bool) -> bool {
+async fn pump(
+    rx: &mut UnboundedReceiver<SessionUpdate>,
+    seen: &mut Seen,
+    until: Duration,
+    mut done: impl FnMut(&Seen) -> bool,
+) -> bool {
     let end = tokio::time::Instant::now() + until;
     loop {
         if done(seen) {
             return true;
         }
         match tokio::time::timeout_at(end, rx.recv()).await {
-            Ok(Some(SessionUpdate::ConnectionLost { reason })) => panic!("connection lost: {reason}"),
+            Ok(Some(SessionUpdate::ConnectionLost { reason })) => {
+                panic!("connection lost: {reason}")
+            }
             Ok(Some(SessionUpdate::Debug(update))) => seen.take(update),
             Ok(Some(_)) => {}
             Ok(None) => panic!("session ended"),
@@ -145,7 +177,11 @@ fn install(bin: &Path, root: &Path, extensions: &Path, spec: &str) {
     // install only.
     let user = root.join("data").join("data").join("User");
     std::fs::create_dir_all(&user).expect("create the server user settings dir");
-    std::fs::write(user.join("settings.json"), r#"{"extensions.verifySignature": false}"#).expect("write the server user settings");
+    std::fs::write(
+        user.join("settings.json"),
+        r#"{"extensions.verifySignature": false}"#,
+    )
+    .expect("write the server user settings");
     let out = Command::new(bin)
         .args(["--install-extension", spec, "--extensions-dir"])
         .arg(extensions)
@@ -155,7 +191,12 @@ fn install(bin: &Path, root: &Path, extensions: &Path, spec: &str) {
         .stdin(Stdio::null())
         .output()
         .expect("install an extension");
-    assert!(out.status.success(), "installing {spec} failed: {}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "installing {spec} failed: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -165,10 +206,19 @@ async fn fr_l31_42_live_python_stops_at_a_breakpoint_reads_a_variable_and_runs_o
         eprintln!("[live-debug] EMBER_OSE_SERVER not set; skipping");
         return;
     };
-    if Command::new("python3").arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().map_or(true, |s| !s.success()) {
+    if Command::new("python3")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_or(true, |s| !s.success())
+    {
         // In CI the live job installs Python for this test, so a missing one is a broken job,
         // not a reason to pass without running.
-        assert!(std::env::var_os("CI").is_none(), "python3 is not on the PATH of the CI live job");
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "python3 is not on the PATH of the CI live job"
+        );
         eprintln!("[live-debug] python3 is not on the PATH; skipping");
         return;
     }
@@ -182,8 +232,16 @@ async fn fr_l31_42_live_python_stops_at_a_breakpoint_reads_a_variable_and_runs_o
     std::fs::write(ws.join(".vscode").join("launch.json"), LAUNCH_JSON).unwrap();
 
     let ext = root.join("ext");
-    for (var, default) in [("EMBER_PYTHON_EXTENSION", "ms-python.python"), ("EMBER_DEBUGPY_EXTENSION", "ms-python.debugpy")] {
-        install(&bin, &root, &ext, &std::env::var(var).unwrap_or_else(|_| default.to_owned()));
+    for (var, default) in [
+        ("EMBER_PYTHON_EXTENSION", "ms-python.python"),
+        ("EMBER_DEBUGPY_EXTENSION", "ms-python.debugpy"),
+    ] {
+        install(
+            &bin,
+            &root,
+            &ext,
+            &std::env::var(var).unwrap_or_else(|_| default.to_owned()),
+        );
     }
 
     let server = Server::start(&bin, &root, &ext);
@@ -194,10 +252,11 @@ async fn fr_l31_42_live_python_stops_at_a_breakpoint_reads_a_variable_and_runs_o
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     let config = SessionConfig::new(addr.clone(), ws.to_str().unwrap());
-    let (session, mut rx) = tokio::time::timeout(Duration::from_secs(120), EditorSession::connect_tcp(config))
-        .await
-        .expect("connect timed out")
-        .unwrap_or_else(|e| panic!("connect: {e}"));
+    let (session, mut rx) =
+        tokio::time::timeout(Duration::from_secs(120), EditorSession::connect_tcp(config))
+            .await
+            .expect("connect timed out")
+            .unwrap_or_else(|e| panic!("connect: {e}"));
     let mut seen = Seen::default();
 
     // The active editor is what `${file}` stands for.
@@ -207,14 +266,21 @@ async fn fr_l31_42_live_python_stops_at_a_breakpoint_reads_a_variable_and_runs_o
     loop {
         match tokio::time::timeout_at(end, rx.recv()).await {
             Ok(Some(SessionUpdate::Opened { .. })) => break,
-            Ok(Some(SessionUpdate::ConnectionLost { reason })) => panic!("connection lost: {reason}"),
+            Ok(Some(SessionUpdate::ConnectionLost { reason })) => {
+                panic!("connection lost: {reason}")
+            }
             Ok(Some(_)) => {}
             Ok(None) => panic!("session ended"),
             Err(_) => panic!("main.py did not open"),
         }
     }
     session.focus(uri.clone()).unwrap();
-    session.debug(DebugRequest::ToggleBreakpoint { uri: uri.clone(), line: 2 }).unwrap();
+    session
+        .debug(DebugRequest::ToggleBreakpoint {
+            uri: uri.clone(),
+            line: 2,
+        })
+        .unwrap();
 
     // The debug types arrive when the extension host has read the extensions; start again until
     // the type is known.
@@ -222,8 +288,13 @@ async fn fr_l31_42_live_python_stops_at_a_breakpoint_reads_a_variable_and_runs_o
     let mut started = false;
     for attempt in 0..30 {
         seen.failed = None;
-        session.start_debugging(ConfigSelector::Name(CONFIG_NAME.into())).unwrap();
-        let outcome = pump(&mut rx, &mut seen, Duration::from_secs(20), |s| s.failed.is_some() || s.stopped()).await;
+        session
+            .start_debugging(ConfigSelector::Name(CONFIG_NAME.into()))
+            .unwrap();
+        let outcome = pump(&mut rx, &mut seen, Duration::from_secs(20), |s| {
+            s.failed.is_some() || s.stopped()
+        })
+        .await;
         match (&seen.failed, outcome) {
             (None, true) => {
                 started = true;
@@ -237,29 +308,74 @@ async fn fr_l31_42_live_python_stops_at_a_breakpoint_reads_a_variable_and_runs_o
             (None, false) => break,
         }
     }
-    assert!(started, "no stop at the breakpoint; the console said {:?}", seen.console);
-    println!("[live-debug] stopped after {:.1} s", t.elapsed().as_secs_f64());
+    assert!(
+        started,
+        "no stop at the breakpoint; the console said {:?}",
+        seen.console
+    );
+    println!(
+        "[live-debug] stopped after {:.1} s",
+        t.elapsed().as_secs_f64()
+    );
 
     // The stop loaded the stack and the scopes of its top frame; read `x` from the locals.
-    let found = pump(&mut rx, &mut seen, Duration::from_secs(30), |s| !s.scopes.is_empty()).await;
+    let found = pump(&mut rx, &mut seen, Duration::from_secs(30), |s| {
+        !s.scopes.is_empty()
+    })
+    .await;
     assert!(found, "no scopes after the stop");
-    let locals = seen.scopes.iter().find(|s| s.name.to_lowercase().contains("local")).unwrap_or(&seen.scopes[0]).variables_reference;
-    let id = seen.sessions.iter().find(|s| matches!(s.state, SessionState::Stopped { .. })).expect("a stopped session").id.clone();
+    let locals = seen
+        .scopes
+        .iter()
+        .find(|s| s.name.to_lowercase().contains("local"))
+        .unwrap_or(&seen.scopes[0])
+        .variables_reference;
+    let id = seen
+        .sessions
+        .iter()
+        .find(|s| matches!(s.state, SessionState::Stopped { .. }))
+        .expect("a stopped session")
+        .id
+        .clone();
     let thread = match &seen.sessions.iter().find(|s| s.id == id).unwrap().state {
         SessionState::Stopped { thread_id, .. } => thread_id.expect("the stop names a thread"),
         other => panic!("not stopped: {other:?}"),
     };
-    session.debug(DebugRequest::Variables { session: id.clone(), reference: locals }).unwrap();
-    let got = pump(&mut rx, &mut seen, Duration::from_secs(30), |s| s.variables.iter().any(|v| v.name == "x")).await;
+    session
+        .debug(DebugRequest::Variables {
+            session: id.clone(),
+            reference: locals,
+        })
+        .unwrap();
+    let got = pump(&mut rx, &mut seen, Duration::from_secs(30), |s| {
+        s.variables.iter().any(|v| v.name == "x")
+    })
+    .await;
     assert!(got, "no variable x; got {:?}", seen.variables);
     let x = seen.variables.iter().find(|v| v.name == "x").unwrap();
     assert_eq!(x.value, "41", "{:?}", seen.variables);
 
     // Continue: the program prints 42 and the session ends.
-    session.debug(DebugRequest::Continue { session: id, thread_id: thread }).unwrap();
-    let ended = pump(&mut rx, &mut seen, Duration::from_secs(60), |s| s.terminated).await;
-    assert!(ended, "the session did not end; the console said {:?}", seen.console);
-    assert!(seen.console.contains("42"), "the console said {:?}", seen.console);
+    session
+        .debug(DebugRequest::Continue {
+            session: id,
+            thread_id: thread,
+        })
+        .unwrap();
+    let ended = pump(&mut rx, &mut seen, Duration::from_secs(60), |s| {
+        s.terminated
+    })
+    .await;
+    assert!(
+        ended,
+        "the session did not end; the console said {:?}",
+        seen.console
+    );
+    assert!(
+        seen.console.contains("42"),
+        "the console said {:?}",
+        seen.console
+    );
 
     session.shutdown().await;
     drop(server);

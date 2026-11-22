@@ -340,8 +340,8 @@ impl Client {
         Ok(p)
     }
 
-    /// Delete an empty project (FR-L26, #384). The state drops it at once; the server's
-    /// `project_deleted` push tells every other client.
+    /// Delete an archived project (FR-L26, D52 Q2/Q4, #327, #384). The state drops the project
+    /// and its sessions at once; the server's `project_deleted` push tells every other client.
     pub async fn delete_project(&self, name: &str) -> Result<(), crate::api::ProjectPatchError> {
         self.inner.api.delete_project(name).await?;
         self.inner.apply(Input::Push(Push::ProjectDeleted { name: name.to_string() }));

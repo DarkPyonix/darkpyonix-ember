@@ -903,12 +903,9 @@ impl Composer {
         let window = crate::ui::window_size::current_window_size();
         { use ::compose_rust::ui::Popover; Popover!(open, dismiss.clone(), placement = compose_rust::PopoverPlacement::Bottom, align = compose_rust::PopoverAlign::Start, offset = composer_pop_offset(COMPOSER_PAD), modifier = pop_anchor_weight(
                 share,
-                // A fixed height, not `equal_height` (#849): the toolkit then counted a child
-                // holding a scrolling list as 0, so the row took the rail's height and the list
-                // showed one row. TODO(#673): the pin measures a scrolling child of fixed height
-                // at that height (compose-rust#766), but this list fills the row rather than
-                // having a height of its own, so going back to `equal_height` waits for a capture
-                // of the open picker at 1440 and 390 showing every row. `elevation(0)` as in
+                // A fixed height, not `equal_height` (#849): the scrolling list fills the row
+                // rather than carrying its own fixed height, so `model_popover_height` keeps all
+                // rows visible instead of collapsing to the rail's height. `elevation(0)` as in
                 // `PopoverMenu`: the box casts its own shadow.
                 with_shadows(Modifier::new(), theme.shadow_lg())
                     .elevation(0.0)

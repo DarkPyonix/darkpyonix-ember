@@ -234,6 +234,8 @@ pub fn server_roots(shim_dir: Option<PathBuf>) -> Arc<dyn Fn() -> Vec<u32> + Sen
     })
 }
 
+type ConfirmationConsole = Arc<dyn Fn(&str, &Claimant) + Send + Sync>;
+
 /// How the door is set up. [`DoorConfig::for_server`] is what `main.rs` uses; tests replace
 /// the parts they drive.
 #[derive(Clone)]
@@ -244,7 +246,7 @@ pub struct DoorConfig {
     /// The process table.
     pub procs: Arc<dyn Fn() -> ProcTable + Send + Sync>,
     /// Where a confirmation code is shown: `(code, claimant)`. The server console.
-    pub console: Arc<dyn Fn(&str, &Claimant) + Send + Sync>,
+    pub console: ConfirmationConsole,
     pub confirm_timeout: Duration,
 }
 

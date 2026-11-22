@@ -17,7 +17,7 @@ NFR-H2 as merged for review in darkpyonix-core PR #34 (branch `feat/m4-hub-ember
 | ----------- | --- |
 | A computer joins by signing in; no address or port entered (FR-N2) | Device link: `POST /device-links` → user code + verification URL → person approves (browser, or Ember as the account's main server for `computer` / `client` links) → device polls `POST /device-links/{id}/token` with an Ed25519 signature over `darkpyonix-hub/v2/link\n<link_id>\n<challenge>` → device token (`dpd_`, headers only) + resolve token (`dpr_`). A restarted device resumes with `GET /device-links/{id}`. |
 | Address directory | The transport publishes its signed record to `PUT /pkarr/{z32 key}` and resolves peers with `GET /pkarr/{key}?token=<resolve token>` (a device token there is refused, NFR-H2). |
-| Relay | `GET /config` `relay_urls`; fallback none: no relay is derived from the hub host since #229 (INTENT D36). On the letify backend the relay URL comes from the main server's device record, then `EMBER_RELAY_URL` overrides. |
+| Relay | `GET /config` `relay_urls`; fallback none: no relay is derived from the hub host since #229 (INTENT D36). On the letify backend the relay URL comes from the main server's device record, then `EMBER_RELAY_URL` overrides. The main server names its relay in its signed record (#1044); the app's pairing reads it, the node not yet. |
 | Add a computer without pasting a `PeerAddr` | `GET /devices` → pick → `POST /api/hub/devices/{endpoint_id}/computer {token}`; the computer row stores the bare peer id, resolved through the directory. |
 | FR-N3 allow-list from the account | Opt-in sync: `hub` rows of the server's `devices` table = account devices (minus the server). |
 | Revocation on the hub | `401 {code: device_removed}` (or a code-less `401` from a hub older than the codes) = removed; seen by a held `GET /devices?wait=25` (FR-H9) within the hub's ~2 s check when `/config` is served, else by `GET /me` every 60 s. Recorded, surfaced, token no longer used. `401 {code: invalid_credentials}` is not a revocation. |
@@ -227,6 +227,6 @@ Left open or worth confirming:
   either); the routes are ready for it.
 - Approving codes from a phone over the transport is local-only for now (it grants account
   membership).
-- The Ember client does not register yet; `Role::Client` and the link flow are ready for it.
+- The Ember app registers as a `client` and pairs with a main server from the account's list (#1044, `ember_hub::pairing`, `ember/app/src/hub_pairing.rs`; written, not compiled or run by its author). The node does not read the relay from the main server's record yet.
 - Lock files: `server`, `node`, `transport` `Cargo.lock` must be refreshed for the new
   dependencies before CI's `cargo test --locked` passes.

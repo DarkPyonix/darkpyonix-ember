@@ -1959,10 +1959,7 @@ mod tests {
         compose_rust::window::reset_window_size();
         let mut host = Host::new(|| Box::new(Recomposer::new(FilesScreen)));
         let mut all = texts(&decode_batch(host.rebuild().expect("rebuild")).expect("decode"));
-        let event = HostEvent {
-            node_id: 0,
-            handler_id: 0,
-            payload: EventPayload::WindowSizeChanged {
+        let event = HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
                 width_dp: 1440.0,
                 height_dp: 900.0,
                 class: WindowSizeClass::Expanded,
@@ -1971,8 +1968,7 @@ mod tests {
                 safe_area_leading: 0.0,
                 safe_area_trailing: 0.0,
                 safe_area_bottom: 0.0,
-            },
-        };
+            });
         let (bytes, _) = host.dispatch(event).expect("dispatch");
         all.extend(texts(&decode_batch(bytes).expect("decode")));
         let has = |want: &str| all.iter().any(|t| t.contains(want));
@@ -2036,11 +2032,7 @@ mod tests {
                 _ => None,
             })
             .expect("대화 열기 OnClick handler");
-        host.dispatch(HostEvent {
-            node_id: open_node,
-            handler_id: open_handler,
-            payload: EventPayload::Clicked,
-        })
+        host.dispatch(HostEvent::new(open_node, open_handler, EventPayload::Clicked))
         .expect("dispatch click");
         assert_eq!(
             ui.route.get_untracked(),
@@ -2070,11 +2062,7 @@ mod tests {
                 _ => None,
             })
             .expect("보내기 OnClick handler");
-        host.dispatch(HostEvent {
-            node_id: send_node,
-            handler_id: send_handler,
-            payload: EventPayload::Clicked,
-        })
+        host.dispatch(HostEvent::new(send_node, send_handler, EventPayload::Clicked))
         .expect("dispatch send click");
         assert_eq!(sent_to.lock().expect("lock").as_deref(), Some("demo-s1"));
     }

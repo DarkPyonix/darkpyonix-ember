@@ -1,0 +1,5 @@
+error: missing required argument `on_dismiss` for Sheet!
+ --> tests/compile-fail/fr_l32_sheet_without_on_dismiss.rs:7:62
+  |
+7 |     { use ::compose_rust::ui::Sheet; Sheet!(open, modifier = modifier) };
+  |                                                              ^^^^^^^^

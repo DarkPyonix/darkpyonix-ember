@@ -109,4 +109,17 @@ describe("editor view", () => {
     expect(v.value).toBe("# T");
     expect(viewToSource(v, 1, false)).toBe('darkpyonix.markdown("""\n# T\n""", silent=True)\n\n\n');
   });
+
+  it("unwraps and round-trips # @markup: quarkdown cells byte-identically (FR-F14)", () => {
+    const text =
+      "# %% [markdown]\n" +
+      "# @markup: quarkdown\n" +
+      'darkpyonix.markdown("""\n.doctype {paged}\n# Title\n""", silent=True, markup="quarkdown")\n';
+    const nb = textToView(text);
+    expect(nb.cells).toHaveLength(1);
+    expect(nb.cells[0].kind).toBe("markup");
+    expect(nb.cells[0].value).toBe(".doctype {paged}\n# Title");
+    expect(nb.cells[0].meta?.metadata?.markup).toBe("quarkdown");
+    expect(viewToText(nb)).toBe(text);
+  });
 });

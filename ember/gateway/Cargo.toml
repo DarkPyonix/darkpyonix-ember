@@ -1,0 +1,21 @@
+[package]
+name = "ember-gateway"
+version = "0.1.0"
+edition = "2021"
+description = "Ember's in-app IDE gateway: a loopback HTTP listener that pipes each request to the computer's OSE over the relay stream (SPEC FR-W5b, #80)"
+license = "Apache-2.0"
+
+# Mobile-safe and UI-free. The gateway reaches the OSE only through ember-client's API (the relay
+# stream), never through transport types (SPEC FR-N5).
+[dependencies]
+ember-client = { path = "../client" }
+getrandom = "0.3"
+hex = "0.4"
+thiserror = "2"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+tracing = "0.1"
+
+[dev-dependencies]
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.28"

@@ -613,7 +613,7 @@ Rejected: messages as the only channel between sessions.
 
 Rejected: the node receiving directly from the sending device (option B in `.scratch/p1S/773-options.md`), because the node admits only its servers (D39, D42) and the stream protocol cannot yet carry a real chunk; a spool on the server, because the file would then exist on a third machine; plain HTTP node targets; letting the server alone decide auto-accept for every offer, because a non-owner offer must still be answered.
 
-**Status.** Specified only (`FR-F1`–`FR-F10`, Draft; issues #152, #487). Not built. First unit: the `ember/transfer` state machine over the fake transport. The Files menu mock is separate UI work.
+**Status.** Built and tested on `develop` (`FR-F1`–`FR-F16` and `FR-L27`–`FR-L27.10`; issues #152, #487, #527, #773, #786): `ember/transfer`, server `/api/transfers` and computer relay, `ember-node` receiver, `ember-client` upload/resume, and the `compose-rust` Files screen (with native file dialog on macOS). Relaying to a phone or another non-computer device (`FR-F7`) is not built. Remaining human/owner checks (`darkpyonix#141`): two-computer send, macOS UI send via native panel, and `#786` stopped-server capture.
 
 ### D25: One client design on every OS, after the owner's reference images; Liquid Glass on iOS only
 

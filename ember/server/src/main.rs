@@ -117,9 +117,8 @@ async fn serve_main() -> anyhow::Result<()> {
     // Keys in the OS keystore where available (FR-S13, EMBER_KEYSTORE=file|os|auto).
     ember_node::keystore::install_from_env()?;
 
-    let data_dir = std::env::var_os("EMBER_DATA_DIR").map(PathBuf::from).unwrap_or_else(|| {
-        PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".ember")
-    });
+    // `EMBER_DATA_DIR`, else `<HOME or USERPROFILE>/.ember`: the folder the app looks in (#1042).
+    let data_dir = ember_server::runtime_dir::data_dir_from_vars(|name| std::env::var_os(name));
     std::fs::create_dir_all(&data_dir)?;
     // FR-A11 (#784): agy homes and the OSE data root live in the data dir's sibling runtime dir;
     // a data dir from before is moved once (idempotent).

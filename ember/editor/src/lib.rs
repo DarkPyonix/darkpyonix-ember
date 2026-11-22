@@ -77,7 +77,8 @@ pub use crate::semantic::{decode_semantic_tokens, encode_semantic_tokens_dto, ov
 pub use crate::commands::{parse_contributed_commands, ContributedCommand};
 pub use crate::fallback::{fallback_for, vscode_fallback_url, ConnectOutcome, Fallback, FallbackTarget};
 pub use crate::extensions::InstalledExtension;
-pub use crate::engine::{CoreOptions, Effect, ExternalChange, Input, SessionCore, SessionUpdate};
+pub use crate::document::DiskBase;
+pub use crate::engine::{CoreOptions, Effect, ExternalChange, FileNoticeKind, Input, SessionCore, SessionUpdate};
 pub use crate::languages::LanguageInfo;
 pub use crate::text_format::{DocumentFormat, Encoding, EncodingMode, Eol};
 pub use crate::coords::{WidgetPos, WidgetRange};

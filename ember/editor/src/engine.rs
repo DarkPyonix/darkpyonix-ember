@@ -11,11 +11,11 @@
 //! Time is an input too (`now` on every call, plus [`SessionCore::next_wake`]), so debounces are
 //! deterministic in tests.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use ember_editor_conn::document::DocumentMirror;
-use ember_editor_conn::exthost::{self, Call, DocumentsAndEditorsDelta, MainThreadCall};
+use ember_editor_conn::exthost::{self, Call, DocumentsAndEditorsDelta};
 use ember_editor_conn::remote_fs::{FileChange, FileChangeType};
 use ember_editor_conn::rpc::{js_error, Arg, IncomingRequest, Reply};
 use ember_editor_conn::uri::UriComponents;
@@ -33,11 +33,11 @@ use crate::inline::{self, EndReason, Ghost, InlineDoc, ReplyOutcome, TypeThrough
 use crate::languages::{LanguageInfo, LanguageRegistry};
 use crate::text_format::{decode_as, decode_detect, decode_reload, DocumentFormat, Encoding, EncodingMode, Eol};
 use crate::registry::{KindTag, ProviderKind, Registry, RegistryChange};
-use crate::replies::session_reply;
 use crate::search::{FileHits, ReplaceReport, ReplaceRequest, SearchEnd, SearchRequest, Target};
 use crate::semantic::{decode_semantic_tokens, overlay_semantic_runs, DocSemanticTokens};
 use crate::widget::{Decoration, DecorationKind, WidgetCommand, WidgetEvent};
 
+mod actors;
 mod language;
 
 /// How many versions behind the document an answer of the highlighter may be and still be shown.
@@ -340,6 +340,8 @@ pub struct SessionCore {
     /// Open `$showMessage` calls by Ember message id (FR-L31.16).
     pending_messages: HashMap<u64, u32>,
     next_message_id: u64,
+    /// Extension-host requests no actor trait implements: (proxy, method) to how often they came.
+    unimplemented: BTreeMap<(String, String), u32>,
     touched: BTreeSet<String>,
     out: Vec<Effect>,
     now: Instant,
@@ -405,6 +407,7 @@ impl SessionCore {
             output_channels: Vec::new(),
             pending_messages: HashMap::new(),
             next_message_id: 0,
+            unimplemented: BTreeMap::new(),
             touched: BTreeSet::new(),
             out: Vec::new(),
             now,
@@ -547,6 +550,13 @@ impl SessionCore {
     /// first input.
     pub fn set_workspace_trust(&mut self, trust: crate::trust::WorkspaceTrust) {
         self.trust = trust;
+    }
+
+    /// The extension-host requests that fell back to the default reply because no actor trait
+    /// implements them: (proxy, method) to the number of calls. It decides which actor gets
+    /// behaviour next.
+    pub fn unimplemented_calls(&self) -> &BTreeMap<(String, String), u32> {
+        &self.unimplemented
     }
 
     pub fn workspace_trusted(&self) -> bool {
@@ -1101,15 +1111,9 @@ impl SessionCore {
 
     /// `MainThreadLanguages.$changeLanguage(resource, languageId)` (`languages.setTextDocumentLanguage`):
     /// refused for an id no extension contributes, as Code-OSS does.
-    fn on_change_language_request(&mut self, r: &IncomingRequest) {
-        let uri: Option<UriComponents> = r.args.first().and_then(Arg::as_json).and_then(|v| serde_json::from_value(v.clone()).ok());
-        let id = r.args.get(1).and_then(Arg::as_json).and_then(Value::as_str).map(str::to_owned);
-        let (Some(uri), Some(id)) = (uri, id) else {
-            self.respond(r.req, Err(Some(js_error("Error", "bad arguments"))));
-            return;
-        };
+    fn on_change_language_request(&mut self, req: u32, uri: UriComponents, id: String) {
         if !self.language_ids.iter().any(|l| *l == id) {
-            self.respond(r.req, Err(Some(js_error("Error", &format!("Unknown language id: {id}")))));
+            self.respond(req, Err(Some(js_error("Error", &format!("Unknown language id: {id}")))));
             return;
         }
         let key = uri.key();
@@ -1119,7 +1123,7 @@ impl SessionCore {
             self.rpc(exthost::activate_by_event(&format!("onLanguage:{id}")));
             self.rpc(exthost::accept_model_language_changed(&u, &id));
         }
-        self.respond(r.req, Ok(Reply::Empty));
+        self.respond(req, Ok(Reply::Empty));
     }
 
     // ---- save ---------------------------------------------------------------------------------
@@ -1539,139 +1543,7 @@ impl SessionCore {
                 }
             }
         }
-        let parsed = MainThreadCall::parse(&r);
-        match parsed {
-            Ok(MainThreadCall::DiagnosticsChangeMany { owner, entries }) => {
-                let keys = self.diagnostics.change_many(&owner, entries);
-                self.touched.extend(keys);
-                self.ui(SessionUpdate::Problems { problems: self.diagnostics.problems() });
-                self.respond(r.req, Ok(Reply::Empty));
-            }
-            Ok(MainThreadCall::DiagnosticsClear { owner }) => {
-                let keys = self.diagnostics.clear(&owner);
-                self.touched.extend(keys);
-                self.ui(SessionUpdate::Problems { problems: self.diagnostics.problems() });
-                self.respond(r.req, Ok(Reply::Empty));
-            }
-            Ok(MainThreadCall::ExecuteCommand { id, args }) => {
-                // The extension host runs its own commands locally; what reaches us is a workbench
-                // command. Setting a context key is a no-op for Ember for now: the API name is
-                // `setContext`, and the extension host at 1.139.1 sends it as `_setContext` (seen
-                // from mhutchie.git-graph in the first NFR-W1 deep run, #84).
-                if !matches!(id.as_str(), "setContext" | "_setContext") && !self.registry.has_command(&id) {
-                    let arguments = match args {
-                        Value::Array(a) => a,
-                        Value::Null => Vec::new(),
-                        other => vec![other],
-                    };
-                    self.ui(SessionUpdate::RunCommand { command: CommandDto { id, title: String::new(), tooltip: None, arguments } });
-                }
-                self.respond(r.req, Ok(Reply::Empty));
-            }
-            Ok(MainThreadCall::OutputRegister { label, .. }) => {
-                self.output_seq += 1;
-                let id = format!("ember-output-{}", self.output_seq);
-                self.output_channels.push(crate::output::OutputChannel::new(id.clone(), label));
-                self.ui(SessionUpdate::OutputChannels {
-                    channels: self.output_channels.clone(),
-                    active_id: Some(id.clone()),
-                });
-                self.respond(r.req, Ok(Reply::Json(serde_json::json!(id))));
-            }
-            Ok(MainThreadCall::OutputAppend { channel_id, value }) => {
-                if let Some(ch) = self.output_channels.iter_mut().find(|c| c.id == channel_id) {
-                    ch.append(&value);
-                    self.ui(SessionUpdate::OutputChannels {
-                        channels: self.output_channels.clone(),
-                        active_id: None,
-                    });
-                }
-                self.respond(r.req, Ok(Reply::Empty));
-            }
-            Ok(MainThreadCall::OutputUpdate { .. }) => {
-                self.respond(r.req, Ok(Reply::Empty));
-            }
-            Ok(MainThreadCall::OutputClear { channel_id, .. }) => {
-                if let Some(ch) = self.output_channels.iter_mut().find(|c| c.id == channel_id) {
-                    ch.clear();
-                    self.ui(SessionUpdate::OutputChannels {
-                        channels: self.output_channels.clone(),
-                        active_id: None,
-                    });
-                }
-                self.respond(r.req, Ok(Reply::Empty));
-            }
-            Ok(MainThreadCall::OutputReveal { channel_id, .. }) => {
-                self.ui(SessionUpdate::OutputChannels {
-                    channels: self.output_channels.clone(),
-                    active_id: Some(channel_id),
-                });
-                self.respond(r.req, Ok(Reply::Empty));
-            }
-            Ok(MainThreadCall::OutputDispose { channel_id }) => {
-                self.output_channels.retain(|c| c.id != channel_id);
-                self.ui(SessionUpdate::OutputChannels {
-                    channels: self.output_channels.clone(),
-                    active_id: None,
-                });
-                self.respond(r.req, Ok(Reply::Empty));
-            }
-            Ok(MainThreadCall::ShowMessage { severity, message, options, commands }) => {
-                // Code-OSS answers when the notification closes: the chosen button's handle, or
-                // `undefined`. The call stays open until the UI says (FR-L31.16).
-                self.next_message_id += 1;
-                let id = self.next_message_id;
-                self.pending_messages.insert(id, r.req);
-                self.ui(SessionUpdate::ExtensionMessage(crate::output::ExtensionMessage::from_show_message(
-                    id, severity, message, &options, &commands,
-                )));
-            }
-            Ok(MainThreadCall::RegisterTextSearchProvider { handle, scheme }) => {
-                // The remote scheme wins over `file` should both ever be registered.
-                if scheme == ember_editor_conn::uri::SCHEME_REMOTE || (scheme == "file" && self.search_provider.is_none()) {
-                    self.search_provider = Some(handle);
-                }
-                self.respond(r.req, Ok(Reply::Empty));
-            }
-            Ok(MainThreadCall::UnregisterSearchProvider { handle }) => {
-                if self.search_provider == Some(handle) {
-                    self.search_provider = None;
-                }
-                self.respond(r.req, Ok(Reply::Empty));
-            }
-            Ok(MainThreadCall::HandleTextMatch { session, matches, .. }) => {
-                self.respond(r.req, Ok(Reply::Empty));
-                self.on_text_matches(session, matches);
-            }
-            Ok(MainThreadCall::Other { proxy: Some("MainThreadDocuments"), method }) if method == "$tryOpenDocument" => {
-                self.on_try_open_document(&r);
-            }
-            Ok(MainThreadCall::Other { proxy: Some("MainThreadLanguages"), method }) if method == "$changeLanguage" => {
-                self.on_change_language_request(&r);
-            }
-            Ok(MainThreadCall::Other { proxy: Some("MainThreadBulkEdits"), method }) if method == "$tryApplyWorkspaceEdit" => {
-                self.on_try_apply_workspace_edit(&r);
-            }
-            Ok(MainThreadCall::Other { proxy, method }) => match self.trust.on_request(proxy, &method, r.req) {
-                // Workspace trust (FR-L31.18).
-                Some(crate::trust::TrustAnswer::Now(reply)) => self.respond(r.req, Ok(reply)),
-                Some(crate::trust::TrustAnswer::Ask) => self.out.push(Effect::Ui(SessionUpdate::WorkspaceTrustRequested)),
-                None => {
-                    let reply = session_reply(proxy, &method, self.reply_seq, &self.language_ids);
-                    self.respond(r.req, Ok(reply));
-                }
-            },
-            Ok(call) => {
-                let change = self.registry.apply(&call);
-                self.on_registry_change(change);
-                self.respond(r.req, Ok(Reply::Empty));
-            }
-            Err(e) => {
-                tracing::warn!("ember-editor: cannot decode {:?}.{}: {e}", r.proxy, r.method);
-                let reply = session_reply(r.proxy, &r.method, self.reply_seq, &self.language_ids);
-                self.respond(r.req, Ok(reply));
-            }
-        }
+        self.route_exthost_request(r);
     }
 
     fn on_registry_change(&mut self, change: RegistryChange) {
@@ -1741,17 +1613,12 @@ impl SessionCore {
     }
 
     /// `$tryOpenDocument(uri, options?)` → the URI once the document is in the extension host.
-    fn on_try_open_document(&mut self, r: &IncomingRequest) {
-        let uri: Option<UriComponents> = r.args.first().and_then(Arg::as_json).and_then(|v| serde_json::from_value(v.clone()).ok());
-        let Some(uri) = uri else {
-            self.respond(r.req, Err(Some(js_error("Error", "bad uri"))));
-            return;
-        };
+    fn on_try_open_document(&mut self, req: u32, uri: UriComponents) {
         let key = uri.key();
         if self.docs.contains_key(&key) || self.exthost_only.contains_key(&key) {
-            self.respond(r.req, Ok(Reply::Json(serde_json::to_value(&uri).unwrap_or(Value::Null))));
+            self.respond(req, Ok(Reply::Json(serde_json::to_value(&uri).unwrap_or(Value::Null))));
         } else {
-            self.out.push(Effect::ReadFile { uri, purpose: ReadPurpose::ExtHostOpen { req: r.req } });
+            self.out.push(Effect::ReadFile { uri, purpose: ReadPurpose::ExtHostOpen { req } });
         }
     }
 

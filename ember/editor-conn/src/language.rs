@@ -10,12 +10,12 @@
 
 use serde_json::{json, Value};
 
-use crate::exthost::{arg_i64, arg_json, j, proxy, Call, DocumentFilter, Position, Range};
+use crate::exthost::{j, proxy, Call, Position, Range};
 use crate::rpc::Arg;
 use crate::uri::UriComponents;
-use crate::Result;
 
-/// What a `$register…` call of this module registered, with the arguments Ember acts on.
+/// What a `$register…` call of this module registered, with the arguments Ember acts on. The
+/// session builds it from the generated `MainThreadLanguageFeatures` argument structs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LanguageFeature {
     /// `$registerDocumentSymbolProvider(handle, selector, label)` (L530).
@@ -36,63 +36,6 @@ pub enum LanguageFeature {
     Completion { trigger_characters: Vec<String>, supports_resolve: bool },
     /// `$registerSignatureHelpProvider(handle, selector, { triggerCharacters, retriggerCharacters })` (L580).
     SignatureHelp { trigger_characters: Vec<String>, retrigger_characters: Vec<String> },
-}
-
-fn strings(v: &Value) -> Vec<String> {
-    v.as_array().map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).collect()).unwrap_or_default()
-}
-
-/// Is `method` one of the registrations [`parse_registration`] decodes?
-pub fn is_registration(method: &str) -> bool {
-    matches!(
-        method,
-        "$registerDocumentSymbolProvider"
-            | "$registerDefinitionSupport"
-            | "$registerReferenceSupport"
-            | "$registerCodeActionSupport"
-            | "$registerDocumentFormattingSupport"
-            | "$registerRangeFormattingSupport"
-            | "$registerRenameSupport"
-            | "$registerCompletionsProvider"
-            | "$registerSignatureHelpProvider"
-    )
-}
-
-/// Decode one registration: handle, selector and the feature. `None` for any other method.
-pub fn parse_registration(method: &str, a: &[Arg]) -> Result<Option<(i64, Vec<DocumentFilter>, LanguageFeature)>> {
-    let feature = match method {
-        "$registerDocumentSymbolProvider" => {
-            LanguageFeature::DocumentSymbol { label: arg_json(a, 2).as_str().unwrap_or_default().to_owned() }
-        }
-        "$registerDefinitionSupport" => LanguageFeature::Definition,
-        "$registerReferenceSupport" => LanguageFeature::Reference,
-        "$registerCodeActionSupport" => LanguageFeature::CodeAction {
-            provided_kinds: strings(&arg_json(a, 2)["providedKinds"]),
-            supports_resolve: arg_json(a, 5).as_bool().unwrap_or(false),
-        },
-        "$registerDocumentFormattingSupport" => {
-            LanguageFeature::DocumentFormatting { display_name: arg_json(a, 3).as_str().unwrap_or_default().to_owned() }
-        }
-        "$registerRangeFormattingSupport" => {
-            LanguageFeature::RangeFormatting { display_name: arg_json(a, 3).as_str().unwrap_or_default().to_owned() }
-        }
-        "$registerRenameSupport" => LanguageFeature::Rename { supports_resolve: arg_json(a, 2).as_bool().unwrap_or(false) },
-        "$registerCompletionsProvider" => LanguageFeature::Completion {
-            trigger_characters: strings(&arg_json(a, 2)),
-            supports_resolve: arg_json(a, 3).as_bool().unwrap_or(false),
-        },
-        "$registerSignatureHelpProvider" => {
-            let meta = arg_json(a, 2);
-            LanguageFeature::SignatureHelp {
-                trigger_characters: strings(&meta["triggerCharacters"]),
-                retrigger_characters: strings(&meta["retriggerCharacters"]),
-            }
-        }
-        _ => return Ok(None),
-    };
-    let handle = arg_i64(a, 0)?;
-    let selector: Vec<DocumentFilter> = serde_json::from_value(arg_json(a, 1))?;
-    Ok(Some((handle, selector, feature)))
 }
 
 fn lang(method: &'static str, args: Vec<Arg>) -> Call {
@@ -271,10 +214,6 @@ pub fn release_signature_help(handle: i64, id: i64) -> Call {
 mod tests {
     use super::*;
 
-    fn args(v: Value) -> Vec<Arg> {
-        v.as_array().unwrap().iter().cloned().map(Arg::Json).collect()
-    }
-
     fn json_arg(c: &Call, i: usize) -> Value {
         c.args[i].as_json().cloned().unwrap()
     }
@@ -284,57 +223,6 @@ mod tests {
     }
 
     const POS: Position = Position { line_number: 3, column: 5 };
-
-    #[test]
-    fn fr_l31_13_decodes_every_registration() {
-        let sel = json!([{"language": "rust"}]);
-        let ext = json!({"value": "rust-lang.rust-analyzer", "_lower": "rust-lang.rust-analyzer"});
-        let cases: Vec<(&str, Value, LanguageFeature)> = vec![
-            ("$registerDocumentSymbolProvider", json!([1, sel, "Rust"]), LanguageFeature::DocumentSymbol { label: "Rust".into() }),
-            ("$registerDefinitionSupport", json!([1, sel]), LanguageFeature::Definition),
-            ("$registerReferenceSupport", json!([1, sel]), LanguageFeature::Reference),
-            (
-                "$registerCodeActionSupport",
-                json!([1, sel, {"providedKinds": ["quickfix", "refactor"]}, "rust-analyzer", "rust-lang.rust-analyzer", true]),
-                LanguageFeature::CodeAction { provided_kinds: vec!["quickfix".into(), "refactor".into()], supports_resolve: true },
-            ),
-            (
-                "$registerDocumentFormattingSupport",
-                json!([1, sel, ext, "rust-analyzer"]),
-                LanguageFeature::DocumentFormatting { display_name: "rust-analyzer".into() },
-            ),
-            (
-                "$registerRangeFormattingSupport",
-                json!([1, sel, ext, "rust-analyzer", false]),
-                LanguageFeature::RangeFormatting { display_name: "rust-analyzer".into() },
-            ),
-            ("$registerRenameSupport", json!([1, sel, true]), LanguageFeature::Rename { supports_resolve: true }),
-            (
-                "$registerCompletionsProvider",
-                json!([1, sel, [".", ":"], true, ext]),
-                LanguageFeature::Completion { trigger_characters: vec![".".into(), ":".into()], supports_resolve: true },
-            ),
-            (
-                "$registerSignatureHelpProvider",
-                json!([1, sel, {"triggerCharacters": ["(", ","], "retriggerCharacters": [")"]}]),
-                LanguageFeature::SignatureHelp { trigger_characters: vec!["(".into(), ",".into()], retrigger_characters: vec![")".into()] },
-            ),
-        ];
-        for (method, a, want) in cases {
-            assert!(is_registration(method), "{method}");
-            let (handle, selector, feature) = parse_registration(method, &args(a)).unwrap().unwrap();
-            assert_eq!(handle, 1, "{method}");
-            assert_eq!(selector[0].language.as_deref(), Some("rust"), "{method}");
-            assert_eq!(feature, want, "{method}");
-        }
-        assert!(!is_registration("$registerHoverProvider"));
-        assert_eq!(parse_registration("$registerHoverProvider", &args(json!([1, sel]))).unwrap(), None);
-    }
-
-    #[test]
-    fn fr_l31_13_registration_without_a_handle_is_malformed() {
-        assert!(parse_registration("$registerDefinitionSupport", &args(json!(["x", []]))).is_err());
-    }
 
     #[test]
     fn fr_l31_13_completion_calls() {

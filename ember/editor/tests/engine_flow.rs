@@ -725,3 +725,37 @@ fn engine_is_any_dirty_at_or_below_tracks_dirty_documents() {
 
     assert!(!c.is_any_dirty_at_or_below("/w/src"));
 }
+
+// Requests for actors or methods no trait implements get the fallback reply and are counted, so
+// the census says which actor needs behaviour next; implemented calls are not counted, and a
+// malformed implemented call falls back without a panic.
+#[test]
+fn fr_e1_unimplemented_main_thread_calls_fall_back_and_are_counted() {
+    let t0 = Instant::now();
+    let mut c = core(t0);
+    assert!(c.unimplemented_calls().is_empty());
+
+    let fx = c.handle(t0, request(1, "MainThreadClipboard", "$readText", vec![json!("text/plain")]));
+    assert_eq!(fx, vec![Effect::Respond { req: 1, result: Ok(Reply::Empty) }]);
+    let key = ("MainThreadClipboard".to_string(), "$readText".to_string());
+    assert_eq!(c.unimplemented_calls().get(&key), Some(&1));
+    let fx = c.handle(t0, request(2, "MainThreadClipboard", "$readText", vec![json!("text/plain")]));
+    assert_eq!(fx, vec![Effect::Respond { req: 2, result: Ok(Reply::Empty) }]);
+    assert_eq!(c.unimplemented_calls().get(&key), Some(&2));
+
+    // A method of an implemented actor that no trait method covers is counted too.
+    let fx = c.handle(t0, request(3, "MainThreadCommands", "$fireCommandActivationEvent", vec![json!("x")]));
+    assert_eq!(fx, vec![Effect::Respond { req: 3, result: Ok(Reply::Empty) }]);
+    assert_eq!(c.unimplemented_calls().get(&("MainThreadCommands".to_string(), "$fireCommandActivationEvent".to_string())), Some(&1));
+
+    // An implemented call is answered by its trait and is not in the census.
+    let fx = c.handle(t0, request(4, "MainThreadDiagnostics", "$clear", vec![json!("ts")]));
+    assert!(fx.contains(&Effect::Respond { req: 4, result: Ok(Reply::Empty) }));
+    assert!(!c.unimplemented_calls().keys().any(|(p, _)| p == "MainThreadDiagnostics"));
+
+    // An implemented call whose arguments do not decode gets the fallback reply.
+    let before = c.unimplemented_calls().clone();
+    let fx = c.handle(t0, request(5, "MainThreadDiagnostics", "$clear", vec![]));
+    assert_eq!(fx, vec![Effect::Respond { req: 5, result: Ok(Reply::Empty) }]);
+    assert_eq!(c.unimplemented_calls(), &before);
+}

@@ -25,7 +25,7 @@ use tokio::sync::mpsc;
 
 use crate::connection::{ConnEvent, Connection};
 use crate::management::{extension_id, RemoteAgentEnvironment};
-use crate::rpc::{Arg, IncomingRequest, Reply, RpcEvent, RpcPeer};
+use crate::rpc::{Arg, Reply, RpcEvent, RpcPeer};
 use crate::uri::UriComponents;
 use crate::{Error, Result};
 
@@ -756,177 +756,8 @@ pub fn execute_contributed_command(id: &str, args: &[Value]) -> Call {
 
 // ---- extension host → Ember -----------------------------------------------------------------
 
-/// Decoded `MainThread*` calls the editor core acts on. Everything else is
-/// [`MainThreadCall::Other`] and gets [`default_reply`]. Signatures (extHost.protocol.ts at
-/// [`crate::PINNED_COMMIT`]): `MainThreadCommandsShape` L135-139, `MainThreadDiagnosticsShape`
-/// L254-257, `MainThreadLanguageFeaturesShape` `$unregister` L529, `$registerCodeLensSupport` /
-/// `$emitCodeLensEvent` L531-532, `$registerHoverProvider` L537,
-/// `$registerInlineCompletionsSupport` L558-576, `$emitInlineCompletionsChange` L577.
-#[derive(Debug, Clone, PartialEq)]
-pub enum MainThreadCall {
-    DiagnosticsChangeMany { owner: String, entries: Vec<(UriComponents, Option<Vec<MarkerData>>)> },
-    DiagnosticsClear { owner: String },
-    RegisterHoverProvider { handle: i64, selector: Vec<DocumentFilter> },
-    RegisterCodeLensSupport { handle: i64, selector: Vec<DocumentFilter>, event_handle: Option<i64> },
-    EmitCodeLensEvent { event_handle: i64 },
-    /// `MainThreadLanguageFeatures.$registerFoldingRangeProvider(handle, selector, extensionId, eventHandle)` (FR-E6).
-    RegisterFoldingRangeProvider { handle: i64, selector: Vec<DocumentFilter>, event_handle: Option<i64> },
-    /// `MainThreadLanguageFeatures.$emitFoldingRangeEvent(eventHandle, ranges?)` (FR-E6).
-    EmitFoldingRangeEvent { event_handle: i64 },
-    /// `MainThreadLanguageFeatures.$registerDocumentSemanticTokensProvider(handle, selector, legend, eventHandle)` (FR-E6).
-    RegisterDocumentSemanticTokensProvider { handle: i64, selector: Vec<DocumentFilter>, legend: SemanticTokensLegend, event_handle: Option<i64> },
-    /// `MainThreadLanguageFeatures.$emitDocumentSemanticTokensEvent(eventHandle)` (FR-E6).
-    EmitDocumentSemanticTokensEvent { event_handle: i64 },
-    /// 17 positional args at the pinned commit (extHost.protocol.ts L558-576); only the stable
-    /// head is decoded, the rest kept raw.
-    RegisterInlineCompletionsSupport { handle: i64, selector: Vec<DocumentFilter>, extension_id: String, raw: Vec<Value> },
-    EmitInlineCompletionsChange { handle: i64 },
-    /// A registration of [`crate::language`]: completion, definition, references, rename, code actions,
-    /// formatting, signature help or document symbols (FR-L31.13).
-    RegisterLanguageFeature { handle: i64, selector: Vec<DocumentFilter>, feature: crate::language::LanguageFeature },
-    Unregister { handle: i64 },
-    RegisterCommand { id: String },
-    UnregisterCommand { id: String },
-    ExecuteCommand { id: String, args: Value },
-    /// MainThreadOutputService calls
-    OutputRegister { label: String, file: Option<UriComponents>, language_id: Option<String>, extension_id: Option<String> },
-    OutputUpdate { channel_id: String },
-    OutputAppend { channel_id: String, value: String },
-    OutputClear { channel_id: String, till: Option<i64> },
-    OutputReveal { channel_id: String, preserve_focus: bool },
-    OutputDispose { channel_id: String },
-    /// MainThreadMessageService.$showMessage
-    ShowMessage { severity: u8, message: String, options: Value, commands: Vec<Value> },
-    /// `MainThreadSearch.$registerTextSearchProvider(handle, scheme)` (FR-E7).
-    RegisterTextSearchProvider { handle: i64, scheme: String },
-    /// `MainThreadSearch.$unregisterProvider(handle)`: any search provider kind.
-    UnregisterSearchProvider { handle: i64 },
-    /// `MainThreadSearch.$handleTextMatch(handle, session, IRawFileMatch2[])`: matches of a running search.
-    HandleTextMatch { handle: i64, session: i64, matches: Vec<crate::search::FileMatch> },
-    Other { proxy: Option<&'static str>, method: String },
-}
-
 pub(crate) fn arg_json(args: &[Arg], i: usize) -> Value {
     args.get(i).and_then(Arg::as_json).cloned().unwrap_or(Value::Null)
-}
-
-pub(crate) fn arg_i64(args: &[Arg], i: usize) -> Result<i64> {
-    arg_json(args, i).as_i64().ok_or_else(|| Error::Malformed(format!("arg {i} is not an integer")))
-}
-
-fn arg_str(args: &[Arg], i: usize) -> Result<String> {
-    arg_json(args, i)
-        .as_str()
-        .map(str::to_owned)
-        .ok_or_else(|| Error::Malformed(format!("arg {i} is not a string")))
-}
-
-impl MainThreadCall {
-    pub fn parse(r: &IncomingRequest) -> Result<Self> {
-        let a = &r.args;
-        let m = r.method.as_str();
-        Ok(match (r.proxy, m) {
-            (Some(proxy::MAIN_THREAD_DIAGNOSTICS), "$changeMany") => Self::DiagnosticsChangeMany {
-                owner: arg_str(a, 0)?,
-                entries: serde_json::from_value(arg_json(a, 1))?,
-            },
-            (Some(proxy::MAIN_THREAD_DIAGNOSTICS), "$clear") => Self::DiagnosticsClear { owner: arg_str(a, 0)? },
-            (Some(proxy::MAIN_THREAD_LANGUAGE_FEATURES), "$registerHoverProvider") => Self::RegisterHoverProvider {
-                handle: arg_i64(a, 0)?,
-                selector: serde_json::from_value(arg_json(a, 1))?,
-            },
-            (Some(proxy::MAIN_THREAD_LANGUAGE_FEATURES), "$registerCodeLensSupport") => Self::RegisterCodeLensSupport {
-                handle: arg_i64(a, 0)?,
-                selector: serde_json::from_value(arg_json(a, 1))?,
-                event_handle: arg_json(a, 2).as_i64(),
-            },
-            (Some(proxy::MAIN_THREAD_LANGUAGE_FEATURES), "$emitCodeLensEvent") => {
-                Self::EmitCodeLensEvent { event_handle: arg_i64(a, 0)? }
-            }
-            (Some(proxy::MAIN_THREAD_LANGUAGE_FEATURES), "$registerFoldingRangeProvider") => Self::RegisterFoldingRangeProvider {
-                handle: arg_i64(a, 0)?,
-                selector: serde_json::from_value(arg_json(a, 1))?,
-                event_handle: arg_json(a, 3).as_i64(),
-            },
-            (Some(proxy::MAIN_THREAD_LANGUAGE_FEATURES), "$emitFoldingRangeEvent") => {
-                Self::EmitFoldingRangeEvent { event_handle: arg_i64(a, 0)? }
-            }
-            (Some(proxy::MAIN_THREAD_LANGUAGE_FEATURES), "$registerDocumentSemanticTokensProvider") => {
-                Self::RegisterDocumentSemanticTokensProvider {
-                    handle: arg_i64(a, 0)?,
-                    selector: serde_json::from_value(arg_json(a, 1))?,
-                    legend: serde_json::from_value(arg_json(a, 2))?,
-                    event_handle: arg_json(a, 3).as_i64(),
-                }
-            }
-            (Some(proxy::MAIN_THREAD_LANGUAGE_FEATURES), "$emitDocumentSemanticTokensEvent") => {
-                Self::EmitDocumentSemanticTokensEvent { event_handle: arg_i64(a, 0)? }
-            }
-            (Some(proxy::MAIN_THREAD_LANGUAGE_FEATURES), "$registerInlineCompletionsSupport") => {
-                Self::RegisterInlineCompletionsSupport {
-                    handle: arg_i64(a, 0)?,
-                    selector: serde_json::from_value(arg_json(a, 1))?,
-                    extension_id: arg_json(a, 3).as_str().unwrap_or_default().to_owned(),
-                    raw: a.iter().map(|x| x.as_json().cloned().unwrap_or(Value::Null)).collect(),
-                }
-            }
-            (Some(proxy::MAIN_THREAD_LANGUAGE_FEATURES), "$emitInlineCompletionsChange") => {
-                Self::EmitInlineCompletionsChange { handle: arg_i64(a, 0)? }
-            }
-            (Some(proxy::MAIN_THREAD_LANGUAGE_FEATURES), m) if crate::language::is_registration(m) => {
-                match crate::language::parse_registration(m, a)? {
-                    Some((handle, selector, feature)) => Self::RegisterLanguageFeature { handle, selector, feature },
-                    None => Self::Other { proxy: r.proxy, method: r.method.clone() },
-                }
-            }
-            (Some(proxy::MAIN_THREAD_LANGUAGE_FEATURES), "$unregister") => Self::Unregister { handle: arg_i64(a, 0)? },
-            (Some(proxy::MAIN_THREAD_COMMANDS), "$registerCommand") => Self::RegisterCommand { id: arg_str(a, 0)? },
-            (Some(proxy::MAIN_THREAD_COMMANDS), "$unregisterCommand") => Self::UnregisterCommand { id: arg_str(a, 0)? },
-            (Some(proxy::MAIN_THREAD_COMMANDS), "$executeCommand") => {
-                Self::ExecuteCommand { id: arg_str(a, 0)?, args: arg_json(a, 1) }
-            }
-            (Some(proxy::MAIN_THREAD_OUTPUT_SERVICE), "$register") => Self::OutputRegister {
-                label: arg_str(a, 0)?,
-                file: serde_json::from_value(arg_json(a, 1)).ok(),
-                language_id: arg_json(a, 2).as_str().map(str::to_owned),
-                extension_id: arg_json(a, 3).as_str().map(str::to_owned),
-            },
-            (Some(proxy::MAIN_THREAD_OUTPUT_SERVICE), "$update") => Self::OutputUpdate {
-                channel_id: arg_str(a, 0)?,
-            },
-            (Some(proxy::MAIN_THREAD_OUTPUT_SERVICE), "$append") => Self::OutputAppend {
-                channel_id: arg_str(a, 0)?,
-                value: arg_str(a, 1)?,
-            },
-            (Some(proxy::MAIN_THREAD_OUTPUT_SERVICE), "$clear") => Self::OutputClear {
-                channel_id: arg_str(a, 0)?,
-                till: arg_json(a, 1).as_i64(),
-            },
-            (Some(proxy::MAIN_THREAD_OUTPUT_SERVICE), "$reveal") => Self::OutputReveal {
-                channel_id: arg_str(a, 0)?,
-                preserve_focus: arg_json(a, 1).as_bool().unwrap_or(false),
-            },
-            (Some(proxy::MAIN_THREAD_OUTPUT_SERVICE), "$dispose" | "$close") => Self::OutputDispose {
-                channel_id: arg_str(a, 0)?,
-            },
-            (Some(proxy::MAIN_THREAD_MESSAGE_SERVICE), "$showMessage") => Self::ShowMessage {
-                severity: arg_i64(a, 0).map(|s| s as u8).unwrap_or(1),
-                message: arg_str(a, 1)?,
-                options: arg_json(a, 2),
-                commands: arg_json(a, 3).as_array().cloned().unwrap_or_default(),
-            },
-            (Some(proxy::MAIN_THREAD_SEARCH), "$registerTextSearchProvider") => {
-                Self::RegisterTextSearchProvider { handle: arg_i64(a, 0)?, scheme: arg_str(a, 1)? }
-            }
-            (Some(proxy::MAIN_THREAD_SEARCH), "$unregisterProvider") => Self::UnregisterSearchProvider { handle: arg_i64(a, 0)? },
-            (Some(proxy::MAIN_THREAD_SEARCH), "$handleTextMatch") => Self::HandleTextMatch {
-                handle: arg_i64(a, 0)?,
-                session: arg_i64(a, 1)?,
-                matches: crate::search::parse_file_matches(&arg_json(a, 2))?,
-            },
-            (proxy, _) => Self::Other { proxy, method: r.method.clone() },
-        })
-    }
 }
 
 /// The reply Ember gives to `MainThread*` calls it does not implement, chosen so the extension
@@ -942,19 +773,35 @@ impl MainThreadCall {
 /// * `MainThreadWorkspace.$isResourceTrusted` / `$requestWorkspaceTrust` (L1986 / L1985): trusted
 ///   (the session answers these from its workspace trust first, see `ember_editor::trust`).
 /// * `MainThreadCommands.$getCommands` (L139): empty list.
+/// * Every other method whose declared result is an array (`T[]` or `Promise<T[]>`): an empty
+///   list. The extension host iterates those results, and `undefined` throws
+///   `TypeError: ... is not iterable` (seen with `MainThreadWorkspace.$loadCertificates`, which
+///   the extension host's proxy resolver calls once an extension makes an https request).
 pub fn default_reply(proxy: Option<&str>, method: &str) -> Reply {
     match (proxy, method) {
         (Some(proxy::MAIN_THREAD_WINDOW), "$getInitialState") => Reply::Json(json!({ "isFocused": true, "isActive": true })),
         (Some(proxy::MAIN_THREAD_WORKSPACE), "$checkExists") => Reply::Json(Value::Bool(false)),
         (Some(proxy::MAIN_THREAD_WORKSPACE), "$isResourceTrusted" | "$requestWorkspaceTrust") => Reply::Json(Value::Bool(true)),
         (Some(proxy::MAIN_THREAD_COMMANDS), "$getCommands") => Reply::Json(json!([])),
+        _ if returns_array(proxy, method) => Reply::Json(json!([])),
         _ => Reply::Empty,
     }
+}
+
+/// The pinned protocol declares `proxy.method` to return an array (bare or in a `Promise`).
+fn returns_array(proxy: Option<&str>, method: &str) -> bool {
+    let Some(m) = proxy.and_then(crate::actors::ActorInfo::by_proxy).and_then(|a| a.method(method)) else {
+        return false;
+    };
+    let t = m.returns.trim();
+    let t = t.strip_prefix("Promise<").and_then(|t| t.strip_suffix('>')).unwrap_or(t).trim();
+    t.ends_with("[]")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rpc::IncomingRequest;
 
     fn req(proxy: &'static str, method: &str, args: Value) -> IncomingRequest {
         IncomingRequest {
@@ -981,8 +828,13 @@ mod tests {
         assert!(crate::rpc_ids::id_of(c.proxy).is_some());
     }
 
+    fn decode_selector(v: Vec<Value>) -> Vec<DocumentFilter> {
+        serde_json::from_value(Value::Array(v)).unwrap()
+    }
+
     #[test]
     fn parses_change_many() {
+        use crate::actors::generated::main_thread_diagnostics::ChangeManyArgs;
         let r = req(
             proxy::MAIN_THREAD_DIAGNOSTICS,
             "$changeMany",
@@ -990,48 +842,44 @@ mod tests {
                 [{"severity":8,"message":"mismatched types","startLineNumber":3,"startColumn":5,"endLineNumber":3,"endColumn":9,"source":"rustc"}]],
                 [{"$mid":1,"scheme":"vscode-remote","authority":"h","path":"/w/b.rs"}, null]]]),
         );
-        match MainThreadCall::parse(&r).unwrap() {
-            MainThreadCall::DiagnosticsChangeMany { owner, entries } => {
-                assert_eq!(owner, "rustc");
-                assert_eq!(entries.len(), 2);
-                assert_eq!(entries[0].1.as_ref().unwrap()[0].start_column, 5);
-                assert!(entries[1].1.is_none());
-            }
-            other => panic!("{other:?}"),
-        }
+        let args = ChangeManyArgs::decode(&r.args).unwrap();
+        let entries: Vec<(UriComponents, Option<Vec<MarkerData>>)> = serde_json::from_value(Value::Array(args.entries)).unwrap();
+        assert_eq!(args.owner, "rustc");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].1.as_ref().unwrap()[0].start_column, 5);
+        assert!(entries[1].1.is_none());
     }
 
     #[test]
     fn parses_hover_registration() {
+        use crate::actors::generated::main_thread_language_features::RegisterHoverProviderArgs;
         let r = req(
             proxy::MAIN_THREAD_LANGUAGE_FEATURES,
             "$registerHoverProvider",
             json!([4, [{"$serialized":true,"language":"rust","scheme":"vscode-remote"}]]),
         );
+        let args = RegisterHoverProviderArgs::decode(&r.args).unwrap();
+        assert_eq!(args.handle, 4);
         assert_eq!(
-            MainThreadCall::parse(&r).unwrap(),
-            MainThreadCall::RegisterHoverProvider {
-                handle: 4,
-                selector: vec![DocumentFilter {
-                    language: Some("rust".into()),
-                    scheme: Some("vscode-remote".into()),
-                    pattern: None,
-                    exclusive: None,
-                    notebook_type: None,
-                }],
-            }
+            decode_selector(args.selector),
+            vec![DocumentFilter {
+                language: Some("rust".into()),
+                scheme: Some("vscode-remote".into()),
+                pattern: None,
+                exclusive: None,
+                notebook_type: None,
+            }]
         );
     }
 
     #[test]
     fn fr_e7_parses_text_search_registration_and_matches() {
+        use crate::actors::generated::main_thread_search::{HandleTextMatchArgs, RegisterTextSearchProviderArgs, UnregisterProviderArgs};
         let r = req(proxy::MAIN_THREAD_SEARCH, "$registerTextSearchProvider", json!([1, "vscode-remote"]));
-        assert_eq!(
-            MainThreadCall::parse(&r).unwrap(),
-            MainThreadCall::RegisterTextSearchProvider { handle: 1, scheme: "vscode-remote".into() }
-        );
+        let args = RegisterTextSearchProviderArgs::decode(&r.args).unwrap();
+        assert_eq!((args.handle, args.scheme.as_str()), (1, "vscode-remote"));
         let r = req(proxy::MAIN_THREAD_SEARCH, "$unregisterProvider", json!([1]));
-        assert_eq!(MainThreadCall::parse(&r).unwrap(), MainThreadCall::UnregisterSearchProvider { handle: 1 });
+        assert_eq!(UnregisterProviderArgs::decode(&r.args).unwrap().handle, 1);
         let r = req(
             proxy::MAIN_THREAD_SEARCH,
             "$handleTextMatch",
@@ -1040,13 +888,10 @@ mod tests {
                     "source": {"startLineNumber": 0, "startColumn": 0, "endLineNumber": 0, "endColumn": 3},
                     "preview": {"startLineNumber": 0, "startColumn": 0, "endLineNumber": 0, "endColumn": 3}}]}]}]]),
         );
-        match MainThreadCall::parse(&r).unwrap() {
-            MainThreadCall::HandleTextMatch { handle, session, matches } => {
-                assert_eq!((handle, session), (1, 3));
-                assert_eq!(matches[0].matches[0].preview_text, "foo");
-            }
-            other => panic!("{other:?}"),
-        }
+        let args = HandleTextMatchArgs::decode(&r.args).unwrap();
+        let matches = crate::search::parse_file_matches(&Value::Array(args.data)).unwrap();
+        assert_eq!((args.handle, args.session), (1, 3));
+        assert_eq!(matches[0].matches[0].preview_text, "foo");
     }
 
     #[test]
@@ -1152,126 +997,95 @@ mod tests {
     }
 
     #[test]
+    fn fr_e1_unimplemented_methods_returning_an_array_default_to_an_empty_list() {
+        for (p, m) in [
+            ("MainThreadWorkspace", "$loadCertificates"),
+            ("MainThreadLanguageModels", "$selectChatModels"),
+            ("MainThreadLanguageModelTools", "$getTools"),
+            ("MainThreadSecretState", "$getKeys"),
+            ("MainThreadFileSystem", "$readdir"),
+        ] {
+            assert_eq!(default_reply(Some(p), m), Reply::Json(json!([])), "{p}.{m}");
+        }
+        assert_eq!(default_reply(Some("MainThreadStatusBar"), "$setEntry"), Reply::Empty);
+        assert_eq!(default_reply(Some("MainThreadWorkspace"), "$nope"), Reply::Empty);
+        assert_eq!(default_reply(None, "$loadCertificates"), Reply::Empty);
+    }
+
+    // `$append` and `$clear` are not methods of MainThreadOutputService at the pinned commit
+    // (output arrives through `$update` and the channel's file), so only the pinned methods are
+    // decoded here. `$register` carries a file URI there: the case with `null` is no longer decodable.
+    #[test]
     fn parses_output_and_message_service_calls() {
+        use crate::actors::generated::main_thread_message_service::ShowMessageArgs;
+        use crate::actors::generated::main_thread_output_service::{DisposeArgs, RegisterArgs, RevealArgs};
         let r1 = req(
             proxy::MAIN_THREAD_OUTPUT_SERVICE,
             "$register",
-            json!(["Git", null, "git", "vscode.git"]),
+            json!(["Git", {"$mid":1,"scheme":"output","path":"/git"}, "git", "vscode.git"]),
         );
-        match MainThreadCall::parse(&r1).unwrap() {
-            MainThreadCall::OutputRegister { label, file, language_id, extension_id } => {
-                assert_eq!(label, "Git");
-                assert!(file.is_none());
-                assert_eq!(language_id.as_deref(), Some("git"));
-                assert_eq!(extension_id.as_deref(), Some("vscode.git"));
-            }
-            other => panic!("{other:?}"),
-        }
+        let a = RegisterArgs::decode(&r1.args).unwrap();
+        assert_eq!(a.label, "Git");
+        assert_eq!(a.file.path, "/git");
+        assert_eq!(a.language_id.as_deref(), Some("git"));
+        assert_eq!(a.extension_id, "vscode.git");
 
-        let r2 = req(
-            proxy::MAIN_THREAD_OUTPUT_SERVICE,
-            "$append",
-            json!(["ember-output-1", "hello world\n"]),
-        );
-        assert_eq!(
-            MainThreadCall::parse(&r2).unwrap(),
-            MainThreadCall::OutputAppend { channel_id: "ember-output-1".into(), value: "hello world\n".into() }
-        );
+        let r4 = req(proxy::MAIN_THREAD_OUTPUT_SERVICE, "$reveal", json!(["ember-output-1", true]));
+        let a = RevealArgs::decode(&r4.args).unwrap();
+        assert_eq!((a.channel_id.as_str(), a.preserve_focus), ("ember-output-1", true));
 
-        let r3 = req(
-            proxy::MAIN_THREAD_OUTPUT_SERVICE,
-            "$clear",
-            json!(["ember-output-1"]),
-        );
-        assert_eq!(
-            MainThreadCall::parse(&r3).unwrap(),
-            MainThreadCall::OutputClear { channel_id: "ember-output-1".into(), till: None }
-        );
-
-        let r4 = req(
-            proxy::MAIN_THREAD_OUTPUT_SERVICE,
-            "$reveal",
-            json!(["ember-output-1", true]),
-        );
-        assert_eq!(
-            MainThreadCall::parse(&r4).unwrap(),
-            MainThreadCall::OutputReveal { channel_id: "ember-output-1".into(), preserve_focus: true }
-        );
-
-        let r5 = req(
-            proxy::MAIN_THREAD_OUTPUT_SERVICE,
-            "$dispose",
-            json!(["ember-output-1"]),
-        );
-        assert_eq!(
-            MainThreadCall::parse(&r5).unwrap(),
-            MainThreadCall::OutputDispose { channel_id: "ember-output-1".into() }
-        );
+        let r5 = req(proxy::MAIN_THREAD_OUTPUT_SERVICE, "$dispose", json!(["ember-output-1"]));
+        assert_eq!(DisposeArgs::decode(&r5.args).unwrap().channel_id, "ember-output-1");
 
         let r6 = req(
             proxy::MAIN_THREAD_MESSAGE_SERVICE,
             "$showMessage",
             json!([3, "Build failed", {"source": "Rust Analyzer"}, []]),
         );
-        match MainThreadCall::parse(&r6).unwrap() {
-            MainThreadCall::ShowMessage { severity, message, options, commands } => {
-                assert_eq!(severity, 3);
-                assert_eq!(message, "Build failed");
-                assert_eq!(options["source"], "Rust Analyzer");
-                assert!(commands.is_empty());
-            }
-            other => panic!("{other:?}"),
-        }
+        let a = ShowMessageArgs::decode(&r6.args).unwrap();
+        assert_eq!(a.severity.as_i64(), Some(3));
+        assert_eq!(a.message, "Build failed");
+        assert_eq!(a.options["source"], "Rust Analyzer");
+        assert!(a.commands.is_empty());
     }
 
     #[test]
     fn fr_e6_parses_folding_and_semantic_tokens_registrations() {
+        use crate::actors::generated::main_thread_language_features::*;
+        let filter = |language: &str| DocumentFilter {
+            language: Some(language.into()),
+            scheme: None,
+            pattern: None,
+            exclusive: None,
+            notebook_type: None,
+        };
         let rf = req(
             proxy::MAIN_THREAD_LANGUAGE_FEATURES,
             "$registerFoldingRangeProvider",
             json!([11, [{"language": "rust"}], {"value": "rust-lang.rust-analyzer"}, 12]),
         );
-        assert_eq!(
-            MainThreadCall::parse(&rf).unwrap(),
-            MainThreadCall::RegisterFoldingRangeProvider {
-                handle: 11,
-                selector: vec![DocumentFilter {
-                    language: Some("rust".into()),
-                    scheme: None,
-                    pattern: None,
-                    exclusive: None,
-                    notebook_type: None,
-                }],
-                event_handle: Some(12),
-            }
-        );
+        let a = RegisterFoldingRangeProviderArgs::decode(&rf.args).unwrap();
+        assert_eq!((a.handle, a.event_handle), (11, Some(12)));
+        assert_eq!(decode_selector(a.selector), vec![filter("rust")]);
         let ef = req(proxy::MAIN_THREAD_LANGUAGE_FEATURES, "$emitFoldingRangeEvent", json!([12]));
-        assert_eq!(MainThreadCall::parse(&ef).unwrap(), MainThreadCall::EmitFoldingRangeEvent { event_handle: 12 });
+        assert_eq!(EmitFoldingRangeEventArgs::decode(&ef.args).unwrap().event_handle, 12);
 
         let rs = req(
             proxy::MAIN_THREAD_LANGUAGE_FEATURES,
             "$registerDocumentSemanticTokensProvider",
             json!([21, [{"language": "rust"}], {"tokenTypes": ["namespace", "type", "function"], "tokenModifiers": ["declaration"]}, 22]),
         );
+        let a = RegisterDocumentSemanticTokensProviderArgs::decode(&rs.args).unwrap();
+        assert_eq!((a.handle, a.event_handle), (21, Some(22)));
+        assert_eq!(decode_selector(a.selector), vec![filter("rust")]);
         assert_eq!(
-            MainThreadCall::parse(&rs).unwrap(),
-            MainThreadCall::RegisterDocumentSemanticTokensProvider {
-                handle: 21,
-                selector: vec![DocumentFilter {
-                    language: Some("rust".into()),
-                    scheme: None,
-                    pattern: None,
-                    exclusive: None,
-                    notebook_type: None,
-                }],
-                legend: SemanticTokensLegend {
-                    token_types: vec!["namespace".into(), "type".into(), "function".into()],
-                    token_modifiers: vec!["declaration".into()],
-                },
-                event_handle: Some(22),
+            serde_json::from_value::<SemanticTokensLegend>(a.legend).unwrap(),
+            SemanticTokensLegend {
+                token_types: vec!["namespace".into(), "type".into(), "function".into()],
+                token_modifiers: vec!["declaration".into()],
             }
         );
         let es = req(proxy::MAIN_THREAD_LANGUAGE_FEATURES, "$emitDocumentSemanticTokensEvent", json!([22]));
-        assert_eq!(MainThreadCall::parse(&es).unwrap(), MainThreadCall::EmitDocumentSemanticTokensEvent { event_handle: 22 });
+        assert_eq!(EmitDocumentSemanticTokensEventArgs::decode(&es.args).unwrap().event_handle, 22);
     }
 }

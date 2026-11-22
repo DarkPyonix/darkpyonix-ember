@@ -63,7 +63,7 @@ function detectEol(main: string): "\n" | "\r\n" {
 }
 
 const MD_OPEN = /^darkpyonix\.markdown\(\s*([rRuU]?)("""|''')\n?/;
-const MD_CLOSE = /^\n?("""|''')\s*(?:,[^"']*)?\)[ \t]*$/;
+const MD_CLOSE = /^\n?("""|''')\s*(?:,\s*[A-Za-z_][A-Za-z0-9_]*\s*=\s*(?:True|False|None|-?\d+(?:\.\d+)?|"[^"\n]*"|'[^'\n]*'))*\s*,?\)[ \t]*$/;
 
 /**
  * Split `darkpyonix.markdown("""…""", silent=…)` into wrapper and Markdown text. Returns null

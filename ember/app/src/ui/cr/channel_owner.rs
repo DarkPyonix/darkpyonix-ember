@@ -444,15 +444,10 @@ fn InviteSection(channel: &str, st: &OwnerState) {
         Label("127.0.0.1 같은 내 컴퓨터 주소나 0.0.0.0 주소는 밖에서 닿지 않습니다", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
     }
     if let Some(c) = created.filter(|_| status.can_copy()) {
-        // Read-only so the link can be selected and copied with Cmd+C / Ctrl+C without editing
-        // (compose-rust#826). 복사 puts the link on the clipboard through the toolkit
-        // (compose-rust v0.0.7, #471); the link is never logged.
-        EmberField(FieldOptions {
-            fill_max_width: true,
-            read_only: true,
-            text: Some(c.link.clone()),
-            ..Default::default()
-        });
+        // The field starts with the link and is read-only (compose-rust#826): the link can be
+        // selected and copied with Cmd+C / Ctrl+C but not edited. 복사 puts the link on the
+        // clipboard through the toolkit (compose-rust v0.0.7, #471); the link is never logged.
+        EmberField(FieldOptions { fill_max_width: true, text: Some(c.link.clone()), read_only: true, ..Default::default() });
         let link = c.link.clone();
         AppButton(COPY_LABEL, None, ButtonKind::Default, true, true, false, move || {
             notice::post(copy_notice(compose_rust::clipboard::set_text(&link).is_ok()));
@@ -688,6 +683,16 @@ mod tests {
         let src = include_str!("channel_owner.rs");
         let production = &src[..src.find("#[cfg(test)]").unwrap()];
         assert!(!production.contains("FilterChip("), "no grey filter chips left");
+    }
+
+    #[test]
+    fn fr_t14_the_invite_link_field_is_read_only() {
+        // compose-rust#826: the link can be selected and copied but not edited, so what is
+        // drawn is always the link 복사 copies.
+        let src = include_str!("channel_owner.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap()];
+        assert!(production.contains("text: Some(c.link.clone()), read_only: true,"));
+        assert!(!production.contains(concat!("TODO(compose-rust#", "826")));
     }
 
     #[test]

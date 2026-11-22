@@ -2013,9 +2013,17 @@ fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<P
 
     match layout {
         PaneLayout::Two => {
-            // The panes scroll independently inside a bounded row so a long diff does not scroll
-            // the files card out of view (matching the mockup's sticky `.vcs-files`), rather than
-            // joining both panes under one `Row::equal_height(true)` page scroll.
+            // The panes scroll on their own inside a bounded row. A row in an unbounded
+            // scroll centres its shorter children vertically (TODO(#673): the toolkit has
+            // `Row::equal_height(true)` with `fill_max_height` children, which sizes the row to
+            // its tallest child (compose-rust#389), and a scrolling child of fixed height now
+            // measures at that height (compose-rust#766). It is not used here because it is a
+            // layout choice the toolkit cannot settle. The row is sized by the intrinsic
+            // heights of wrapped code in the diff pane, and one page scroll would take the
+            // files card out of view while a long diff is read, which the mockup's sticky
+            // `.vcs-files` avoids. A capture of this layout with `equal_height` in a page scroll
+            // must show the files card as tall as the diff and still in view before this
+            // changes).
             let d_files = diffs.clone();
             let st_files = staging.clone();
             let fold_files = folded.clone();

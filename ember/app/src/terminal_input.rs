@@ -141,13 +141,23 @@ impl ImeInput {
     }
 }
 
-/// The Korean notice for a paste chord while multi-line paste confirmation in the editor window
-/// is not yet wired (the toolkit's `compose_rust::clipboard::read_text` is already in the pin).
-pub const PASTE_UNAVAILABLE: &str = "이 창에서는 아직 클립보드를 읽을 수 없어 붙여넣기를 할 수 없습니다.";
+/// The Korean notice for a paste chord while the editor window does not read the clipboard.
+/// The toolkit reads it (`compose_rust::clipboard::read_text`, compose-rust#546); what is
+/// missing is Ember's multi-line paste confirmation, see the `TODO(#673)` at the chord in
+/// `ui/editor_workbench.rs`.
+pub const PASTE_UNAVAILABLE: &str = "이 창에서는 아직 붙여넣기를 할 수 없습니다. 여러 줄 붙여넣기 확인이 준비되지 않았습니다.";
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fr_l31_21_the_paste_notice_gives_the_true_reason() {
+        // The toolkit reads the clipboard (compose-rust#546); what is not built is the
+        // multi-line paste confirmation, so the notice says that and not that the read fails.
+        assert!(PASTE_UNAVAILABLE.contains("여러 줄 붙여넣기 확인"), "{PASTE_UNAVAILABLE}");
+        assert!(!PASTE_UNAVAILABLE.contains("클립보드를 읽을 수 없"), "{PASTE_UNAVAILABLE}");
+    }
 
     #[test]
     fn fr_l31_21_paste_chord_is_cmd_v_or_ctrl_shift_v() {

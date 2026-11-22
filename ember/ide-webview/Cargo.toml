@@ -1,0 +1,18 @@
+[package]
+name = "ember-ide-webview"
+version = "0.1.0"
+edition = "2021"
+description = "Standalone native IDE window host for Ember VS Code Web sessions"
+license = "Apache-2.0"
+
+[[bin]]
+name = "ember-ide-webview"
+path = "src/main.rs"
+
+[dependencies]
+ember-bridge = { path = "../bridge" }
+serde_json = "1"
+tao = "0.33"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+wry = "0.51"

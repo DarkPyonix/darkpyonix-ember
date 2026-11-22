@@ -1,13 +1,15 @@
-//! "Open IDE" (FR-L7): what each target does once the server has said how to reach it
+//! "Open IDE": what each target does once the server has said how to reach it
 //! (`GET /api/sessions/{id}/ide`).
 //!
-//! - **VS Code**: the wrapped VS Code Web URL, opened in the **system browser**. This process
-//!   never hosts it (NFR-L2): the URL is handed to the OS URL handler.
+//! - **VS Code**: the wrapped VS Code Web URL, opened in the standalone
+//!   `ember-ide-webview` child process (falling back to the OS URL handler if the
+//!   helper binary is not installed). This launcher process never embeds a browser
+//!   engine directly.
 //! - **Gateway**: the `jetbrains-gateway://` link, handed to the OS URL handler, which starts
 //!   JetBrains Gateway on this machine.
-//! - **Ember**: the editor screen (FR-L31); its code area waits for the editor core (M8).
+//! - **Ember**: the editor screen.
 //!
-//! Only `http`, `https` and the JetBrains schemes are ever passed to the OS, so a server
+//! Only `http`, `https` and the JetBrains schemes are ever passed out, so a server
 //! answer cannot make this app open an arbitrary file or program.
 
 use std::path::{Path, PathBuf};
@@ -51,6 +53,8 @@ impl IdeKind {
 /// What choosing a target does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdeAction {
+    /// Launch the standalone IDE window binary (`ember-ide-webview`) at this URL.
+    OpenIdeWindow(String),
     /// Hand this URL to the OS.
     OpenUrl(String),
     /// Open the Ember editor screen (its code area waits for the editor core, M8).
@@ -61,7 +65,7 @@ pub enum IdeAction {
 
 pub fn plan(kind: IdeKind, target: Option<&IdeTarget>) -> IdeAction {
     if kind == IdeKind::Ember {
-        // The caller opens the editor screen (FR-L31) from the launch data (project, folder).
+        // The caller opens the editor screen from the launch data (project, folder).
         return IdeAction::EmberPlaceholder;
     }
     let Some(t) = target else {
@@ -71,7 +75,11 @@ pub fn plan(kind: IdeKind, target: Option<&IdeTarget>) -> IdeAction {
         return IdeAction::Unavailable(t.reason.clone().unwrap_or_else(|| format!("{} is not available", kind.label())));
     }
     match t.url.as_deref() {
-        Some(url) if allowed_url(kind, url) => IdeAction::OpenUrl(url.to_string()),
+        Some(url) if allowed_url(kind, url) => match kind {
+            IdeKind::VsCode => IdeAction::OpenIdeWindow(url.to_string()),
+            IdeKind::Gateway => IdeAction::OpenUrl(url.to_string()),
+            IdeKind::Ember => IdeAction::EmberPlaceholder,
+        },
         Some(url) => IdeAction::Unavailable(format!("refusing to open {url:?}: unexpected scheme")),
         None => IdeAction::Unavailable(format!("the server gave no URL for {}", kind.label())),
     }
@@ -103,6 +111,89 @@ pub fn open_command(url: &str) -> Vec<String> {
 pub fn open_external(url: &str) -> std::io::Result<()> {
     let argv = open_command(url);
     Command::new(&argv[0]).args(&argv[1..]).spawn().map(|_| ())
+}
+
+/// Environment variable overriding the path to the standalone IDE window binary.
+pub const IDE_WEBVIEW_BIN_ENV: &str = "EMBER_IDE_WEBVIEW_BIN";
+
+/// Executable file name of the standalone IDE window binary.
+pub const IDE_WEBVIEW_BIN_NAME: &str = if cfg!(windows) {
+    "ember-ide-webview.exe"
+} else {
+    "ember-ide-webview"
+};
+
+/// Resolve the standalone IDE window binary in priority order:
+/// 1. `EMBER_IDE_WEBVIEW_BIN` environment override,
+/// 2. sibling executable next to the running `ember-app` binary,
+/// 3. lookup on `PATH`.
+pub fn resolve_ide_webview_bin(
+    env_override: Option<&str>,
+    current_exe: Option<&Path>,
+    path_var: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
+    if let Some(p) = env_override.map(str::trim).filter(|s| !s.is_empty()) {
+        return Some(PathBuf::from(p));
+    }
+    if let Some(sibling) = current_exe
+        .and_then(Path::parent)
+        .map(|dir| dir.join(IDE_WEBVIEW_BIN_NAME))
+        .filter(|p| p.is_file())
+    {
+        return Some(sibling);
+    }
+    if let Some(path_var) = path_var {
+        for dir in std::env::split_paths(path_var) {
+            let candidate = dir.join(IDE_WEBVIEW_BIN_NAME);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// The `(executable, args)` pair that launches the standalone IDE window binary.
+pub fn ide_window_command(bin: &Path, url: &str) -> (PathBuf, Vec<String>) {
+    (
+        bin.to_path_buf(),
+        vec!["--url".to_string(), url.to_string()],
+    )
+}
+
+/// Spawn `bin --url <url>` when present, or invoke `fallback` when the binary is absent.
+pub fn open_ide_window_with(
+    bin: Option<&Path>,
+    url: &str,
+    fallback: impl FnOnce(&str) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    match bin {
+        Some(exe) => {
+            let (program, args) = ide_window_command(exe, url);
+            Command::new(program).args(args).spawn().map(|_| ())
+        }
+        None => {
+            tracing::warn!(
+                url = %url,
+                "ember-ide-webview binary not found; falling back to system browser"
+            );
+            fallback(url)
+        }
+    }
+}
+
+/// Open `url` in the standalone `ember-ide-webview` binary, falling back to `open_external`
+/// if the helper binary is not installed.
+pub fn open_ide_window(url: &str) -> std::io::Result<()> {
+    let env_override = std::env::var(IDE_WEBVIEW_BIN_ENV).ok();
+    let current_exe = std::env::current_exe().ok();
+    let path_var = std::env::var_os("PATH");
+    let bin = resolve_ide_webview_bin(
+        env_override.as_deref(),
+        current_exe.as_deref(),
+        path_var.as_deref(),
+    );
+    open_ide_window_with(bin.as_deref(), url, open_external)
 }
 
 /// CLI flag that launches this binary directly into the editor, which runs as its own HTML-mode window (FR-L31).
@@ -241,7 +332,7 @@ mod tests {
     fn fr_l7_targets() {
         assert_eq!(
             plan(IdeKind::VsCode, Some(&target("vscode", true, Some("http://h:8890/?folder=%2Fw")))),
-            IdeAction::OpenUrl("http://h:8890/?folder=%2Fw".into())
+            IdeAction::OpenIdeWindow("http://h:8890/?folder=%2Fw".into())
         );
         assert_eq!(
             plan(IdeKind::Gateway, Some(&target("gateway", true, Some("jetbrains-gateway://connect#type=ssh")))),
@@ -263,6 +354,89 @@ mod tests {
         ));
         assert_eq!(IdeKind::from_key("gateway"), Some(IdeKind::Gateway));
         assert_eq!(open_command("u").last().map(String::as_str), Some("u"));
+    }
+
+    #[test]
+    fn fr_l7_ide_webview_binary_resolution_and_command() {
+        let base = std::env::temp_dir().join(format!(
+            "ember-ide-webview-resolve-{}",
+            std::process::id()
+        ));
+        let sibling_dir = base.join("sibling");
+        let path_dir = base.join("path_bin");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&sibling_dir).unwrap();
+        std::fs::create_dir_all(&path_dir).unwrap();
+
+        let sibling_bin = sibling_dir.join(IDE_WEBVIEW_BIN_NAME);
+        let path_bin = path_dir.join(IDE_WEBVIEW_BIN_NAME);
+        std::fs::write(&sibling_bin, b"stub").unwrap();
+        std::fs::write(&path_bin, b"stub").unwrap();
+
+        let fake_exe = sibling_dir.join("ember-app");
+        let path_os = std::env::join_paths([&path_dir]).unwrap();
+
+        // 1. Environment override wins over sibling and PATH.
+        assert_eq!(
+            resolve_ide_webview_bin(
+                Some("/custom/ember-ide-webview"),
+                Some(&fake_exe),
+                Some(path_os.as_os_str()),
+            ),
+            Some(PathBuf::from("/custom/ember-ide-webview"))
+        );
+
+        // 2. Sibling next to current_exe wins over PATH.
+        assert_eq!(
+            resolve_ide_webview_bin(None, Some(&fake_exe), Some(path_os.as_os_str())),
+            Some(sibling_bin.clone())
+        );
+
+        // 3. PATH lookup finds the binary when no sibling exists.
+        let other_exe = base.join("other/ember-app");
+        assert_eq!(
+            resolve_ide_webview_bin(None, Some(&other_exe), Some(path_os.as_os_str())),
+            Some(path_bin)
+        );
+
+        // 4. Returns None when nothing matches.
+        assert_eq!(resolve_ide_webview_bin(None, Some(&other_exe), None), None);
+
+        // Command construction passes --url <url>.
+        let (bin, args) = ide_window_command(&sibling_bin, "http://127.0.0.1:8890/?folder=%2Fw");
+        assert_eq!(bin, sibling_bin);
+        assert_eq!(args, vec!["--url", "http://127.0.0.1:8890/?folder=%2Fw"]);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn fr_l7_open_ide_window_spawns_helper_or_falls_back() {
+        let mut fallback_called_with = None;
+        open_ide_window_with(None, "http://127.0.0.1:8890/?folder=%2Fw", |u| {
+            fallback_called_with = Some(u.to_owned());
+            Ok(())
+        })
+        .expect("fallback succeeds");
+        assert_eq!(
+            fallback_called_with.as_deref(),
+            Some("http://127.0.0.1:8890/?folder=%2Fw")
+        );
+
+        #[cfg(unix)]
+        {
+            let mut fallback_hit = false;
+            open_ide_window_with(
+                Some(Path::new("/usr/bin/true")),
+                "http://127.0.0.1:8890/?folder=%2Fw",
+                |_| {
+                    fallback_hit = true;
+                    Ok(())
+                },
+            )
+            .expect("spawn helper succeeds");
+            assert!(!fallback_hit, "fallback must not run when helper binary exists");
+        }
     }
 
     #[test]

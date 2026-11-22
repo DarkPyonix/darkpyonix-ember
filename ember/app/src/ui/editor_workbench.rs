@@ -1603,7 +1603,7 @@ pub mod page {
                         if let Some(url) = fallback_url {
                             button {
                                 onclick: move |_| {
-                                    if let Err(e) = crate::ide::open_external(&url) {
+                                    if let Err(e) = crate::ide::open_ide_window(&url) {
                                         tracing::warn!("could not open the VS Code target: {e}");
                                     }
                                 },

@@ -44,7 +44,7 @@ pub use crate::ui::session::{
     view_from_saved, visible_panes,
 };
 
-use crate::ide::{IdeAction, IdeKind, open_external, plan};
+use crate::ide::{IdeAction, IdeKind, open_external, open_ide_window, plan};
 use crate::server::{CurrentComputer, IdeLaunch};
 use crate::services::{run_shared, services};
 use crate::ui::coexist::{SharedUi, shared_ui};
@@ -190,6 +190,18 @@ pub fn launch_ide_shared(
     };
     let label = ide_label(kind);
     match plan(kind, target.as_ref()) {
+        IdeAction::OpenIdeWindow(url) => run_shared(
+            async move {
+                tokio::task::spawn_blocking(move || open_ide_window(&url))
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|r| r.map_err(|e| e.to_string()))
+            },
+            move |r| match r {
+                Ok(()) => notice::post(format!("{label}: 여는 중입니다")),
+                Err(e) => notice::post(format!("{label}: 열지 못했습니다: {e}")),
+            },
+        ),
         IdeAction::OpenUrl(url) => run_shared(
             async move {
                 tokio::task::spawn_blocking(move || open_external(&url))

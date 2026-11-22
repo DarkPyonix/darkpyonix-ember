@@ -1118,3 +1118,17 @@ What trust does not protect. Under D37 agents and terminals run with the full au
 **Why.** The owner's rule is that an agent answers in a channel and does not post on its own. A long turn is normal for a coding agent, so the answer must still be possible after 30 minutes, once.
 
 **Status.** Written, not yet compiled or run (#380). SPEC `FR-T12` (open mention thread).
+
+### D52: Project leader selection, archive and delete scope, and archived projects in search
+
+**Decision.** [user, 2026-11-22, #327, #384, `darkpyonix#141`]:
+- **Project leader (Q5):** `"A: 기존 세션 중 선택"`. A project's leader is chosen from the existing live sessions belonging to that project (`leader_session`), or cleared (`null`). `기본 프로젝트` keeps no leader (`D28`).
+- **Delete scope (Q2):** `"함께 삭제"`. Deleting a project cascades and removes its sessions, transcripts (`events`, `messages_fts`, `shim_offsets`, `session_forks`, A2A and computer/proxy metadata), channels, schedules, teams, computer assignments and browser egress rules in one transaction, and releases any idle live agent processes.
+- **Archive and delete guards (Q3/Q4):** `"보관 거부 + 삭제 전 보관 필수"`. Archiving a project is refused while any of its sessions are running (`running`, `waiting_for_approval`, or draining). A project must be archived before it can be deleted.
+- **Archived projects in search (Q6):** `"안 나옴"`. Archived projects and their sessions do not appear in server or client search results.
+
+**Why.** Picking an existing session avoids spawning an unexpected agent session just to name a leader. Requiring archive before delete and refusing archive while sessions run prevents accidental loss of active work, while cascading delete removes orphaned transcripts and records once the user explicitly archives and deletes the project. Hiding archived projects from search keeps search focused on active work.
+
+**Rejected.** Auto-creating a new leader session (Q5 B/C); refusing to delete non-empty projects (`409 project_not_empty`) or moving deleted projects' sessions to `기본 프로젝트` (Q2); force-stopping running sessions on archive or allowing direct deletion of unarchived projects (Q3/Q4); showing archived projects in search results (Q6).
+
+**Status.** Spec updated (#327, #384); implementation and tests landing in the same PR (`FR-L26`, `FR-S4`).

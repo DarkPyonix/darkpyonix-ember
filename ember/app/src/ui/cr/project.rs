@@ -4,10 +4,11 @@
 //!
 //! The decisions (boxes, members, ordering, filters, deck, settings rules) are `ui::project`'s
 //! plain functions, used as they are. The settings sheet saves name, repository, default
-//! branch, new member defaults, character style and profile override per harness with
-//! `PATCH /api/projects/{name}` (FR-L26, #327). The danger zone archives and restores with the
-//! same PATCH and deletes with `DELETE /api/projects/{name}` after a second tap; the leader stays
-//! disabled (owner decision, #384). The full view's 루틴 tile lists the project's server routines.
+//! branch, new member defaults, character style, leader session and profile override per harness
+//! with `PATCH /api/projects/{name}` (FR-L26, #327, #384). The danger zone archives and restores
+//! with the same PATCH and deletes with `DELETE /api/projects/{name}` after archiving and a
+//! second tap. The full view's 루틴 and 채널 tiles list the project's server routines and
+//! channels and open their screens.
 
 #![allow(non_snake_case)]
 
@@ -40,7 +41,11 @@ use crate::model::status_rank;
 use crate::ide::{open_external, plan, IdeAction, IdeKind};
 use crate::server::IdeLaunch;
 use crate::services::{run_shared, services};
-use crate::ui::project::{archive_patch, danger_hint, danger_rows_for, delete_armed, delete_error_message, delete_step, full_after_removal, is_owner_refusal, project_routine_tile, DeleteStep, TileLoad};
+use crate::ui::project::{
+    archive_patch, danger_hint, danger_rows_for, delete_armed, delete_error_message, delete_step, full_after_removal,
+    is_owner_refusal, project_channel_tile, project_links_from, project_routine_tile, ChannelTileLoad, DeleteStep,
+    ProjectLinks, TileLoad,
+};
 use crate::ui::coexist::{shared_ui, SharedUi};
 use crate::ui::shell::NavMenu;
 
@@ -882,30 +887,55 @@ fn FullProject(b: &ProjectBox, chips: &[ComputerChip], st: &Ui, ui: &SharedUi, w
         ComputerStrip(&assigned, st);
     }
     KpiStrip(b, ui, w);
-    // The project's routines from the server (FR-L26, #327); the demo lists its samples.
+    // The project's routines and channels from the server (FR-L26, #327); the demo lists its samples.
     let routines = remember_with_key(b.id.clone(), || {
         mutable_state_of(if services().demo.is_some() { TileLoad::Loaded(super::routines::sample_entries()) } else { TileLoad::Loading })
     });
+    let channels = remember_with_key(b.id.clone(), || {
+        mutable_state_of(if services().demo.is_some() {
+            ChannelTileLoad::Loaded(super::channels::sample_rooms())
+        } else {
+            ChannelTileLoad::Loading
+        })
+    });
     if services().demo.is_none() {
         let (slot, id) = (routines.clone(), b.id.clone());
-        compose_rust::runtime::launched_effect(b.id.clone(), move || async move {
+        launched_effect(b.id.clone(), move || async move {
             run_shared(async move { crate::ui::project::load_project_tile(services().client.api(), &id).await }, move |l| slot.set(l));
+        });
+        let (slot, id) = (channels.clone(), b.id.clone());
+        launched_effect(b.id.clone(), move || async move {
+            run_shared(
+                async move { crate::ui::project::load_project_channels(services().client.api(), &id).await },
+                move |l| slot.set(l),
+            );
         });
     }
     let routine_lines = project_routine_tile(&routines.get(), &b.id, super::routines::now_local()).lines();
+    let channel_lines = project_channel_tile(&channels.get(), &b.id).lines();
     let members = || MembersCard(b, st, ui);
     let side = || {
         { use ::compose_rust::ui::Column; Column!(spacing = SP[4], modifier = Modifier::new().fill_max_width(), {
-            // TODO(channels screen, phase 7): the channel tile lists the project's channels here.
-            for (icon, title, empty) in [(shell::ICON_GAUGE_SVG, "루틴", "루틴이 없습니다"), (shell::ICON_HASH_SVG, "채널", "채널이 없습니다")] {
+            for (icon, title, menu, lines) in [
+                (shell::ICON_GAUGE_SVG, "루틴", NavMenu::Routines, &routine_lines),
+                (shell::ICON_HASH_SVG, "채널", NavMenu::Channels, &channel_lines),
+            ] {
+                let (u, id) = (ui.clone(), b.id.clone());
                 super::home::Tile(|| {
-                    super::home::CardHead(icon, title, || {});
-                    if title == "루틴" {
-                        for line in &routine_lines {
-                            Label(line, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(2));
-                        }
-                    } else {
-                        Label(&format!("{empty}. {SOON}"), Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(2));
+                    super::home::CardHead(icon, title, || {
+                        NamedClickable(
+                            super::a11y::OPEN_SCREEN,
+                            Modifier::new().size(30.0, 30.0).border(1.0, paint(p.line)).shape_role(ShapeRole::Full),
+                            Alignment::Center,
+                            move || {
+                                u.set_selected_project(Some(id.clone()));
+                                shell::choose(&u, menu);
+                            },
+                            || NavIcon(ICON_ARROW_RIGHT_SVG, p.muted.to_argb(), 16.0),
+                        );
+                    });
+                    for line in lines {
+                        Label(line, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(2));
                     }
                 });
             }
@@ -1573,7 +1603,6 @@ fn create_project(
 /// name, and this device's remembered style moves with it. The character style is also kept in
 /// this device's prefs, but only as the fallback the tiles read when the server has none.
 /// The 보관 and 보관 해제 buttons send their one-field patch through here too (#327).
-/// TODO(#384): the leader is not sent (server `not_yet`).
 fn save_settings(
     project: String,
     patch: ember_client::wire::ProjectPatch,
@@ -1669,6 +1698,27 @@ pub(super) fn SettingsSheet(
     let failure = remember_with_key(b.id.clone(), || mutable_state_of(None::<String>));
     let sheet_skip = SheetSkip::from_env();
     let confirm = remember_with_key(b.id.clone(), || mutable_state_of(false));
+    let links = remember_with_key(b.id.clone(), || {
+        mutable_state_of(if services().demo.is_some() {
+            project_links_from(
+                &b.id,
+                &super::routines::sample_entries(),
+                &super::channels::sample_rooms(),
+            )
+        } else {
+            ProjectLinks::loading()
+        })
+    });
+    if services().demo.is_none() {
+        let (slot, id) = (links.clone(), b.id.clone());
+        launched_effect(b.id.clone(), move || async move {
+            run_shared(
+                async move { crate::ui::project::load_project_links(services().client.api(), &id).await },
+                move |l| slot.set(l),
+            );
+        });
+    }
+    let links_now = links.get();
     let d = draft.get();
     let errors = validate_settings(&d, &b.id);
     let patch = build_patch(&server, &d);
@@ -1710,6 +1760,7 @@ pub(super) fn SettingsSheet(
                         FieldRow("이름", || {
                             EmberField(FieldOptions {
                                 fill_max_width: true,
+                                text: Some(if default_project { b.name.clone() } else { d.name.clone() }),
                                 placeholder: b.name.clone(),
                                 enabled: Some(part_supported(SettingsPart::Name) && !default_project),
                                 on_value_change: Some(Box::new(move |v| d1.update(|s| s.name = v))),
@@ -1721,7 +1772,8 @@ pub(super) fn SettingsSheet(
                                 FieldRow("저장소", || {
                                     EmberField(FieldOptions {
                                         fill_max_width: true,
-                                        placeholder: b.repo.clone().unwrap_or_else(|| "github.com/...".to_string()),
+                                        text: Some(d.repo.clone()),
+                                        placeholder: "github.com/...".to_string(),
                                         enabled: Some(part_supported(SettingsPart::Repository)),
                                         on_value_change: Some(Box::new(move |v| d2.update(|s| s.repo = v))),
                                         ..Default::default()
@@ -1732,7 +1784,8 @@ pub(super) fn SettingsSheet(
                                 FieldRow("기본 브랜치", || {
                                     EmberField(FieldOptions {
                                         fill_max_width: true,
-                                        placeholder: b.branch.clone().unwrap_or_else(|| "develop".to_string()),
+                                        text: Some(d.branch.clone()),
+                                        placeholder: "develop".to_string(),
                                         enabled: Some(part_supported(SettingsPart::Repository)),
                                         on_value_change: Some(Box::new(move |v| d3.update(|s| s.branch = v))),
                                         ..Default::default()
@@ -1781,12 +1834,11 @@ pub(super) fn SettingsSheet(
                             let dr = draft.clone();
                             // The model picker sheet of the new session screen needs the harness
                             // catalog (an Ember gap, not compose-rust#383, which is fixed); the id
-                            // is typed until it is shared. v0.0.7: #374 fixed (`TextField::text`);
-                            // workaround kept until checked on a display, so the server's current
-                            // model stays the placeholder.
+                            // is typed until it is shared.
                             EmberField(FieldOptions {
                                 fill_max_width: true,
-                                placeholder: server.member_defaults.as_ref().and_then(|m| m.model.clone()).unwrap_or_else(|| "비워 두면 하네스 기본값을 씁니다".to_string()),
+                                text: Some(d.model.clone()),
+                                placeholder: "비워 두면 하네스 기본값을 씁니다".to_string(),
                                 enabled: Some(part_supported(SettingsPart::MemberDefaults)),
                                 on_value_change: Some(Box::new(move |v| dr.update(|s| s.model = v))),
                                 ..Default::default()
@@ -1843,9 +1895,8 @@ pub(super) fn SettingsSheet(
                     }
                 });
                 if leader_choice_visible(&b.id) {
-                    // `.ps-leads`: one radio per member, the leader ticked. Read only until the
-                    // server takes a leader (400 `not_yet`, TODO(#384)).
-                    SkipSection(&sheet_skip, EST_SEC_LEADER, "리더 (오케스트레이터)", "다른 팀원에게 일을 나누고 모으는 팀원 한 명입니다. 리더 지정은 서버가 아직 지원하지 않습니다", false, || {
+                    // `.ps-leads`: one radio per member, clicking toggles `draft.leader_session`.
+                    SkipSection(&sheet_skip, EST_SEC_LEADER, "리더 (오케스트레이터)", "프로젝트의 기존 세션 중에서 리더를 고릅니다. 다시 누르면 해제됩니다.", false, || {
                         if b.members.is_empty() {
                             Label("팀원이 없습니다", Fs::Md, Weight::Regular, Some(paint(p.text_2)), Some(1));
                         }
@@ -1856,8 +1907,19 @@ pub(super) fn SettingsSheet(
                                 { use ::compose_rust::ui::Row; Row!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
                                     for m in row {
                                         let mut m = m.clone();
+                                        m.leader = d.leader_session.as_deref() == Some(m.session_id.as_str());
                                         m.leader = review_leader(review.as_deref(), &b.members, &m);
-                                        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), content = || LeaderOption(&m, &b.id)) };
+                                        let (dr, sid) = (draft.clone(), m.session_id.clone());
+                                        let on_toggle = move || {
+                                            dr.update(|s| {
+                                                if s.leader_session.as_deref() == Some(sid.as_str()) {
+                                                    s.leader_session = None;
+                                                } else {
+                                                    s.leader_session = Some(sid.clone());
+                                                }
+                                            });
+                                        };
+                                        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), content = || LeaderOption(&m, &b.id, on_toggle)) };
                                     }
                                     for _ in row.len()..cols {
                                         { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
@@ -1871,14 +1933,36 @@ pub(super) fn SettingsSheet(
                         Label("리더가 필요하면 프로젝트를 새로 만들어 옮기세요.", Fs::Md, Weight::Regular, Some(paint(p.text_2)), Some(1));
                     });
                 }
-                SkipSection(&sheet_skip, EST_SEC_LINKS, "연결", "이 프로젝트에 묶인 채널, 루틴, 버전 관리입니다. 채널과 루틴 연결은 서버가 아직 알려 주지 않습니다", false, || {
-                    // `.ps-chips` of outline chips; only 버전 관리 is known to the client.
-                    let (u, closed, id) = (shared_ui().clone(), closed.clone(), b.id.clone());
-                    AppButton("버전 관리", Some(IconRole::History), ButtonKind::Default, true, patch.is_empty() && !saving.get(), false, move || {
-                        closed.set(None);
-                        u.set_selected_project(Some(id.clone()));
-                        shell::choose(&u, NavMenu::VersionControl);
-                    });
+                SkipSection(&sheet_skip, EST_SEC_LINKS, "연결", "이 프로젝트에 묶인 루틴, 채널, 버전 관리로 바로 이동합니다", false, || {
+                    { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
+                        let nav_enabled = patch.is_empty() && !saving.get();
+                        { use ::compose_rust::ui::FlowRow; FlowRow!(horizontal_spacing = SP[1], vertical_spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
+                            let routine_label = links_now.routine_button_label();
+                            let channel_label = links_now.channel_button_label();
+                            let (u, closed_r, id) = (shared_ui().clone(), closed.clone(), b.id.clone());
+                            AppButton(&routine_label, None, ButtonKind::Default, true, nav_enabled, false, move || {
+                                closed_r.set(None);
+                                u.set_selected_project(Some(id.clone()));
+                                shell::choose(&u, NavMenu::Routines);
+                            });
+                            let (u, closed_c, id) = (shared_ui().clone(), closed.clone(), b.id.clone());
+                            AppButton(&channel_label, None, ButtonKind::Default, true, nav_enabled, false, move || {
+                                closed_c.set(None);
+                                u.set_selected_project(Some(id.clone()));
+                                shell::choose(&u, NavMenu::Channels);
+                            });
+                            let (u, closed_v, id) = (shared_ui().clone(), closed.clone(), b.id.clone());
+                            AppButton("버전 관리", Some(IconRole::History), ButtonKind::Default, true, nav_enabled, false, move || {
+                                closed_v.set(None);
+                                u.set_selected_project(Some(id.clone()));
+                                shell::choose(&u, NavMenu::VersionControl);
+                            });
+                        }) };
+                        Label(&links_now.summary_line(), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+                        if let Some(reason) = crate::ui::project::characters_link_reason(!patch.is_empty()) {
+                            Label(reason, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+                        }
+                    }) };
                 });
                 SkipSection(&sheet_skip, EST_SEC_DANGER, "위험 영역", danger_hint(&b.id), false, || {
                     { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
@@ -1888,7 +1972,7 @@ pub(super) fn SettingsSheet(
                         for row in danger_rows_for(&b.id, b.members.len(), archived, delete_armed(armed.get(), now)) {
                             let (project, closed, full, saving, failure, armed) = (b.id.clone(), closed.clone(), full.clone(), saving.clone(), failure.clone(), armed.clone());
                             let part = row.part;
-                            DangerRowView(&row, danger_allowed(&b.id, part) && !saving.get(), move || {
+                            DangerRowView(&row, row.enabled && !saving.get(), move || {
                                 if part == SettingsPart::Archive {
                                     save_settings(project.clone(), archive_patch(archived), None, closed.clone(), full.clone(), saving.clone(), failure.clone());
                                     return;
@@ -1960,34 +2044,34 @@ fn review_leader(value: Option<&str>, members: &[Member], m: &Member) -> bool {
     }
 }
 
-/// `.ps-lead`: a radio mark, the member's name and task. Read only: the server does not take a
-/// leader yet (TODO(#384)), so the mark shows the current leader and does not react.
 /// The member's character on a leader card (`bot(s,30)` in the mockup's `.ps-lead`).
 pub const LEADER_AVATAR: f32 = 30.0;
 
 /// The radio mark on a leader card: the toolkit's radio button in the mockup's colours and
-/// size (compose-rust#545), named by its member. It shows whether the member leads and takes
-/// no change handler, so a caller cannot make it react: the server does not take a leader yet
-/// (TODO(#384)), and the Host owns the value, so a press changes nothing.
-pub fn LeaderMark(selected: bool, name: &str) {
+/// size (compose-rust#545), named by its member. Pressing it toggles the member as leader.
+pub fn LeaderMark(selected: bool, name: &str, mut on_toggle: impl FnMut() + 'static) {
     let p = ember_theme().palette;
-    { use ::compose_rust::ui::RadioButton; RadioButton!(selected, |_| {}, ring_color = paint(p.text_2), dot_color = paint(p.ink), size = 16.0, accessible_name = name) };
+    { use ::compose_rust::ui::RadioButton; RadioButton!(selected, move |_| on_toggle(), ring_color = paint(p.text_2), dot_color = paint(p.ink), size = 16.0, accessible_name = name) };
 }
 
-fn LeaderOption(m: &Member, project_id: &str) {
+fn LeaderOption(m: &Member, project_id: &str, on_toggle: impl FnMut() + Clone + 'static) {
     let p = ember_theme().palette;
     // `.ps-lead:has(input:checked)`: the chosen card is on `sel` with an `ink` border.
     let card = Modifier::new().fill_max_width().padding(10.0).border(1.0, paint(if m.leader { p.ink } else { p.line })).corner_radius(CORNER_MD);
     let card = if m.leader { card.background(paint(p.sel)) } else { card };
-    { use ::compose_rust::ui::Row; Row!(spacing = 10.0, alignment = Alignment::CenterStart, modifier = card, {
-            LeaderMark(m.leader, &m.name);
-            // The member's character, 30 dp, between the mark and the name (review st F).
-            Character(&m.agent, m.leader, LEADER_AVATAR, &m.name, project_id, CharState::from_status(m.status), None);
-            { use ::compose_rust::ui::Column; Column!(spacing = 2.0, modifier = Modifier::new().weight(1.0), {
-                Label(&m.name, Fs::Sm, Weight::Semibold, None, Some(1));
-                Label(&m.task, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+    let mut card_toggle = on_toggle.clone();
+    let mark_toggle = on_toggle;
+    Clickable(Modifier::new().fill_max_width().corner_radius(CORNER_MD), Alignment::CenterStart, move || card_toggle(), || {
+        { use ::compose_rust::ui::Row; Row!(spacing = 10.0, alignment = Alignment::CenterStart, modifier = card, {
+                LeaderMark(m.leader, &m.name, mark_toggle);
+                // The member's character, 30 dp, between the mark and the name (review st F).
+                Character(&m.agent, m.leader, LEADER_AVATAR, &m.name, project_id, CharState::from_status(m.status), None);
+                { use ::compose_rust::ui::Column; Column!(spacing = 2.0, modifier = Modifier::new().weight(1.0), {
+                    Label(&m.name, Fs::Sm, Weight::Semibold, None, Some(1));
+                    Label(&m.task, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+                }) };
             }) };
-        }) };
+    });
 }
 
 /// `.ps-danger`: the title and what it does at the left, the destructive button at the right.
@@ -2069,7 +2153,7 @@ mod tests {
                 Box::new(Recomposer::new(move || {
                     let mut m = member("a", LauncherStatus::Running);
                     m.leader = leader;
-                    LeaderOption(&m, "p");
+                    LeaderOption(&m, "p", || {});
                 }))
             });
             let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
@@ -2124,7 +2208,7 @@ mod tests {
                 Box::new(Recomposer::new(move || {
                     let mut m = member("a", LauncherStatus::Running);
                     m.leader = leader;
-                    LeaderOption(&m, "p");
+                    LeaderOption(&m, "p", || {});
                 }))
             });
             let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
@@ -2154,7 +2238,7 @@ mod tests {
         }
         let production = include_str!("project.rs").split("#[cfg(test)]").next().unwrap();
         let lead = production.split("fn LeaderOption(").nth(1).unwrap().split("\nfn ").next().unwrap();
-        assert!(lead.contains("LeaderMark(m.leader, &m.name);"), "the card draws the read-only mark");
+        assert!(lead.contains("LeaderMark(m.leader, &m.name, "), "the card draws the interactive mark");
         assert!(!lead.contains(".border(1.5"), "no drawn ring is left");
 
         // compose-rust#410 (#673): the search row that the icon opens binds its field to a focus
@@ -2168,70 +2252,92 @@ mod tests {
     }
 
     #[test]
-    fn fr_l26_a_press_on_the_leader_mark_changes_nothing_it_shows() {
-        // The mark is read only: a press, sent the way the Renderer sends one (the value the
-        // user asked for, to the radio's change handler), leaves it showing what it was given.
+    fn fr_l26_clicking_leader_option_toggles_selection_and_delete_waits_for_archive() {
         let _guard = crate::services::test_guard();
         use compose_rust::{EventPayload, PropertyKind};
-        for leader in [true, false] {
-            let mut host = Host::new(move || {
+
+        // Clicking a leader card toggles selection on and off.
+        let mut host = Host::new(|| {
+            Box::new(Recomposer::new(|| {
+                let chosen = remember(|| mutable_state_of(None::<String>));
+                let mut m = member("s1", LauncherStatus::Running);
+                m.leader = chosen.get().as_deref() == Some("s1");
+                let c = chosen.clone();
+                LeaderOption(&m, "p", move || {
+                    c.update(|cur| {
+                        if cur.as_deref() == Some("s1") {
+                            *cur = None;
+                        } else {
+                            *cur = Some("s1".to_string());
+                        }
+                    });
+                });
+            }))
+        });
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let radio = batch
+            .iter()
+            .find_map(|m| match m {
+                Mutation::Create { node_id, widget: compose_rust::WidgetKind::RadioButton } => Some(*node_id),
+                _ => None,
+            })
+            .expect("a toolkit radio button");
+        let checked = |b: &[Mutation]| -> Vec<bool> {
+            b.iter()
+                .filter_map(|m| match m {
+                    Mutation::SetProp { node_id, property: PropertyKind::Checked, value: PropertyValue::Bool(v) } if *node_id == radio => Some(*v),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(checked(&batch), vec![false]);
+        let handler = batch
+            .iter()
+            .find_map(|m| match m {
+                Mutation::SetProp { node_id, property: PropertyKind::OnValueChange, value: PropertyValue::Integer(h) } if *node_id == radio => Some(*h as u64),
+                _ => None,
+            })
+            .expect("the radio's change handler");
+
+        // First press selects the member as leader.
+        let (bytes, _) = host
+            .dispatch(HostEvent::new(radio, handler, EventPayload::ValueChanged(1.0)))
+            .expect("dispatch select");
+        let after_select = decode_batch(bytes).expect("decode");
+        assert_eq!(checked(&after_select), vec![true]);
+
+        // Second press clears the leader.
+        let (bytes, _) = host
+            .dispatch(HostEvent::new(radio, handler, EventPayload::ValueChanged(0.0)))
+            .expect("dispatch clear");
+        let after_clear = decode_batch(bytes).expect("decode");
+        assert_eq!(checked(&after_clear), vec![false]);
+
+        // Delete button is disabled until the project is archived.
+        let delete_enabled_in_view = |archived: bool| -> bool {
+            let mut h = Host::new(move || {
                 Box::new(Recomposer::new(move || {
-                    let mut m = member("a", LauncherStatus::Running);
-                    m.leader = leader;
-                    LeaderOption(&m, "p");
+                    let [_, del] = danger_rows_for("ember", 2, archived, false);
+                    DangerRowView(&del, del.enabled, || {});
                 }))
             });
-            let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
-            let radio = batch
+            let b = decode_batch(h.rebuild().expect("rebuild")).expect("decode");
+            let btn = b
                 .iter()
                 .find_map(|m| match m {
-                    Mutation::Create { node_id, widget: compose_rust::WidgetKind::RadioButton } => Some(*node_id),
+                    Mutation::Create { node_id, widget: compose_rust::WidgetKind::Button } => Some(*node_id),
                     _ => None,
                 })
-                .expect("a toolkit radio button");
-            let checked = |batch: &[Mutation]| -> Vec<bool> {
-                batch
-                    .iter()
-                    .filter_map(|m| match m {
-                        Mutation::SetProp { node_id, property: PropertyKind::Checked, value: PropertyValue::Bool(b) } if *node_id == radio => Some(*b),
-                        _ => None,
-                    })
-                    .collect()
-            };
-            assert_eq!(checked(&batch), vec![leader], "the mark shows the leader value it was given");
-            let handler = batch
-                .iter()
+                .expect("delete button");
+            b.iter()
                 .find_map(|m| match m {
-                    Mutation::SetProp { node_id, property: PropertyKind::OnValueChange, value: PropertyValue::Integer(h) } if *node_id == radio => Some(*h as u64),
+                    Mutation::SetProp { node_id, property: PropertyKind::Enabled, value: PropertyValue::Bool(v) } if *node_id == btn => Some(*v),
                     _ => None,
                 })
-                .expect("the radio's change handler");
-            // Ask for the other state, then for the same one again.
-            for asked in [!leader, leader] {
-                let (bytes, _) = host
-                    .dispatch(HostEvent::new(radio, handler, EventPayload::ValueChanged(if asked { 1.0 } else { 0.0 })))
-                    .expect("dispatch");
-                let after = decode_batch(bytes).expect("decode");
-                assert!(checked(&after).iter().all(|b| *b == leader), "a press changed the mark (leader {leader}, asked {asked}): {after:?}");
-            }
-            let (bytes, _) = host.dispatch(HostEvent::new(0, 0, EventPayload::Resync)).expect("resync");
-            let full = decode_batch(bytes).expect("decode");
-            let radio_now = full
-                .iter()
-                .find_map(|m| match m {
-                    Mutation::Create { node_id, widget: compose_rust::WidgetKind::RadioButton } => Some(*node_id),
-                    _ => None,
-                })
-                .expect("the re-sent tree has the radio");
-            let shown: Vec<bool> = full
-                .iter()
-                .filter_map(|m| match m {
-                    Mutation::SetProp { node_id, property: PropertyKind::Checked, value: PropertyValue::Bool(b) } if *node_id == radio_now => Some(*b),
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(shown, vec![leader], "after the presses the re-sent tree shows the radio's state once, as leader {leader}");
-        }
+                .expect("enabled prop on delete button")
+        };
+        assert!(!delete_enabled_in_view(false), "delete must be disabled when not archived");
+        assert!(delete_enabled_in_view(true), "delete must be enabled when archived");
     }
 
     #[test]
@@ -2734,6 +2840,60 @@ mod tests {
             batch.iter().any(|m| matches!(m, Mutation::SetModifier { modifier, .. } if format!("{modifier:?}").contains(&max_h))),
             "expected SizeIn with {max_h}"
         );
+    }
+
+    #[test]
+    fn fr_l26_settings_sheet_prefills_fields_and_wires_live_links() {
+        let src = include_str!("project.rs");
+        let production = src.split("#[cfg(test)]").next().unwrap();
+        let sheet = production.split("pub(super) fn SettingsSheet(").nth(1).unwrap().split("\nfn ").next().unwrap();
+        assert!(sheet.contains("text: Some(if default_project { b.name.clone() } else { d.name.clone() })"));
+        assert!(sheet.contains("text: Some(d.repo.clone())"));
+        assert!(sheet.contains("text: Some(d.branch.clone())"));
+        assert!(sheet.contains("text: Some(d.model.clone())"));
+        assert!(sheet.contains("load_project_links("));
+        assert!(sheet.contains("NavMenu::Routines"));
+        assert!(sheet.contains("NavMenu::Channels"));
+        assert!(sheet.contains("NavMenu::VersionControl"));
+        assert!(!sheet.contains("채널과 루틴 연결은 서버가 아직 알려 주지 않습니다"));
+
+        let _guard = crate::services::test_guard();
+        let mut host = Host::new(|| {
+            Box::new(Recomposer::new(|| {
+                let b = ProjectBox {
+                    id: "ember".into(),
+                    name: "ember".into(),
+                    members: vec![],
+                    running: 0,
+                    waiting: 0,
+                    computers: vec![],
+                    top: None,
+                    repo: Some("github.com/DarkPyonix/darkpyonix-ember".into()),
+                    branch: Some("develop".into()),
+                };
+                let closed = remember(|| mutable_state_of(Some("ember".to_string())));
+                let full = remember(|| mutable_state_of(None::<String>));
+                SettingsSheet(&b, &[], closed, full, || {});
+            }))
+        });
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let all = texts(&batch);
+        assert!(all.iter().any(|t| t == "ember"), "prefilled name text missing: {all:?}");
+        assert!(all.iter().any(|t| t.starts_with("루틴 (")), "live routine link missing: {all:?}");
+        assert!(all.iter().any(|t| t.starts_with("채널 (")), "live channel link missing: {all:?}");
+        assert!(all.iter().any(|t| t == "버전 관리"), "vcs link missing: {all:?}");
+    }
+
+    #[test]
+    fn fr_l26_full_project_tiles_wire_channels_and_navigate_to_routines_and_channels() {
+        let src = include_str!("project.rs");
+        let production = src.split("#[cfg(test)]").next().unwrap();
+        let full = production.split("fn FullProject(").nth(1).unwrap().split("\n// --- IDE").next().unwrap();
+        assert!(full.contains("load_project_channels("));
+        assert!(full.contains("project_channel_tile("));
+        assert!(full.contains("NavMenu::Routines"));
+        assert!(full.contains("NavMenu::Channels"));
+        assert!(!full.contains("{empty}. {SOON}"));
     }
 }
 

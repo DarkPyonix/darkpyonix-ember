@@ -1,0 +1,64 @@
+# Android APK dev-CI leg (FR-L36, #770). Builds the arm64-v8a debug APK with the same
+# toolchain as publish-release.yml (dx 0.7.10, NDK 27.1.12297006, JDK 21) and verifies
+# that an APK artifact is produced.
+name: Android APK
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    name: Build Android APK (arm64-v8a)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+      DX_VERSION: "0.7.10"
+      NDK_VERSION: "27.1.12297006"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ember/app
+          key: android-dev
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Install the NDK
+        run: |
+          set -euo pipefail
+          sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:?the runner image has no Android SDK}}"
+          "$sdk/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$NDK_VERSION" >/dev/null
+          echo "ANDROID_HOME=$sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$sdk/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          ls "$sdk/ndk/$NDK_VERSION/toolchains/llvm/prebuilt"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-android-ember-${{ hashFiles('ember/app/Cargo.lock') }}
+          restore-keys: gradle-android-ember-
+      - name: Install the Dioxus CLI
+        run: |
+          if ! dx --version 2>/dev/null | grep -q "^dioxus $DX_VERSION "; then
+            cargo install dioxus-cli --version "$DX_VERSION" --locked --force
+          fi
+          dx --version
+      - name: Build the APK
+        run: cd ember/app && ./scripts/build-android.sh --cargo-args=--locked
+      - name: Verify APK output
+        run: |
+          set -euo pipefail
+          apk="$(find ember/app/target/dx -name '*.apk' -type f | head -n 1)"
+          test -n "$apk"
+          ls -lh "$apk"

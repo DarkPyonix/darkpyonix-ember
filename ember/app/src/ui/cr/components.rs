@@ -1064,6 +1064,9 @@ pub struct FieldOptions {
     /// a name (the branch menu's `feat/새-브랜치` is "새 브랜치 이름"). `&'static str` for the
     /// reason [`NamedClickable`] gives.
     pub label: Option<&'static str>,
+    /// Text that can be selected and copied but not edited, read as not editable by assistive
+    /// technology (`TextField`'s `read_only`, compose-rust#826).
+    pub read_only: bool,
 }
 
 /// The type step of a field's text and placeholder when no role is named (style.css `.field`).
@@ -1208,6 +1211,7 @@ fn FieldNode(o: FieldOptions, modifier: Modifier) {
         line_height = o.line_height.unwrap_or(fs.line_height()),
         letter_spacing = fs.letter_spacing(),
         bare = o.bare,
+        read_only = o.read_only,
         on_submit = o.on_submit,
         on_focus_gained = o.on_focus_gained,
         on_focus_lost = o.on_focus_lost,
@@ -2480,6 +2484,19 @@ mod tests {
         let production = include_str!("components.rs").split("#[cfg(test)]").next().unwrap();
         assert!(!production.contains(&["OneLine", "HintField"].concat()));
         assert!(!production.contains(concat!("TODO(compose-rust#", "786")));
+    }
+
+    #[test]
+    fn fr_t14_a_read_only_field_is_the_toolkits_read_only_text_field() {
+        // compose-rust#826: `TextField`'s `read_only` keeps the text selectable and copyable
+        // but not editable. Only a field that asks for it sends the flag.
+        let nodes = emitted_nodes(|| {
+            EmberField(FieldOptions { fill_max_width: true, text: Some("https://example.invalid/i".into()), read_only: true, ..Default::default() })
+        });
+        let field = the(&nodes, "TextField");
+        assert!(field.props.iter().any(|p| p == "ReadOnly=Bool(true)"), "{:?}", field.props);
+        let plain = emitted_nodes(|| EmberField(FieldOptions { fill_max_width: true, ..Default::default() }));
+        assert!(!the(&plain, "TextField").props.iter().any(|p| p.starts_with("ReadOnly=")), "a plain field sends no flag");
     }
 
     #[test]

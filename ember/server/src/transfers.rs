@@ -846,3 +846,48 @@ async fn put_settings(
     )?;
     Ok(Json(settings))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fr_f3_receiver_records_an_expired_offer_without_a_sender() {
+        let dir = tempfile::tempdir().unwrap();
+        let receiver = TransferManager::new(dir.path(), None, None);
+        let offer = receiver.receive_offer("laptop", None, vec![DeclaredFile {
+            name: "late.bin".into(),
+            size: 12,
+            sha256: None,
+        }]).unwrap();
+        let id = offer["id"].as_str().unwrap();
+        receiver.inner.lock().unwrap().pending_offers[0].created_at = now_ms() - 301_000;
+
+        let snapshot = receiver.snapshot();
+        assert!(snapshot.pending_offers.is_empty());
+        assert!(snapshot.transfers.is_empty());
+        assert_eq!(snapshot.history.len(), 1);
+        assert_eq!(snapshot.history[0].id, id);
+        assert_eq!(serde_json::to_value(snapshot.history[0].result).unwrap(), "expired");
+        assert!(receiver.accept_offer(id).is_err());
+        assert!(receiver.decline_offer(id).is_err());
+        assert!(!dir.path().join("received/.partial").exists());
+    }
+
+    #[test]
+    fn fr_f3_receiver_refuses_a_late_first_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let receiver = TransferManager::new(dir.path(), None, None);
+        let offer = receiver.receive_offer("laptop", None, vec![DeclaredFile {
+            name: "late.bin".into(),
+            size: 12,
+            sha256: None,
+        }]).unwrap();
+        let id = offer["id"].as_str().unwrap();
+        receiver.inner.lock().unwrap().pending_offers[0].created_at = now_ms() - 301_000;
+
+        let error = receiver.accept_offer(id).unwrap_err().into_response();
+        assert_eq!(error.status(), StatusCode::GONE);
+        assert!(!dir.path().join("received/.partial").exists());
+    }
+}

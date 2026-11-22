@@ -637,6 +637,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fr_f3_receiver_expires_a_pending_offer_across_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let receiver = Receiver::open(Some(dir.path()), None, ReceivePolicy::Ask).unwrap();
+        let offer = receiver.offer(OfferBody {
+            from: "laptop".into(),
+            peer_id: None,
+            files: vec![DeclaredFile { name: "late.bin".into(), size: 12, sha256: None }],
+            owner: false,
+        }).unwrap();
+        let id = offer["id"].as_str().unwrap();
+        {
+            let mut state = receiver.st().unwrap();
+            state.ledger.pending[0].created_at = now_ms() - 301_000;
+            state.save_ledger().unwrap();
+        }
+        drop(receiver);
+
+        let receiver = Receiver::open(Some(dir.path()), None, ReceivePolicy::Ask).unwrap();
+        let snapshot = receiver.snapshot().unwrap();
+        assert_eq!(snapshot["pending_offers"], json!([]));
+        assert_eq!(snapshot["history"][0]["id"], id);
+        assert_eq!(snapshot["history"][0]["result"], "expired");
+        assert!(receiver.accept(id).is_err());
+        assert!(receiver.decline(id).is_err());
+        assert!(!dir.path().join("received/.partial").exists());
+        drop(receiver);
+
+        let receiver = Receiver::open(Some(dir.path()), None, ReceivePolicy::Ask).unwrap();
+        assert_eq!(receiver.history().unwrap().len(), 1);
+    }
+
+    #[test]
     fn fr_f15_receive_policy_parses_and_defaults_to_owner() {
         assert_eq!(ReceivePolicy::parse(None).unwrap(), ReceivePolicy::Owner);
         assert_eq!(ReceivePolicy::parse(Some("")).unwrap(), ReceivePolicy::Owner);

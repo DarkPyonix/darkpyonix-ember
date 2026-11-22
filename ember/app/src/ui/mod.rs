@@ -19,6 +19,7 @@ pub mod conversation;
 pub mod editor;
 pub mod editor_actions;
 pub mod editor_agent;
+pub(crate) mod editor_debug;
 pub mod enrol_flow;
 pub mod device_scope;
 pub mod editor_icons;

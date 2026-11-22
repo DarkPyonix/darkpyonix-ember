@@ -52,7 +52,7 @@ use crate::ui::Route;
 use super::compat::{Badge, Banner, CodeText, MessageText, Spinner, StatusIndicator};
 use super::components::{
     AppButton, BackButton, ButtonKind, Clickable, EmberCard, EmberField, FieldOptions, IconButton, Label, NameThenPill,
-    OptionSheet, Pill, PillTone, Txt,
+    Pill, PillTone, PopKind, PopMenu, PopRow, PopoverMenu, Txt,
 };
 use super::ko;
 use super::launcher::{ConnectionBanner, export, patch_session};
@@ -63,8 +63,6 @@ use super::theme::*;
 pub const ICON_SHIELD_SVG: &str = include_str!("../../../assets/nav/shield.svg");
 pub const ICON_TERMINAL_SVG: &str = include_str!("../../../assets/nav/terminal.svg");
 pub const ICON_SEND_SVG: &str = include_str!("../../../assets/nav/send.svg");
-
-const POPUP_W: f32 = 280.0;
 
 /// The height of a transcript summary row (mockup `.cmd`: `padding:3px 0` around a 24 dp pill).
 pub const CMD_ROW_H: f32 = 30.0;
@@ -676,36 +674,19 @@ pub fn ConversationView(id: &str, embedded: bool) {
         .ide_target
         .as_deref()
         .and_then(IdeKind::from_key);
-    let mut ide_order: Vec<IdeKind> = IdeKind::ALL.to_vec();
-    if let Some(k) = remembered {
-        ide_order.retain(|x| *x != k);
-        ide_order.insert(0, k);
-    }
+    let ide_choices = crate::ui::session::ide_choices(remembered);
     let ide_now = ide.get();
-    let ide_entries: Vec<(IdeKind, String)> = ide_order
-        .iter()
-        .map(|k| {
-            let mut label = k.label().to_string();
-            if Some(*k) == remembered {
-                label.push_str(" (최근 사용)");
-            }
-            if let Some(Ok(l)) = &ide_now {
-                if let Some(t) = l.target(k.key()) {
-                    if !t.available {
-                        if let Some(r) = &t.reason {
-                            label = format!("{label}: {r}");
-                        }
-                    }
-                }
-            }
-            if *k == IdeKind::Ember {
-                if let Some(n) = crate::ui::session::ember_ide_notice(ide_now.as_ref()) {
-                    label = format!("{label}: {n}");
-                }
-            }
-            (*k, label)
-        })
-        .collect();
+    let ide_rows = super::session::with_ember_notice(
+        super::session::ide_pop_rows(&ide_choices, remembered),
+        &ide_choices,
+        ide_now.as_ref(),
+    );
+    let current_computer = computer.get();
+    let current_computer_id = current_computer.as_ref().map(|c| c.computer.id.clone());
+    let ide_sub = crate::ui::session::ide_menu_subtitle(
+        current_computer.as_ref().map(|c| c.computer.name.as_str()),
+        &record.cwd,
+    );
 
     // ---- mentions (FR-T6) ----------------------------------------------------------------------
     let cur_draft = draft.get();
@@ -770,8 +751,74 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                         );
                                     }) };
                                 StatusIndicator(status);
-                                let more = more_menu.clone();
-                                IconButton(IconRole::More, true, move || more.set(true));
+                                let more_rows = vec![
+                                    PopRow {
+                                        title: if pinned { "고정 해제" } else { "고정" }.into(),
+                                        chosen: pinned,
+                                        ..Default::default()
+                                    },
+                                    PopRow {
+                                        title: "내보내기".into(),
+                                        ..Default::default()
+                                    },
+                                    PopRow {
+                                        title: ko::FORK_MENU_LABEL.into(),
+                                        ..Default::default()
+                                    },
+                                    PopRow {
+                                        title: ko::approve_all_menu_label(approve_all).into(),
+                                        chosen: approve_all,
+                                        danger: !approve_all,
+                                        ..Default::default()
+                                    },
+                                ];
+                                let more_dismiss = more_menu;
+                                let sid_more = sid.clone();
+                                let title_more = title.clone();
+                                let ui_more = ui.clone();
+                                let more = more_menu;
+                                PopoverMenu(
+                                    more_menu.get(),
+                                    PopMenu {
+                                        name: super::a11y::MORE,
+                                        kind: PopKind::Drop,
+                                        head: "대화 메뉴",
+                                        sub: None,
+                                        rows: &more_rows,
+                                        align: compose_rust::PopoverAlign::End,
+                                    },
+                                    move || more_dismiss.set(false),
+                                    move |idx| match idx {
+                                        0 => patch_session(
+                                            sid_more.clone(),
+                                            SessionPatch {
+                                                pinned: Some(!pinned),
+                                                ..Default::default()
+                                            },
+                                        ),
+                                        1 => export(sid_more.clone(), title_more.clone()),
+                                        2 => fork_from(&ui_more, sid_more.clone(), None),
+                                        3 => {
+                                            let id_ap = sid_more.clone();
+                                            let enable = !approve_all;
+                                            run_shared(
+                                                async move { services().set_approve_all(&id_ap, enable).await },
+                                                |r| {
+                                                    if let Err(e) = r {
+                                                        notice::post(format!("모드를 바꾸지 못했습니다: {e}"));
+                                                    }
+                                                },
+                                            );
+                                        }
+                                        _ => {}
+                                    },
+                                    move || {
+                                        IconButton(IconRole::More, true, move || {
+                                            more.set(!more.get_untracked());
+                                        });
+                                    },
+                                    None,
+                                );
                             }) };
                     }
 
@@ -812,42 +859,136 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                     Some(paint(p.muted)),
                                     Some(1),
                                 );
-                                let cm = computer_menu.clone();
-                                AppButton(
-                                    &computer_name,
+                                let comp_rows: Vec<PopRow> = if computers.is_empty() {
+                                    vec![PopRow {
+                                        title: "등록된 컴퓨터가 없습니다".into(),
+                                        ..Default::default()
+                                    }]
+                                } else {
+                                    computers
+                                        .iter()
+                                        .map(|c| PopRow {
+                                            title: c.name.clone(),
+                                            description: Some(ko::reachability_label(c.reachability).to_string()),
+                                            chosen: current_computer_id.as_deref() == Some(c.id.as_str()),
+                                            ..Default::default()
+                                        })
+                                        .collect()
+                                };
+                                let comp_dismiss = computer_menu;
+                                let comps_for_pick = computers.clone();
+                                let sid_comp = sid.clone();
+                                let reload_comp = load.clone();
+                                let cm = computer_menu;
+                                PopoverMenu(
+                                    computer_menu.get(),
+                                    PopMenu {
+                                        name: super::a11y::COMPUTER_PICKER,
+                                        kind: PopKind::Mode,
+                                        head: "컴퓨터",
+                                        sub: None,
+                                        rows: &comp_rows,
+                                        align: compose_rust::PopoverAlign::Start,
+                                    },
+                                    move || comp_dismiss.set(false),
+                                    move |idx| {
+                                        let Some(c) = comps_for_pick.get(idx) else {
+                                            return;
+                                        };
+                                        if demo_blocked_cr() {
+                                            return;
+                                        }
+                                        let cid = c.id.clone();
+                                        let s_id = sid_comp.clone();
+                                        let reload = reload_comp.clone();
+                                        run_shared(
+                                            async move {
+                                                services()
+                                                    .server
+                                                    .switch_computer(&s_id, &cid)
+                                                    .await
+                                                    .map_err(|e| e.to_string())
+                                            },
+                                            move |r| match r {
+                                                Ok(out) => {
+                                                    reload();
+                                                    notice::post(format!(
+                                                        "{} 컴퓨터로 전환했습니다",
+                                                        out.computer.name
+                                                    ));
+                                                }
+                                                Err(e) => {
+                                                    notice::post(format!("컴퓨터를 전환하지 못했습니다: {e}"))
+                                                }
+                                            },
+                                        );
+                                    },
+                                    move || {
+                                        AppButton(
+                                            &computer_name,
+                                            None,
+                                            ButtonKind::Default,
+                                            true,
+                                            !busy,
+                                            false,
+                                            move || cm.set(!cm.get_untracked()),
+                                        );
+                                    },
                                     None,
-                                    ButtonKind::Default,
-                                    true,
-                                    !busy,
-                                    false,
-                                    move || cm.set(true),
                                 );
                                 { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                                 if let Some(label) = qv::needs_you_label(pending) {
                                     Badge(&label, Tone::Warning);
                                 }
-                                let im = ide_menu.clone();
+                                let ide_dismiss = ide_menu;
+                                let ide_choices_pick = ide_choices.clone();
+                                let ui_ide = ui.clone();
+                                let launch_res = ide_now.clone();
+                                let im = ide_menu;
                                 let ui_ide_btn = ui.clone();
-                                let launch_btn = ide.get();
-                                let chev = ide_menu.clone();
-                                AppButton(
-                                    "IDE 열기",
-                                    Some(IconRole::Forward),
-                                    ButtonKind::Default,
-                                    true,
-                                    true,
-                                    false,
-                                    move || {
-                                        super::session::ide_main_click(remembered, &im, |kind| {
-                                            super::session::launch_ide_shared(
-                                                &ui_ide_btn,
-                                                kind,
-                                                launch_btn.clone(),
-                                            )
-                                        })
+                                let launch_btn = ide_now.clone();
+                                let chev = ide_menu;
+                                PopoverMenu(
+                                    ide_menu.get(),
+                                    PopMenu {
+                                        name: super::a11y::IDE_PICKER,
+                                        kind: PopKind::Drop,
+                                        head: crate::ui::session::IDE_MENU_HEAD,
+                                        sub: ide_sub.as_deref(),
+                                        rows: &ide_rows,
+                                        align: compose_rust::PopoverAlign::End,
                                     },
+                                    move || ide_dismiss.set(false),
+                                    move |idx| {
+                                        let Some(choice) = ide_choices_pick.get(idx) else {
+                                            return;
+                                        };
+                                        super::session::launch_ide_shared(&ui_ide, choice.kind, launch_res.clone());
+                                    },
+                                    move || {
+                                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, space_role = SpaceRole::Sm, content = move || {
+                                            AppButton(
+                                                "IDE 열기",
+                                                Some(IconRole::Forward),
+                                                ButtonKind::Default,
+                                                true,
+                                                true,
+                                                false,
+                                                move || {
+                                                    super::session::ide_main_click(remembered, &im, |kind| {
+                                                        super::session::launch_ide_shared(
+                                                            &ui_ide_btn,
+                                                            kind,
+                                                            launch_btn.clone(),
+                                                        )
+                                                    })
+                                                },
+                                            );
+                                            super::session::IdeChevron(chev, false);
+                                        }) };
+                                    },
+                                    None,
                                 );
-                                super::session::IdeChevron(chev, false);
                             }) };
                     }
 
@@ -1199,136 +1340,6 @@ pub fn ConversationView(id: &str, embedded: bool) {
                             }) };
                     }
                 }) };
-
-            // ---- Popups (outside spaced Column) ------------------------------------------------
-            // 1. More menu OptionSheet
-            let more_labels = vec![
-                if pinned {
-                    "고정 해제".to_string()
-                } else {
-                    "고정".to_string()
-                },
-                "내보내기".to_string(),
-                ko::FORK_MENU_LABEL.to_string(),
-                ko::approve_all_menu_label(approve_all).to_string(),
-            ];
-            let more_dismiss = more_menu.clone();
-            let sid_more = sid.clone();
-            let title_more = title.clone();
-            let ui_more = ui.clone();
-            OptionSheet(
-                more_menu.get(),
-                &more_labels,
-                None,
-                POPUP_W,
-                move || more_dismiss.set(false),
-                move |idx| match idx {
-                    0 => patch_session(
-                        sid_more.clone(),
-                        SessionPatch {
-                            pinned: Some(!pinned),
-                            ..Default::default()
-                        },
-                    ),
-                    1 => export(sid_more.clone(), title_more.clone()),
-                    2 => fork_from(&ui_more, sid_more.clone(), None),
-                    3 => {
-                        let id_ap = sid_more.clone();
-                        let enable = !approve_all;
-                        run_shared(
-                            async move { services().set_approve_all(&id_ap, enable).await },
-                            |r| {
-                                if let Err(e) = r {
-                                    notice::post(format!("모드를 바꾸지 못했습니다: {e}"));
-                                }
-                            },
-                        );
-                    }
-                    _ => {}
-                },
-            );
-
-            // 2. Computer menu OptionSheet
-            let comp_labels: Vec<String> = if computers.is_empty() {
-                vec!["등록된 컴퓨터가 없습니다".to_string()]
-            } else {
-                computers
-                    .iter()
-                    .map(|c| {
-                        format!(
-                            "{} ({})",
-                            c.name,
-                            ko::reachability_label(c.reachability)
-                        )
-                    })
-                    .collect()
-            };
-            let comp_dismiss = computer_menu.clone();
-            let comps_for_pick = computers.clone();
-            let sid_comp = sid.clone();
-            let reload_comp = load.clone();
-            OptionSheet(
-                computer_menu.get(),
-                &comp_labels,
-                None,
-                POPUP_W,
-                move || comp_dismiss.set(false),
-                move |idx| {
-                    let Some(c) = comps_for_pick.get(idx) else {
-                        return;
-                    };
-                    if demo_blocked_cr() {
-                        return;
-                    }
-                    let cid = c.id.clone();
-                    let s_id = sid_comp.clone();
-                    let reload = reload_comp.clone();
-                    run_shared(
-                        async move {
-                            services()
-                                .server
-                                .switch_computer(&s_id, &cid)
-                                .await
-                                .map_err(|e| e.to_string())
-                        },
-                        move |r| match r {
-                            Ok(out) => {
-                                reload();
-                                notice::post(format!(
-                                    "{} 컴퓨터로 전환했습니다",
-                                    out.computer.name
-                                ));
-                            }
-                            Err(e) => {
-                                notice::post(format!("컴퓨터를 전환하지 못했습니다: {e}"))
-                            }
-                        },
-                    );
-                },
-            );
-
-            // 3. IDE menu OptionSheet (when not embedded)
-            if !embedded {
-                let ide_labels: Vec<String> =
-                    ide_entries.iter().map(|(_, l)| l.clone()).collect();
-                let ide_kinds: Vec<IdeKind> = ide_entries.iter().map(|(k, _)| *k).collect();
-                let ide_dismiss = ide_menu.clone();
-                let ui_ide = ui.clone();
-                let launch_res = ide.get();
-                OptionSheet(
-                    ide_menu.get(),
-                    &ide_labels,
-                    remembered.map(|_| 0),
-                    POPUP_W,
-                    move || ide_dismiss.set(false),
-                    move |idx| {
-                        let Some(&kind) = ide_kinds.get(idx) else {
-                            return;
-                        };
-                        super::session::launch_ide_shared(&ui_ide, kind, launch_res.clone());
-                    },
-                );
-            }
         }) };
 }
 
@@ -2560,5 +2571,60 @@ mod tests {
             assert!(mods.contains(&surface), "root box {mods:?} lacks {surface}");
             assert!(mods.iter().any(|m| m == "FillMaxWidth") && mods.iter().any(|m| m == "FillMaxHeight"), "{mods:?}");
         }
+    }
+
+    #[test]
+    fn fr_l10_4_conversation_menus_are_anchored_popovers_not_option_sheets() {
+        let _guard = crate::services::test_guard();
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+        services().open_session("demo-s1");
+        let mut host = Host::new(|| Box::new(Recomposer::new(host_conversation_s1)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        crate::ui::window_size::set_opened_for_test(None);
+
+        let popover_ids: Vec<u32> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::Create { node_id, widget } if format!("{widget:?}") == "Popover" => Some(*node_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(popover_ids.len(), 3, "More, Computer, and IDE menus should each be an anchored Popover");
+
+        let has_dialog_or_sheet = batch.iter().any(|m| {
+            matches!(m, Mutation::Create { widget, .. } if matches!(format!("{widget:?}").as_str(), "Dialog" | "Sheet"))
+        });
+        assert!(!has_dialog_or_sheet, "conversation header menus must not emit a centred OptionSheet Dialog or Sheet");
+
+        let popover_mods: Vec<String> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetModifier { node_id, modifier, .. } if popover_ids.contains(node_id) => {
+                    Some(format!("{modifier:?}"))
+                }
+                _ => None,
+            })
+            .collect();
+        let menu_role_count = popover_mods.iter().filter(|m| m.contains("Semantics") && m.contains("Menu")).count();
+        assert_eq!(menu_role_count, 3, "all 3 popovers must declare Role::Menu, got {popover_mods:?}");
+
+        let popover_props: Vec<String> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetProp { node_id, property, value } if popover_ids.contains(node_id) => {
+                    Some(format!("{property:?}={value:?}"))
+                }
+                _ => None,
+            })
+            .collect();
+        for name in [super::super::a11y::MORE, super::super::a11y::COMPUTER_PICKER, super::super::a11y::IDE_PICKER] {
+            assert!(
+                popover_props.iter().any(|p| p.contains(name)),
+                "expected a Popover prop named '{name}', got {popover_props:?}"
+            );
+        }
+
+        let prod = include_str!("conversation.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(!prod.contains("OptionSheet("), "no centred OptionSheet remains in conversation.rs");
     }
 }

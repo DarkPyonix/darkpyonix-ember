@@ -1027,6 +1027,8 @@ pub struct FieldOptions {
     pub weight: Option<f32>,
     pub fill_max_width: bool,
     pub placeholder: String,
+    /// Colour of the placeholder text; `None` uses the theme's `muted` token (`.field::placeholder`).
+    pub placeholder_color: Option<Paint>,
     /// Text the field starts with (selectable, copyable); `None` starts empty.
     pub text: Option<String>,
     pub multiline: bool,
@@ -1198,6 +1200,7 @@ fn FieldNode(o: FieldOptions, modifier: Modifier) {
     // The function takes the change handler as a required argument; a field without one gets a
     // handler that does nothing.
     let on_value_change: Box<dyn FnMut(String)> = o.on_value_change.unwrap_or_else(|| Box::new(|_| {}));
+    let placeholder_color = o.placeholder_color.unwrap_or_else(|| paint(ember_theme().palette.muted));
     // The node's transparent fill alone still left the toolkit's frame drawn inside the
     // composer (H2, SE10, CH1); `bare` drops it.
     { use ::compose_rust::ui::TextField; TextField!(
@@ -1207,6 +1210,7 @@ fn FieldNode(o: FieldOptions, modifier: Modifier) {
         word_break = WordBreak::KeepAll,
         overflow_wrap = OverflowWrap::Anywhere,
         placeholder = o.placeholder,
+        placeholder_color = placeholder_color,
         multiline = o.multiline,
         enabled = o.enabled.unwrap_or(true),
         type_role = o.type_role,
@@ -2553,6 +2557,67 @@ mod tests {
         assert!(field.props.iter().any(|p| p == "ReadOnly=Bool(true)"), "{:?}", field.props);
         let plain = emitted_nodes(|| EmberField(FieldOptions { fill_max_width: true, ..Default::default() }));
         assert!(!the(&plain, "TextField").props.iter().any(|p| p.starts_with("ReadOnly=")), "a plain field sends no flag");
+    }
+
+    #[test]
+    fn fr_l10_2_fields_send_the_muted_placeholder_color() {
+        let _guard = crate::services::test_guard();
+        let prev = crate::services::services().ui.theme_pref.get();
+        let check_scheme = |pref: ThemePref, expected_muted: Color| {
+            crate::services::services().ui.theme_pref.set(pref);
+            let encoded = (2_i64 << 32) | i64::from(expected_muted.to_argb());
+            let want = format!("PlaceholderColor=Integer({encoded})");
+            let framed = emitted_nodes(|| {
+                EmberField(FieldOptions {
+                    fill_max_width: true,
+                    placeholder: "힌트".into(),
+                    ..Default::default()
+                })
+            });
+            assert!(
+                the(&framed, "TextField").props.iter().any(|p| p == &want),
+                "framed field should send {want}, got {:?}",
+                the(&framed, "TextField").props
+            );
+            let bare = emitted_nodes(|| {
+                EmberField(FieldOptions {
+                    bare: true,
+                    placeholder: "메시지".into(),
+                    ..Default::default()
+                })
+            });
+            assert!(
+                the(&bare, "TextField").props.iter().any(|p| p == &want),
+                "bare field should send {want}, got {:?}",
+                the(&bare, "TextField").props
+            );
+            let search = emitted_nodes(|| SearchField("검색", 36.0, |_| {}));
+            assert!(
+                the(&search, "TextField").props.iter().any(|p| p == &want),
+                "search field should send {want}, got {:?}",
+                the(&search, "TextField").props
+            );
+        };
+        check_scheme(ThemePref::Light, LIGHT.muted);
+        check_scheme(ThemePref::Dark, DARK.muted);
+
+        // An explicit placeholder_color overrides the default muted token.
+        crate::services::services().ui.theme_pref.set(ThemePref::Light);
+        let custom = emitted_nodes(|| {
+            EmberField(FieldOptions {
+                placeholder: "커스텀".into(),
+                placeholder_color: Some(paint(LIGHT.text_2)),
+                ..Default::default()
+            })
+        });
+        let custom_encoded = (2_i64 << 32) | i64::from(LIGHT.text_2.to_argb());
+        let want_custom = format!("PlaceholderColor=Integer({custom_encoded})");
+        assert!(
+            the(&custom, "TextField").props.iter().any(|p| p == &want_custom),
+            "custom placeholder color should override default, got {:?}",
+            the(&custom, "TextField").props
+        );
+        crate::services::services().ui.theme_pref.set(prev);
     }
 
     #[test]

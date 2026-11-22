@@ -412,7 +412,7 @@ fn fr_e6_folding_ranges_from_indent_and_provider_and_toggle_preserved_on_edit() 
     assert!(!initial_folds[0].collapsed);
 
     // Register a folding range provider for typescript.
-    let provider_args = vec![json!(7), json!([{"language": "typescript"}])];
+    let provider_args = vec![json!(7), json!([{"language": "typescript"}]), json!({"value": "pub.ext"})];
     d.feed(request(1, "MainThreadLanguageFeatures", "$registerFoldingRangeProvider", provider_args));
 
     // Handle the call for $provideFoldingRanges and reply with provider ranges.

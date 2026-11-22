@@ -442,10 +442,12 @@ pub mod view {
 
 pub mod page {
     use dioxus_compose::html::prelude::dioxus_elements::point_interaction::{InteractionLocation, ModifiersInteraction};
-    use dioxus_compose::html::prelude::dioxus_elements::{Key, Modifiers};
+    use dioxus_compose::html::prelude::dioxus_elements::{Key, Modifiers, MountedData, ScrollBehavior};
     use dioxus_compose::html::prelude::dioxus_signals::{ReadableExt, WritableExt};
     use dioxus_compose::html::prelude::*;
+    use std::cell::RefCell;
     use std::collections::HashMap;
+    use std::rc::Rc;
     use std::sync::Arc;
     use crate::terminal_stream::{self, ChangeCallback, TerminalHandle, TerminalState};
     use crate::ui::editor_terminals as terms;
@@ -779,6 +781,7 @@ pub mod page {
 
     fn open_palette(s: &Shared, mode: crate::ui::palette::Mode) {
         let (mut open, mut query, mut sel, mut palette_mode) = (s.palette_open, s.palette_query, s.palette_sel, s.palette_mode);
+        PALETTE_SCROLL.with(|ps| ps.borrow_mut().clear());
         palette_mode.set(mode);
         if mode != crate::ui::palette::Mode::Commands && mode != crate::ui::palette::Mode::GotoLine {
             s.host.send(HostCommand::IndexFiles);
@@ -792,10 +795,66 @@ pub mod page {
         open.set(true);
     }
 
+    /// Tracks mounted palette rows so opening a picker or moving its highlight scrolls the active
+    /// row into view via `MountedData::scroll_to` without slicing the list.
+    #[derive(Default)]
+    struct PaletteScroll {
+        rows: HashMap<usize, Rc<MountedData>>,
+        current: Option<(crate::ui::palette::Mode, usize, usize)>,
+        last_scrolled: Option<(crate::ui::palette::Mode, usize, usize)>,
+    }
+
+    impl PaletteScroll {
+        fn clear(&mut self) {
+            self.rows.clear();
+            self.current = None;
+            self.last_scrolled = None;
+        }
+
+        fn sync(&mut self, mode: crate::ui::palette::Mode, len: usize, chosen: usize) {
+            self.rows.retain(|&row, _| row < len);
+            if len == 0 {
+                self.current = None;
+                return;
+            }
+            let target = (mode, len, chosen);
+            self.current = Some(target);
+            if self.last_scrolled != Some(target)
+                && let Some(data) = self.rows.get(&chosen)
+            {
+                let fut = data.scroll_to(ScrollBehavior::Instant);
+                drop(fut);
+                self.last_scrolled = Some(target);
+            }
+        }
+
+        fn mounted(&mut self, row: usize, data: Rc<MountedData>) {
+            self.rows.insert(row, data.clone());
+            if let Some(target) = self.current
+                && target.2 == row
+                && self.last_scrolled != Some(target)
+            {
+                let fut = data.scroll_to(ScrollBehavior::Instant);
+                drop(fut);
+                self.last_scrolled = Some(target);
+            }
+        }
+    }
+
+    thread_local! {
+        static PALETTE_SCROLL: RefCell<PaletteScroll> = RefCell::new(PaletteScroll::default());
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn palette_scrolled_row() -> Option<usize> {
+        PALETTE_SCROLL.with(|ps| ps.borrow().last_scrolled.map(|(_, _, row)| row))
+    }
+
     fn close_palette(s: &Shared) {
         let mut open = s.palette_open;
         if *open.read() {
             open.set(false);
+            PALETTE_SCROLL.with(|ps| ps.borrow_mut().clear());
             s.host.send(HostCommand::CancelIndexFiles);
         }
     }
@@ -870,6 +929,7 @@ pub mod page {
             return;
         }
         let (mut open, mut query, mut sel, mut palette_mode) = (s.palette_open, s.palette_query, s.palette_sel, s.palette_mode);
+        PALETTE_SCROLL.with(|ps| ps.borrow_mut().clear());
         palette_mode.set(mode);
         query.set(String::new());
         // Follow the current entry until the person moves: the rows may still grow (FR-L31.7).
@@ -936,8 +996,8 @@ pub mod page {
             }
         };
         let hint_text = placeholder(mode, keymap);
-        // A picker lists every row (a language list is longer than 50) and shows the window of rows that
-        // holds the highlighted one, so the current language or encoding is in view when it opens (FR-L31.7).
+        // A picker lists every row (a language list is longer than 50) and scrolls the highlighted
+        // row into view via MountedData::scroll_to on open and on arrow moves.
         let picker = crate::ui::editor_status::is_picker(mode);
         let shown: Vec<_> = ranked.iter().take(if picker { usize::MAX } else { 50 }).cloned().collect();
         let chosen = if picker {
@@ -947,11 +1007,7 @@ pub mod page {
         } else {
             (*sel.read()).min(shown.len().saturating_sub(1))
         };
-        let (win_start, _) = if picker {
-            crate::ui::editor_status::list_window(chosen, shown.len(), crate::ui::editor_status::PICKER_VISIBLE_ROWS)
-        } else {
-            (0, shown.len())
-        };
+        PALETTE_SCROLL.with(|ps| ps.borrow_mut().sync(mode, shown.len(), chosen));
         // A command the editor cannot do yet is listed but does nothing: Enter on it leaves the sheet open.
         let enter_payload = shown
             .get(chosen)
@@ -999,13 +1055,7 @@ pub mod page {
                 }
                 div { class: "ed-pall", role: "listbox",
                     if shown.is_empty() { div { style: "padding:var(--sp3); color:var(--muted);", "{crate::ui::palette::empty_text(mode, index_running)}" } }
-                    if win_start > 0 {
-                        div { class: "ed-tn", role: "option", "aria-label": "위 항목 더 보기", style: "--d:0; height:34px; color:var(--muted);",
-                            onclick: move |_| sel.set(win_start - 1),
-                            "{crate::ui::editor_status::more_above_text(win_start)}"
-                        }
-                    }
-                    for (row, r) in shown.iter().enumerate().skip(win_start) {
+                    for (row, r) in shown.iter().enumerate() {
                         {
                             let item = &items[r.index];
                             let segments = highlight_segments(&item.title, &r.matched);
@@ -1016,6 +1066,7 @@ pub mod page {
                             let class = if row == chosen { "ed-tn sel" } else { "ed-tn" };
                             let row_style = if enabled { "--d:0; height:34px;" } else { "--d:0; height:34px; color:var(--muted);" };
                             rsx! { div { key: "{row}", class, role: "option", "aria-selected": "{row == chosen}", "aria-disabled": "{!enabled}", style: "{row_style}",
+                                onmounted: move |event| PALETTE_SCROLL.with(|ps| ps.borrow_mut().mounted(row, event.data())),
                                 onclick: move |_| {
                                     if !enabled { return; }
                                     close_palette(&click_s);

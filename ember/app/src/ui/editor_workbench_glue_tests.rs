@@ -1140,3 +1140,68 @@ fn fr_e3_a_hover_draws_the_card_where_the_editor_says_the_word_is() {
     assert!(page.find("data-ed", "hover-card").is_none(), "the card goes with the hover");
     super::set_hover_rect((0, 0, 0), None);
 }
+
+// #838: the language picker renders its full list (no 9-row window or "위에 N개" row) and calls
+// MountedData::scroll_to on the highlighted row on open and on arrow keys.
+#[test]
+fn fr_l31_7_language_picker_renders_full_list_and_scrolls_highlighted_row_into_view() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open();
+    page.click_row();
+    page.deliver(opened(1));
+    page.deliver(SessionUpdate::Format {
+        uri: uri(),
+        format: ember_editor::DocumentFormat {
+            eol: ember_editor::Eol::Lf,
+            encoding: ember_editor::Encoding::Utf8,
+            language_id: "rust".into(),
+            language_name: "Rust".into(),
+        },
+    });
+    let mut languages: Vec<ember_editor::LanguageInfo> = (0..40)
+        .map(|i| ember_editor::LanguageInfo {
+            id: format!("lang{i:02}"),
+            name: format!("Alpha {i:02}"),
+        })
+        .collect();
+    languages.push(ember_editor::LanguageInfo { id: "rust".into(), name: "Rust".into() });
+    for i in 0..4 {
+        languages.push(ember_editor::LanguageInfo {
+            id: format!("zlang{i:02}"),
+            name: format!("Zeta {i:02}"),
+        });
+    }
+    languages.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    page.host().state.lock().unwrap().languages = languages.clone();
+    page.redraw();
+
+    let lang_btn = page.find("title", "언어 모드 선택").expect("language status button");
+    page.dom.click_node(lang_btn);
+    page.dom.render();
+
+    assert!(page.find("aria-label", "위 항목 더 보기").is_none(), "9-row window overflow row is gone");
+    let options: Vec<NodeId> = page
+        .connected()
+        .into_iter()
+        .filter(|&id| page.attr(id, "role").as_deref() == Some("option"))
+        .collect();
+    assert_eq!(options.len(), languages.len() + 1, "every language row is rendered");
+
+    let rust_idx = options
+        .iter()
+        .position(|&id| page.attr(id, "aria-selected").as_deref() == Some("true"))
+        .expect("a highlighted option");
+    assert_eq!(rust_idx, 41, "Rust is highlighted on open");
+    assert_eq!(super::page::palette_scrolled_row(), Some(41), "highlighted row scrolled into view on open");
+
+    let input = page
+        .find("aria-label", crate::ui::palette::search_label(crate::ui::palette::Mode::Language))
+        .expect("picker search input");
+    page.dom.key_down(input, Key::ArrowDown, Code::ArrowDown, Modifiers::empty());
+    page.dom.render();
+    assert_eq!(super::page::palette_scrolled_row(), Some(42), "ArrowDown scrolls row 42 into view");
+
+    page.dom.key_down(input, Key::ArrowUp, Code::ArrowUp, Modifiers::empty());
+    page.dom.render();
+    assert_eq!(super::page::palette_scrolled_row(), Some(41), "ArrowUp scrolls row 41 into view");
+}

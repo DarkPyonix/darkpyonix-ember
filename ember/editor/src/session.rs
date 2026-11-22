@@ -87,6 +87,9 @@ pub struct SessionConfig {
     /// what the extension host is given, as the Code-OSS workbench does. Compared without regard
     /// to case.
     pub disabled_extensions: Vec<String>,
+    /// Backend for `MainThreadSecretState` (`$getPassword`, `$setPassword`, `$deletePassword`).
+    /// When `None`, the session uses [`crate::secret_state::default_secret_store`].
+    pub secret_store: Option<Arc<dyn crate::secret_state::SecretStore>>,
 }
 
 impl SessionConfig {
@@ -108,11 +111,17 @@ impl SessionConfig {
             vscode_url: None,
             workspace_trusted: true,
             disabled_extensions: Vec::new(),
+            secret_store: None,
         }
     }
 
     pub fn with_vscode_url(mut self, url: impl Into<String>) -> Self {
         self.vscode_url = Some(url.into());
+        self
+    }
+
+    pub fn with_secret_store(mut self, store: Arc<dyn crate::secret_state::SecretStore>) -> Self {
+        self.secret_store = Some(store);
         self
     }
 }
@@ -409,9 +418,12 @@ impl EditorSession {
         core.set_settings(settings.clone());
         core.set_grammar_catalog(crate::textmate::GrammarCatalog::from_extensions(&extensions));
         core.set_workspace_trust(crate::trust::WorkspaceTrust::new(config.workspace_trusted, extensions.clone()));
+        let secrets = config.secret_store.clone().unwrap_or_else(crate::secret_state::default_secret_store);
         let driver = Driver {
             core,
             highlight: None,
+            secrets,
+            secret_tx: None,
             peer: peer.clone(),
             fs: Arc::clone(&fs),
             ipc: ipc.clone(),
@@ -826,6 +838,10 @@ struct Driver {
     core: SessionCore,
     /// Jobs for the highlighting thread (started in [`Driver::run`]).
     highlight: Option<std::sync::mpsc::SyncSender<HighlightJob>>,
+    /// Backend for `MainThreadSecretState` operations.
+    secrets: Arc<dyn crate::secret_state::SecretStore>,
+    /// FIFO queue for blocking secret-store operations (started in [`Driver::run`]).
+    secret_tx: Option<mpsc::UnboundedSender<(u32, crate::secret_state::SecretOp)>>,
     peer: RpcPeer,
     fs: Arc<RemoteFs>,
     ipc: IpcClient,
@@ -915,6 +931,23 @@ impl Driver {
     ) {
         let (internal_tx, mut internal_rx) = mpsc::unbounded_channel::<Input>();
         self.highlight = Some(spawn_highlighter(internal_tx.clone()));
+        let (secret_tx, mut secret_rx) = mpsc::unbounded_channel::<(u32, crate::secret_state::SecretOp)>();
+        {
+            let secrets = Arc::clone(&self.secrets);
+            let tx = internal_tx.clone();
+            tokio::spawn(async move {
+                while let Some((req, op)) = secret_rx.recv().await {
+                    let store = Arc::clone(&secrets);
+                    let result = tokio::task::spawn_blocking(move || crate::secret_state::execute_op(store.as_ref(), op))
+                        .await
+                        .unwrap_or_else(|e| Err(format!("secret store task failed: {e}")));
+                    if tx.send(Input::SecretState { req, result }).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        self.secret_tx = Some(secret_tx);
         if !self.commands.is_empty() {
             let _ = self.updates.send(SessionUpdate::Commands { commands: self.commands.clone() });
         }
@@ -1066,6 +1099,21 @@ impl Driver {
                                 let _ = internal.send(Input::Highlighted(rebuild));
                             }
                         }
+                    }
+                }
+                Effect::SecretState { req, op } => {
+                    if let Some(tx) = &self.secret_tx {
+                        if tx.send((req, op)).is_err() {
+                            let _ = internal.send(Input::SecretState {
+                                req,
+                                result: Err("secret store worker stopped".to_owned()),
+                            });
+                        }
+                    } else {
+                        let _ = internal.send(Input::SecretState {
+                            req,
+                            result: Err("secret store worker not started".to_owned()),
+                        });
                     }
                 }
                 Effect::ReadFile { uri, purpose } => {

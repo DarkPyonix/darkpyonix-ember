@@ -138,6 +138,8 @@ pub enum Input {
     Language(crate::language::LanguageRequest),
     /// An event of an extension webview or its host (FR-E8).
     Webview(crate::webview::WebviewEvent),
+    /// Outcome of a `MainThreadSecretState` operation (`$getPassword`, `$setPassword`, `$deletePassword`).
+    SecretState { req: u32, result: Result<crate::secret_state::SecretReply, String> },
     /// Nothing happened; run due timers.
     Tick,
 }
@@ -157,6 +159,8 @@ pub enum Effect {
     Unwatch { uri: UriComponents },
     /// Work for the highlighting thread; its answer comes back as [`Input::Highlighted`].
     Highlight(HighlightJob),
+    /// Run a `MainThreadSecretState` operation against the secret store; answered with [`Input::SecretState`].
+    SecretState { req: u32, op: crate::secret_state::SecretOp },
     Ui(SessionUpdate),
 }
 
@@ -470,6 +474,7 @@ impl SessionCore {
                 let out = self.webviews.on_event(event);
                 self.apply_webview(out);
             }
+            Input::SecretState { req, result } => self.on_secret_state_result(req, result),
             Input::Tick => {}
         }
         self.run_timers();
@@ -570,6 +575,20 @@ impl SessionCore {
             let path = doc.uri.path.trim_end_matches('/');
             (path == prefix || path.strip_prefix(prefix).is_some_and(|r| r.starts_with('/'))) && doc.is_dirty()
         })
+    }
+
+    fn on_secret_state_result(&mut self, req: u32, result: Result<crate::secret_state::SecretReply, String>) {
+        match result {
+            Ok(crate::secret_state::SecretReply::Value(Some(value))) => {
+                self.respond(req, Ok(Reply::Json(Value::String(value))));
+            }
+            Ok(crate::secret_state::SecretReply::Value(None)) | Ok(crate::secret_state::SecretReply::Unit) => {
+                self.respond(req, Ok(Reply::Empty));
+            }
+            Err(err) => {
+                self.respond(req, Err(Some(js_error("Error", &err))));
+            }
+        }
     }
 
     fn on_decide_trust(&mut self, trusted: bool) {

@@ -58,6 +58,7 @@ pub mod languages;
 pub mod registry;
 pub mod replies;
 pub mod search;
+pub mod secret_state;
 pub mod selector;
 pub mod semantic;
 pub mod textmate;
@@ -82,6 +83,7 @@ pub use crate::text_format::{DocumentFormat, Encoding, EncodingMode, Eol};
 pub use crate::coords::{WidgetPos, WidgetRange};
 pub use crate::language::{LanguageRequest, LanguageUpdate};
 pub use crate::session::{DirLister, EditorSession, ServerSettingsFile, SessionConfig};
+pub use crate::secret_state::{InMemorySecretStore, SecretStore};
 pub use crate::settings::{EditorSettings, SettingsLayer, SettingsScope, SettingsScopes};
 pub use crate::output::{ExtensionMessage, MessageAction, MessageSeverity, OutputChannel, MAX_OUTPUT_CHANNEL_BYTES};
 pub use crate::widget::{

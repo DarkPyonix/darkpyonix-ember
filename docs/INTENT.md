@@ -476,7 +476,7 @@ Rejected: failing tool actions while the computer is away; wording the notice as
 This closes Q2 (who moves a session): the user designates, and the server moves it on a connection
 change. An agent-triggered `switch_computer` is not part of this decision.
 
-**Status.** Not built; today only the user switches (#34).
+**Status.** Built, not verified on two physical computers (#82 V4). The designated computer, the probes (2 x 10 s, `EMBER_FALLBACK_PROBES` and `EMBER_FALLBACK_INTERVAL_SECS`), the fall back to the main server, the return, and the "now working on X (moved from Y)" notice are in `ember/server/src/computers/mod.rs` (`fr_x3_disconnect_moves_to_main_server_with_a_moved_notice`, `fr_x3_reconnect_moves_back_with_a_notice`). A teammate spawned with `--computer` is designated as well, and its leader is told of each move (FR-T7, #82). This corrects the earlier "Not built" line, which had gone stale; the decision itself is unchanged.
 
 ### D21: A low-level terminal view of other sessions, apart from team messages
 
@@ -1092,3 +1092,13 @@ What trust does not protect. Under D37 agents and terminals run with the full au
 **Why.** A Windows computer hosts its own OSE the same way a Mac or a Linux machine does; one script and one archive shape keep the five targets in step.
 
 **Status.** Written, not yet run in CI (#83). Not built: the live tests on Windows (they use Unix process groups and `pkill`), process tree kill of the extension host on Windows, and hardened token file ACLs. SPEC `FR-W4` (acceptance, Windows).
+
+### D50: The editor core supports a set of Code-OSS commits, proven equal by generation
+
+**Decision.** *[provisional, leader 2026-11-20, Q-E3; `docs/design/POST-1-0-EDITOR-CORE.md`]* The Ember 에디터 connects to a Code-OSS server whose commit is in a supported set. A commit joins the set only when the generator shows the same actor order and the same signatures for every bridged method as the pinned one. Until the generator exists (#32 phase B) the set is the one pin. On any other commit the window offers `VS Code에서 열기` (`SPEC.md` FR-E10).
+
+**Why.** A client that updates itself meets an older or newer OSE; a set proven equal by generation accepts those without branches in code, and an unknown commit could shift a proxy id and deliver calls to the wrong actor.
+
+**Rejected.** One pin only (a self-updated client falls back for no reason); per-commit signature branches (an untestable matrix); connecting to unknown commits.
+
+**Status.** Not built: today the editor checks one pin at connect.

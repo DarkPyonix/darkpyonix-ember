@@ -4,8 +4,9 @@
 //! - **Leader**: the first `team spawn` makes the calling session the leader of a new team.
 //!   Only the leader spawns and ends teammates. A session leads at most one team and is never
 //!   both a leader and a teammate (no nested teams).
-//! - **Teammates** are ordinary sessions in the leader's project, created with the agent,
-//!   account and computer the leader chose and nothing else from the leader (no model, no
+//! - **Teammates** are ordinary sessions in the leader's project, created with the agent and
+//!   computer the leader chose, under their harness's profile (D30; `--account` only for
+//!   verification), and nothing else from the leader (no model, no
 //!   transcript, no approvals: each teammate keeps its own approvals, answered in its own
 //!   session). The first prompt arrives as an A2A message from the leader (FR-T3), so the
 //!   teammate can reply with one call.
@@ -188,6 +189,12 @@ pub struct Member {
     pub title: String,
     pub agent: String,
     pub status: Option<SessionStatus>,
+    /// The computer the member was put on (`team spawn --computer`, or the user's designation,
+    /// FR-X3); `None`: the main server. *[leader, 2026-11-22, #82]*
+    pub designated_computer: Option<String>,
+    /// The computer it runs on now; differs from `designated_computer` while it works on the
+    /// main server because its computer stopped answering (D20). `None`: the main server.
+    pub current_computer: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -242,7 +249,13 @@ pub struct SpawnRequest {
     /// Agent kind (`claude-code`, `codex`); default: the leader's.
     #[serde(default)]
     pub agent: Option<String>,
-    /// Account id; default: the account router's choice (FR-U2).
+    /// The profile the teammate runs under (FR-T7, `INTENT.md` D30): `None` or `default` is its
+    /// harness's profile, with the project's override (FR-L26). Named profiles are not stored on
+    /// the server yet (FR-L17), so any other name is refused. *[leader, 2026-11-22, #82]*
+    #[serde(default)]
+    pub profile: Option<String>,
+    /// One fixed account id, for verification and debugging only (D30: the profile decides
+    /// otherwise). Exclusive with a named `profile`.
     #[serde(default)]
     pub account: Option<String>,
     /// Use the account-switching pipeline (FR-U3). Exclusive with `account`; when neither is
@@ -639,6 +652,39 @@ fn valid_name(name: &str) -> Result<(), A2aError> {
     }
 }
 
+/// What a leader is told when its teammate moves (D20: the work goes on; no word that it is void).
+pub fn move_notice(name: &str, from: &str, to: &str, fell_back: bool) -> String {
+    let mut text = format!("[Ember team notice] Teammate {name} is now working on \"{to}\" (moved from \"{from}\").");
+    if fell_back {
+        text.push_str(&format!(
+            " \"{from}\" stopped answering, so it continues on the main server and returns when \
+             \"{from}\" answers again. Its earlier commands and file changes stay on \"{from}\"."
+        ));
+    }
+    text
+}
+
+/// The profile a spawn names (FR-T7, D30, #82): none or `default` is the harness's profile.
+/// Named profiles live on the client device until the server stores them (FR-L17).
+fn check_profile(profile: Option<&str>, account: Option<&str>, agent: crate::agents::AgentKind) -> Result<(), A2aError> {
+    let Some(p) = profile.map(str::trim).filter(|p| !p.is_empty()) else {
+        return Ok(());
+    };
+    if !p.eq_ignore_ascii_case("default") {
+        return Err(A2aError::BadRequest(format!(
+            "profile {p:?} is not on this server: named profiles are not stored on the server yet \
+             (FR-L17); leave out --profile to use the {} default profile",
+            agent.as_str()
+        )));
+    }
+    if account.is_some() {
+        return Err(A2aError::BadRequest(
+            "--profile and --account are exclusive; the profile chooses the account".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn session_error(e: SessionError) -> A2aError {
     match e {
         SessionError::NotFound(id) => A2aError::NotFound(format!("session {id} not found")),
@@ -677,9 +723,14 @@ impl A2a {
         let names: HashMap<String, String> =
             rows.iter().map(|m| (m.session_id.clone(), m.name.clone())).collect();
         let mut members = Vec::with_capacity(rows.len());
+        let placement = self.placement.lock().unwrap().clone();
         for m in rows {
             let rec: Option<SessionRecord> = store.session(&m.session_id)?;
+            let (designated_computer, current_computer) =
+                placement.as_ref().map(|p| p(&m.session_id)).unwrap_or((None, None));
             members.push(Member {
+                designated_computer,
+                current_computer,
                 title: rec.as_ref().map(|r| r.title.clone()).unwrap_or_default(),
                 agent: rec.as_ref().map(|r| r.agent.as_str().to_string()).unwrap_or_default(),
                 status: rec.as_ref().map(|r| r.status),
@@ -837,6 +888,7 @@ impl A2a {
             None => leader.agent,
         };
         let account = req.account.as_deref().map(str::trim).filter(|a| !a.is_empty());
+        check_profile(req.profile.as_deref(), account, agent)?;
         let def = crate::members::MemberDef {
             harness: agent.as_str().to_string(),
             account: account.map(String::from),
@@ -850,6 +902,25 @@ impl A2a {
             .filter(|t| !t.is_empty())
             .map(String::from)
             .unwrap_or_else(|| format!("{name} \u{00b7} {}", leader.title));
+        let computer = req
+            .computer
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty() && *c != crate::computers::LOCAL)
+            .map(String::from);
+        // FR-T7, Q-T4 (#82): the teammate starts in the leader's directory, so that absolute
+        // path must exist on its computer. Checked before anything is created; a refusal says why.
+        if let Some(computer) = &computer {
+            let checker = self.dir_checker.lock().unwrap().clone();
+            if let Some(check) = checker {
+                if let Err(why) = check(computer.clone(), leader.cwd.clone()).await {
+                    return Err(A2aError::BadRequest(format!(
+                        "teammate {name} was not started: {why}. A teammate starts in the leader's \
+                         directory, so it must exist at the same path on computer {computer}"
+                    )));
+                }
+            }
+        }
         // Same project and directory; nothing else is inherited (model, account, computer and
         // approvals are the teammate's own).
         let rec = crate::members::create_member_session(&self.sessions, &def, |agent| NewSession {
@@ -875,12 +946,7 @@ impl A2a {
             }
         };
 
-        if let Some(computer) = req
-            .computer
-            .as_deref()
-            .map(str::trim)
-            .filter(|c| !c.is_empty() && *c != crate::computers::LOCAL)
-        {
+        if let Some(computer) = computer.as_deref() {
             let setter = self.computer_setter.lock().unwrap().clone();
             let result = match setter {
                 Some(set) => set(rec.id.clone(), computer.to_string()).await,
@@ -911,6 +977,24 @@ impl A2a {
             member,
             message,
         })
+    }
+
+    /// A session moved between computers (FR-X3 watcher). When it is an active teammate, its
+    /// leader is told once per move and the team is pushed again with the new placement (FR-T7,
+    /// D20, Q-T5, #82). `fell_back` is true when it left its designated computer for the main
+    /// server because that computer stopped answering.
+    pub async fn teammate_moved(self: &Arc<Self>, session_id: &str, from: &str, to: &str, fell_back: bool) {
+        let member = match self.sessions.store().team_member(session_id) {
+            Ok(Some(m)) if m.is_active_teammate() => m,
+            Ok(_) => return,
+            Err(e) => {
+                tracing::warn!(session = %session_id, "reading the team of a moved session failed: {e:#}");
+                return;
+            }
+        };
+        let Ok(Some(team)) = self.sessions.store().team_row(&member.team_id) else { return };
+        self.notify(session_id, &team.leader_session, &move_notice(&member.name, from, to, fell_back)).await;
+        self.publish_team(&member.team_id);
     }
 
     fn archive(&self, id: &str) {

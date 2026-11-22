@@ -493,7 +493,8 @@ runtime turns "protocol stability" from a research risk into a release-engineeri
    `provide_hover(uri, pos)` picks the providers whose selectors match and fans out.
    Selector matching needs `languages.score` semantics (language, scheme, glob pattern).
    **Written (#46, CI), with step 4's three bridges:** `ember/editor/` (package `ember-editor`),
-   designed in `EDITOR-SESSION.md`. Reconnect is still to do.
+   designed in `EDITOR-SESSION.md`. After a lost connection the window starts a new session
+   (#451, `FR-L31.6`); reconnecting that resumes the session is still to do (`FR-E11`).
 4. **FR-E2 → FR-E3 → FR-E4** in that order, as `IMPLEMENTATION.md` §3 sets out. Each is a
    registry plus a request/response pair plus widget rendering.
 5. **Activation and configuration fidelity.** Port the implicit-activation generators and core

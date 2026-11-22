@@ -24,7 +24,7 @@
 //! | [`trust`]     | workspace trust: restricted mode extensions, grant (FR-L31.18)   |
 //! | [`uri`]       | `UriComponents` with `$mid` marshalling                           |
 //! | [`webview`]   | `MainThreadWebviews` / panels / views / custom editors (FR-E8)    |
-| [`debug`]     | `ExtHostDebugService` calls and DAP messages                      |
+//! | [`debug`]     | `ExtHostDebugService` calls and DAP messages                      |
 //!
 //! Everything is generic over `AsyncRead + AsyncWrite`, so the same code rides a plain TCP socket,
 //! a TLS stream, or an `ember-transport` stream later.

@@ -50,14 +50,23 @@ CREATE TABLE IF NOT EXISTS a2a_switches (
 ///
 /// `origin_guest_until` marks the message as a guest's (FR-T17): the guest's allowance end in Unix
 /// milliseconds, with `origin_label` holding the guest's display name.
-const ADDED_COLUMNS: &[(&str, &str)] =
-    &[("origin_channel", "TEXT"), ("origin_label", "TEXT"), ("origin_guest_until", "INTEGER")];
+///
+/// `kind` is `report` for an FR-T8 report the server built (#995); `NULL` for every other message.
+const ADDED_COLUMNS: &[(&str, &str)] = &[
+    ("origin_channel", "TEXT"),
+    ("origin_label", "TEXT"),
+    ("origin_guest_until", "INTEGER"),
+    ("kind", "TEXT"),
+];
+
+/// [`A2aMessage::kind`] of an FR-T8 report.
+pub const KIND_REPORT: &str = "report";
 
 /// Prefix of `from_session` for a message from a person in a channel.
 pub const CHANNEL_SENDER_PREFIX: &str = "channel:";
 
 const MESSAGE_COLUMNS: &str = "id, from_session, to_session, reply_to, text, created_at, delivered_at, \
-     origin_channel, origin_label, origin_guest_until";
+     origin_channel, origin_label, origin_guest_until, kind";
 
 /// Idempotent: adds each missing column of [`ADDED_COLUMNS`] to `a2a_messages`.
 fn migrate(conn: &Connection) -> anyhow::Result<()> {
@@ -122,6 +131,15 @@ pub struct A2aMessage {
     /// Unix milliseconds. `origin_label` is then the guest's display name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin_guest_until: Option<i64>,
+    /// `Some("report")` for an FR-T8 report built by the server (#995); `None` otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+}
+
+impl A2aMessage {
+    pub fn is_report(&self) -> bool {
+        self.kind.as_deref() == Some(KIND_REPORT)
+    }
 }
 
 pub struct A2aStore {
@@ -197,9 +215,40 @@ impl A2aStore {
             origin_channel: None,
             origin_label: None,
             origin_guest_until: None,
+            kind: None,
         };
         self.insert(&msg)?;
         Ok(msg)
+    }
+
+    /// Store an FR-T8 report from session `from` to its delegator `to` (#995).
+    pub fn insert_report(&self, from: &str, to: &str, text: &str) -> anyhow::Result<A2aMessage> {
+        let msg = A2aMessage {
+            id: format!("msg_{}", uuid::Uuid::new_v4().simple()),
+            from_session: from.into(),
+            to_session: to.into(),
+            reply_to: None,
+            text: text.into(),
+            created_at: now_ms(),
+            delivered_at: None,
+            origin_channel: None,
+            origin_label: None,
+            origin_guest_until: None,
+            kind: Some(KIND_REPORT.into()),
+        };
+        self.insert(&msg)?;
+        Ok(msg)
+    }
+
+    /// Put delivered messages back in the queue (an FR-T8 report whose receiving turn failed).
+    pub fn mark_undelivered(&self, ids: &[String]) -> anyhow::Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        for id in ids {
+            tx.execute("UPDATE a2a_messages SET delivered_at = NULL WHERE id = ?1", params![id])?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// Store a message a person typed in `channel_id` (FR-T12). `from_session` becomes
@@ -246,6 +295,7 @@ impl A2aStore {
             origin_channel: Some(channel_id.into()),
             origin_label: Some(label.into()),
             origin_guest_until: guest_until,
+            kind: None,
         };
         self.insert(&msg)?;
         Ok(msg)
@@ -255,8 +305,8 @@ impl A2aStore {
         self.conn.lock().unwrap().execute(
             "INSERT INTO a2a_messages
                  (id, from_session, to_session, reply_to, text, created_at, origin_channel, origin_label,
-                  origin_guest_until)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                  origin_guest_until, kind)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 msg.id,
                 msg.from_session,
@@ -266,7 +316,8 @@ impl A2aStore {
                 msg.created_at,
                 msg.origin_channel,
                 msg.origin_label,
-                msg.origin_guest_until
+                msg.origin_guest_until,
+                msg.kind
             ],
         )?;
         Ok(())
@@ -443,6 +494,7 @@ fn row_to_message(r: &rusqlite::Row<'_>) -> rusqlite::Result<A2aMessage> {
         origin_channel: r.get(7)?,
         origin_label: r.get(8)?,
         origin_guest_until: r.get(9)?,
+        kind: r.get(10)?,
     })
 }
 

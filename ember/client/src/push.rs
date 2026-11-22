@@ -315,7 +315,7 @@ mod tests {
         let p = decode(
             r#"{"type":"schedule_run","run":{"id":"r1","schedule_id":"sch1","scheduled_at":5,"started_at":5,"status":"running"}}"#,
         );
-        assert!(matches!(p, Ok(Push::ScheduleRun { run }) if run.id == "r1" && run.schedule_id == "sch1"), "{p:?}");
+        assert!(matches!(p, Ok(Push::ScheduleRun { ref run }) if run.id == "r1" && run.schedule_id == "sch1"), "{p:?}");
         assert!(SKIPPED_TYPES.is_empty());
     }
 

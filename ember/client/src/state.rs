@@ -831,6 +831,7 @@ mod tests {
     fn lagged_and_unknown_sessions_request_full_resync() {
         let mut s = State::new();
         assert!(s.apply(Input::Push(Push::Lagged { missed: 4 })).resync_all);
+        assert!(s.apply(push("ghost", 1, SessionStatus::Running, AgentEvent::Unknown)).resync_all);
     }
 
     /// A channel message names its channel and a schedule push marks the schedules changed, so
@@ -861,16 +862,15 @@ mod tests {
         let mut s = State::default();
         let pc = Computer { id: "studio".into(), name: "Studio".into(), reachability: Reachability::Unknown, projects: vec![] };
         s.apply(Input::ComputersLoaded(vec![pc]));
-        let push = |id: &str, r: Option<bool>| Input::Push(Push::ComputerStatus { computer_id: id.into(), reachable: r });
-        let ch = s.apply(push("studio", Some(false)));
+        let status = |id: &str, r: Option<bool>| Input::Push(Push::ComputerStatus { computer_id: id.into(), reachable: r });
+        let ch = s.apply(status("studio", Some(false)));
         assert!(ch.computers && ch.persist);
         assert_eq!(s.computers()[0].reachability, Reachability::Offline);
-        assert!(s.apply(push("studio", Some(false))).is_empty(), "no change");
-        assert!(s.apply(push("studio", None)).is_empty(), "unknown keeps what is shown");
-        assert!(s.apply(push("ghost", Some(true))).is_empty(), "not listed yet");
-        assert!(s.apply(push("studio", Some(true))).computers);
+        assert!(s.apply(status("studio", Some(false))).is_empty(), "no change");
+        assert!(s.apply(status("studio", None)).is_empty(), "unknown keeps what is shown");
+        assert!(s.apply(status("ghost", Some(true))).is_empty(), "not listed yet");
+        assert!(s.apply(status("studio", Some(true))).computers);
         assert_eq!(s.computers()[0].reachability, Reachability::Online);
-        assert!(s.apply(push("ghost", 1, SessionStatus::Running, AgentEvent::Unknown)).resync_all);
     }
 
     #[test]

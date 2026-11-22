@@ -275,9 +275,10 @@ fn ChannelsView(rooms: Vec<Room>, load: Load, feed: Option<Feed>) {
     // Load the open room's messages; the effect ends when the room or the screen closes.
     if let Some(f) = feed.clone() {
         let key = cur.clone();
+        let loader = f.clone();
         launched_effect(key.clone(), move || async move {
             if let Some(id) = key {
-                f.follow(id).await;
+                loader.follow(id).await;
             }
         });
         // A pushed channel message (or a reconnect) since this screen opened: read again
@@ -285,7 +286,6 @@ fn ChannelsView(rooms: Vec<Room>, load: Load, feed: Option<Feed>) {
         // screen does not read twice.
         let pushed = crate::services::try_services().map(|s| s.ui.live.channels.get()).unwrap_or(0);
         let baseline = remember(|| pushed);
-        let f = f.clone();
         let open_room = cur.clone();
         launched_effect(pushed, move || async move {
             if pushed != baseline {

@@ -215,6 +215,8 @@ fn row_to_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<McpEntry> {
     })
 }
 
+type SealedEnvironment = (String, Option<Vec<u8>>, Option<Vec<u8>>);
+
 impl McpRegistry {
     /// The registry in `store`, sealing with `<data dir>/secret.key` (created if missing; the same
     /// key as API-provider keys, FR-U5).
@@ -266,7 +268,7 @@ impl McpRegistry {
         &self,
         id: &str,
         env: &BTreeMap<String, String>,
-    ) -> anyhow::Result<(String, Option<Vec<u8>>, Option<Vec<u8>>)> {
+    ) -> anyhow::Result<SealedEnvironment> {
         let keys: Vec<&String> = env.keys().collect();
         let keys_json = serde_json::to_string(&keys)?;
         if env.is_empty() {
@@ -280,7 +282,8 @@ impl McpRegistry {
     /// The decrypted environment of server `id` (empty when it has none). For the start hook
     /// only; never send it to a client.
     fn env_of(&self, id: &str) -> anyhow::Result<BTreeMap<String, String>> {
-        let row: Option<(Option<Vec<u8>>, Option<Vec<u8>>)> = self
+        type EncryptedEnvironmentRow = (Option<Vec<u8>>, Option<Vec<u8>>);
+        let row: Option<EncryptedEnvironmentRow> = self
             .store
             .conn()
             .query_row(

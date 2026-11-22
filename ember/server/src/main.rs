@@ -29,9 +29,9 @@ use ember_server::store::Store;
 ///   exits, and `POST /api/server-token/rotate` does the same on a running server (#369)
 /// - Owner presence (FR-S12, #784): owner routes also need the in-memory owner key, claimed over
 ///   `<data dir>/owner.sock` (Windows: the named pipe `\\.\pipe\ember-owner-<hash>`, #815) by
-///   the app or by `ember-server owner <verb>` (a terminal only). The default mode is warn: a
-///   call without a key is logged and served, until the app ships its claim.
-///   `EMBER_OWNER_PRESENCE=enforce` refuses it with 403, on Windows too;
+///   the app or by `ember-server owner <verb>` (a terminal only). The default mode is enforce:
+///   a call without a key is refused with 403, on Windows too (#784).
+///   `EMBER_OWNER_PRESENCE=warn` logs and serves it instead;
 ///   `EMBER_OWNER_CONFIRM=off` grants a claim without the console code (best effort)
 /// - `EMBER_IDLE_SECS`: release an agent process after this long without activity (default 300)
 /// - `EMBER_CLAUDE_BIN`: the Claude Code CLI (default `claude` on `PATH`)
@@ -97,6 +97,7 @@ use ember_server::store::Store;
 ///   only the guest routes and `/join`, never the owner API. `EMBER_GUEST_LISTEN_ALLOW_REMOTE=1`
 ///   is required for a non-loopback address; `EMBER_GUEST_ALLOWED_HOSTS` and
 ///   `EMBER_GUEST_PUBLIC_URL` name the hosts guests use. See `guest_door`.
+///
 /// `ember-server __keep-pty …` is the local node's PTY keeper (FR-P6): dispatched before any
 /// runtime or logging starts, as in `ember-node`, so a keeper holds one fd and little memory.
 fn main() -> anyhow::Result<()> {

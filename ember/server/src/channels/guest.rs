@@ -312,6 +312,7 @@ fn fail(e: ChannelError) -> Response {
 }
 
 /// The guest may act on its own channel only; anything else is 404, never 403.
+#[expect(clippy::result_large_err, reason = "return the Axum error response directly without boxing it")]
 fn own_channel(guest: &Guest, id: &str) -> Result<(), Response> {
     if guest.channel_id == id {
         Ok(())

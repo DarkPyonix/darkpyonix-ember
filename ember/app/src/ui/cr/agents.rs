@@ -33,7 +33,7 @@ pub use crate::ui::agents::{
 };
 use super::components::{
     AppButton, ButtonKind, Choice, ChoiceButton, ChoiceRowFit, EmberCard, EmberField, FieldOptions, InsetPanel,
-    DataNamedOverlay, InsetPanelSized, Label, NameThenPillLines, NamedClickable, Pill, PillTone, PopKind, PopMenu, PopRow, PopoverMenu,
+    InsetPanelSized, Label, NameThenPillLines, NamedClickable, Pill, PillTone, PopKind, PopMenu, PopRow, PopoverMenu,
 };
 use super::theme::*;
 use crate::server::{Account, ChatGptAccount};
@@ -525,37 +525,43 @@ fn ModelRadio(label: &str, selected: bool, mut on_click: impl FnMut() + 'static)
         list = list.circle(paint(p.line), 10.0, 10.0, 9.0, 1.5);
     }
     let draw = list.build();
-    let radio_label = label.to_string();
 
-    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().size(20.0, 20.0), content = move || {
+    NamedClickable(
+        label,
+        Modifier::new().size(20.0, 20.0),
+        Alignment::Center,
+        move || on_click(),
+        move || {
             { use ::compose_rust::ui::Canvas; Canvas!(draw, modifier = Modifier::new().size(20.0, 20.0)) };
-            DataNamedOverlay(&radio_label, true, None, move || on_click());
-        }) };
+        },
+    );
 }
 
 /// A selectable chip matching the mockup's .field.ag-sel: as wide as its one-line label and the
-/// 14 px at each side. It had a fixed 200 while the button over it was `fill_max_size`, which made
-/// a chip without a width take the rest of the row; the button takes the chip's bounds now
-/// (`match_parent_size`, compose-rust#431). Its name can be data (a profile), so that button
-/// carries it.
+/// 14 px at each side. The painted box itself is the named control (`NamedClickable`,
+/// compose-rust#831).
 fn SelectChip(text: &str, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
-    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
-                .height(H_CTL)
-                .background(paint(p.surface_2))
-                .shape_role(ShapeRole::Full), alignment = Alignment::Center, content = move || {
+    NamedClickable(
+        text,
+        Modifier::new()
+            .height(H_CTL)
+            .background(paint(p.surface_2))
+            .shape_role(ShapeRole::Full),
+        Alignment::Center,
+        on_click,
+        move || {
             { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, {
                 { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(14.0)) };
                 Label(text, Fs::Sm, Weight::Medium, Some(paint(p.text)), Some(1));
                 { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(14.0)) };
             }) };
-            DataNamedOverlay(text, true, None, on_click);
-        }) };
+        },
+    );
 }
 
 /// A picker pill matching mockup's .pickchip: full pill shape, icon + label, sized by its content
-/// (12 px, the icon and 8, the label, 12). Its width was a `text_px` estimate for the reason
-/// [`SelectChip`] gives, and goes with it (compose-rust#431).
+/// (12 px, the icon and 8, the label, 12).
 fn ModelPickerPill(text: &str, svg: Option<&'static str>, on_click: impl FnMut() + 'static) {
     MenuPickerPill(text, svg, None, on_click);
 }
@@ -563,10 +569,19 @@ fn ModelPickerPill(text: &str, svg: Option<&'static str>, on_click: impl FnMut()
 /// [`ModelPickerPill`] as the control of a [`PopoverMenu`], saying whether the menu is open.
 fn MenuPickerPill(text: &str, svg: Option<&'static str>, expanded: Option<bool>, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
-    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
-                .height(H_CTL)
-                .background(paint(p.surface_2))
-                .shape_role(ShapeRole::Full), alignment = Alignment::Center, content = move || {
+    let mut m = Modifier::new()
+        .height(H_CTL)
+        .background(paint(p.surface_2))
+        .shape_role(ShapeRole::Full);
+    if let Some(open) = expanded {
+        m = m.expanded(open);
+    }
+    NamedClickable(
+        text,
+        m,
+        Alignment::Center,
+        on_click,
+        move || {
             { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, {
                 { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(12.0)) };
                 if let Some(s) = svg {
@@ -576,8 +591,8 @@ fn MenuPickerPill(text: &str, svg: Option<&'static str>, expanded: Option<bool>,
                 Label(text, Fs::Sm, Weight::Medium, Some(paint(p.text)), Some(1));
                 { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(12.0)) };
             }) };
-            DataNamedOverlay(text, true, expanded, on_click);
-        }) };
+        },
+    );
 }
 
 /// A segmented control matching the mockup (.seg button height 32, selected = ink fill, white label).
@@ -3468,8 +3483,8 @@ mod tests {
     fn fr_l10_4_a_default_chip_says_whether_its_menu_is_open() {
         let _guard = crate::services::test_guard();
         let sem = |nodes: Vec<Node>| -> String {
-            let button = nodes.iter().find(|n| n.widget == "Button").expect("the chip's button");
-            button.mods.iter().find(|m| m.starts_with("Semantics")).cloned().unwrap_or_default()
+            let chip = nodes.iter().find(|n| n.widget == "Box" && n.props.iter().any(|p| p.starts_with("OnClick="))).expect("the chip's box");
+            chip.mods.iter().find(|m| m.starts_with("Semantics")).cloned().unwrap_or_default()
         };
         let open = sem(nodes_of(|| MenuPickerPill("아직 정하지 않았습니다", Some(ICON_USER_SVG), Some(true), || {})));
         let closed = sem(nodes_of(|| MenuPickerPill("아직 정하지 않았습니다", Some(ICON_USER_SVG), Some(false), || {})));
@@ -3481,9 +3496,8 @@ mod tests {
 
     #[test]
     fn section_rows_are_the_named_controls_and_data_named_chips_keep_a_matched_button() {
-        // compose-rust#429, #431 (#673): the screen's own overlay functions are gone. A section
-        // row or pill is the control itself; a chip or radio named from data (a profile, a model)
-        // keeps `components::DataNamedOverlay`, which takes its box's bounds and no more.
+        // compose-rust#429, #831 (#673): section rows, radios and chips are all painted boxes
+        // named directly with `Modifier::label` (`NamedClickable`), with no clear `Button` overlay.
         let _guard = crate::services::test_guard();
         for shape in [NavShape::Side, NavShape::Pills] {
             let nodes = match shape {
@@ -3502,9 +3516,11 @@ mod tests {
             }
         }
         let radio = nodes_of(|| ModelRadio("Opus 기본 모델로 선택", true, || {}));
-        let over = radio.iter().find(|n| n.widget == "Button").expect("the radio's button");
-        assert!(over.props.iter().any(|p| p == "AccessibleName=String(\"Opus 기본 모델로 선택\")"), "{:?}", over.props);
-        assert!(over.mods.iter().any(|m| m == "MatchParentSize") && !over.mods.iter().any(|m| m.starts_with("FillMax")), "{:?}", over.mods);
+        assert!(!radio.iter().any(|n| n.widget == "Button"), "no clear button overlay on radio");
+        let box_node = radio.iter().find(|n| n.widget == "Box" && n.props.iter().any(|p| p == "AccessibleName=String(\"Opus 기본 모델로 선택\")")).expect("the radio's box");
+        assert!(box_node.props.iter().any(|p| p.starts_with("OnClick=")), "{:?}", box_node.props);
+        assert!(box_node.mods.iter().any(|m| m.starts_with("Semantics") && m.contains("Button")), "{:?}", box_node.mods);
+        assert_eq!(box_node.mods.iter().filter(|m| m.starts_with("PressFeedback")).count(), 1, "{:?}", box_node.mods);
         let production = include_str!("agents.rs").split("#[cfg(test)]").next().unwrap();
         assert!(!production.contains(&["Focus", "Overlay"].concat()), "no overlay function of its own");
         assert!(!production.contains(&["cu::", "Button("].concat()), "no direct toolkit button");
@@ -3512,19 +3528,18 @@ mod tests {
 
     #[test]
     fn chips_and_picker_pills_send_no_width_of_their_own() {
-        // compose-rust#431 (#673): the fixed 200 and the `text_px` estimate are gone; the box
-        // sends a height and takes the width of its row of spacers and label.
+        // compose-rust#431, #831 (#673): the fixed 200 and the `text_px` estimate are gone; the
+        // painted box itself is the clickable control and sends a height with no width.
         let _guard = crate::services::test_guard();
         for nodes in [
             nodes_of(|| SelectChip("자동", || {})),
             nodes_of(|| ModelPickerPill("아직 정하지 않았습니다", Some(ICON_USER_SVG), || {})),
             nodes_of(|| ModelPickerPill("+ 계정", None, || {})),
         ] {
-            let over = nodes.iter().find(|n| n.widget == "Button").expect("the chip's button");
-            let chip = nodes.iter().find(|n| Some(n.id) == over.parent).expect("the chip");
+            assert!(!nodes.iter().any(|n| n.widget == "Button"), "no clear button overlay");
+            let chip = nodes.iter().find(|n| n.widget == "Box" && n.props.iter().any(|p| p.starts_with("OnClick="))).expect("the chip");
             assert!(chip.mods.iter().any(|m| *m == format!("Height({H_CTL:?})")), "{:?}", chip.mods);
             assert!(!chip.mods.iter().any(|m| m.starts_with("Width(") || m.starts_with("Size(") || m.starts_with("FillMax")), "{:?}", chip.mods);
-            assert!(over.mods.iter().any(|m| m == "MatchParentSize"), "{:?}", over.mods);
         }
         let production = include_str!("agents.rs").split("#[cfg(test)]").next().unwrap();
         for f in ["fn SelectChip(", "fn MenuPickerPill("] {
@@ -4262,9 +4277,9 @@ mod tests {
         assert!(!switch.contains("Canvas"), "the switch is the toolkit's, not a painted stand-in");
     }
 
-    /// `(node, name)` of every Button, Switch and Slider in the first frame and after the width
-    /// report. The name is the `accessible_name` when one is set (compose-rust v0.0.7), else the
-    /// visible text.
+    /// `(node, name)` of every Button, `Role::Button` control (`NamedClickable`), Switch and Slider
+    /// in the first frame and after the width report. The name is the `accessible_name` when one is
+    /// set (compose-rust v0.0.7), else the visible text.
     fn button_texts_at(width: f32, class: compose_rust::WindowSizeClass, section: Section) -> Vec<(u32, String)> {
         use compose_rust::protocol::{decode_batch, HostEvent, Mutation, PropertyValue};
         use compose_rust::{EventPayload, PropertyKind, WidgetKind, WindowHeightClass};
@@ -4282,6 +4297,12 @@ mod tests {
             for m in batch {
                 match m {
                     Mutation::Create { node_id, widget: WidgetKind::Button | WidgetKind::Switch | WidgetKind::Slider } => {
+                        nodes.insert(*node_id);
+                    }
+                    Mutation::SetModifier { node_id, modifier, .. }
+                        if matches!(modifier, compose_rust::Modifier::Semantics { .. })
+                            && format!("{modifier:?}").contains("role: Button,") =>
+                    {
                         nodes.insert(*node_id);
                     }
                     Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(t) } => {

@@ -3,11 +3,7 @@
 //!
 //! The decisions (menu order and labels, the screen a menu shows, which bottom tab a menu
 //! belongs to, which layout a window size gets, the badges) are the plain functions and enums of
-//! `ui::shell`, re-exported here and tested there; this file draws them. They move here when
-//! the Dioxus shell is deleted (phase 8).
-//!
-//! Content: the screens are still on dioxus-compose, so the content area shows a placeholder
-//! per menu until each screen lands in its phase.
+//! `ui::shell`, re-exported here and tested there; this file draws them.
 //!
 //! The window controls' strip (macOS traffic lights, Windows caption buttons, a Linux desktop's
 //! own) is reserved from the toolkit's reported safe area on every system (FR-L33,
@@ -30,7 +26,7 @@ pub use crate::ui::shell::{
     active_menu, avatar_initial, badge_text, caption_reserved_width, nav_badge, nav_mode,
     screen_for, tab_badge, tab_for_menu, toggled_collapse, tinted_svg, BottomTab, NavBadge,
     NavCounts, NavMenu, Screen, ShellMode, BOTTOM_TABS, DEMO_USER, ICON_GEAR_SVG, ICON_MOON_SVG,
-    ICON_MORE_SVG, ICON_SUN_SVG, MORE_MENUS, ORG_NAME, PLACEHOLDER_TEXT, WINDOWS_CAPTION_HEIGHT_DP,
+    ICON_MORE_SVG, ICON_SUN_SVG, MORE_MENUS, ORG_NAME, WINDOWS_CAPTION_HEIGHT_DP,
 };
 use super::components::{Clickable, EmberSheet, Label, NamedClickable};
 use super::theme::*;
@@ -599,17 +595,6 @@ fn menu_item(svg: &'static str, label: &str, on_click: impl FnMut() + 'static) {
     );
 }
 
-/// A menu whose screen is not built yet ("준비 중입니다").
-pub fn Placeholder(menu: NavMenu) {
-    // A `Box` centers on both axes; a `Column`'s alignment is the horizontal one only.
-    { use ::compose_rust::ui::Box; Box!(alignment = Alignment::Center, modifier = Modifier::new().fill_max_width().fill_max_height(), {
-        { use ::compose_rust::ui::Column; Column!(alignment = Alignment::Center, space_role = SpaceRole::Sm, {
-            Label(menu.label(), Fs::Xl3, PAGE_TITLE_WEIGHT, None, None);
-            Label(PLACEHOLDER_TEXT, Fs::Md, Weight::Regular, Some(paint(ember_theme().palette.muted)), None);
-        }) };
-    }) };
-}
-
 // ---------------------------------------------------------------------------------------------
 // Root
 // ---------------------------------------------------------------------------------------------
@@ -662,36 +647,21 @@ pub fn shell() {
                     }) };
             }
             { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0).fill_max_width(), {
-                // TODO(#220 phases 4-7): each screen replaces its placeholder as it moves.
                 if ui.characters.get().is_some() {
                     super::characters_screen::CharactersScreen();
-                } else if matches!(screen, Screen::Search) {
-                    super::search::SearchScreen();
-                } else if matches!(screen, Screen::Channels) {
-                    super::channels::ChannelsScreen();
-                } else if matches!(screen, Screen::Launcher) {
-                    super::project::ProjectScreen();
-                } else if matches!(screen, Screen::Files) {
-                    super::files::FilesScreen();
-                } else if matches!(screen, Screen::Home) {
-                    super::home::HomeScreen();
-                } else if matches!(screen, Screen::VersionControl) {
-                    super::vcs::VcsScreen();
-                } else if matches!(screen, Screen::Agents) {
-                    super::agents::AgentsScreen();
-                } else if matches!(screen, Screen::Routines) {
-                    super::routines::RoutinesScreen();
-                } else if let Screen::Conversation(ref id) = screen {
-                    super::session::SessionScreen(Some(id.clone()));
-                } else if matches!(screen, Screen::Placeholder(NavMenu::Sessions)) {
-                    super::session::SessionScreen(None);
                 } else {
-                    let menu = match &screen {
-                        Screen::Conversation(_) => NavMenu::Sessions,
-                        Screen::Placeholder(m) => *m,
-                        _ => active,
-                    };
-                    Placeholder(menu);
+                    match &screen {
+                        Screen::Search => super::search::SearchScreen(),
+                        Screen::Channels => super::channels::ChannelsScreen(),
+                        Screen::Launcher => super::project::ProjectScreen(),
+                        Screen::Files => super::files::FilesScreen(),
+                        Screen::Home => super::home::HomeScreen(),
+                        Screen::VersionControl => super::vcs::VcsScreen(),
+                        Screen::Agents => super::agents::AgentsScreen(),
+                        Screen::Routines => super::routines::RoutinesScreen(),
+                        Screen::Sessions => super::session::SessionScreen(None),
+                        Screen::Conversation(id) => super::session::SessionScreen(Some(id.clone())),
+                    }
                 }
             }) };
         }) };

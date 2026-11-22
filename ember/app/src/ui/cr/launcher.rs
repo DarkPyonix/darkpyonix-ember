@@ -198,7 +198,12 @@ pub fn rows_preview() {
     let ui = shared_ui().clone();
     let theme = ember_theme();
     let rows: Vec<SessionRow> = ui.with_rows(|s, cx| {
-        let project = s.projects().into_iter().next().map(|p| p.name).unwrap_or_default();
+        let project = s
+            .projects()
+            .into_iter()
+            .find(|p| !s.project(&p.name).is_some_and(|pr| pr.archived))
+            .map(|p| p.name)
+            .unwrap_or_default();
         model::project_sessions(s, &project, cx, false)
     });
     // `ScrollColumn` takes only a modifier, so the spacing is a `Column` inside it.

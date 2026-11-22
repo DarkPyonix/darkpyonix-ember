@@ -134,6 +134,17 @@ pub enum A2aError {
 pub type ComputerSetter =
     Arc<dyn Fn(String, String) -> BoxFuture<'static, Result<(), String>> + Send + Sync>;
 
+/// Checks that a directory exists on a computer before a teammate is spawned there:
+/// `(computer id, absolute path)`, `Err` with the reason when it does not (FR-T7, #82). Installed
+/// by `main.rs` from the computer's node (`stat`).
+pub type DirChecker =
+    Arc<dyn Fn(String, String) -> BoxFuture<'static, Result<(), String>> + Send + Sync>;
+
+/// Where a session runs: `(designated computer id, current computer id)`, each `None` when
+/// nothing is recorded (the session runs on the main server). Installed by `main.rs` from
+/// `crate::computers::Computers::placement`, so team views show where each member is (FR-T7).
+pub type PlacementLookup = Arc<dyn Fn(&str) -> (Option<String>, Option<String>) + Send + Sync>;
+
 /// A session the caller may message.
 #[derive(Debug, Clone, Serialize)]
 pub struct Target {
@@ -176,6 +187,8 @@ pub struct A2a {
     /// transcripts.
     last_notice: StdMutex<HashMap<(String, String), Instant>>,
     computer_setter: StdMutex<Option<ComputerSetter>>,
+    dir_checker: StdMutex<Option<DirChecker>>,
+    placement: StdMutex<Option<PlacementLookup>>,
     /// Recent channel posts per (session, channel), for the rate limit of `channel post`.
     channel_posts: StdMutex<HashMap<(String, String), std::collections::VecDeque<Instant>>>,
     /// Sessions whose last start skipped the `ember-channels` registration because the user's own
@@ -676,6 +689,8 @@ impl A2a {
             awaiting: StdMutex::new(HashMap::new()),
             last_notice: StdMutex::new(HashMap::new()),
             computer_setter: StdMutex::new(None),
+            dir_checker: StdMutex::new(None),
+            placement: StdMutex::new(None),
             channel_posts: StdMutex::new(HashMap::new()),
             channel_fallback: StdMutex::new(HashSet::new()),
             claude_sources: StdMutex::new(ClaudeConfigSources::from_env()),
@@ -685,6 +700,16 @@ impl A2a {
     /// Let `team spawn` put teammates on a chosen computer.
     pub fn set_computer_setter(&self, setter: ComputerSetter) {
         *self.computer_setter.lock().unwrap() = Some(setter);
+    }
+
+    /// Let `team spawn --computer` refuse a computer without the project directory (FR-T7, #82).
+    pub fn set_dir_checker(&self, checker: DirChecker) {
+        *self.dir_checker.lock().unwrap() = Some(checker);
+    }
+
+    /// Let team views name each member's designated and current computer (FR-T7, #82).
+    pub fn set_placement_lookup(&self, lookup: PlacementLookup) {
+        *self.placement.lock().unwrap() = Some(lookup);
     }
 
     /// Hook into the session manager: give every agent process its credentials and
@@ -998,10 +1023,11 @@ impl A2a {
              Teams (only when the work splits into independent parts; each teammate is a full \
              agent session in this project):\n\
              \n\
-             - `{CLI_NAME} team spawn <name> [--agent claude-code|codex] [--account <id>] \
-             [--computer <id>] \"<first prompt>\"` starts a teammate and makes you the team \
-             leader; `{CLI_NAME} team list` shows members and tasks; `{CLI_NAME} team end \
-             <name>` stops one. Only the leader spawns and ends teammates.\n\
+             - `{CLI_NAME} team spawn <name> [--agent claude-code|codex] [--computer <id>] \
+             \"<first prompt>\"` starts a teammate and makes you the team leader; the teammate \
+             runs under its harness's profile, so do not choose an account. `{CLI_NAME} team \
+             list` shows members and tasks; `{CLI_NAME} team end <name>` stops one. Only the \
+             leader spawns and ends teammates.\n\
              - `{CLI_NAME} task add \"<title>\" [--detail <text>] [--assign <name>]`, \
              `{CLI_NAME} task update <n> [--status open|in_progress|blocked|done|cancelled] \
              [--assign <name>|none]`, `{CLI_NAME} task list`.\n\

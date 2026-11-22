@@ -673,6 +673,39 @@ async fn fr_x3_disconnect_moves_to_main_server_with_a_moved_notice() {
     assert!(c.reconcile(s, &id).await.unwrap().is_none());
 }
 
+// FR-T7 (#82): every move the watcher makes reaches the move listeners, marked as a fall back or
+// not, and `placement` names the designated and the current computer.
+#[tokio::test]
+async fn fr_t7_move_listeners_hear_the_fall_back_and_the_return() {
+    let (f, down) = flaky_fixture();
+    let (s, c) = (&f.sessions, &f.computers);
+    let heard: Arc<Mutex<Vec<(String, String, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+    let h = heard.clone();
+    c.on_move(Arc::new(move |out: &ember_server::computers::SwitchOutcome, fell_back: bool| {
+        h.lock().unwrap().push((out.previous.name.clone(), out.computer.name.clone(), fell_back));
+    }));
+    let pi = c.register("pi", "http://pi:8741", "tok").unwrap();
+    let id = new_session(s);
+    assert_eq!(c.placement(&id), (None, None));
+    c.designate(&id, Some(&pi.id)).unwrap();
+    c.reconcile(s, &id).await.unwrap().expect("moves onto the designated computer");
+    assert_eq!(c.placement(&id), (Some(pi.id.clone()), Some(pi.id.clone())));
+    turn(s, &id, "hello").await;
+
+    down.lock().unwrap().push("pi".into());
+    c.reconcile(s, &id).await.unwrap().expect("falls back");
+    assert_eq!(c.placement(&id), (Some(pi.id.clone()), Some(LOCAL.to_string())));
+    assert!(c.reconcile(s, &id).await.unwrap().is_none(), "no move, nothing heard");
+    down.lock().unwrap().clear();
+    c.reconcile(s, &id).await.unwrap().expect("returns");
+
+    let heard = heard.lock().unwrap().clone();
+    assert_eq!(heard.len(), 3, "{heard:?}");
+    assert_eq!(heard[1], ("pi".to_string(), "this server".to_string(), true));
+    assert_eq!(heard[2], ("this server".to_string(), "pi".to_string(), false));
+    assert!(!heard[0].2, "moving onto the designated computer is not a fall back");
+}
+
 #[tokio::test]
 async fn fr_x3_reconnect_moves_back_with_a_notice() {
     let (f, down) = flaky_fixture();

@@ -52,6 +52,7 @@ pub struct Shared {
     pub host: EditorHost,
     pub bridge: Rc<RefCell<WidgetBridge>>,
     pub revision: SyncSignal<u64>,
+    pub(crate) debug: Signal<super::editor_debug::DebugControls>,
     pub tabs: Signal<EditorTabs>,
     pub directory: Signal<String>,
     pub expanded: Signal<std::collections::HashSet<String>>,
@@ -186,6 +187,7 @@ fn init(target: EditorTarget) {
     let root = dioxus_compose::html::prelude::dioxus_core::ScopeId::ROOT;
     let revision = use_hook(|| SyncSignal::<u64>::new_maybe_sync_in_scope(0, root));
     let host = use_hook(|| EditorHost::start(target.clone(), revision));
+    let debug = use_hook(|| Signal::new_in_scope(super::editor_debug::DebugControls::default(), root));
     let tabs = use_hook(|| Signal::new_in_scope(EditorTabs::default(), root));
     let directory = use_hook(|| Signal::new_in_scope(target.folder.clone(), root));
     let expanded = use_hook(|| Signal::new_in_scope(std::collections::HashSet::<String>::new(), root));
@@ -274,7 +276,7 @@ fn init(target: EditorTarget) {
     let extensions = use_hook(|| crate::ui::editor_extensions::Extensions::new(&target.computer, revision));
     let agent = use_hook(|| crate::ui::editor_agent::AgentTool::new(&target.project, &target.folder, revision));
     let vscode = crate::ide::VsCodeFallback::for_editor(&target);
-    SHARED.with(|s| *s.borrow_mut() = Some(Shared { extensions, agent, host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, tree_multi_sel, tree_clipboard, tree_drag_src, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, recent_files, theme, position, stripes, menu_open, tab_menu, close_confirm, term_paste_confirm, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, vscode, server_url: target.server_url, computer: target.computer, uris, open_errors, editor_versions, last_find_cmd, pending_goto, next_goto_id, last_goto_id, problems_limit, selected_output_channel, workbench_logs, scm, notifications }));
+    SHARED.with(|s| *s.borrow_mut() = Some(Shared { extensions, agent, host, bridge, revision, debug, tabs, directory, expanded, bottom_max, tree_sel, tree_multi_sel, tree_clipboard, tree_drag_src, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, recent_files, theme, position, stripes, menu_open, tab_menu, close_confirm, term_paste_confirm, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, vscode, server_url: target.server_url, computer: target.computer, uris, open_errors, editor_versions, last_find_cmd, pending_goto, next_goto_id, last_goto_id, problems_limit, selected_output_channel, workbench_logs, scm, notifications }));
 }
 
 pub(crate) fn join_path(dir: &str, name: &str) -> String {
@@ -452,6 +454,7 @@ fn editor_pane() -> Element {
             compose_rust::code::GutterDecorations::default()
         }
     };
+    let gutter_decorations = super::editor_debug::gutter(&s, &uri, &doc.text, version, gutter_decorations);
     let change_s = s.clone(); let change_uri = uri.clone();
     let save_s = s.clone(); let save_uri = uri.clone();
     let hover_s = s.clone(); let hover_uri = uri.clone();
@@ -477,7 +480,12 @@ fn editor_pane() -> Element {
         on_change: move |e: compose_rust::code::CodeChange| { keep_edited_tab(&change_s, &change_uri.path); let event = change_s.bridge.borrow_mut().on_code_changed(&change_uri, e.version, WidgetRange::new(pos(e.range.start), pos(e.range.end)), e.text); if let Some((_, _, WidgetEvent::CodeChanged { version, .. })) = &event { change_s.editor_versions.borrow_mut().insert(generation, *version); } send(&change_s, event); crate::ui::editor_states::view::edited(&change_s, &change_uri.path); },
         on_save: move |e: compose_rust::code::SaveRequest| { if !crate::ui::editor_states::view::manual_save_allowed(&save_s, &save_uri.path) { return; } let event = save_s.bridge.borrow().on_save_requested(&save_uri, e.version); send(&save_s, event); save_s.scm.refresh(); },
         on_hover: move |e: compose_rust::code::CodeHover| { let phase = match e.phase { compose_rust::schema::HoverPhase::Rest => EditorHoverPhase::Rest, _ => EditorHoverPhase::Leave }; let event = hover_s.bridge.borrow().on_code_hovered(&hover_uri, e.decoration.unwrap_or(0), pos(e.position), phase); send(&hover_s, event); },
-        on_decoration_click: move |id| { let event = click_s.bridge.borrow().on_decoration_activated(&click_uri, id); send(&click_s, event); },
+        on_decoration_click: move |id| {
+            if !super::editor_debug::activate_gutter(&click_s, &click_uri, id) {
+                let event = click_s.bridge.borrow().on_decoration_activated(&click_uri, id);
+                send(&click_s, event);
+            }
+        },
         on_fold_change: move |e: compose_rust::code::FoldChange| { let event = fold_s.bridge.borrow_mut().on_fold_changed(&fold_uri, e.start_line, e.collapsed); send(&fold_s, event); let mut rev = fold_s.revision; *rev.write() += 1; },
         on_selection_change: move |e: compose_rust::code::SelectionChange| { crate::ui::editor_language::view::caret_moved(); let mut position = selection_s.position; position.set((e.active.line as usize + 1, e.active.column as usize + 1)); let mut find_sel = selection_s.find.selection; find_sel.set(((e.anchor.line, e.anchor.column), (e.active.line, e.active.column))); let event = selection_s.bridge.borrow().on_selection_changed(&selection_uri, e.version, pos(e.anchor), pos(e.active)); send(&selection_s, event); },
     } }
@@ -1577,6 +1585,7 @@ pub mod page {
             if let ember_editor::SessionUpdate::Saved { uri } = &update { saved_paths.push(uri.path.clone()); }
             // Hot exit (FR-L31.6a): the disk text of a restored buffer, or its failed open.
             crate::editor_backup::view::on_update(&s, &update);
+            crate::ui::editor_debug::on_update(&s, &update);
             let action = s.bridge.borrow_mut().apply(update);
             match action {
                 BridgeAction::Resync(uri) => { s.host.send(HostCommand::Resync(uri)); }
@@ -1822,6 +1831,9 @@ pub mod page {
                         if let Some((menu_path, x, y)) = s.tab_menu.read().clone() { {tab_context_menu(&s, &menu_path, x, y)} }
                         if let Some(path) = current.as_deref().filter(|p| !settings_shown && !is_webview_tab(p)) {
                             {breadcrumbs(&s, path)}
+                            if !diff_shown && !conflict_shown && !compare_shown {
+                                {crate::ui::editor_debug::breakpoint_editor(&s, path)}
+                            }
                         }
                         {crate::ui::editor_states::view::banners(&s, current.as_deref())}
                         if *s.find.open.read() && active.is_some() && !diff_shown && !conflict_shown && !compare_shown { {find_bar(&s)} }
@@ -1925,7 +1937,7 @@ pub mod page {
         let find_hint = keymap.hint(Action::Find, Os::current());
         let find_s = s.clone();
         let git_s = s.clone();
-        let (runcfg_s, run_s, stop_s, ask_s) = (s.clone(), s.clone(), s.clone(), s.clone());
+        let ask_s = s.clone();
         let mut stripes = s.stripes;
         let project_tip = tooltip_text("프로젝트 창", &keymap.hint(Action::Project, Os::current()));
         // The traffic lights float over the top bar's left end under FullSize. `leading` is the
@@ -1947,11 +1959,7 @@ pub mod page {
                 }
                     if *s.palette_open.read() { {palette_sheet(s, keymap)} }
                 }
-                div { class: "ed-runcfg",
-                    button { class: "ed-pj", title: "실행 구성", "aria-label": "실행 구성", onclick: move |_| crate::ui::editor_tasks::view::open(&runcfg_s), {icon_tone("play", 16, "text")} "실행 구성" {icon_tone("chev-dn", 12, "muted")} }
-                    button { class: "ed-ib run", title: "실행", "aria-label": "실행", onclick: move |_| { if let Some(blocked) = crate::ui::workspace_trust::view::blocked(&run_s, crate::ui::workspace_trust::Restricted::Run) { notice(blocked); } else { crate::ui::editor_tasks::view::run_default(&run_s); } }, {icon_tone("play", 16, "green")} }
-                    button { class: "ed-ib", title: "중지", "aria-label": "중지", onclick: move |_| crate::ui::editor_tasks::view::stop(&stop_s), {icon("pause")} }
-                }
+                {crate::ui::editor_debug::run_picker(s)}
                 // The mockup's order (`editor.js:75-76`): run configuration, run, stop, ask agent, theme.
                 // No ⋯ here: the tab strip's ⋯ opens the menu (owner placement rule 2026-11-13, rule 5).
                 button { class: "ed-ib", title: "에이전트에게 묻기", "aria-label": "에이전트에게 묻기", onclick: move |_| run_action(&ask_s, Action::Ask), {icon("spark")} }

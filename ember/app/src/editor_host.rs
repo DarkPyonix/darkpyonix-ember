@@ -94,6 +94,7 @@ pub enum HostCommand {
     CancelSearch(u64),
     /// A language feature at the caret: completion, definition, rename and the rest (FR-L31.13).
     Language(ember_editor::LanguageRequest),
+    Debug(ember_editor::debugger::DebugRequest),
     Replace { id: u64, request: ember_editor::search::ReplaceRequest },
     /// Discard working-tree changes for a file by reading it through the session, reconstructing
     /// the base text from `diff`, and writing it back only if reading succeeds.
@@ -480,6 +481,7 @@ impl EditorHost {
                         state.extensions.add_capture_samples();
                     }
                 }
+                let _ = session.debug(ember_editor::debugger::DebugRequest::ListConfigurations);
                 *revision.write() += 1;
                 let mut index_task: Option<tokio::task::JoinHandle<()>> = None;
                 // The newest search the window asked for: a debounced one that is no longer it is dropped.
@@ -653,6 +655,7 @@ impl EditorHost {
                             }
                             Some(HostCommand::Replace { id, request }) => { let _ = session.replace(id, request); }
                             Some(HostCommand::Language(request)) => { let _ = session.language(request); }
+                            Some(HostCommand::Debug(request)) => { let _ = session.debug(request); }
                             Some(HostCommand::AnswerMessage { id, handle }) => { let _ = session.answer_message(id, handle); }
                             Some(HostCommand::ActiveOutputChannel(id)) => { let _ = session.set_active_output_channel(id); }
                             Some(HostCommand::LoadTasks) => {
@@ -738,7 +741,7 @@ impl EditorHost {
                             }
                             None => {
                                 // The session ended without saying why.
-                                shared.lock().unwrap().connection_lost("session ended");
+                                shared.lock().unwrap().apply_update(SessionUpdate::ConnectionLost { reason: "session ended".into() });
                                 lost = true;
                                 break;
                             }

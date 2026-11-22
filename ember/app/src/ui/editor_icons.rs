@@ -155,10 +155,9 @@ mod tests {
         for dark in [false, true] {
             assert!(token("--c-green", dark).is_some_and(|green| Some(green) != token("--text-2", dark)));
         }
-        let page = include_str!("editor_workbench.rs");
-        let run = &page[page.find(r#"button { class: "ed-ib run", title: "실행", "aria-label": "실행","#).expect("the run button")..];
-        let run = &run[..run.find('\n').unwrap()];
-        assert!(run.ends_with(r#"{icon_tone("play", 16, "green")} }"#), "{run}");
+        let debug = include_str!("editor_debug.rs");
+        assert!(debug.contains(r#"id: "debug-run", class: "ed-ib run""#));
+        assert!(debug.contains(r#"{icon_tone("play", 16, "green")}"#));
     }
 
     // #477: the icon strokes are the shared tokens of the stylesheet the page loads, in both palettes.
@@ -221,9 +220,7 @@ mod tests {
             // The top bar: pill chevrons, the find pill and the run button.
             "\"{name}\" {icon_tone(\"chev-dn\", 12, \"muted\")}",
             "{icon_tone(\"git\", 16, \"text\")} \"{branch}\" {icon_tone(\"chev-dn\", 12, \"muted\")}",
-            "{icon_tone(\"play\", 16, \"text\")} \"실행 구성\" {icon_tone(\"chev-dn\", 12, \"muted\")}",
             "{icon_tone(\"search\", 16, \"muted\")}\n                    span { class: \"hide-md\"",
-            "{icon_tone(\"play\", 16, \"green\")} }",
             // The stripes and the terminal tabs: the selected one is in the text colour.
             "{icon_tone(icon_name(w), 16, if selected { \"text\" } else { \"\" })}",
             "{icon_tone(\"code\", 14, if on { \"text\" } else { \"\" })}",
@@ -238,6 +235,7 @@ mod tests {
         ] {
             assert!(page.contains(call), "the page lost {call}");
         }
+        assert!(include_str!("editor_debug.rs").contains(r#"{icon_tone("chev-dn", 12, "muted")}"#));
         assert!(include_str!("editor_language.rs").contains("{icon_tone(\"chev\", 11, \"muted\")}"), "the symbol crumbs' chevrons are not muted");
         assert!(include_str!("editor_states.rs").contains("{icon_tone(\"check\", 14, \"text\")}"), "the 자동 저장 submenu's check is not in the text colour");
         assert!(include_str!("editor_tasks.rs").contains("{icon_tone(\"play\", 14, \"text\")}"), "the running task's tab icon is not in the text colour");

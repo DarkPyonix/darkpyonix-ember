@@ -39,6 +39,7 @@ fn target() -> EditorTarget {
         server_url: String::new(),
         computer: String::new(),
         relay: String::new(),
+        vscode_url: String::new(),
     }
 }
 

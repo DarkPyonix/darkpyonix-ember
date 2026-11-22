@@ -2360,6 +2360,7 @@ mod tests {
             server_url: "http://srv:1".into(),
             computer: "node-a".into(),
             relay: "/api/computers/node-a/ide/relay/l1".into(),
+            vscode_url: String::new(),
         };
         let text = format!("{target:?}");
         assert!(text.contains("/api/computers/node-a/ide/relay/l1"), "{text}");

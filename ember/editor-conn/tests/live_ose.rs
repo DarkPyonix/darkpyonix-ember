@@ -51,9 +51,10 @@ use serde_json::{json, Value};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
+use ember_editor_conn::actors::generated::main_thread_diagnostics::ChangeManyArgs;
 use ember_editor_conn::document::{DocumentBridge, EditorChange, TextEdit};
 use ember_editor_conn::exthost::{
-    self, InitDataParams, MainThreadCall, MarkerData, Range, WorkspaceData, WorkspaceFolder,
+    self, InitDataParams, MarkerData, Range, WorkspaceData, WorkspaceFolder,
 };
 use ember_editor_conn::handshake::{self, ConnectOptions, ConnectionType, ExtensionHostStartParams};
 use ember_editor_conn::ipc::IpcClient;
@@ -334,12 +335,15 @@ async fn respond_loop(
                     _ if verbose => println!("[live-ose]   EH→ {name} {}", args_preview(&r.args)),
                     _ => {}
                 }
-                match MainThreadCall::parse(&r) {
-                    Ok(MainThreadCall::DiagnosticsChangeMany { owner, entries }) => {
-                        let _ = diag.send(DiagEvent::Changed { owner, entries });
+                if r.proxy == Some(ember_editor_conn::actors::generated::main_thread_diagnostics::PROXY) && r.method == "$changeMany" {
+                    match ChangeManyArgs::decode(&r.args)
+                        .and_then(|a| Ok((a.owner, serde_json::from_value(Value::Array(a.entries))?)))
+                    {
+                        Ok((owner, entries)) => {
+                            let _ = diag.send(DiagEvent::Changed { owner, entries });
+                        }
+                        Err(e) => eprintln!("[live-ose] cannot parse {name}: {e}; args {}", args_preview(&r.args)),
                     }
-                    Ok(_) => {}
-                    Err(e) => eprintln!("[live-ose] cannot parse {name}: {e}; args {}", args_preview(&r.args)),
                 }
                 peer.respond(r.req, Ok(live_reply(r.proxy, &r.method, seq)));
             }
@@ -351,6 +355,22 @@ async fn respond_loop(
                 let _ = diag.send(DiagEvent::Gone("disconnected".into()));
                 break;
             }
+        }
+    }
+}
+
+/// Prints every extension host to Ember request seen, `proxy.method count`, most frequent first.
+/// It prints when dropped, so a failed run shows it too. Nothing asserts on it.
+struct Census(Arc<Mutex<BTreeMap<String, u32>>>);
+
+impl Drop for Census {
+    fn drop(&mut self) {
+        let seen = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut rows: Vec<(&String, &u32)> = seen.iter().collect();
+        rows.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        println!("[live-ose] ---- extension host -> Ember requests ({} distinct) ----", rows.len());
+        for (name, n) in rows {
+            println!("[live-ose] {name} {n}");
         }
     }
 }
@@ -579,6 +599,7 @@ async fn live_ose_end_to_end() {
 
     let (diag_tx, mut diag_rx) = mpsc::unbounded_channel();
     let seen = Arc::new(Mutex::new(BTreeMap::new()));
+    let _census = Census(Arc::clone(&seen));
     let responder = tokio::spawn(respond_loop(peer.clone(), rpc_events, diag_tx, Arc::clone(&seen), verbose));
 
     let defaults = exthost::contributed_configuration_defaults(&extensions);
@@ -685,13 +706,6 @@ async fn live_ose_end_to_end() {
     println!("[live-ose]   server exit: {status:?}");
     steps.done("5. server stopped (SIGTERM to process group)");
 
-    {
-        let seen = seen.lock().unwrap();
-        println!("[live-ose] ---- extension host → Ember calls ({} distinct) ----", seen.len());
-        for (name, n) in seen.iter() {
-            println!("[live-ose] {n:>5}  {name}");
-        }
-    }
     steps.summary();
     drop(server); // removes the temp dir unless EMBER_OSE_KEEP is set
 }

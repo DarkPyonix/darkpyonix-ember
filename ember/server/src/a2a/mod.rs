@@ -56,6 +56,10 @@ pub const CHANNEL_POSTS_PER_MINUTE: u32 = 6;
 
 /// How long after a person's mention an agent may post in that channel (FR-T12).
 pub const CHANNEL_MENTION_WINDOW: Duration = Duration::from_secs(30 * 60);
+/// How long a mention thread stays open while the agent has not answered it (FR-T12, #380,
+/// INTENT D51): past the window, an agent may still post its first answer to its latest mention
+/// in a channel for this long.
+pub const CHANNEL_THREAD_MAX: Duration = Duration::from_secs(24 * 60 * 60);
 /// Marks the first line of every delivered message.
 pub const HEADER_TAG: &str = "[ember a2a]";
 /// Marks the first line of every scheduled prompt (FR-A8).

@@ -1270,7 +1270,7 @@ fn HarnessCard(
                             }
                             AppButton(
                                 &label,
-                                Some(IconRole::History),
+                                Some(IconRole::Refresh),
                                 ButtonKind::Default,
                                 true,
                                 can,
@@ -4354,5 +4354,16 @@ mod tests {
         // Real (non-sample) data without a reported path shows no path at all.
         let bare = vec![DetectedAgent { kind: "claude-code".into(), installed: true, ..Default::default() }];
         assert_eq!(crate::ui::agents::harness_path_text(claude, &bare, false), crate::ui::agents::NO_INFO);
+    }
+
+    #[test]
+    fn fr_l20_rescan_button_draws_the_refresh_icon() {
+        // #517: the mockup's 다시 찾기 is a refresh arrow; the clock (History) stood in until
+        // compose-rust v0.0.12 brought `IconRole::Refresh`.
+        let production = include_str!("agents.rs").split("#[cfg(test)]").next().unwrap();
+        let button = production.split("let label = crate::ui::agents::rescan_label(&rstate);").nth(1).unwrap();
+        let button = button.split("ButtonKind::Default").next().unwrap();
+        assert!(button.contains("Some(IconRole::Refresh)"), "{button}");
+        assert!(!production.contains("IconRole::History"), "the 에이전트 screen has no clock icon");
     }
 }

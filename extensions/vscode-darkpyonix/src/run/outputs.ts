@@ -1,7 +1,9 @@
-// nbformat 4 outputs → notebook output items (MIME + bytes). Pure; the VS Code layer wraps the
+// nbformat 4 outputs -> notebook output items (MIME + bytes). Pure; the VS Code layer wraps the
 // result in NotebookCellOutput / NotebookCellOutputItem.
 import type { NbOutput } from "../manager/types";
+import { QUARKDOWN_MIME, renderQuarkdown, type QuarkdownRenderResult } from "./quarkdown";
 
+export { QUARKDOWN_MIME };
 export const STDOUT_MIME = "application/vnd.code.notebook.stdout";
 export const STDERR_MIME = "application/vnd.code.notebook.stderr";
 export const ERROR_MIME = "application/vnd.code.notebook.error";
@@ -76,4 +78,53 @@ export function convertOutput(o: NbOutput): ConvertedOutput {
 
 export function decodeText(item: OutputItem): string {
   return new TextDecoder().decode(item.data);
+}
+
+export function hasQuarkdownOutput(o: NbOutput): boolean {
+  if (o.output_type === "stream" || o.output_type === "error") return false;
+  const data = o.data ?? {};
+  return QUARKDOWN_MIME in data && !("text/html" in data);
+}
+
+/**
+ * Convert an output and, when it carries `text/vnd.darkpyonix.quarkdown` without `text/html`,
+ * render it through the local Quarkdown CLI in a separate process (SPEC FR-F14). Falls back
+ * cleanly to `text/plain` when the CLI is absent or fails.
+ */
+export async function convertOutputWithQuarkdown(
+  o: NbOutput,
+  render: (source: string) => Promise<QuarkdownRenderResult> = (src) => renderQuarkdown(src),
+): Promise<ConvertedOutput> {
+  const base = convertOutput(o);
+  if (!hasQuarkdownOutput(o)) return base;
+
+  const raw = o.data?.[QUARKDOWN_MIME];
+  const source = typeof raw === "string" || Array.isArray(raw) ? joinText(raw as string | string[]) : String(raw ?? "");
+  const res = await render(source);
+  const prevDpx = (base.metadata.darkpyonix && typeof base.metadata.darkpyonix === "object")
+    ? (base.metadata.darkpyonix as Record<string, unknown>)
+    : {};
+
+  if (res.ok) {
+    return {
+      items: [{ mime: "text/html", data: enc.encode(res.html) }, ...base.items],
+      metadata: { ...base.metadata, darkpyonix: { ...prevDpx, renderer: "quarkdown" } },
+    };
+  }
+
+  // Fallback: put text/plain first so VS Code displays the raw source cleanly without a missing-renderer error.
+  const plain = base.items.find((i) => i.mime === "text/plain")
+    ?? { mime: "text/plain", data: enc.encode(source) };
+  const others = base.items.filter((i) => i.mime !== "text/plain");
+  return {
+    items: [plain, ...others],
+    metadata: {
+      ...base.metadata,
+      darkpyonix: {
+        ...prevDpx,
+        fallback: res.reason,
+        fallbackMessage: res.message,
+      },
+    },
+  };
 }

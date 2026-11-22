@@ -326,7 +326,7 @@ pub fn claude_settings_json(denied: &[PathBuf], post_tool_hook: Option<&str>) ->
                     {
                         "matcher": "*",
                         "hooks": [
-                            { "type": "command", "command": command }
+                            { "type": "command", "command": command, "timeout": 5 }
                         ]
                     }
                 ]

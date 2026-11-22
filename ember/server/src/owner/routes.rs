@@ -30,6 +30,7 @@ use RouteClass::{Exempt, OtherDoor, Owner, Token};
 
 /// Every registered route. Sorted by path, then method.
 pub const ROUTES: &[(&str, &str, RouteClass)] = &[
+    ("POST", "/api/a2a/inbox/ack", Exempt),
     ("POST", "/api/a2a/inbox/drain", Exempt),
     ("POST", "/api/a2a/messages", Exempt),
     ("GET", "/api/a2a/messages/{id}", Exempt),

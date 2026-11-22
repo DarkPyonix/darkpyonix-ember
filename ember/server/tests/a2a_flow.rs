@@ -8,9 +8,12 @@ use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::Router;
-use ember_server::a2a::{A2a, A2aConfig, A2aStore, Limits};
+use ember_server::a2a::{
+    A2a, A2aConfig, A2aStore, Limits, MAX_MID_TURN_BYTES, MID_TURN_FENCE_END, MID_TURN_PREAMBLE,
+};
 use ember_server::agents::scripted::ScriptedAdapter;
 use ember_server::agents::{AgentAdapter, AgentKind, AgentRun, Detected, StartRequest};
+use ember_server::auth::{self, ServerAuth};
 use ember_server::events::{AgentEvent, ApprovalDecision, SessionStatus};
 use ember_server::session::{NewSession, Sessions};
 use ember_server::store::Store;
@@ -831,9 +834,9 @@ async fn fr_t3_busy_delivery_stays_queued_when_steer_returns_false_or_errors() {
 
 #[tokio::test]
 async fn fr_t3_post_tool_use_hook_drains_queued_messages_and_reports() {
-    // FR-T3 (#997): POST /api/a2a/inbox/drain with the session's runtime token drains queued
-    // messages and reports while busy, marks them delivered, records `UserMessage`, and returns
-    // `null` on a second call; missing or invalid tokens get 401.
+    // FR-T3 (#997): two-step at-least-once hook delivery (`drain` -> `ack`). `drain` returns
+    // queued messages wrapped with the untrusted-data preamble without marking them delivered;
+    // `ack` marks them delivered and records `UserMessage`; a second `ack` is idempotent.
     let w = world();
     let a = new_session(&w.sessions, "alpha");
     let b = new_session(&w.sessions, "beta");
@@ -851,18 +854,46 @@ async fn fr_t3_post_tool_use_hook_drains_queued_messages_and_reports() {
         .insert_report(&a, &b, "Report: alpha finished")
         .unwrap();
 
-    // Missing or wrong runtime token is rejected with 401.
+    // Missing or wrong runtime token is rejected with 401 on both drain and ack.
     let (st, v) = call(&w.app, "POST", "/api/a2a/inbox/drain", None, None).await;
     assert_eq!(st, StatusCode::UNAUTHORIZED);
     assert_eq!(v["code"], "unauthorized");
     let (st, _) = call(&w.app, "POST", "/api/a2a/inbox/drain", Some("bad-token"), None).await;
     assert_eq!(st, StatusCode::UNAUTHORIZED);
+    let (st, v) = call(
+        &w.app,
+        "POST",
+        "/api/a2a/inbox/ack",
+        None,
+        Some(json!({ "ids": ["msg_1"] })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    assert_eq!(v["code"], "unauthorized");
+    let (st, _) = call(
+        &w.app,
+        "POST",
+        "/api/a2a/inbox/ack",
+        Some("bad-token"),
+        Some(json!({ "ids": ["msg_1"] })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
 
-    // Draining with the target session's runtime token returns the batched text and marks delivered.
+    // Step 1: drain returns ids and wrapped text, leaving messages pending until ack.
     let b_token = w.agents.token(&b);
     let (st, v) = call(&w.app, "POST", "/api/a2a/inbox/drain", Some(&b_token), None).await;
     assert_eq!(st, StatusCode::OK, "{v}");
+    let ids: Vec<String> = v["ids"]
+        .as_array()
+        .expect("ids array")
+        .iter()
+        .map(|x| x.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids.len(), 3, "{v}");
     let drained = v["text"].as_str().expect("drained text should be a string");
+    assert!(drained.starts_with(MID_TURN_PREAMBLE), "{drained}");
+    assert!(drained.ends_with(MID_TURN_FENCE_END), "{drained}");
     assert!(
         drained.contains("first note")
             && drained.contains("second note")
@@ -870,6 +901,20 @@ async fn fr_t3_post_tool_use_hook_drains_queued_messages_and_reports() {
             && drained.contains("Report: alpha finished"),
         "{drained}"
     );
+    assert_eq!(w.a2a.store().pending_for(&b).unwrap().len(), 3);
+    assert_eq!(user_messages(&w.sessions, &b).len(), 1);
+
+    // Step 2: ack marks the batch delivered and records UserMessage.
+    let (st, ack) = call(
+        &w.app,
+        "POST",
+        "/api/a2a/inbox/ack",
+        Some(&b_token),
+        Some(json!({ "ids": ids })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{ack}");
+    assert_eq!(ack["acked"], 3);
     assert!(w.a2a.store().pending_for(&b).unwrap().is_empty());
     wait_for("mid-turn UserMessage recorded", || user_messages(&w.sessions, &b).len() == 2).await;
     let msgs = user_messages(&w.sessions, &b);
@@ -877,9 +922,396 @@ async fn fr_t3_post_tool_use_hook_drains_queued_messages_and_reports() {
     assert_eq!(msgs[0], "busy work");
     assert_eq!(msgs[1], drained);
 
-    // Second drain returns null and does not record another UserMessage.
+    // Second ack with the same ids is idempotent and records no duplicate UserMessage.
+    let (st, ack2) = call(
+        &w.app,
+        "POST",
+        "/api/a2a/inbox/ack",
+        Some(&b_token),
+        Some(json!({ "ids": ids })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{ack2}");
+    assert_eq!(ack2["acked"], 0);
+    assert_eq!(user_messages(&w.sessions, &b).len(), 2);
+
+    // Second drain returns empty ids and null text.
     let (st, v) = call(&w.app, "POST", "/api/a2a/inbox/drain", Some(&b_token), None).await;
     assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["ids"], json!([]));
     assert!(v["text"].is_null(), "{v}");
     assert_eq!(user_messages(&w.sessions, &b).len(), 2);
+}
+
+#[tokio::test]
+async fn fr_t3_hook_cross_session_token_cannot_drain_or_ack_another_sessions_mail() {
+    let w = world();
+    let a = new_session(&w.sessions, "alpha");
+    let b = new_session(&w.sessions, "beta");
+    w.sessions.send(&a, "busy a").await.unwrap();
+    wait_status(&w.sessions, &a, SessionStatus::WaitingForApproval).await;
+    w.sessions.send(&b, "busy b").await.unwrap();
+    wait_status(&w.sessions, &b, SessionStatus::WaitingForApproval).await;
+
+    let (_, r) = send(&w, &a, &b, "secret for beta", None).await;
+    assert_eq!(r["status"], "queued");
+    let msg_id = r["id"].as_str().unwrap().to_string();
+
+    let a_token = w.agents.token(&a);
+    let (st, v) = call(&w.app, "POST", "/api/a2a/inbox/drain", Some(&a_token), None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["ids"], json!([]));
+    assert!(v["text"].is_null(), "{v}");
+
+    let (st, v) = call(
+        &w.app,
+        "POST",
+        "/api/a2a/inbox/ack",
+        Some(&a_token),
+        Some(json!({ "ids": [msg_id] })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["acked"], 0);
+    assert_eq!(w.a2a.store().pending_for(&b).unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn fr_t3_hook_rotated_token_gets_401_on_drain_and_ack() {
+    let w = world();
+    let a = new_session(&w.sessions, "alpha");
+    let b = new_session(&w.sessions, "beta");
+    w.sessions.send(&a, "busy a").await.unwrap();
+    wait_status(&w.sessions, &a, SessionStatus::WaitingForApproval).await;
+    w.sessions.send(&b, "busy b").await.unwrap();
+    wait_status(&w.sessions, &b, SessionStatus::WaitingForApproval).await;
+
+    let old_token = w.agents.token(&b);
+    let fresh_token = w.a2a.store().issue_token(&b).unwrap();
+
+    let (st, _) = call(&w.app, "POST", "/api/a2a/inbox/drain", Some(&old_token), None).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    let (st, _) = call(
+        &w.app,
+        "POST",
+        "/api/a2a/inbox/ack",
+        Some(&old_token),
+        Some(json!({ "ids": ["msg_1"] })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+
+    let (st, _) = call(&w.app, "POST", "/api/a2a/inbox/drain", Some(&fresh_token), None).await;
+    assert_eq!(st, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn fr_t3_hook_bad_host_or_origin_gets_403_through_auth_guard() {
+    let w = world();
+    let b = new_session(&w.sessions, "beta");
+    w.sessions.send(&b, "busy b").await.unwrap();
+    wait_status(&w.sessions, &b, SessionStatus::WaitingForApproval).await;
+    let b_token = w.agents.token(&b);
+
+    let srv_auth = ServerAuth::new(
+        "server-secret".into(),
+        "127.0.0.1:8740".parse().unwrap(),
+        [],
+    );
+    let guarded = auth::protect(w.app.clone(), srv_auth);
+
+    for (path, body) in [
+        ("/api/a2a/inbox/drain", json!({})),
+        ("/api/a2a/inbox/ack", json!({ "ids": [] })),
+    ] {
+        let req_bad_host = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("host", "evil.example:8740")
+            .header("authorization", format!("Bearer {b_token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let res = guarded.clone().oneshot(req_bad_host).await.unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN, "bad Host on {path}");
+
+        let req_bad_origin = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("host", "127.0.0.1:8740")
+            .header("origin", "https://evil.example")
+            .header("authorization", format!("Bearer {b_token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let res = guarded.clone().oneshot(req_bad_origin).await.unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN, "bad Origin on {path}");
+
+        let req_ok = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("host", "127.0.0.1:8740")
+            .header("authorization", format!("Bearer {b_token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let res = guarded.clone().oneshot(req_ok).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "valid Host on {path}");
+    }
+}
+
+#[tokio::test]
+async fn fr_t3_hook_stopped_or_idle_session_returns_empty_and_keeps_mail_queued() {
+    let w = world();
+    let a = new_session(&w.sessions, "alpha");
+    let b = new_session(&w.sessions, "beta");
+
+    // Idle (finished) live session: drain and ack both return empty and leave mail queued.
+    w.sessions.send(&b, "first turn").await.unwrap();
+    finish_turn(&w.sessions, &b, 1).await;
+    let b_token = w.agents.token(&b);
+    let m1 = w.a2a.store().insert_message(&a, &b, None, "while idle").unwrap();
+
+    let (st, v) = call(&w.app, "POST", "/api/a2a/inbox/drain", Some(&b_token), None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["ids"], json!([]));
+    assert!(v["text"].is_null(), "{v}");
+    assert_eq!(w.a2a.store().pending_for(&b).unwrap().len(), 1);
+
+    let (st, v) = call(
+        &w.app,
+        "POST",
+        "/api/a2a/inbox/ack",
+        Some(&b_token),
+        Some(json!({ "ids": [m1.id] })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["acked"], 0);
+    assert_eq!(w.a2a.store().pending_for(&b).unwrap().len(), 1);
+
+    // Stopped (not live) session whose stored status is Running: drain and ack return empty.
+    let c = new_session(&w.sessions, "gamma");
+    w.sessions
+        .store()
+        .append(
+            &c,
+            &AgentEvent::UserMessage {
+                text: "not live".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        w.sessions.store().session(&c).unwrap().unwrap().status,
+        SessionStatus::Running
+    );
+    assert!(!w.sessions.is_live(&c).await);
+    let c_token = w.a2a.store().issue_token(&c).unwrap();
+    let m2 = w.a2a.store().insert_message(&a, &c, None, "while stopped").unwrap();
+
+    let (st, v) = call(&w.app, "POST", "/api/a2a/inbox/drain", Some(&c_token), None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["ids"], json!([]));
+    assert!(v["text"].is_null(), "{v}");
+    assert_eq!(w.a2a.store().pending_for(&c).unwrap().len(), 1);
+
+    let (st, v) = call(
+        &w.app,
+        "POST",
+        "/api/a2a/inbox/ack",
+        Some(&c_token),
+        Some(json!({ "ids": [m2.id] })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["acked"], 0);
+    assert_eq!(w.a2a.store().pending_for(&c).unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn fr_t3_hook_native_session_id_mismatch_returns_empty() {
+    let w = world();
+    let a = new_session(&w.sessions, "alpha");
+    let b = new_session(&w.sessions, "beta");
+    w.sessions.send(&a, "busy a").await.unwrap();
+    wait_status(&w.sessions, &a, SessionStatus::WaitingForApproval).await;
+    w.sessions.send(&b, "busy b").await.unwrap();
+    wait_status(&w.sessions, &b, SessionStatus::WaitingForApproval).await;
+
+    wait_for("beta native_id recorded", || {
+        w.sessions.store().session(&b).unwrap().unwrap().native_id.is_some()
+    })
+    .await;
+    let expected_native = w.sessions.store().session(&b).unwrap().unwrap().native_id.unwrap();
+
+    let (_, r) = send(&w, &a, &b, "only for main session", None).await;
+    assert_eq!(r["status"], "queued");
+
+    let b_token = w.agents.token(&b);
+    let (st, v) = call(
+        &w.app,
+        "POST",
+        "/api/a2a/inbox/drain",
+        Some(&b_token),
+        Some(json!({ "native_session_id": "subagent-native-id" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["ids"], json!([]));
+    assert!(v["text"].is_null(), "{v}");
+    assert_eq!(w.a2a.store().pending_for(&b).unwrap().len(), 1);
+
+    let (st, v) = call(
+        &w.app,
+        "POST",
+        "/api/a2a/inbox/drain",
+        Some(&b_token),
+        Some(json!({ "native_session_id": expected_native })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["ids"].as_array().unwrap().len(), 1);
+    assert!(v["text"].as_str().unwrap().contains("only for main session"));
+}
+
+#[tokio::test]
+async fn fr_t3_hook_caps_batch_at_16_kib_and_wraps_with_untrusted_preamble() {
+    let w = world();
+    let a = new_session(&w.sessions, "alpha");
+    let b = new_session(&w.sessions, "beta");
+    w.sessions.send(&a, "busy a").await.unwrap();
+    wait_status(&w.sessions, &a, SessionStatus::WaitingForApproval).await;
+    w.sessions.send(&b, "busy b").await.unwrap();
+    wait_status(&w.sessions, &b, SessionStatus::WaitingForApproval).await;
+
+    // Three ~7 KiB messages exceed MAX_MID_TURN_BYTES (16 KiB).
+    let chunk = "x".repeat(7 * 1024);
+    let m1 = w
+        .a2a
+        .store()
+        .insert_message(&a, &b, None, &format!("M1-{chunk}"))
+        .unwrap();
+    let m2 = w
+        .a2a
+        .store()
+        .insert_message(&a, &b, None, &format!("M2-{chunk}"))
+        .unwrap();
+    let m3 = w
+        .a2a
+        .store()
+        .insert_message(&a, &b, None, &format!("M3-{chunk}"))
+        .unwrap();
+
+    let b_token = w.agents.token(&b);
+    let (st, v) = call(&w.app, "POST", "/api/a2a/inbox/drain", Some(&b_token), None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let ids1: Vec<String> = v["ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids1, vec![m1.id.clone(), m2.id.clone()]);
+    let text1 = v["text"].as_str().unwrap();
+    assert!(text1.len() <= MAX_MID_TURN_BYTES, "len={}", text1.len());
+    assert!(text1.starts_with(MID_TURN_PREAMBLE), "{text1}");
+    assert!(text1.ends_with(MID_TURN_FENCE_END), "{text1}");
+    assert!(text1.contains("M1-") && text1.contains("M2-") && !text1.contains("M3-"));
+
+    // Ack first batch; third message stays queued for the next tool round.
+    let (st, ack1) = call(
+        &w.app,
+        "POST",
+        "/api/a2a/inbox/ack",
+        Some(&b_token),
+        Some(json!({ "ids": ids1 })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(ack1["acked"], 2);
+    assert_eq!(w.a2a.store().pending_for(&b).unwrap().len(), 1);
+
+    let (st, v2) = call(&w.app, "POST", "/api/a2a/inbox/drain", Some(&b_token), None).await;
+    assert_eq!(st, StatusCode::OK, "{v2}");
+    assert_eq!(v2["ids"], json!([m3.id]));
+    assert!(v2["text"].as_str().unwrap().contains("M3-"));
+    let (st, _) = call(
+        &w.app,
+        "POST",
+        "/api/a2a/inbox/ack",
+        Some(&b_token),
+        Some(json!({ "ids": [m3.id] })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(w.a2a.store().pending_for(&b).unwrap().is_empty());
+
+    // Single oversized message (> 16 KiB) with multi-byte UTF-8 is truncated cleanly.
+    let huge = "한".repeat(7 * 1024); // 21 KiB UTF-8
+    let m4 = w.a2a.store().insert_message(&a, &b, None, &huge).unwrap();
+    let (st, v3) = call(&w.app, "POST", "/api/a2a/inbox/drain", Some(&b_token), None).await;
+    assert_eq!(st, StatusCode::OK, "{v3}");
+    assert_eq!(v3["ids"], json!([m4.id]));
+    let text3 = v3["text"].as_str().unwrap();
+    assert!(text3.len() <= MAX_MID_TURN_BYTES, "len={}", text3.len());
+    assert!(text3.starts_with(MID_TURN_PREAMBLE));
+    assert!(text3.ends_with(MID_TURN_FENCE_END));
+    assert!(text3.contains("\n[truncated]"));
+}
+
+#[tokio::test]
+async fn fr_t3_hook_a2a_disabled_returns_empty_on_drain_and_ack() {
+    let w = world();
+    let a = new_session(&w.sessions, "alpha");
+    let b = new_session(&w.sessions, "beta");
+    w.sessions.send(&a, "busy a").await.unwrap();
+    wait_status(&w.sessions, &a, SessionStatus::WaitingForApproval).await;
+    w.sessions.send(&b, "busy b").await.unwrap();
+    wait_status(&w.sessions, &b, SessionStatus::WaitingForApproval).await;
+
+    let m = w.a2a.store().insert_message(&a, &b, None, "hello").unwrap();
+    let b_token = w.agents.token(&b);
+
+    // Disabled per-session.
+    w.a2a.set_session_enabled(&b, false).unwrap();
+    let (st, v) = call(&w.app, "POST", "/api/a2a/inbox/drain", Some(&b_token), None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["ids"], json!([]));
+    assert!(v["text"].is_null());
+    let (st, v) = call(
+        &w.app,
+        "POST",
+        "/api/a2a/inbox/ack",
+        Some(&b_token),
+        Some(json!({ "ids": [m.id] })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["acked"], 0);
+    assert_eq!(w.a2a.store().pending_for(&b).unwrap().len(), 1);
+
+    // Disabled globally.
+    w.a2a.set_session_enabled(&b, true).unwrap();
+    w.a2a.set_enabled(false).unwrap();
+    let (st, v) = call(&w.app, "POST", "/api/a2a/inbox/drain", Some(&b_token), None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["ids"], json!([]));
+    assert!(v["text"].is_null());
+    let (st, v) = call(
+        &w.app,
+        "POST",
+        "/api/a2a/inbox/ack",
+        Some(&b_token),
+        Some(json!({ "ids": [m.id] })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["acked"], 0);
+    assert_eq!(w.a2a.store().pending_for(&b).unwrap().len(), 1);
+
+    // Re-enabled: drain succeeds.
+    w.a2a.set_enabled(true).unwrap();
+    let (st, v) = call(&w.app, "POST", "/api/a2a/inbox/drain", Some(&b_token), None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["ids"], json!([m.id]));
 }

@@ -4,8 +4,8 @@
 //! process, and calls the A2A API. A deliberately tiny, blocking HTTP/1.1 client over a plain TCP
 //! socket: the server is local to the agent process (D3) and this keeps the tool dependency-free.
 
-use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::io::{IsTerminal, Read, Write};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use anyhow::{bail, Context};
@@ -74,6 +74,10 @@ Environment (set by Ember for every agent session):
 
 /// The one error text for a base URL the client refuses. Fixed: the URL may hold credentials.
 pub const BAD_BASE_URL: &str = "EMBER_URL is not a plain http://host[:port] address";
+
+const HOOK_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const HOOK_IO_TIMEOUT: Duration = Duration::from_secs(4);
+const MAX_HOOK_STDIN_BYTES: u64 = 64 * 1024;
 
 pub struct Client {
     host: String,
@@ -155,15 +159,82 @@ impl Client {
         path: &str,
         body: Option<&Value>,
     ) -> anyhow::Result<(u16, Value)> {
-        let host = self.host.trim_start_matches('[').trim_end_matches(']');
-        let mut stream = TcpStream::connect((host, self.port)).with_context(|| {
-            format!(
-                "connecting to the Ember server at {}:{}",
-                self.host, self.port
-            )
-        })?;
         // A send can wake a sleeping session, which starts its agent process.
-        stream.set_read_timeout(Some(Duration::from_secs(120)))?;
+        self.request_with_timeouts(method, path, body, None, Duration::from_secs(120))
+    }
+
+    /// One short-timeout request for `ember-a2a hook post-tool-use` (2 s connect, 4 s I/O) so a
+    /// stalled server fails open before Claude Code's 5 s hook timeout kills the process.
+    pub fn request_hook(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+    ) -> anyhow::Result<(u16, Value)> {
+        self.request_with_timeouts(
+            method,
+            path,
+            body,
+            Some(HOOK_CONNECT_TIMEOUT),
+            HOOK_IO_TIMEOUT,
+        )
+    }
+
+    fn request_with_timeouts(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+        connect_timeout: Option<Duration>,
+        io_timeout: Duration,
+    ) -> anyhow::Result<(u16, Value)> {
+        let host = self.host.trim_start_matches('[').trim_end_matches(']');
+        let mut stream = match connect_timeout {
+            Some(timeout) => {
+                let addrs: Vec<_> = (host, self.port)
+                    .to_socket_addrs()
+                    .with_context(|| {
+                        format!(
+                            "resolving the Ember server at {}:{}",
+                            self.host, self.port
+                        )
+                    })?
+                    .collect();
+                let mut last_err = None;
+                let mut connected = None;
+                for addr in addrs {
+                    match TcpStream::connect_timeout(&addr, timeout) {
+                        Ok(s) => {
+                            connected = Some(s);
+                            break;
+                        }
+                        Err(e) => last_err = Some(e),
+                    }
+                }
+                match connected {
+                    Some(s) => s,
+                    None => {
+                        return Err(last_err
+                            .map(anyhow::Error::from)
+                            .unwrap_or_else(|| anyhow::anyhow!("no addresses resolved")))
+                        .with_context(|| {
+                            format!(
+                                "connecting to the Ember server at {}:{}",
+                                self.host, self.port
+                            )
+                        });
+                    }
+                }
+            }
+            None => TcpStream::connect((host, self.port)).with_context(|| {
+                format!(
+                    "connecting to the Ember server at {}:{}",
+                    self.host, self.port
+                )
+            })?,
+        };
+        stream.set_read_timeout(Some(io_timeout))?;
+        stream.set_write_timeout(Some(io_timeout))?;
         let body = body.map(|b| b.to_string()).unwrap_or_default();
         let req = format!(
             "{method} {}{path} HTTP/1.1\r\nHost: {}:{}\r\nAuthorization: Bearer {}\r\n\
@@ -487,38 +558,117 @@ pub fn run(args: &[String]) -> i32 {
 fn run_hook(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
         Some("post-tool-use") => {
-            if let Some(output) = hook_post_tool_use_output() {
-                println!("{output}");
+            let stdin_bytes = read_hook_stdin();
+            if let Ok(client) = Client::from_env() {
+                let mut out = std::io::stdout().lock();
+                run_hook_post_tool_use(&client, &stdin_bytes, &mut out);
             }
             0
         }
         Some(other) => {
             eprintln!("unknown hook command {other} (post-tool-use)\n\n{USAGE}");
-            2
+            1
         }
         None => {
             eprintln!("missing hook command (post-tool-use)\n\n{USAGE}");
-            2
+            1
         }
     }
 }
 
-/// Calls `POST /api/a2a/inbox/drain` and formats the Claude Code `PostToolUse` hook response when
-/// messages were queued. Returns `None` on unset env, empty inbox, or any error (fail open).
-fn hook_post_tool_use_output() -> Option<String> {
-    let client = Client::from_env().ok()?;
-    let (status, v) = client.request("POST", "/api/a2a/inbox/drain", None).ok()?;
-    if !(200..300).contains(&status) {
-        return None;
+#[derive(Debug, PartialEq, Eq)]
+enum HookStdin {
+    /// Claude Code Task subagent marker (`agent_id` or `parent_session_id` present and non-empty).
+    Subagent,
+    /// Main session (or empty/unparseable stdin): optional `session_id` forwarded to the server.
+    Main { native_session_id: Option<String> },
+}
+
+fn read_hook_stdin() -> Vec<u8> {
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return Vec::new();
     }
-    let text = v.get("text").and_then(Value::as_str).filter(|s| !s.is_empty())?;
+    let mut buf = Vec::new();
+    let _ = stdin.take(MAX_HOOK_STDIN_BYTES).read_to_end(&mut buf);
+    buf
+}
+
+fn is_non_empty_marker(v: Option<&Value>) -> bool {
+    match v {
+        None | Some(Value::Null) => false,
+        Some(Value::String(s)) => !s.is_empty(),
+        Some(_) => true,
+    }
+}
+
+fn parse_hook_stdin(raw: &[u8]) -> HookStdin {
+    if raw.iter().all(u8::is_ascii_whitespace) {
+        return HookStdin::Main {
+            native_session_id: None,
+        };
+    }
+    let Ok(v) = serde_json::from_slice::<Value>(raw) else {
+        return HookStdin::Main {
+            native_session_id: None,
+        };
+    };
+    if is_non_empty_marker(v.get("agent_id")) || is_non_empty_marker(v.get("parent_session_id")) {
+        return HookStdin::Subagent;
+    }
+    let native_session_id = v
+        .get("session_id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    HookStdin::Main { native_session_id }
+}
+
+/// Two-step at-least-once `PostToolUse` hook delivery:
+/// 1. Skip Task subagents (`agent_id` / `parent_session_id` in stdin JSON).
+/// 2. `POST /api/a2a/inbox/drain` with `native_session_id` (short hook timeout).
+/// 3. Write `hookSpecificOutput` JSON to `out` and flush.
+/// 4. Best-effort `POST /api/a2a/inbox/ack` with the drained `ids`.
+/// Fails open silently on any error.
+fn run_hook_post_tool_use(client: &Client, stdin_bytes: &[u8], out: &mut dyn Write) {
+    let HookStdin::Main { native_session_id } = parse_hook_stdin(stdin_bytes) else {
+        return;
+    };
+    let drain_body = json!({ "native_session_id": native_session_id });
+    let Ok((status, v)) = client.request_hook("POST", "/api/a2a/inbox/drain", Some(&drain_body))
+    else {
+        return;
+    };
+    if !(200..300).contains(&status) {
+        return;
+    }
+    let ids: Vec<String> = v
+        .get("ids")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+    let Some(text) = v.get("text").and_then(Value::as_str).filter(|s| !s.is_empty()) else {
+        return;
+    };
+    if ids.is_empty() {
+        return;
+    }
     let payload = json!({
         "hookSpecificOutput": {
             "hookEventName": "PostToolUse",
             "additionalContext": text,
         }
     });
-    Some(payload.to_string())
+    if writeln!(out, "{payload}").is_err() || out.flush().is_err() {
+        return;
+    }
+    let _ = client.request_hook("POST", "/api/a2a/inbox/ack", Some(&json!({ "ids": ids })));
 }
 
 enum CliError {
@@ -1122,5 +1272,126 @@ mod tests {
         assert_eq!(parse_response(raw).unwrap(), (200, json!([1, 2, 3])));
         let raw = b"HTTP/1.1 202 Accepted\r\ncontent-length: 0\r\n\r\n";
         assert_eq!(parse_response(raw).unwrap(), (202, Value::Null));
+    }
+
+    #[test]
+    fn fr_t3_hook_wrong_subcommand_exits_1() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(run(&args(&["hook"])), 1);
+        assert_eq!(run(&args(&["hook", "bogus"])), 1);
+    }
+
+    #[test]
+    fn fr_t3_hook_stdin_subagent_guard_and_session_id() {
+        assert_eq!(
+            parse_hook_stdin(br#"{"agent_id":"sub-1","session_id":"s1"}"#),
+            HookStdin::Subagent
+        );
+        assert_eq!(
+            parse_hook_stdin(br#"{"parent_session_id":"p-1","session_id":"s1"}"#),
+            HookStdin::Subagent
+        );
+        assert_eq!(
+            parse_hook_stdin(br#"{"agent_id":null,"parent_session_id":"","session_id":"native-42"}"#),
+            HookStdin::Main {
+                native_session_id: Some("native-42".into()),
+            }
+        );
+        assert_eq!(
+            parse_hook_stdin(b""),
+            HookStdin::Main {
+                native_session_id: None,
+            }
+        );
+    }
+
+    #[test]
+    fn fr_t3_hook_outputs_post_tool_use_json_and_acks_ids() {
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen: Arc<Mutex<Vec<(String, Value)>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_srv = seen.clone();
+
+        let wrapped_text = format!(
+            "{}\n[ember a2a] Message msg_1 from session s1\n\nhi\n{}",
+            super::super::MID_TURN_PREAMBLE,
+            super::super::MID_TURN_FENCE_END
+        );
+        let drain_resp = json!({ "ids": ["msg_1"], "text": wrapped_text }).to_string();
+
+        let srv = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut sock, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 4096];
+                let n = sock.read(&mut buf).unwrap();
+                let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let first_line = req.lines().next().unwrap_or("").to_string();
+                let body_str = req.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+                let body_json: Value = serde_json::from_str(body_str).unwrap_or(Value::Null);
+                let resp_body = if first_line.contains("/api/a2a/inbox/drain") {
+                    drain_resp.clone()
+                } else {
+                    json!({ "acked": 1 }).to_string()
+                };
+                seen_srv.lock().unwrap().push((first_line, body_json));
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    resp_body.len(),
+                    resp_body
+                );
+                sock.write_all(resp.as_bytes()).unwrap();
+            }
+        });
+
+        let client = Client::new(&format!("http://{addr}"), "tok").unwrap();
+        let mut out = Vec::new();
+        run_hook_post_tool_use(&client, br#"{"session_id":"native-99"}"#, &mut out);
+        srv.join().unwrap();
+
+        let emitted: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(emitted["hookSpecificOutput"]["hookEventName"], "PostToolUse");
+        let ctx = emitted["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(ctx.starts_with(super::super::MID_TURN_PREAMBLE), "{ctx}");
+        assert!(ctx.ends_with(super::super::MID_TURN_FENCE_END), "{ctx}");
+        assert!(ctx.contains("hi"), "{ctx}");
+
+        let calls = seen.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert!(calls[0].0.starts_with("POST /api/a2a/inbox/drain "));
+        assert_eq!(calls[0].1["native_session_id"], "native-99");
+        assert!(calls[1].0.starts_with("POST /api/a2a/inbox/ack "));
+        assert_eq!(calls[1].1["ids"], json!(["msg_1"]));
+    }
+
+    #[test]
+    fn fr_t3_hook_skips_subagent_without_contacting_server_and_fails_open_when_unreachable() {
+        use std::net::TcpListener;
+
+        // Bind and drop a listener so the port refuses connections immediately.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let client = Client::new(&format!("http://{addr}"), "tok").unwrap();
+
+        // Subagent markers emit nothing.
+        for stdin in [
+            br#"{"agent_id":"sub-1"}"#.as_slice(),
+            br#"{"parent_session_id":"parent-1"}"#.as_slice(),
+        ] {
+            let mut out = Vec::new();
+            run_hook_post_tool_use(&client, stdin, &mut out);
+            assert!(out.is_empty(), "subagent must emit nothing");
+        }
+
+        // Unreachable server fails open with empty stdout.
+        let mut out = Vec::new();
+        run_hook_post_tool_use(&client, br#"{"session_id":"main-1"}"#, &mut out);
+        assert!(out.is_empty(), "unreachable server must fail open");
     }
 }

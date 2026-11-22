@@ -6,7 +6,10 @@
 //! - `POST /api/a2a/messages` `{to, text, reply_to?}` → `202 {id, to, status}` where status is
 //!   `delivered` or `queued`
 //! - `GET  /api/a2a/messages/{id}` → the message, if the caller sent or received it
-//! - `POST /api/a2a/inbox/drain` → `{text: String | null}` (mid-turn drain for hooks, FR-T3)
+//! - `POST /api/a2a/inbox/drain` `{native_session_id?}` → `{ids, text: String | null}` (step 1 of
+//!   two-step mid-turn hook delivery, FR-T3)
+//! - `POST /api/a2a/inbox/ack` `{ids}` → `{acked}` (step 2 of two-step mid-turn hook delivery,
+//!   FR-T3)
 //!
 //!
 //! Team routes for agents (FR-T7, token = the caller; see [`super::team`]):
@@ -63,6 +66,7 @@ pub fn router(a2a: Arc<A2a>) -> Router {
         .route("/api/a2a/messages", post(send))
         .route("/api/a2a/messages/{id}", get(message))
         .route("/api/a2a/inbox/drain", post(drain_inbox))
+        .route("/api/a2a/inbox/ack", post(ack_inbox))
         .route("/api/a2a/settings", get(get_settings).put(put_settings))
         .route(
             "/api/sessions/{id}/a2a",
@@ -158,13 +162,43 @@ async fn message(
     }
 }
 
+#[derive(Default, Deserialize)]
+struct DrainRequest {
+    #[serde(default)]
+    native_session_id: Option<String>,
+}
+
 async fn drain_inbox(
     State(a): State<Arc<A2a>>,
     headers: HeaderMap,
+    body: axum::body::Bytes,
 ) -> ApiResult<impl IntoResponse> {
     let me = caller(&a, &headers)?;
-    let text = a.drain_mid_turn(&me).await?;
-    Ok(Json(json!({ "text": text })))
+    let req: DrainRequest = if body.iter().all(u8::is_ascii_whitespace) {
+        DrainRequest::default()
+    } else {
+        serde_json::from_slice(&body)
+            .map_err(|e| A2aError::BadRequest(format!("invalid drain request body: {e}")))?
+    };
+    let batch = a
+        .peek_mid_turn(&me, req.native_session_id.as_deref())
+        .await?;
+    Ok(Json(batch))
+}
+
+#[derive(Deserialize)]
+struct AckRequest {
+    ids: Vec<String>,
+}
+
+async fn ack_inbox(
+    State(a): State<Arc<A2a>>,
+    headers: HeaderMap,
+    Json(b): Json<AckRequest>,
+) -> ApiResult<impl IntoResponse> {
+    let me = caller(&a, &headers)?;
+    let acked = a.ack_mid_turn(&me, &b.ids).await?;
+    Ok(Json(json!({ "acked": acked })))
 }
 
 #[derive(Deserialize)]

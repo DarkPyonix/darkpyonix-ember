@@ -1633,7 +1633,7 @@ mod tests {
             v["hooks"]["PostToolUse"],
             json!([{
                 "matcher": "*",
-                "hooks": [{ "type": "command", "command": hook }]
+                "hooks": [{ "type": "command", "command": hook, "timeout": 5 }]
             }])
         );
 
@@ -1644,7 +1644,7 @@ mod tests {
             v["hooks"]["PostToolUse"],
             json!([{
                 "matcher": "*",
-                "hooks": [{ "type": "command", "command": hook }]
+                "hooks": [{ "type": "command", "command": hook, "timeout": 5 }]
             }])
         );
 
@@ -1666,7 +1666,7 @@ mod tests {
             parsed["hooks"]["PostToolUse"],
             json!([{
                 "matcher": "*",
-                "hooks": [{ "type": "command", "command": hook }]
+                "hooks": [{ "type": "command", "command": hook, "timeout": 5 }]
             }])
         );
     }

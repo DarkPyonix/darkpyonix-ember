@@ -640,6 +640,8 @@ const DRIVE_MAX_RETRIES: u32 = 5;
 const DRIVE_RETRY_WINDOW: Duration = Duration::from_secs(5);
 /// Base backoff delay between `drive_inner` retry attempts (doubles up to 800 ms).
 const DRIVE_INITIAL_BACKOFF: Duration = Duration::from_millis(50);
+/// Maximum consecutive `Target.attachToTarget` failures inside one `drive_inner` pass.
+const ATTACH_MAX_CONSECUTIVE_FAILURES: usize = 10;
 
 /// Keeps one page attached for streaming and input, follows new tabs, and runs the screencast
 /// while anyone watches. Ends when the connection closes, the instance is gone, or retries are
@@ -721,6 +723,7 @@ async fn drive_inner(me: &Weak<BrowserInstance>, cdp: &Arc<Cdp>) -> anyhow::Resu
         (me.viewers.subscribe(), me.follow.subscribe(), me.screencast.subscribe())
     };
 
+    let mut consecutive_attach_failures: usize = 0;
     loop {
         // Choose the tab: the selected one if it still exists, else the newest.
         let want = follow.borrow_and_update().clone();
@@ -741,10 +744,17 @@ async fn drive_inner(me: &Weak<BrowserInstance>, cdp: &Arc<Cdp>) -> anyhow::Resu
             .call("Target.attachToTarget", json!({ "targetId": target.target_id, "flatten": true }), None)
             .await;
         let session_id = match att {
-            Ok(v) => v["sessionId"].as_str().unwrap_or_default().to_string(),
+            Ok(v) => {
+                consecutive_attach_failures = 0;
+                v["sessionId"].as_str().unwrap_or_default().to_string()
+            }
             Err(e) => {
-                tracing::debug!("attach {} failed: {e:#}", target.target_id);
+                consecutive_attach_failures += 1;
+                tracing::debug!("attach {} failed ({consecutive_attach_failures}): {e:#}", target.target_id);
                 tabs.retain(|t| t.target_id != target.target_id);
+                if consecutive_attach_failures >= ATTACH_MAX_CONSECUTIVE_FAILURES {
+                    return Err(e.context("too many consecutive Target.attachToTarget failures"));
+                }
                 continue;
             }
         };
@@ -947,5 +957,72 @@ mod tests {
         assert!(!state.running, "instance must mark running=false after driver gives up");
         assert!(state.error.as_deref().unwrap_or_default().contains("gave up after 4 attempts"));
         assert!(cdp.is_open(), "CDP stayed open; bound stopped the retry loop");
+    }
+
+    #[tokio::test]
+    async fn drive_inner_bounds_consecutive_attach_failures() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let attach_calls = Arc::new(AtomicUsize::new(0));
+        let attach_srv = attach_calls.clone();
+
+        // Fake CDP server where discovery/create succeed, but Target.attachToTarget always fails.
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let (mut sink, mut rx) = ws.split();
+            let mut created = 0usize;
+            while let Some(Ok(msg)) = rx.next().await {
+                if let Message::Text(text) = msg {
+                    if let Ok(v) = serde_json::from_str::<Value>(&text) {
+                        if let Some(id) = v.get("id").and_then(Value::as_u64) {
+                            let method = v.get("method").and_then(Value::as_str).unwrap_or_default();
+                            let reply = match method {
+                                "Target.setDiscoverTargets" => json!({ "id": id, "result": {} }),
+                                "Target.getTargets" => json!({ "id": id, "result": { "targetInfos": [] } }),
+                                "Target.createTarget" => {
+                                    created += 1;
+                                    json!({ "id": id, "result": { "targetId": format!("t-{created}") } })
+                                }
+                                "Target.attachToTarget" => {
+                                    attach_srv.fetch_add(1, Ordering::SeqCst);
+                                    json!({
+                                        "id": id,
+                                        "error": { "code": -32000, "message": "cannot attach target" }
+                                    })
+                                }
+                                _ => json!({ "id": id, "result": {} }),
+                            };
+                            let _ = sink.send(Message::Text(reply.to_string().into())).await;
+                        }
+                    }
+                }
+            }
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = BrowserConfig {
+            root: dir.path().to_path_buf(),
+            chrome: Some(PathBuf::from("/bin/true")),
+            headless: true,
+            window: (800, 600),
+            screencast: ScreencastOptions::default(),
+        };
+        let inst = BrowserInstance::new("p", dir.path().to_path_buf(), &cfg, Egress::Direct, None);
+        let ws_url = format!("ws://{addr}/devtools/browser/fake");
+        let cdp = Cdp::connect(&ws_url).await.unwrap();
+
+        let err = drive_inner(&Arc::downgrade(&inst), &cdp)
+            .await
+            .err()
+            .expect("drive_inner must fail after consecutive attach failures");
+        server.abort();
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("too many consecutive Target.attachToTarget failures"),
+            "unexpected error: {msg}"
+        );
+        assert_eq!(attach_calls.load(Ordering::SeqCst), ATTACH_MAX_CONSECUTIVE_FAILURES);
     }
 }

@@ -33,12 +33,22 @@ struct Server {
     root: PathBuf,
 }
 
+/// The server settings of the NFR-W1 run (`ember/ose/regress.sh`): Open VSX extensions carry no
+/// Microsoft signature, and `--install-extension` refuses them unless signature checks are off.
+/// Written before the install as well as before the server starts. Returns the server data dir.
+fn write_server_settings(root: &Path) -> PathBuf {
+    let data = root.join("data");
+    for scope in ["Machine", "User"] {
+        let dir = data.join("data").join(scope);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("settings.json"), "{ \"extensions.verifySignature\": false }\n").unwrap();
+    }
+    data
+}
+
 impl Server {
     fn start(bin: &Path, root: &Path, extensions: &Path) -> Self {
-        let data = root.join("data");
-        let machine = data.join("data").join("Machine");
-        std::fs::create_dir_all(&machine).unwrap();
-        std::fs::write(machine.join("settings.json"), "{ \"extensions.verifySignature\": false }\n").unwrap();
+        let data = write_server_settings(root);
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let log = std::fs::File::create(root.join("server.log")).unwrap();
         let log_err = log.try_clone().unwrap();
@@ -116,6 +126,8 @@ async fn pump(
 #[ignore = "needs a real OSE server (EMBER_OSE_SERVER) and the network for Open VSX"]
 async fn live_window_flow_type_save_linter() {
     let Some(bin) = std::env::var_os("EMBER_OSE_SERVER").map(PathBuf::from) else {
+        // FR-E12: in CI the live job always sets it, so a missing server there is a failure.
+        assert!(std::env::var_os("CI").is_none(), "[window-flow] EMBER_OSE_SERVER not set in CI");
         eprintln!("[window-flow] EMBER_OSE_SERVER not set; skipping");
         return;
     };
@@ -129,11 +141,12 @@ async fn live_window_flow_type_save_linter() {
 
     // The unmodified linter from Open VSX, installed the way the NFR-W1 run installs it.
     let ext = root.join("ext");
+    let data = write_server_settings(&root);
     let out = Command::new(&bin)
         .args(["--install-extension", LINTER, "--extensions-dir"])
         .arg(&ext)
         .arg("--server-data-dir")
-        .arg(root.join("data"))
+        .arg(&data)
         .arg("--accept-server-license-terms")
         .stdin(Stdio::null())
         .output()

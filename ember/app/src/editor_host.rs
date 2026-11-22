@@ -55,6 +55,8 @@ pub enum HostCommand {
     DecideTrust(bool),
     /// Answer extension message `id` with the chosen button's handle, or `undefined` (FR-L31.16).
     AnswerMessage { id: u64, handle: Option<i64> },
+    /// The output channel the window shows (FR-L31.16).
+    ActiveOutputChannel(Option<String>),
     /// Read the project's `.vscode/tasks.json` for the 실행 window (FR-L31.16).
     LoadTasks,
     /// Read the extension scan again on the management connection (FR-L31.14): after an install,
@@ -601,6 +603,7 @@ impl EditorHost {
                             Some(HostCommand::Replace { id, request }) => { let _ = session.replace(id, request); }
                             Some(HostCommand::Language(request)) => { let _ = session.language(request); }
                             Some(HostCommand::AnswerMessage { id, handle }) => { let _ = session.answer_message(id, handle); }
+                            Some(HostCommand::ActiveOutputChannel(id)) => { let _ = session.set_active_output_channel(id); }
                             Some(HostCommand::LoadTasks) => {
                                 shared.lock().unwrap().tasks = Some(crate::ui::editor_tasks::TasksLoad::Loading);
                                 *revision.write() += 1;

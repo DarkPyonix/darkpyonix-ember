@@ -310,7 +310,7 @@ pub fn hook_listing(json_out: &str, hooks_file: &Path) -> Result<u64, String> {
     };
     let hook = hooks
         .iter()
-        .find(|h| h["name"] == HOOK_NAME && h["source"].as_str().is_some_and(|s| same_file(s)))
+        .find(|h| h["name"] == HOOK_NAME && h["source"].as_str().is_some_and(&same_file))
         .ok_or_else(|| format!("{HOOK_NAME} from {} is not listed", hooks_file.display()))?;
     if hook["enabled"] != true {
         return Err(format!("{HOOK_NAME} is listed but disabled"));

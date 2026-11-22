@@ -59,8 +59,13 @@ async def main_css(request: Request, path: str) -> Response:
             logger.warning("static/overlay.css is missing; skipping injection")
             return await proxy.relay(request, url)
         logger.info("Applied mobile overlay CSS to: %s", path)
-        return Response(content=resp.text + "\n\n/* --- Custom mobile overlay --- */\n" + overlay,
-                        media_type="text/css", headers=assets.NO_CACHE)
+        combined = resp.text + "\n\n/* --- Custom mobile overlay --- */\n" + overlay
+        return assets.cached_response(
+            combined,
+            media_type="text/css",
+            cache_control=assets.WORKBENCH_CSS_CACHE_CONTROL,
+            request=request,
+        )
     logger.info("CSS intercept matched but upstream response was not CSS or not 200 for: %s "
                 "(status %s, content-type %s)", path, resp.status_code, resp.headers.get("content-type"))
     return await proxy.relay(request, url)

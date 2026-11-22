@@ -13,6 +13,8 @@
 mod common;
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::ConnectInfo;
@@ -22,7 +24,7 @@ use ember_transport::gate::{CLOSE_NOT_ALLOWED, CLOSE_REVOKED};
 use ember_transport::http::{http1_client, HttpListener};
 use ember_transport::{
     BackendKind, CloseReason, Connection, LetifyConfig, MemorySignalHub, ObserverAddr, PathState, PeerAddr, PeerGate,
-    PeerId, RelayConfig, SecretKey, Transport, TransportConfig,
+    PeerId, RelayConfig, SecretKey, SignalChannel, Transport, TransportConfig,
 };
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
@@ -46,6 +48,42 @@ fn free_udp() -> SocketAddr {
     std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap()
 }
 
+/// A rendezvous channel that counts the punch offers it receives. The kinds are letify-link's
+/// rendezvous message kinds 3 (`PunchOffer`) and 5 (`PunchOfferExt`), the first byte of a
+/// message; this test names no letify-link type (`FR-N5`).
+#[derive(Debug)]
+struct CountingSignal {
+    inner: Arc<dyn SignalChannel>,
+    offers: Arc<AtomicUsize>,
+}
+
+impl CountingSignal {
+    fn wrap(inner: Arc<dyn SignalChannel>) -> (Arc<dyn SignalChannel>, Arc<AtomicUsize>) {
+        let offers = Arc::new(AtomicUsize::new(0));
+        let wrapped: Arc<dyn SignalChannel> = Arc::new(Self { inner, offers: offers.clone() });
+        (wrapped, offers)
+    }
+}
+
+#[async_trait::async_trait]
+impl SignalChannel for CountingSignal {
+    async fn send(&self, to: PeerId, msg: Vec<u8>) -> ember_transport::Result<()> {
+        self.inner.send(to, msg).await
+    }
+
+    async fn recv(&self) -> ember_transport::Result<(PeerId, Vec<u8>)> {
+        let (from, msg) = self.inner.recv().await?;
+        if matches!(msg.first(), Some(3 | 5)) {
+            self.offers.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok((from, msg))
+    }
+
+    fn watch(&self, peers: &[PeerId]) {
+        self.inner.watch(peers)
+    }
+}
+
 struct Net {
     _server: Transport,
     node: Transport,
@@ -55,6 +93,8 @@ struct Net {
     signals: MemorySignalHub,
     relay_url: String,
     observer: ObserverAddr,
+    /// Punch offers the node received.
+    node_offers: Arc<AtomicUsize>,
 }
 
 /// A main server (relay and address observer), a node behind a gate that admits only the
@@ -62,6 +102,11 @@ struct Net {
 /// relay and observer. `node_punch` is false for a node whose UDP is blocked: it never answers
 /// a punch offer.
 async fn net(node_punch: bool) -> Net {
+    net_with(node_punch, true).await
+}
+
+/// The same, with the client's `udp_punch` set to `client_punch`.
+async fn net_with(node_punch: bool, client_punch: bool) -> Net {
     let signals = MemorySignalHub::new();
     let (node_key, client_key) = (SecretKey::generate(), SecretKey::generate());
     let (node_id, client_id) = (node_key.peer_id(), client_key.peer_id());
@@ -86,9 +131,10 @@ async fn net(node_punch: bool) -> Net {
     let relay_url = server.local_addr().relays.remove(0);
     let observer = ObserverAddr { addr: qad, node: Some(server_id) };
 
-    let device = |key: SecretKey, advertise: Vec<SocketAddr>, udp_punch: bool| {
+    let (node_signal, node_offers) = CountingSignal::wrap(signals.channel(node_id));
+    let device = |key: SecretKey, signal: Arc<dyn SignalChannel>, advertise: Vec<SocketAddr>, udp_punch: bool| {
         let letify = LetifyConfig {
-            signal: Some(signals.channel(key.peer_id())),
+            signal: Some(signal),
             observer: Some(observer),
             advertise,
             udp_punch,
@@ -101,14 +147,15 @@ async fn net(node_punch: bool) -> Net {
             .relay(RelayConfig::Custom(vec![relay_url.clone()]))
             .letify(letify)
     };
-    let node = Transport::bind(device(node_key, vec![dead_address()], node_punch)).await.unwrap();
-    let client = Transport::bind(device(client_key, vec![], true)).await.unwrap();
+    let node = Transport::bind(device(node_key, node_signal, vec![dead_address()], node_punch)).await.unwrap();
+    let client_signal: Arc<dyn SignalChannel> = signals.channel(client_id);
+    let client = Transport::bind(device(client_key, client_signal, vec![], client_punch)).await.unwrap();
     let gate = PeerGate::allow_list([client_id]);
     gate.attach(&node);
     serve_http(&node, gate.clone());
     // The client knows only the node's refused TCP address.
     client.add_peer_addr(PeerAddr { peer: node_id, relays: vec![], direct: node.local_addr().direct });
-    Net { _server: server, node, client, gate, signals, relay_url, observer }
+    Net { _server: server, node, client, gate, signals, relay_url, observer, node_offers }
 }
 
 /// Serves `GET /whoami` (the caller's peer id) on the node, behind `gate`.
@@ -159,6 +206,7 @@ async fn em11_two_peers_punch_a_direct_udp_path_and_carry_http_over_it() {
         other => panic!("expected the punched direct path, got {other}"),
     }
     assert!(!conn.path_state().is_relayed());
+    assert!(n.node_offers.load(Ordering::SeqCst) >= 1, "the client offered the punch over the rendezvous");
     assert_eq!(whoami(&conn).await, n.client.peer_id().to_string());
     // The session stays on the direct path while it carries traffic.
     for _ in 0..3 {
@@ -254,4 +302,69 @@ async fn em11_fr_n3_a_device_the_node_does_not_admit_is_refused_on_the_punched_p
     // The admitted client still gets its punched path.
     let conn = punched(&n).await;
     assert_eq!(whoami(&conn).await, n.client.peer_id().to_string());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn em11_with_udp_punch_off_no_punch_candidate_is_offered() {
+    // EMBER_LETIFY_UDP_PUNCH=off on the client: it sends no punch offer, and the session stays on
+    // the relay even though the node would answer one.
+    let n = net_with(true, false).await;
+    let conn = tokio::time::timeout(Duration::from_secs(20), n.client.connect(n.node.peer_id(), SERVICE))
+        .await
+        .expect("connect through the relay timed out")
+        .unwrap();
+    assert_eq!(whoami(&conn).await, n.client.peer_id().to_string());
+    // Longer than a punch lead and window, so an offer would have arrived and a punch finished.
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    assert_eq!(n.node_offers.load(Ordering::SeqCst), 0, "a client with punching off offered a punch");
+    assert!(conn.path_state().is_relayed(), "expected the relay, got {}", conn.path_state());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn em11_a_dial_to_the_relay_node_offers_no_punch() {
+    // The main server is the relay node: a device dials it directly or through its relay, never
+    // with a punch, even with punching on and an observer configured.
+    let signals = MemorySignalHub::new();
+    let qad = free_udp();
+    let server_key = SecretKey::generate();
+    let server_id = server_key.peer_id();
+    let (server_signal, server_offers) = CountingSignal::wrap(signals.channel(server_id));
+    let server = Transport::bind(
+        TransportConfig::new(server_key)
+            .backend(BackendKind::Letify)
+            .bind_addr("127.0.0.1:0".parse().unwrap())
+            .letify(LetifyConfig {
+                relay_listen: Some("127.0.0.1:0".parse().unwrap()),
+                qad_listen: Some(qad),
+                signal: Some(server_signal),
+                ..LetifyConfig::default()
+            }),
+    )
+    .await
+    .unwrap();
+    common::spawn_echo(&server, "echo");
+    let server_addr = server.local_addr();
+    let relay_url = server_addr.relays[0].clone();
+    let client_key = SecretKey::generate();
+    let client = Transport::bind(
+        TransportConfig::new(client_key.clone())
+            .backend(BackendKind::Letify)
+            .bind_addr("127.0.0.1:0".parse().unwrap())
+            .relay(RelayConfig::Custom(vec![relay_url]))
+            .letify(LetifyConfig {
+                signal: Some(signals.channel(client_key.peer_id())),
+                observer: Some(ObserverAddr { addr: qad, node: Some(server_id) }),
+                ..LetifyConfig::default()
+            }),
+    )
+    .await
+    .unwrap();
+    client.add_peer_addr(server_addr);
+    let conn = tokio::time::timeout(Duration::from_secs(20), client.connect(server_id, "echo"))
+        .await
+        .expect("connect to the main server timed out")
+        .unwrap();
+    assert_eq!(common::echo_roundtrip(&conn, b"to the main server").await, b"to the main server");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(server_offers.load(Ordering::SeqCst), 0, "a dial to the relay node offered a punch");
 }

@@ -444,11 +444,15 @@ fn InviteSection(channel: &str, st: &OwnerState) {
         Label("127.0.0.1 같은 내 컴퓨터 주소나 0.0.0.0 주소는 밖에서 닿지 않습니다", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
     }
     if let Some(c) = created.filter(|_| status.can_copy()) {
-        // A read-only look: the field starts with the link, enabled so it can be selected and
-        // copied with Cmd+C / Ctrl+C. TODO(compose-rust#826): `TextField` has no read-only flag,
-        // so typing into it changes only what is drawn, never the link. 복사 puts the link on the
-        // clipboard through the toolkit (compose-rust v0.0.7, #471); the link is never logged.
-        EmberField(FieldOptions { fill_max_width: true, text: Some(c.link.clone()), ..Default::default() });
+        // Read-only so the link can be selected and copied with Cmd+C / Ctrl+C without editing
+        // (compose-rust#826). 복사 puts the link on the clipboard through the toolkit
+        // (compose-rust v0.0.7, #471); the link is never logged.
+        EmberField(FieldOptions {
+            fill_max_width: true,
+            read_only: true,
+            text: Some(c.link.clone()),
+            ..Default::default()
+        });
         let link = c.link.clone();
         AppButton(COPY_LABEL, None, ButtonKind::Default, true, true, false, move || {
             notice::post(copy_notice(compose_rust::clipboard::set_text(&link).is_ok()));

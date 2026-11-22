@@ -4,6 +4,7 @@
 //! assertion waits for a condition with a generous bound and never sleeps and then asserts.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use ember_node::api::{self, Node};
@@ -15,8 +16,19 @@ use serde_json::{json, Value};
 use tokio_tungstenite::tungstenite::Message;
 
 const TOKEN: &str = "node-token";
-/// How long a condition may take to show up.
-const BOUND: Duration = Duration::from_secs(20);
+/// How long a condition may take to show up (configurable via `EMBER_FS_WATCH_BOUND_SECS`).
+fn bound() -> Duration {
+    std::env::var("EMBER_FS_WATCH_BOUND_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(30))
+}
+
+/// Serialize FSEvents/inotify integration tests so concurrent stream starts do not stall macOS
+/// `fseventsd` under heavy load (#976).
+static WATCH_SERIAL: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 struct Fx {
     root: PathBuf,
@@ -25,9 +37,11 @@ struct Fx {
     client: NodeClient,
     url: String,
     _dir: tempfile::TempDir,
+    _serial: tokio::sync::MutexGuard<'static, ()>,
 }
 
 async fn fx_with(limits: WatchLimits) -> Fx {
+    let serial = WATCH_SERIAL.get_or_init(|| tokio::sync::Mutex::new(())).lock().await;
     let dir = tempfile::tempdir().unwrap();
     let tmp = dir.path().canonicalize().unwrap();
     let root = tmp.join("root");
@@ -42,7 +56,7 @@ async fn fx_with(limits: WatchLimits) -> Fx {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", l.local_addr().unwrap());
     tokio::spawn(api::serve(l, node));
-    Fx { root, outside, denied, client: NodeClient::new(&url, TOKEN).unwrap(), url, _dir: dir }
+    Fx { root, outside, denied, client: NodeClient::new(&url, TOKEN).unwrap(), url, _dir: dir, _serial: serial }
 }
 
 async fn fx() -> Fx {
@@ -67,15 +81,17 @@ async fn next(ws: &mut FsWatchSocket, within: Duration) -> Option<Value> {
     tokio::time::timeout(within, fut).await.ok().flatten()
 }
 
-/// Read frames until `want` holds for one of them (and return it), or panic after [`BOUND`].
+/// Read frames until `want` holds for one of them (and return it), or panic after [`bound()`].
 async fn until(ws: &mut FsWatchSocket, what: &str, want: impl Fn(&Value) -> bool) -> Value {
-    let deadline = tokio::time::Instant::now() + BOUND;
+    let limit = bound();
+    let deadline = tokio::time::Instant::now() + limit;
+    let mut seen = Vec::new();
     loop {
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
         match next(ws, left).await {
             Some(v) if want(&v) => return v,
-            Some(_) => continue,
-            None => panic!("no frame with {what} within {BOUND:?}"),
+            Some(v) => seen.push(v),
+            None => panic!("no frame with {what} within {limit:?} (seen {} frames: {seen:?})", seen.len()),
         }
     }
 }
@@ -192,7 +208,7 @@ async fn fr_w4d_a_denied_file_inside_a_watched_tree_gives_no_event() {
     let marker = f.root.join("marker.txt");
     std::fs::write(&marker, "x").unwrap();
     let mut seen = Vec::new();
-    let deadline = tokio::time::Instant::now() + BOUND;
+    let deadline = tokio::time::Instant::now() + bound();
     while !seen.iter().any(|p: &String| p == marker.to_str().unwrap()) {
         assert!(tokio::time::Instant::now() < deadline, "no event for the marker: {seen:?}");
         seen.extend(paths_seen(&mut ws, Duration::from_millis(500)).await);
@@ -243,7 +259,7 @@ async fn fr_w4d_the_watch_caps_answer_too_many_watches() {
 
     // Closing a socket gives its watches back.
     drop(one);
-    let deadline = tokio::time::Instant::now() + BOUND;
+    let deadline = tokio::time::Instant::now() + bound();
     let mut id = 10;
     loop {
         let v = watch(&mut two, id, &f.root, true).await;
@@ -283,7 +299,7 @@ async fn fr_w4d_git_internals_are_dropped_except_what_scm_needs() {
     let mut seen = Vec::new();
     let head = git.join("HEAD");
     let main = git.join("refs/heads/main");
-    let deadline = tokio::time::Instant::now() + BOUND;
+    let deadline = tokio::time::Instant::now() + bound();
     while !(seen.contains(&head.to_str().unwrap().to_string()) && seen.contains(&main.to_str().unwrap().to_string())) {
         assert!(tokio::time::Instant::now() < deadline, "HEAD and the ref were not reported: {seen:?}");
         seen.extend(paths_seen(&mut ws, Duration::from_millis(500)).await);

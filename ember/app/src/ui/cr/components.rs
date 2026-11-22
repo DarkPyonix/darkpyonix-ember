@@ -257,14 +257,9 @@ pub fn NamedDisabled(label: &'static str, modifier: Modifier, alignment: Alignme
     { use ::compose_rust::ui::Box; Box!(modifier = modifier.label(label).role(Role::Button).disabled(true), alignment = alignment, content = content) };
 }
 
-// TODO(compose-rust#831): a container
-// takes its name from `Modifier::label` only (`compose-rust/src/ui/mod.rs` `LabelCache`, a
-// 128-entry LRU cache in v0.0.11), and a `Button` with content insets its children by the design
-// system's 16 dp by default (`HostButton.kt` `labelPadding`; `Button::content_padding` is in
-// v0.0.11, compose-rust#789). So a painted box whose name is built from data (a path, a commit
-// subject, a profile name) keeps a clear `Button` over it for the name, the focus and the click.
-// When a container takes an owned name, move every caller onto [`Clickable`] with that name and
-// delete this.
+// TODO(#673): compose-rust#831 (owned, replaceable accessible name on a clickable container) is
+// closed in the toolkit. Keep `DataNamedOverlay` until a display pass migrates every caller onto
+// `Clickable` with an owned accessible name and verifies assistive technology output.
 /// The control of a painted box whose accessible name is built from data: a clear toolkit
 /// `Button` exactly over its `Box` parent. It takes the parent's bounds without changing them
 /// (`Modifier::match_parent_size`, compose-rust#431), so the box keeps the size of what it
@@ -1033,6 +1028,8 @@ pub struct FieldOptions {
     pub multiline: bool,
     /// `None` keeps the field enabled.
     pub enabled: Option<bool>,
+    /// Prevent edits while still allowing selection and copy (compose-rust#826).
+    pub read_only: bool,
     /// The field inside the composer or a row: no fill, no border, and no toolkit frame
     /// (`TextField::bare`, compose-rust v0.0.7). `background`, `border_*` and `corner_radius`
     /// are not sent for it: the container draws the frame.
@@ -1089,8 +1086,9 @@ pub const FIELD_INSET_MULTILINE: (f32, f32) = (12.0, 10.0);
 /// The frame is Ember's own row and the field inside it is bare (FR-L10.2, #878): the toolkit's
 /// framed field puts its text 8 px in, and a per-side inner padding would also have to keep a
 /// single line centred in the 40 px height, which `TextField` cannot do yet.
-/// TODO(compose-rust#771): move the frame and the 12 px inset onto the field once it takes
-/// per-side content padding; until then a click on the 12 px strip does not focus the field.
+/// TODO(#673): compose-rust#771 (bare TextField inner padding) is closed in the toolkit; moving
+/// the frame and the 12 px inset onto the field waits for a display check. Until then a click on
+/// the 12 px strip does not focus the field.
 pub fn EmberField(o: FieldOptions) {
     if o.bare {
         BareField(o);
@@ -1203,6 +1201,7 @@ fn FieldNode(o: FieldOptions, modifier: Modifier) {
         placeholder = o.placeholder,
         multiline = o.multiline,
         enabled = o.enabled.unwrap_or(true),
+        read_only = o.read_only,
         type_role = o.type_role,
         font_size = fs.size(),
         line_height = o.line_height.unwrap_or(fs.line_height()),
@@ -1291,8 +1290,8 @@ pub fn name_then_pill_width(room: f32, natural: f32, pill: f32, gap: f32) -> Opt
 /// pill and whatever follows the row stay on screen (CSS `flex:0 1 auto;min-width:0` on the
 /// name and `flex:none` on the pill; `.detail .topbar` in the mockup). The pill never shrinks.
 ///
-/// TODO(compose-rust#778, after v0.0.11): the measuring below goes when the pin has a weight that
-/// leaves a child its own size.
+/// TODO(#673): compose-rust#778 closed with max-width/max-height, not a weight that leaves a
+/// child its own size (`weight(fill = false)`). The measuring below stays until that gap lands.
 ///
 /// The toolkit has no weight that leaves a child its own size (Compose `weight(fill = false)`)
 /// and no maximum width: a weighted child fills its share, and unweighted ones are measured
@@ -1770,9 +1769,9 @@ pub fn EmberCardSized(
         .border(1.0, paint(border))
         .corner_radius(CORNER_LG);
     // A Box rather than `Card`, whose design-system shape ignores `corner_radius`.
-    // TODO(compose-rust#826): the mockup's 16/20 padding is asymmetric and `Modifier::padding`
-    // is uniform, so 16 is used on all sides unless the caller passes one. The side spacers go
-    // when the toolkit takes a padding per side.
+    // TODO(#673): compose-rust#826 (per-side padding) is closed in the toolkit; moving card
+    // padding from uniform 16 + 4 dp side spacers onto `padding_xy` waits for a display pass
+    // (an earlier swap clipped 1 px of the first Home chart bar at 1440).
     // The 4 dp spacers raise the uniform 16 to the mockup's 20 on the sides (`--pad-card`).
     let side = if padding.is_some() { 0.0 } else { PAD_CARD_H - PAD_CARD_V };
     { use ::compose_rust::ui::Box; Box!(modifier = m.padding(padding.unwrap_or(PAD_CARD_V)), {
@@ -1799,8 +1798,8 @@ pub fn InsetPanelSized(fill_max_width: bool, fill_max_height: bool, content: imp
     if fill_max_height {
         m = m.fill_max_height();
     }
-    // TODO(compose-rust#826): the mockup's 12/16 padding is asymmetric; 12 on all sides and the
-    // 4 dp spacers below until the toolkit takes one per side.
+    // TODO(#673): compose-rust#826 (per-side padding) is closed in the toolkit; moving inset
+    // panel padding from uniform 12 + 4 dp side spacers onto `padding_xy` waits for a display pass.
     let alignment = if fill_max_height { Some(Alignment::CenterStart) } else { None };
     { use ::compose_rust::ui::Box; Box!(
         modifier = m.background(paint(theme.palette.surface_2)).corner_radius(CORNER_MD).padding(PAD_ROW_V),

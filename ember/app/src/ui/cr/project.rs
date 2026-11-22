@@ -481,8 +481,8 @@ fn ComputerStrip(chips: &[ComputerChip], st: &Ui) {
         return;
     }
     let scroll = compose_rust::ui::remember_scroll_state();
-    // TODO(compose-rust#818): `ScrollState` has no viewport size, so the step is taken from the
-    // window's content width, which is wider than the strip between its arrows.
+    // TODO(#673): compose-rust#818 (`ScrollState` viewport size) is closed in the toolkit;
+    // adopting it in place of the window content width waits for the next pin and display check.
     let viewport = content_width(crate::ui::window_size::current_window_size().width_dp, SP[6]);
     // Only the overflow is read here; each arrow reads the offset itself (#671).
     let arrows = strip_arrows_visible(scroll.max_offset());
@@ -2357,8 +2357,9 @@ mod tests {
         assert!(arrow.contains(".disabled(!enabled)"));
         let strip = &src[src.find("fn ComputerStrip(").unwrap()..src.find("fn StripArrow(").unwrap()];
         assert!(!strip.contains("scroll.offset()"), "the strip keeps no offset from composition");
-        // The open toolkit gaps cite their compose-rust issues.
-        assert!(strip.contains("TODO(compose-rust#818)"));
+        // Closed toolkit gaps re-pointed to #673 until adopted after a display check.
+        assert!(strip.contains("TODO(#673)"));
+        assert!(!strip.contains("TODO(compose-rust#818)"), "compose-rust#818 is closed");
         assert!(!strip.contains("TODO(compose-rust#817"), "the dash landed in v0.0.12");
         assert!(!strip.contains("TODO(compose-rust, #671)") && !arrow.contains("TODO("));
     }

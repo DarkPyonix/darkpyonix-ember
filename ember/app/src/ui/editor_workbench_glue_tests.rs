@@ -1079,3 +1079,29 @@ fn fr_l33_1_the_safe_area_arriving_after_the_first_render_moves_the_top_bar() {
     assert!(page.find("aria-label", crate::ui::workspace_trust::PROMPT_TITLE).is_some(), "the prompt is still up");
     compose_rust::window::reset_window_size();
 }
+
+fn compose_root() -> Element {
+    super::view::root_with(app)
+}
+
+// #301: the editor window is a Compose root with the page in an `HtmlView`. The page mounts there
+// with its own stylesheets and draws the project tree; the events of the code editor inside it reach
+// the page through the root since dioxus-compose a64f3b92 (its fr34_3 island tests). The rendered
+// window is a display check.
+#[test]
+fn fr_l31_the_editor_page_mounts_inside_a_compose_root() {
+    let _guard = crate::services::test_guard();
+    FOLDER.with(|f| *f.borrow_mut() = ROOT.to_string());
+    let (host, _commands) = EditorHost::fake();
+    {
+        let mut state = host.state.lock().unwrap();
+        state.connected = true;
+        state.listings.insert(ROOT.to_string(), vec![("a.rs".to_string(), ember_editor_conn::remote_fs::file_type::FILE)]);
+    }
+    FAKE.with(|f| *f.borrow_mut() = Some(host));
+    let mut root = dioxus_compose::Host::new(compose_root);
+    let bytes = root.rebuild().expect("the Compose root with the editor page did not build");
+    let batch = dioxus_compose::protocol::decode_batch(bytes).expect("decode");
+    let sent: Vec<String> = batch.iter().map(|m| format!("{m:?}")).collect();
+    assert!(sent.iter().any(|m| m.contains("\"a.rs\"")), "the project tree row a.rs is not in the root's first batch");
+}

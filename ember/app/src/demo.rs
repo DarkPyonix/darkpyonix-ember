@@ -350,7 +350,10 @@ pub fn metrics_sample(now_ms: u64) -> ember_client::api::MetricsSample {
         }),
         disks: vec![DiskMetrics { name: "Macintosh HD".into(), mount: "/".into(), total_bytes: 500 * GB, available_bytes: 210 * GB }],
         network: vec![NetMetrics { interface: "en0".into(), rx_bytes: now_ms / 1000 * 2_400_000, tx_bytes: now_ms / 1000 * 380_000 }],
-        temperatures: vec![TempMetrics { label: "CPU".into(), celsius: wave(20.0, 48.0, 62.0, 1.0) }],
+        temperatures: vec![
+            TempMetrics { label: "CPU".into(), celsius: wave(20.0, 48.0, 62.0, 1.0) },
+            TempMetrics { label: "GPU".into(), celsius: wave(24.0, 42.0, 54.0, 2.0) },
+        ],
         gpu: GpuReport { devices: vec![], reason: Some("이 컴퓨터에서는 GPU 값을 읽지 못했습니다".into()) },
         processes: procs
             .iter()

@@ -335,6 +335,22 @@ async fn respond_loop(
                     _ if verbose => println!("[live-ose]   EH→ {name} {}", args_preview(&r.args)),
                     _ => {}
                 }
+                if r.proxy == Some(ember_editor_conn::actors::generated::main_thread_storage::PROXY) {
+                    use ember_editor_conn::actors::generated::main_thread_storage::{InitializeExtensionStorageArgs, SetValueArgs};
+                    match r.method.as_str() {
+                        "$initializeExtensionStorage" => {
+                            if let Err(e) = InitializeExtensionStorageArgs::decode(&r.args) {
+                                eprintln!("[live-ose] cannot parse {name}: {e}; args {}", args_preview(&r.args));
+                            }
+                        }
+                        "$setValue" => {
+                            if let Err(e) = SetValueArgs::decode(&r.args) {
+                                eprintln!("[live-ose] cannot parse {name}: {e}; args {}", args_preview(&r.args));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 if r.proxy == Some(ember_editor_conn::actors::generated::main_thread_diagnostics::PROXY) && r.method == "$changeMany" {
                     match ChangeManyArgs::decode(&r.args)
                         .and_then(|a| Ok((a.owner, serde_json::from_value(Value::Array(a.entries))?)))
@@ -694,6 +710,17 @@ async fn live_ose_end_to_end() {
     }
     assert!(markers.iter().any(|m| m.severity == 8), "expected an Error marker: {markers:?}");
     steps.done("4. MainThreadDiagnostics.$changeMany (JSON errors)");
+    let storage_inits = seen
+        .lock()
+        .unwrap()
+        .get("MainThreadStorage.$initializeExtensionStorage")
+        .copied()
+        .unwrap_or(0);
+    assert!(
+        storage_inits > 0,
+        "expected at least one MainThreadStorage.$initializeExtensionStorage call during activation"
+    );
+    steps.done("4. MainThreadStorage.$initializeExtensionStorage observed");
 
     // ---- 5. shutdown ----------------------------------------------------------------------------
     exthost::terminate(peer.connection());

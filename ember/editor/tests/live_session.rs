@@ -576,3 +576,191 @@ async fn live_session_probe_hover_codelens_inline() {
     session.shutdown().await;
     drop(server);
 }
+
+/// Packs a minimal storage-probe VSIX into `vsix_path` for the live OSE storage persistence test.
+fn pack_storage_probe_vsix(vsix_path: &Path) {
+    let script = r#"
+import json, sys, zipfile
+
+package_json = {
+    "name": "ember-storage-probe",
+    "displayName": "Ember Storage Probe",
+    "version": "0.0.1",
+    "publisher": "ember-test",
+    "engines": {"vscode": "^1.80.0"},
+    "main": "./extension.js",
+    "activationEvents": [
+        "onCommand:emberStorageProbe.write",
+        "onCommand:emberStorageProbe.report"
+    ],
+    "contributes": {
+        "commands": [
+            {"command": "emberStorageProbe.write", "title": "Write Storage"},
+            {"command": "emberStorageProbe.report", "title": "Report Storage"}
+        ]
+    }
+}
+
+extension_js = r'''
+const vscode = require('vscode');
+
+exports.activate = function (context) {
+  const ch = vscode.window.createOutputChannel('ember-storage-probe');
+  context.subscriptions.push(ch);
+  context.subscriptions.push(vscode.commands.registerCommand('emberStorageProbe.write', async (gVal, wVal) => {
+    await context.globalState.update('gKey', gVal);
+    await context.workspaceState.update('wKey', wVal);
+    ch.appendLine('WROTE:' + JSON.stringify({ g: context.globalState.get('gKey', null), w: context.workspaceState.get('wKey', null) }));
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('emberStorageProbe.report', async () => {
+    ch.appendLine('REPORT:' + JSON.stringify({ g: context.globalState.get('gKey', null), w: context.workspaceState.get('wKey', null) }));
+  }));
+};
+
+exports.deactivate = function () {};
+'''
+
+manifest = '''<?xml version="1.0" encoding="utf-8"?>
+<PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011">
+  <Metadata>
+    <Identity Language="en-US" Id="ember-storage-probe" Version="0.0.1" Publisher="ember-test"/>
+    <DisplayName>Ember Storage Probe</DisplayName>
+    <Description>Test probe for MainThreadStorage persistence</Description>
+  </Metadata>
+  <Installation><InstallationTarget Id="Microsoft.VisualStudio.Code"/></Installation>
+  <Dependencies/>
+  <Assets><Asset Type="Microsoft.VisualStudio.Code.Manifest" Path="extension/package.json" Addressable="true"/></Assets>
+</PackageManifest>'''
+
+content_types = '''<?xml version="1.0" encoding="utf-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension=".json" ContentType="application/json"/>
+  <Default Extension=".js" ContentType="application/javascript"/>
+  <Default Extension=".vsixmanifest" ContentType="text/xml"/>
+</Types>'''
+
+with zipfile.ZipFile(sys.argv[1], 'w', zipfile.ZIP_DEFLATED) as z:
+    z.writestr('[Content_Types].xml', content_types)
+    z.writestr('extension.vsixmanifest', manifest)
+    z.writestr('extension/package.json', json.dumps(package_json, indent=2))
+    z.writestr('extension/extension.js', extension_js)
+"#;
+    let st = Command::new("python3")
+        .arg("-I")
+        .arg("-c")
+        .arg(script)
+        .arg(vsix_path)
+        .status()
+        .expect("python3");
+    assert!(st.success(), "failed to pack storage probe vsix");
+}
+
+/// Live OSE test: `MainThreadStorage` persists `globalState` across sessions and workspaces,
+/// and persists `workspaceState` per workspace while isolating different workspaces.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a real OSE server: EMBER_OSE_SERVER=<unpacked build>/bin/dpx-ose-server, and python3"]
+async fn live_session_main_thread_storage_persists_across_restarts() {
+    let Some(bin) = std::env::var_os("EMBER_OSE_SERVER").map(PathBuf::from) else {
+        eprintln!("[live-session] EMBER_OSE_SERVER not set; skipping");
+        return;
+    };
+    let root = std::env::temp_dir().join(format!("ember-storage-live-{}", uuid_short()));
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(&root).unwrap();
+    let ws_a = root.join("ws-a");
+    let ws_b = root.join("ws-b");
+    std::fs::create_dir_all(&ws_a).unwrap();
+    std::fs::create_dir_all(&ws_b).unwrap();
+
+    let vsix = root.join("ember-storage-probe.vsix");
+    pack_storage_probe_vsix(&vsix);
+    let ext = root.join("ext");
+    let data = root.join("data");
+    let out = Command::new(&bin)
+        .arg("--install-extension")
+        .arg(&vsix)
+        .arg("--extensions-dir")
+        .arg(&ext)
+        .arg("--server-data-dir")
+        .arg(&data)
+        .arg("--accept-server-license-terms")
+        .stdin(Stdio::null())
+        .output()
+        .expect("install storage probe");
+    assert!(
+        out.status.success(),
+        "install failed: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let server = Server::start_with(&bin, &root, Some(&ext));
+    let addr = format!("127.0.0.1:{}", server.port);
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while tokio::net::TcpStream::connect(&addr).await.is_err() {
+        assert!(Instant::now() < deadline, "server not listening on {addr}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // Session 1 (ws-a): write both globalState and workspaceState.
+    let (s1, mut rx1) = tokio::time::timeout(
+        Duration::from_secs(120),
+        EditorSession::connect_tcp(SessionConfig::new(addr.clone(), ws_a.to_str().unwrap())),
+    )
+    .await
+    .expect("connect s1 timed out")
+    .unwrap_or_else(|e| panic!("connect s1: {e}"));
+    s1.execute_command("emberStorageProbe.write", vec![serde_json::json!("g-persisted"), serde_json::json!("w-alpha")])
+        .unwrap();
+    wait_for("WROTE output in s1", 60, &mut rx1, |u| match u {
+        SessionUpdate::OutputChannels { channels, .. } => channels
+            .iter()
+            .find_map(|c| c.text.lines().find(|l| l.starts_with("WROTE:")).map(str::to_owned)),
+        _ => None,
+    })
+    .await;
+    s1.shutdown().await;
+
+    // Session 2 (ws-a): both globalState and workspaceState must be restored.
+    let (s2, mut rx2) = tokio::time::timeout(
+        Duration::from_secs(120),
+        EditorSession::connect_tcp(SessionConfig::new(addr.clone(), ws_a.to_str().unwrap())),
+    )
+    .await
+    .expect("connect s2 timed out")
+    .unwrap_or_else(|e| panic!("connect s2: {e}"));
+    s2.execute_command("emberStorageProbe.report", vec![]).unwrap();
+    let report_a = wait_for("REPORT output in s2", 60, &mut rx2, |u| match u {
+        SessionUpdate::OutputChannels { channels, .. } => channels
+            .iter()
+            .find_map(|c| c.text.lines().find(|l| l.starts_with("REPORT:")).map(str::to_owned)),
+        _ => None,
+    })
+    .await;
+    let payload_a: serde_json::Value = serde_json::from_str(report_a.trim_start_matches("REPORT:")).unwrap();
+    assert_eq!(payload_a["g"], "g-persisted");
+    assert_eq!(payload_a["w"], "w-alpha");
+    s2.shutdown().await;
+
+    // Session 3 (ws-b): globalState persists, workspaceState is isolated.
+    let (s3, mut rx3) = tokio::time::timeout(
+        Duration::from_secs(120),
+        EditorSession::connect_tcp(SessionConfig::new(addr.clone(), ws_b.to_str().unwrap())),
+    )
+    .await
+    .expect("connect s3 timed out")
+    .unwrap_or_else(|e| panic!("connect s3: {e}"));
+    s3.execute_command("emberStorageProbe.report", vec![]).unwrap();
+    let report_b = wait_for("REPORT output in s3", 60, &mut rx3, |u| match u {
+        SessionUpdate::OutputChannels { channels, .. } => channels
+            .iter()
+            .find_map(|c| c.text.lines().find(|l| l.starts_with("REPORT:")).map(str::to_owned)),
+        _ => None,
+    })
+    .await;
+    let payload_b: serde_json::Value = serde_json::from_str(report_b.trim_start_matches("REPORT:")).unwrap();
+    assert_eq!(payload_b["g"], "g-persisted");
+    assert!(payload_b["w"].is_null(), "workspaceState leaked across workspaces: {payload_b}");
+    s3.shutdown().await;
+    drop(server);
+}

@@ -189,6 +189,7 @@ fn result_of(r: TransferResult) -> HistoryResult {
         TransferResult::Done => HistoryResult::Done,
         TransferResult::Failed => HistoryResult::Failed,
         TransferResult::Declined => HistoryResult::Declined,
+        TransferResult::Expired => HistoryResult::Expired,
         TransferResult::Cancelled => HistoryResult::Cancelled,
     }
 }
@@ -503,6 +504,7 @@ impl Book {
         let ended = match end {
             Ok(UploadEnd::Done(_)) => Some(HistoryResult::Done),
             Ok(UploadEnd::Declined) => Some(HistoryResult::Declined),
+            Err(TransferError::Expired) => Some(HistoryResult::Expired),
             _ => None,
         };
         if let (Some(result), o) = (ended, &self.outgoing[pos]) {
@@ -523,7 +525,7 @@ impl Book {
                     self.sent.push((id, o.device));
                 }
             }
-            Ok(UploadEnd::Declined) | Ok(UploadEnd::Cancelled) => {
+            Ok(UploadEnd::Declined | UploadEnd::Cancelled) | Err(TransferError::Expired) => {
                 self.outgoing.remove(pos);
             }
             Err(e) => {
@@ -816,8 +818,11 @@ impl TransferService for ServerTransferService {
                 Answer::Decline => api.decline_transfer_offer(&id).await.map(|_| ()),
             };
             if let Err(e) = result {
-                // 404: the sender withdrew it, or another client answered first.
-                notify(if e.status() == Some(404) { "이미 끝난 요청입니다." } else { ACTION_FAILED });
+                notify(match e.status() {
+                    Some(404) => "이미 끝난 요청입니다.",
+                    Some(410) => "만료된 요청입니다.",
+                    _ => ACTION_FAILED,
+                });
             }
             let _ = refresh(&book, &api).await;
             redraw();

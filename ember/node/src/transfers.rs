@@ -26,6 +26,7 @@ use std::sync::{Arc, Mutex};
 
 use ember_transfer::limits::{Limits, DEFAULT_MAX_BYTES};
 use ember_transfer::names::{clean_offer_paths, MAX_OFFER_FILES};
+use ember_transfer::state::OFFER_TTL_MS;
 use ember_transfer::store::{
     DeclaredFile, HistoryRecord, ReceiveWriter, StoreError, StoredFile, TransferDirection, TransferResult,
 };
@@ -173,6 +174,8 @@ pub struct ChunkBody {
 pub enum RecvError {
     #[error("{0}")]
     NotFound(String),
+    #[error("offer {0} expired")]
+    Expired(String),
     #[error("{0}")]
     BadRequest(String),
     #[error("{0}")]
@@ -236,9 +239,51 @@ impl State {
         Ok(write_atomic(&self.dir.join(LEDGER_FILE), &bytes)?)
     }
 
-    fn save_history(&self) {
-        if let Ok(bytes) = serde_json::to_vec_pretty(&self.history) {
-            let _ = write_atomic(&self.dir.join(HISTORY_FILE), &bytes);
+    fn save_history(&self) -> R<()> {
+        let bytes = serde_json::to_vec_pretty(&self.history).map_err(|e| RecvError::Internal(e.to_string()))?;
+        Ok(write_atomic(&self.dir.join(HISTORY_FILE), &bytes)?)
+    }
+
+    fn expire_pending(&mut self, now: i64) -> R<()> {
+        let cutoff = now.saturating_sub(OFFER_TTL_MS);
+        let due = |offer: &PendingOffer| offer.created_at <= cutoff;
+        let mut inserted = 0;
+        let mut expired = false;
+        for offer in self.ledger.pending.iter().filter(|offer| due(offer)) {
+            expired = true;
+            // The process may have stopped after committing history but before the ledger.
+            if self.history.iter().any(|r| r.id == offer.id && r.result == TransferResult::Expired) {
+                continue;
+            }
+            self.history.insert(0, HistoryRecord {
+                id: offer.id.clone(),
+                name: offer.cleaned_names.first().cloned().unwrap_or_else(|| "file".into()),
+                device: offer.from.clone(),
+                direction: TransferDirection::Receive,
+                size: offer.total,
+                result: TransferResult::Expired,
+                timestamp_ms: now,
+            });
+            inserted += 1;
+        }
+        if inserted != 0 {
+            if let Err(error) = self.save_history() {
+                self.history.drain(..inserted);
+                return Err(error);
+            }
+        }
+        if expired {
+            self.ledger.pending.retain(|offer| !due(offer));
+            self.save_ledger()?;
+        }
+        Ok(())
+    }
+
+    fn missing_offer(&self, id: &str) -> RecvError {
+        if self.history.iter().any(|r| r.id == id && r.result == TransferResult::Expired) {
+            RecvError::Expired(id.to_owned())
+        } else {
+            RecvError::NotFound(format!("offer {id} not found"))
         }
     }
 
@@ -249,7 +294,7 @@ impl State {
     fn record(&mut self, id: String, name: String, device: String, size: u64, result: TransferResult) -> HistoryRecord {
         let rec = HistoryRecord { id, name, device, direction: TransferDirection::Receive, size, result, timestamp_ms: now_ms() };
         self.history.insert(0, rec.clone());
-        self.save_history();
+        let _ = self.save_history();
         rec
     }
 }
@@ -304,6 +349,7 @@ impl Receiver {
             received: Vec::new(),
             history,
         };
+        st.expire_pending(now_ms())?;
         // Partial folders the ledger does not name belong to nothing and are removed (`FR-F13`).
         let keep: Vec<String> = st.ledger.active.iter().map(|t| t.id.clone()).collect();
         if let Ok(entries) = std::fs::read_dir(st.received_dir.join(".partial")) {
@@ -361,7 +407,8 @@ impl Receiver {
 
     /// `GET /transfers`: the same shape as the server's snapshot.
     pub fn snapshot(&self) -> R<Value> {
-        let g = self.st()?;
+        let mut g = self.st()?;
+        g.expire_pending(now_ms())?;
         Ok(json!({
             "ready": true,
             "devices": [],
@@ -423,6 +470,7 @@ impl Receiver {
         };
         {
             let mut g = self.st()?;
+            g.expire_pending(offer.created_at)?;
             g.ledger.pending.push(offer.clone());
             g.save_ledger()?;
         }
@@ -437,23 +485,25 @@ impl Receiver {
     /// `POST /transfers/offers/{id}/accept`.
     pub fn accept(&self, id: &str) -> R<Transfer> {
         let (total, dir) = {
-            let g = self.st()?;
+            let mut g = self.st()?;
+            g.expire_pending(now_ms())?;
             let o = g
                 .ledger
                 .pending
                 .iter()
                 .find(|o| o.id == id)
-                .ok_or_else(|| RecvError::NotFound(format!("offer {id} not found")))?;
+                .ok_or_else(|| g.missing_offer(id))?;
             (o.total, g.received_dir.clone())
         };
         self.check_space(&dir, total)?;
         let mut g = self.st()?;
+        g.expire_pending(now_ms())?;
         let pos = g
             .ledger
             .pending
             .iter()
             .position(|o| o.id == id)
-            .ok_or_else(|| RecvError::NotFound(format!("offer {id} not found")))?;
+            .ok_or_else(|| g.missing_offer(id))?;
         let o = g.ledger.pending.remove(pos);
         let t = Transfer {
             id: o.id,
@@ -478,12 +528,13 @@ impl Receiver {
     /// `POST /transfers/offers/{id}/decline`.
     pub fn decline(&self, id: &str) -> R<HistoryRecord> {
         let mut g = self.st()?;
+        g.expire_pending(now_ms())?;
         let pos = g
             .ledger
             .pending
             .iter()
             .position(|o| o.id == id)
-            .ok_or_else(|| RecvError::NotFound(format!("offer {id} not found")))?;
+            .ok_or_else(|| g.missing_offer(id))?;
         let o = g.ledger.pending.remove(pos);
         g.save_ledger()?;
         let name = o.cleaned_names.first().cloned().unwrap_or_else(|| "file".into());
@@ -598,6 +649,7 @@ impl Receiver {
     /// `POST /transfers/{id}/cancel`: an offer or a transfer; the partial folder goes (`FR-F4`).
     pub fn cancel(&self, id: &str) -> R<HistoryRecord> {
         let mut g = self.st()?;
+        g.expire_pending(now_ms())?;
         if let Some(w) = g.writers.remove(id) {
             w.abort();
         }
@@ -620,14 +672,17 @@ impl Receiver {
     }
 
     pub fn history(&self) -> R<Vec<HistoryRecord>> {
-        Ok(self.st()?.history.clone())
+        let mut g = self.st()?;
+        g.expire_pending(now_ms())?;
+        Ok(g.history.clone())
     }
 
     /// Clears the history; received files stay (`FR-F8`).
     pub fn clear_history(&self) -> R<()> {
         let mut g = self.st()?;
+        g.expire_pending(now_ms())?;
         g.history.clear();
-        g.save_history();
+        let _ = g.save_history();
         Ok(())
     }
 }

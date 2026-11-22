@@ -22,6 +22,7 @@ use base64::Engine;
 use ember_transfer::limits::{Limits, DEFAULT_MAX_BYTES};
 use ember_transfer::mode::ReceiveMode;
 use ember_transfer::names::clean_offer_paths;
+use ember_transfer::state::OFFER_TTL_MS;
 use ember_transfer::store::{
     DeclaredFile, HistoryRecord, ReceiveWriter, StoreError, StoredFile, TransferDirection,
     TransferResult,
@@ -103,6 +104,8 @@ pub struct TransfersSnapshot {
 pub enum TransferApiError {
     #[error("{0}")]
     NotFound(String),
+    #[error("offer {0} expired")]
+    Expired(String),
     #[error("{0}")]
     BadRequest(String),
     #[error("{0}")]
@@ -119,6 +122,7 @@ impl IntoResponse for TransferApiError {
     fn into_response(self) -> Response {
         let code = match &self {
             TransferApiError::NotFound(_) => StatusCode::NOT_FOUND,
+            TransferApiError::Expired(_) => StatusCode::GONE,
             TransferApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
             TransferApiError::Forbidden(_) => StatusCode::FORBIDDEN,
             TransferApiError::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
@@ -143,7 +147,41 @@ struct Inner {
     history: Vec<HistoryRecord>,
 }
 
+impl PendingOfferItem {
+    fn ended(self, result: TransferResult, now: i64) -> HistoryRecord {
+        HistoryRecord {
+            id: self.id,
+            name: self.cleaned_names.into_iter().next().unwrap_or_else(|| "file".into()),
+            device: self.from,
+            direction: TransferDirection::Receive,
+            size: self.total,
+            result,
+            timestamp_ms: now,
+        }
+    }
+}
+
 impl Inner {
+    fn expire_pending(&mut self, now: i64) {
+        let cutoff = now.saturating_sub(OFFER_TTL_MS);
+        let mut changed = false;
+        for offer in self.pending_offers.extract_if(.., |offer| offer.created_at <= cutoff) {
+            self.history.insert(0, offer.ended(TransferResult::Expired, now));
+            changed = true;
+        }
+        if changed {
+            self.save_history();
+        }
+    }
+
+    fn missing_offer(&self, id: &str) -> TransferApiError {
+        if self.history.iter().any(|r| r.id == id && r.result == TransferResult::Expired) {
+            TransferApiError::Expired(id.to_owned())
+        } else {
+            TransferApiError::NotFound(format!("offer {id} not found"))
+        }
+    }
+
     fn save_history(&self) {
         if let Ok(bytes) = serde_json::to_vec_pretty(&self.history) {
             let _ = std::fs::write(&self.history_path, bytes);
@@ -254,7 +292,8 @@ impl TransferManager {
     }
 
     pub fn snapshot(&self) -> TransfersSnapshot {
-        let g = self.inner.lock().unwrap();
+        let mut g = self.inner.lock().unwrap();
+        g.expire_pending(now_ms());
         let (mode_str, auto_peers) = match &g.mode {
             ReceiveMode::Ask => ("ask".to_string(), Vec::new()),
             ReceiveMode::Off => ("off".to_string(), Vec::new()),
@@ -358,6 +397,7 @@ impl TransferManager {
             total,
             created_at: now_ms(),
         };
+        g.expire_pending(offer.created_at);
         g.pending_offers.push(offer.clone());
         drop(g);
 
@@ -372,11 +412,12 @@ impl TransferManager {
     /// Accepts a pending offer and opens its partial receive writer (`FR-F3`, `FR-F5`).
     pub fn accept_offer(&self, id: &str) -> Result<TransferItem, TransferApiError> {
         let mut g = self.inner.lock().unwrap();
+        g.expire_pending(now_ms());
         let pos = g
             .pending_offers
             .iter()
             .position(|o| o.id == id)
-            .ok_or_else(|| TransferApiError::NotFound(format!("offer {id} not found")))?;
+            .ok_or_else(|| g.missing_offer(id))?;
         let offer = g.pending_offers.remove(pos);
         let writer = ReceiveWriter::open(
             &g.received_dir,
@@ -411,25 +452,15 @@ impl TransferManager {
     /// Declines a pending offer (`FR-F3`).
     pub fn decline_offer(&self, id: &str) -> Result<HistoryRecord, TransferApiError> {
         let mut g = self.inner.lock().unwrap();
+        let now = now_ms();
+        g.expire_pending(now);
         let pos = g
             .pending_offers
             .iter()
             .position(|o| o.id == id)
-            .ok_or_else(|| TransferApiError::NotFound(format!("offer {id} not found")))?;
+            .ok_or_else(|| g.missing_offer(id))?;
         let offer = g.pending_offers.remove(pos);
-        let rec = HistoryRecord {
-            id: offer.id,
-            name: offer
-                .cleaned_names
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "file".into()),
-            device: offer.from,
-            direction: TransferDirection::Receive,
-            size: offer.total,
-            result: TransferResult::Declined,
-            timestamp_ms: now_ms(),
-        };
+        let rec = offer.ended(TransferResult::Declined, now);
         g.history.insert(0, rec.clone());
         g.save_history();
         Ok(rec)
@@ -591,24 +622,14 @@ impl TransferManager {
     /// Cancels a pending offer or active transfer and removes partial files (`FR-F4`).
     pub fn cancel_transfer(&self, id: &str) -> Result<HistoryRecord, TransferApiError> {
         let mut g = self.inner.lock().unwrap();
+        let now = now_ms();
+        g.expire_pending(now);
         if let Some(writer) = g.writers.remove(id) {
             writer.abort();
         }
         if let Some(pos) = g.pending_offers.iter().position(|o| o.id == id) {
             let offer = g.pending_offers.remove(pos);
-            let rec = HistoryRecord {
-                id: offer.id,
-                name: offer
-                    .cleaned_names
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| "file".into()),
-                device: offer.from,
-                direction: TransferDirection::Receive,
-                size: offer.total,
-                result: TransferResult::Cancelled,
-                timestamp_ms: now_ms(),
-            };
+            let rec = offer.ended(TransferResult::Cancelled, now);
             g.history.insert(0, rec.clone());
             g.save_history();
             return Ok(rec);
@@ -636,6 +657,7 @@ impl TransferManager {
     /// Clears transfer history without deleting received files on disk (`FR-F8`).
     pub fn clear_history(&self) {
         let mut g = self.inner.lock().unwrap();
+        g.expire_pending(now_ms());
         g.history.clear();
         g.save_history();
     }

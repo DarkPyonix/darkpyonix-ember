@@ -527,6 +527,17 @@ impl Store {
         self.channel_row(channel).ok().map(|r| r.name)
     }
 
+    /// Whether `author` wrote a message in `channel` at or after `since_ms` (FR-T12: an agent's
+    /// answer closes its mention thread).
+    pub fn channel_posted_since(&self, channel: &str, author: &str, since_ms: i64) -> Result<bool, ChannelError> {
+        let n: i64 = self.conn().query_row(
+            "SELECT COUNT(*) FROM channel_messages WHERE channel_id = ?1 AND author = ?2 AND at >= ?3",
+            params![channel, author, since_ms],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
     /// Remove one message row. Used only to undo a post whose JSONL append failed (FR-T16).
     pub fn delete_channel_message(&self, seq: i64) -> Result<(), ChannelError> {
         self.conn().execute("DELETE FROM channel_messages WHERE seq = ?1", params![seq])?;

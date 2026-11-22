@@ -221,6 +221,33 @@ ember-server owner call POST /api/accounts <span class="s">'{"agent": "claude-co
       </p>
     </div>
 
+    <h3 id="server-wsl">A server in WSL, the app on Windows</h3>
+    <p>
+      <span class="pill partial">Partial</span> (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/982">#982</a>, not yet checked on a Windows computer)
+      A server started in WSL writes its token to <code>~/.ember/server-token</code> inside Linux,
+      where the Windows app does not look. WSL forwards port 8740 to <code>127.0.0.1</code> on
+      Windows, so the app reaches the server at its default address and needs only the token. Copy
+      it into the app's own data folder, <code>%APPDATA%\ember</code> (where <code>device.key</code>
+      and <code>prefs.json</code> are), from PowerShell:
+    </p>
+    <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+      <figcaption>PowerShell</figcaption>
+<pre><code>New-Item -ItemType Directory -Force "$env:APPDATA\ember" | Out-Null
+wsl sh -c 'cat ~/.ember/server-token' | Set-Content -Encoding ascii "$env:APPDATA\ember\server-token"</code></pre>
+    </figure>
+    <p>
+      Then start the app again. It looks for the token in this order and uses the first one it
+      finds: <code>EMBER_SERVER_TOKEN</code>; <code>$EMBER_DATA_DIR/server-token</code> when
+      <code>EMBER_DATA_DIR</code> is set (and then nowhere else); otherwise
+      <code>~/.ember/server-token</code>, where <code>~</code> is <code>HOME</code>, or
+      <code>%USERPROFILE%</code> when <code>HOME</code> is not set; then
+      <code>%APPDATA%\ember\server-token</code>. A server started with its own
+      <code>EMBER_DATA_DIR</code> keeps the token in that folder instead of <code>~/.ember</code>.
+      After the server rotates its token, copy the file again. When the server refuses the token,
+      the banner says so and lists the places the app looked; the app does not retry every 30
+      seconds then, because the same token would be refused again.
+    </p>
+
     <h3 id="mount-build">Building with the project mount</h3>
     <p>
       <span class="pill partial">Partial</span> When a Claude Code session works on another

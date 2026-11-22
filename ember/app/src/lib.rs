@@ -68,6 +68,12 @@ pub(crate) fn prepare() {
         .try_init();
 
     let config = AppConfig::from_env();
+    // The app's own data folder is the last place the server token is looked for (FR-S11, #982):
+    // on Windows a program started from the Start menu has no HOME, and a server in WSL writes
+    // its token where the Windows app cannot see it.
+    if let Some(dir) = config.data_dir.as_deref() {
+        ember_client::token::set_app_data_dir(dir);
+    }
     // Prefs first: the server address saved in 설정 decides the reach (FR-N9).
     let initial_prefs = config
         .prefs_path()

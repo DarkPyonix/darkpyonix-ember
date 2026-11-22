@@ -225,10 +225,9 @@ pub fn ClickableAs(
 }
 
 /// A [`Clickable`] whose child is only an icon or a glyph, named for assistive technology with
-/// `Modifier::label` (compose-rust v0.0.7, #460, #429). `label` is `&'static str` on purpose:
-/// the toolkit keeps a 128-entry LRU cache of distinct labels (`compose-rust/src/ui/mod.rs`
-/// `LabelCache`, compose-rust#456, v0.0.11), so a name built from data (a routine name, a commit
-/// subject) takes a `Button`'s `accessible_name` instead.
+/// `Modifier::label` (compose-rust v0.0.7, #460, #429). `label` is `&'static str` because every
+/// caller names a fixed control; a name built from data (a routine name, a commit subject) still
+/// goes through [`DataNamedOverlay`], whose note says why.
 pub fn NamedClickable(
     label: &'static str,
     modifier: Modifier,
@@ -257,14 +256,14 @@ pub fn NamedDisabled(label: &'static str, modifier: Modifier, alignment: Alignme
     { use ::compose_rust::ui::Box; Box!(modifier = modifier.label(label).role(Role::Button).disabled(true), alignment = alignment, content = content) };
 }
 
-// TODO(compose-rust#831): a container
-// takes its name from `Modifier::label` only (`compose-rust/src/ui/mod.rs` `LabelCache`, a
-// 128-entry LRU cache in v0.0.11), and a `Button` with content insets its children by the design
-// system's 16 dp by default (`HostButton.kt` `labelPadding`; `Button::content_padding` is in
-// v0.0.11, compose-rust#789). So a painted box whose name is built from data (a path, a commit
-// subject, a profile name) keeps a clear `Button` over it for the name, the focus and the click.
-// When a container takes an owned name, move every caller onto [`Clickable`] with that name and
-// delete this.
+// TODO(#673): a container takes an owned name from data now (compose-rust#831):
+// `Modifier::label(&str)` keeps its own `Arc<str>` on the node, and the 128-entry `LabelCache`
+// in `compose-rust/src/ui/mod.rs` only shares copies of recent names, so an evicted name stays
+// on its node. Nothing in the toolkit blocks moving every caller onto a [`Clickable`] named
+// with `Modifier::label` and deleting this. It waits because the move changes what is drawn:
+// the press tint, the hover layer and the focus ring go from this clear `Button` to the painted
+// box at every caller in `vcs.rs`, `agents.rs` and `routines.rs`, which a capture and a
+// keyboard and VoiceOver check on a display must confirm.
 /// The control of a painted box whose accessible name is built from data: a clear toolkit
 /// `Button` exactly over its `Box` parent. It takes the parent's bounds without changing them
 /// (`Modifier::match_parent_size`, compose-rust#431), so the box keeps the size of what it
@@ -1064,6 +1063,9 @@ pub struct FieldOptions {
     /// a name (the branch menu's `feat/새-브랜치` is "새 브랜치 이름"). `&'static str` for the
     /// reason [`NamedClickable`] gives.
     pub label: Option<&'static str>,
+    /// Text that can be selected and copied but not edited, read as not editable by assistive
+    /// technology (`TextField`'s `read_only`, compose-rust#826).
+    pub read_only: bool,
 }
 
 /// The type step of a field's text and placeholder when no role is named (style.css `.field`).
@@ -1087,10 +1089,14 @@ pub const FIELD_INSET_MULTILINE: (f32, f32) = (12.0, 10.0);
 /// the frame. `bare`: see [`BareField`].
 ///
 /// The frame is Ember's own row and the field inside it is bare (FR-L10.2, #878): the toolkit's
-/// framed field puts its text 8 px in, and a per-side inner padding would also have to keep a
-/// single line centred in the 40 px height, which `TextField` cannot do yet.
-/// TODO(compose-rust#771): move the frame and the 12 px inset onto the field once it takes
-/// per-side content padding; until then a click on the 12 px strip does not focus the field.
+/// framed field puts its text 8 px in.
+/// TODO(#673): the toolkit now has what moving the frame and the 12 px inset onto the field
+/// needs (compose-rust#771): a bare single-line field centres its text in the height it is
+/// given, and `padding_each` on it sits inside the field, so a click there focuses it. The move
+/// rebuilds [`BareField`] (the centring row, the side spacers, the multiline clip) and changes
+/// every field on every screen, so it waits for captures of the framed, bare and multiline
+/// fields at 1440 and 390, light and dark, matching the ones before. Until then a click on the
+/// 12 px strip does not focus the field.
 pub fn EmberField(o: FieldOptions) {
     if o.bare {
         BareField(o);
@@ -1138,13 +1144,13 @@ pub fn EmberField(o: FieldOptions) {
 
 /// A field inside a container that draws the frame (FR-L10.2, #844).
 ///
-/// The toolkit's bare field (compose-rust v0.0.7 `HostTextField.kt`, `Bare`) draws no frame,
-/// has no inner padding and sets its text at the top of whatever height it is given
-/// (`contentAlignment = TopStart`). So the height, weight, width and inset the caller asked for
-/// go on a Row around it, which centres a single line vertically, and the field itself takes
-/// only the row's remaining width (and its height, when multiline). No background, border or
-/// shape is sent: a zero-width border is drawn as a 1 px hairline, the frame that was still
-/// visible inside the composers.
+/// The toolkit's bare field (`HostTextField.kt`, `Bare`) draws no frame and has no inner
+/// padding of its own. Before compose-rust#771 it set its text at the top of whatever height it
+/// was given, so the height, weight, width and inset the caller asked for go on a Row around it,
+/// which centres a single line vertically (see the `TODO(#673)` on [`EmberField`]), and the
+/// field itself takes only the row's remaining width (and its height, when multiline). No
+/// background, border or shape is sent: a zero-width border was drawn as a 1 px hairline, the
+/// frame that was still visible inside the composers.
 fn BareField(o: FieldOptions) {
     let (ix, iy) = o.inset.unwrap_or((0.0, 0.0));
     let (ix, iy) = (ix.max(0.0), iy.max(0.0));
@@ -1208,6 +1214,7 @@ fn FieldNode(o: FieldOptions, modifier: Modifier) {
         line_height = o.line_height.unwrap_or(fs.line_height()),
         letter_spacing = fs.letter_spacing(),
         bare = o.bare,
+        read_only = o.read_only,
         on_submit = o.on_submit,
         on_focus_gained = o.on_focus_gained,
         on_focus_lost = o.on_focus_lost,
@@ -1291,11 +1298,12 @@ pub fn name_then_pill_width(room: f32, natural: f32, pill: f32, gap: f32) -> Opt
 /// pill and whatever follows the row stay on screen (CSS `flex:0 1 auto;min-width:0` on the
 /// name and `flex:none` on the pill; `.detail .topbar` in the mockup). The pill never shrinks.
 ///
-/// TODO(compose-rust#778, after v0.0.11): the measuring below goes when the pin has a weight that
-/// leaves a child its own size.
+/// TODO(compose-rust, unfiled: a weight that leaves a child its own size): the measuring below
+/// goes when the toolkit has one. compose-rust#778 brought `Modifier::max_width`, `max_height`
+/// and `size_in`, which cap a node at a fixed size but not at what its siblings leave, and
+/// `Modifier::weight` still fills its whole share (no `fill = false`).
 ///
-/// The toolkit has no weight that leaves a child its own size (Compose `weight(fill = false)`)
-/// and no maximum width: a weighted child fills its share, and unweighted ones are measured
+/// So a weighted child fills its share, and unweighted ones are measured
 /// first, in order, each with what the ones before it left (compose-rust
 /// `renderer/desktop/src/renderer/RenderNode.kt` `WeightedStackPolicy`). So the row measures:
 /// the room, the pill and the name's own width (a copy in clear ink, left out of the
@@ -1770,9 +1778,11 @@ pub fn EmberCardSized(
         .border(1.0, paint(border))
         .corner_radius(CORNER_LG);
     // A Box rather than `Card`, whose design-system shape ignores `corner_radius`.
-    // TODO(compose-rust#826): the mockup's 16/20 padding is asymmetric and `Modifier::padding`
-    // is uniform, so 16 is used on all sides unless the caller passes one. The side spacers go
-    // when the toolkit takes a padding per side.
+    // TODO(#673): the mockup's 16/20 padding is asymmetric. The toolkit has per-side padding
+    // (`Modifier::padding_xy`, `padding_each`), but putting it on the card in place of the
+    // spacers below (tried in 1f507612) moved the first hatched bar of the home 비용과 토큰 추이
+    // card at 1440 so its left edge was clipped by one pixel. Until a display pass finds why, 16
+    // is used on all sides unless the caller passes one, and the side spacers stay.
     // The 4 dp spacers raise the uniform 16 to the mockup's 20 on the sides (`--pad-card`).
     let side = if padding.is_some() { 0.0 } else { PAD_CARD_H - PAD_CARD_V };
     { use ::compose_rust::ui::Box; Box!(modifier = m.padding(padding.unwrap_or(PAD_CARD_V)), {
@@ -1799,8 +1809,10 @@ pub fn InsetPanelSized(fill_max_width: bool, fill_max_height: bool, content: imp
     if fill_max_height {
         m = m.fill_max_height();
     }
-    // TODO(compose-rust#826): the mockup's 12/16 padding is asymmetric; 12 on all sides and the
-    // 4 dp spacers below until the toolkit takes one per side.
+    // TODO(#673): the mockup's 12/16 padding is asymmetric; 12 on all sides and the 4 dp
+    // spacers below. The toolkit has per-side padding (`Modifier::padding_xy`, `padding_each`),
+    // but the same change on cards (tried in 1f507612) clipped a chart bar's left edge by one
+    // pixel at 1440, and no captured screen shows an inset panel, so it waits for a display pass.
     let alignment = if fill_max_height { Some(Alignment::CenterStart) } else { None };
     { use ::compose_rust::ui::Box; Box!(
         modifier = m.background(paint(theme.palette.surface_2)).corner_radius(CORNER_MD).padding(PAD_ROW_V),
@@ -2527,6 +2539,19 @@ mod tests {
         let production = include_str!("components.rs").split("#[cfg(test)]").next().unwrap();
         assert!(!production.contains(&["OneLine", "HintField"].concat()));
         assert!(!production.contains(concat!("TODO(compose-rust#", "786")));
+    }
+
+    #[test]
+    fn fr_t14_a_read_only_field_is_the_toolkits_read_only_text_field() {
+        // compose-rust#826: `TextField`'s `read_only` keeps the text selectable and copyable
+        // but not editable. Only a field that asks for it sends the flag.
+        let nodes = emitted_nodes(|| {
+            EmberField(FieldOptions { fill_max_width: true, text: Some("https://example.invalid/i".into()), read_only: true, ..Default::default() })
+        });
+        let field = the(&nodes, "TextField");
+        assert!(field.props.iter().any(|p| p == "ReadOnly=Bool(true)"), "{:?}", field.props);
+        let plain = emitted_nodes(|| EmberField(FieldOptions { fill_max_width: true, ..Default::default() }));
+        assert!(!the(&plain, "TextField").props.iter().any(|p| p.starts_with("ReadOnly=")), "a plain field sends no flag");
     }
 
     #[test]
@@ -3717,6 +3742,25 @@ mod tests {
         assert!(text.contains("overflow_wrap = overflow_wrap,"));
         for screen in [include_str!("monitor.rs"), include_str!("routines.rs")] {
             assert!(!screen.contains(concat!("TODO(compose-rust#", "443)")));
+        }
+    }
+
+    #[test]
+    fn no_todo_cites_a_toolkit_issue_that_is_closed_in_the_pin() {
+        // #673: each of these compose-rust issues is closed and its feature is in the pin, so a
+        // `TODO(compose-rust#N)` naming one is false. What still waits names what blocks it.
+        let files = [
+            ("components.rs", include_str!("components.rs")),
+            ("channel_owner.rs", include_str!("channel_owner.rs")),
+            ("vcs.rs", include_str!("vcs.rs")),
+            ("ui/home.rs", include_str!("../home.rs")),
+            ("terminal_input.rs", include_str!("../../terminal_input.rs")),
+        ];
+        for (name, src) in files {
+            let production = src.split("#[cfg(test)]").next().unwrap();
+            for issue in ["389", "521", "546", "771", "778", "826", "831"] {
+                assert!(!production.contains(&format!("TODO(compose-rust#{issue}")), "{name} cites closed #{issue}");
+            }
         }
     }
 

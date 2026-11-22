@@ -191,14 +191,20 @@ pub fn spawn_editor_with(exe: &Path, project: &str, folder: &str) -> std::io::Re
 /// Spawn an editor with the token in the child environment, never in argv.
 pub fn spawn_editor_target(exe: &Path, target: &EditorTarget) -> std::io::Result<std::process::Child> {
     let (bin, args) = editor_command(exe, &target.project, &target.folder, &target.endpoint);
-    Command::new(bin)
+    // The owner handoff (FR-S12, #1042): a one-time token, recorded with the child's PID.
+    let handoff = crate::owner_handoff::new_token();
+    let child = Command::new(bin)
         .args(args)
+        .env(crate::owner_handoff::HANDOFF_ENV, &handoff)
         .env(EDITOR_TOKEN_ENV, &target.token)
         .env(EDITOR_SERVER_ENV, &target.server_url)
         .env(EDITOR_COMPUTER_ENV, &target.computer)
         .env(EDITOR_RELAY_ENV, &target.relay)
         .env(EDITOR_VSCODE_ENV, &target.vscode_url)
-        .spawn()
+        .spawn()?;
+    let mut reg = crate::owner_handoff::registry().lock().unwrap_or_else(|e| e.into_inner());
+    reg.record(handoff, u64::from(child.id()), std::time::Instant::now());
+    Ok(child)
 }
 
 /// Spawn a new Ember process in `--editor <project> <folder>` mode (FR-L31).

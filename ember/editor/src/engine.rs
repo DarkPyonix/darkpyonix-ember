@@ -24,7 +24,7 @@ use serde_json::{json, Value};
 use crate::codelens::{CodeLenses, CommandDto};
 use crate::coords::{WidgetPos, WidgetRange};
 use crate::diagnostics::Diagnostics;
-use crate::document::{decode, OpenDocument};
+use crate::document::{decode, DiskBase, OpenDocument};
 use crate::folding::{parse_provider_folds, DocFolds, FoldRegion};
 use crate::highlight::{Action as HighlightAction, HighlightJob, HighlightOutput, Highlights, Problem};
 use crate::hover::{HoverPopup, HoverState};
@@ -106,8 +106,11 @@ pub enum Input {
     Focus { uri: UriComponents },
     /// Show `text` (widget form) as the buffer of `uri`, opening the file first if it is not open: the
     /// window's buffer kept across a reconnect (FR-L31.6). The document is dirty unless `text` equals
-    /// the file on disk; equal text changes nothing.
-    Restore { uri: UriComponents, text: String },
+    /// the file on disk; equal text changes nothing. `base` is the file text (widget form) the window's
+    /// buffer was based on, when it knows it: a file that no longer holds it changed meanwhile, so a
+    /// buffer with edits raises the conflict instead of silently standing in for the newer file, and a
+    /// buffer without edits yields to the newer file. With no base the buffer is put back as it is.
+    Restore { uri: UriComponents, text: String, base: Option<String> },
     /// An event from the `CodeEditor` node rendered with key `generation`.
     Widget { uri: UriComponents, generation: u64, event: WidgetEvent },
     /// Explicit inline-completion request at `pos` (a keyboard command).
@@ -116,6 +119,9 @@ pub enum Input {
     RpcReply { token: Token, result: Result<Value, String> },
     FileRead { uri: UriComponents, purpose: ReadPurpose, result: Result<Vec<u8>, String> },
     FileWritten { uri: UriComponents, token: Token, result: Result<(), String> },
+    /// The file no longer holds what a save expected ([`Effect::WriteFile::expect`]), so the write for
+    /// `token` was not made.
+    SaveStale { uri: UriComponents, token: Token },
     FilesChanged(Vec<FileChange>),
     /// The highlighting worker finished a batch of jobs.
     Highlighted(HighlightOutput),
@@ -165,7 +171,10 @@ pub enum Effect {
     /// Answer extension-host request `req`.
     Respond { req: u32, result: Result<Reply, Option<Value>> },
     ReadFile { uri: UriComponents, purpose: ReadPurpose },
-    WriteFile { uri: UriComponents, bytes: Vec<u8>, token: Token },
+    /// Write `bytes`. With `expect`, the file is read first and the write is made only when it still
+    /// holds that; otherwise the answer is [`Input::SaveStale`] and nothing is written. A file that
+    /// is not there passes the check.
+    WriteFile { uri: UriComponents, bytes: Vec<u8>, token: Token, expect: Option<DiskBase> },
     /// Read one extension storage file; answered with [`Input::StorageRead`].
     ReadStorage { uri: UriComponents, shared: bool, extension_id: String },
     /// Atomically write (`Some`) or delete (`None`) one extension storage file; answered with [`Input::StorageWritten`].
@@ -181,6 +190,27 @@ pub enum Effect {
 fn is_missing_file(error: &str) -> bool {
     let e = error.to_lowercase();
     e.contains("entrynotfound") || e.contains("enoent") || e.contains("not found") || e.contains("no such file")
+}
+
+/// What a [`SessionUpdate::FileNotice`] is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileNoticeKind {
+    /// The file changed on disk but reading or decoding the new content failed, so the buffer may be behind it.
+    ReloadFailed,
+    /// The server refused to watch the file, so a change to it is not reported.
+    WatchRefused,
+    /// The server's file watcher reported an error.
+    WatcherError,
+    /// The widget did not apply an edit the session sent (the user edited the same place).
+    EditRejected,
+}
+
+/// The generation of the next widget node, counted across every session of the process. A session
+/// made after a reconnect must not hand out a number the window's widget still has as its key.
+static GENERATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn next_generation() -> u64 {
+    GENERATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,6 +276,8 @@ pub enum SessionUpdate {
     Format { uri: UriComponents, format: DocumentFormat },
     /// Reopening with an encoding failed; the document is unchanged (FR-L31.7).
     FormatFailed { uri: UriComponents, error: String },
+    /// Something about a file went wrong that no user action caused: the window shows it.
+    FileNotice { uri: Option<UriComponents>, kind: FileNoticeKind, detail: String },
     /// Every language the extensions contribute, for the language mode picker (FR-L31.7).
     Languages { languages: Vec<LanguageInfo> },
     /// The answer to a language feature request (FR-L31.13).
@@ -316,7 +348,7 @@ pub struct SessionCore {
     docs: HashMap<String, OpenDocument>,
     opening: HashSet<String>,
     /// Buffers to restore once their file has been read ([`Input::Restore`] before the open finished).
-    restores: HashMap<String, String>,
+    restores: HashMap<String, (String, Option<String>)>,
     /// Documents announced to the extension host only (for `$tryOpenDocument`): key → (uri, version).
     exthost_only: HashMap<String, (UriComponents, u64)>,
     active: Option<String>,
@@ -338,6 +370,13 @@ pub struct SessionCore {
     ids: DecorationIds,
     pending: HashMap<Token, Pending>,
     saves: HashMap<Token, (String, u64, Vec<u8>)>,
+    /// The write in flight per document key: one at a time, so an older write cannot land after a newer one.
+    saving: HashMap<String, Token>,
+    /// Documents asked to save while a write was in flight: they are written again, with the text of that time.
+    save_queued: HashSet<String>,
+    /// Documents whose file changed behind a buffer with edits and where the user has not chosen yet; a
+    /// save then is the user's explicit overwrite.
+    conflicts: HashSet<String>,
     /// Documents being read again in a chosen encoding (FR-L31.7): key → encoding.
     reopen: HashMap<String, Encoding>,
     /// Handle of the extension host's text search provider for the workspace's scheme (FR-E7).
@@ -354,7 +393,6 @@ pub struct SessionCore {
     /// Persistent extension storage (`MainThreadStorage`).
     storage: crate::storage::ExtensionStorage,
     next_token: Token,
-    next_generation: u64,
     next_editor: u64,
     next_edit_request: u32,
     reply_seq: u64,
@@ -418,6 +456,9 @@ impl SessionCore {
             ids: DecorationIds::new(),
             pending: HashMap::new(),
             saves: HashMap::new(),
+            saving: HashMap::new(),
+            save_queued: HashSet::new(),
+            conflicts: HashSet::new(),
             reopen: HashMap::new(),
             search_provider: None,
             search_session: 0,
@@ -429,7 +470,6 @@ impl SessionCore {
             debug: crate::debugger::DebugState::new(now),
             storage: crate::storage::ExtensionStorage::default(),
             next_token: 0,
-            next_generation: 0,
             next_editor: 0,
             next_edit_request: 0,
             reply_seq: 0,
@@ -473,13 +513,14 @@ impl SessionCore {
             Input::Close { uri } => self.on_close(&uri),
             Input::Reload { uri } => self.on_reload(uri),
             Input::Focus { uri } => self.on_focus(&uri),
-            Input::Restore { uri, text } => self.on_restore(uri, text),
+            Input::Restore { uri, text, base } => self.on_restore(uri, text, base),
             Input::Widget { uri, generation, event } => self.on_widget(&uri, generation, event),
             Input::TriggerInline { uri, generation, pos } => self.on_trigger_inline(&uri, generation, pos),
             Input::ExtHostRequest(r) => self.on_exthost_request(r),
             Input::RpcReply { token, result } => self.on_rpc_reply(token, result),
             Input::FileRead { uri, purpose, result } => self.on_file_read(uri, purpose, result),
             Input::FileWritten { uri, token, result } => self.on_file_written(&uri, token, result),
+            Input::SaveStale { uri, token } => self.on_save_stale(&uri, token),
             Input::FilesChanged(changes) => self.on_files_changed(changes),
             Input::Highlighted(output) => self.on_highlighted(output),
             Input::ExecuteCommand { id, arguments } => {
@@ -557,7 +598,10 @@ impl SessionCore {
         self.now = now;
         let key = uri.key();
         if let Some(text) = self.docs.get(&key).map(|d| d.lines().join("\n")) {
-            self.reset_doc(&key, &text, None);
+            // The buffer goes back to the widget as it is. It is not the disk's text, so what the
+            // buffer was based on stays: a dirty document is still dirty afterwards.
+            self.replace_doc(&key, |doc, generation| doc.restore(&text, generation));
+            self.announce_buffer_state(&key);
         }
         self.flush_decorations();
         std::mem::take(&mut self.out)
@@ -789,7 +833,7 @@ impl SessionCore {
             self.rpc(exthost::accept_documents_and_editors_delta(&delta));
             ext_version = v + 1;
         }
-        self.next_generation += 1;
+        let generation = next_generation();
         self.next_editor += 1;
         let editor_id = format!("ember-editor-{}", self.next_editor);
         let (tab_width, insert_spaces) = self.indent_for(&language);
@@ -800,11 +844,12 @@ impl SessionCore {
             &language,
             &editor_id,
             ext_version,
-            self.next_generation,
+            generation,
             tab_width,
             insert_spaces,
         );
         calls.extend(doc.set_encoding(encoding));
+        doc.note_disk_encoding();
         for c in calls {
             self.rpc(c);
         }
@@ -827,18 +872,18 @@ impl SessionCore {
         self.schedule_folding(&key, Duration::ZERO);
         self.schedule_semantic(&key, Duration::ZERO);
         self.touched.insert(key.clone());
-        if let Some(text) = self.restores.remove(&key) {
-            self.restore_doc(&key, &text);
+        if let Some((text, base)) = self.restores.remove(&key) {
+            self.restore_doc(&key, &text, base.as_deref());
         }
     }
 
-    fn on_restore(&mut self, uri: UriComponents, text: String) {
+    fn on_restore(&mut self, uri: UriComponents, text: String, base: Option<String>) {
         let key = uri.key();
         if self.docs.contains_key(&key) {
-            self.restore_doc(&key, &text);
+            self.restore_doc(&key, &text, base.as_deref());
             return;
         }
-        self.restores.insert(key.clone(), text);
+        self.restores.insert(key.clone(), (text, base));
         if self.opening.insert(key) {
             self.out.push(Effect::ReadFile { uri, purpose: ReadPurpose::Open });
         }
@@ -846,22 +891,57 @@ impl SessionCore {
 
     /// Put `text` (widget form) in the buffer of open document `key` as a new generation and tell the
     /// window whether it is dirty. Text equal to the buffer changes nothing.
-    fn restore_doc(&mut self, key: &str, text: &str) {
+    ///
+    /// `base` is the file text the window's buffer was based on. When the file no longer holds it, the
+    /// file changed while the window was away: a buffer without edits (`text == base`) is not put back,
+    /// the newer file stays; a buffer with edits is put back and the conflict is raised, so a save
+    /// cannot overwrite the newer file unnoticed.
+    fn restore_doc(&mut self, key: &str, text: &str, base: Option<&str>) {
         let normalized = text.replace("\r\n", "\n");
-        match self.docs.get(key) {
-            Some(doc) if doc.widget_text() != normalized => {}
-            _ => return,
+        let Some(doc) = self.docs.get(key) else { return };
+        let disk = doc.disk_widget_text();
+        let mut conflict = false;
+        if let Some(base) = base.map(|b| b.replace("\r\n", "\n")) {
+            if disk != base {
+                if normalized == base {
+                    return;
+                }
+                conflict = normalized != disk;
+            }
         }
-        self.replace_doc(key, |doc, generation| doc.restore(&normalized, generation));
-        if let Some(doc) = self.docs.get(key) {
-            let (uri, dirty) = (doc.uri.clone(), doc.is_dirty());
-            self.ui(SessionUpdate::Dirty { uri, dirty });
+        if doc.widget_text() != normalized {
+            self.replace_doc(key, |doc, generation| doc.restore(&normalized, generation));
+            self.announce_buffer_state(key);
         }
+        if conflict {
+            self.raise_conflict(key);
+        }
+    }
+
+    /// Tell the window whether the buffer is dirty, and show again the conflict bar a new widget node
+    /// would have dropped.
+    fn announce_buffer_state(&mut self, key: &str) {
+        let Some(doc) = self.docs.get(key) else { return };
+        let (uri, dirty) = (doc.uri.clone(), doc.is_dirty());
+        self.ui(SessionUpdate::Dirty { uri, dirty });
+        if self.conflicts.contains(key) {
+            self.raise_conflict(key);
+        }
+    }
+
+    /// The file changed on disk behind a buffer that must not be replaced: the window asks the user.
+    fn raise_conflict(&mut self, key: &str) {
+        let Some(doc) = self.docs.get(key) else { return };
+        let uri = doc.uri.clone();
+        self.conflicts.insert(key.to_owned());
+        self.ui(SessionUpdate::ExternalChange { uri, change: ExternalChange::ChangedWhileDirty });
     }
 
     fn on_close(&mut self, uri: &UriComponents) {
         let key = uri.key();
         self.restores.remove(&key);
+        self.save_queued.remove(&key);
+        self.conflicts.remove(&key);
         self.language_close(&key);
         let Some(doc) = self.docs.remove(&key) else { return };
         self.rpc(doc.remove_call());
@@ -951,6 +1031,8 @@ impl SessionCore {
             WidgetEvent::CodeChanged { version, range, text } => self.on_code_changed(&key, version, range, &text),
             WidgetEvent::CodeEditRejected { request_id, base_version, current_version, .. } => {
                 tracing::debug!("ember-editor: EditCode {request_id} on {key} rejected (base {base_version}, now {current_version})");
+                let detail = format!("edit {request_id} was not applied: the text changed there (version {base_version}, now {current_version})");
+                self.ui(SessionUpdate::FileNotice { uri: Some(uri.clone()), kind: FileNoticeKind::EditRejected, detail });
             }
             WidgetEvent::CodeHovered { decoration, pos, phase } => match phase {
                 crate::widget::HoverPhase::Rest => self.on_hover_rest(&key, decoration, pos),
@@ -1195,13 +1277,39 @@ impl SessionCore {
 
     // ---- save ---------------------------------------------------------------------------------
 
+    /// Save document `key`. One write per document is in flight at a time: a request made meanwhile is
+    /// run when that write is done, with the text the document has then.
     fn on_save(&mut self, key: &str) {
+        if !self.docs.contains_key(key) {
+            return;
+        }
+        if self.saving.contains_key(key) {
+            self.save_queued.insert(key.to_owned());
+            return;
+        }
+        self.start_save(key);
+    }
+
+    fn start_save(&mut self, key: &str) {
         let Some(doc) = self.docs.get(key) else { return };
         let bytes = doc.save_bytes();
+        // Once the user has been told that the file changed, a save is their choice to overwrite it.
+        let expect = if self.conflicts.contains(key) { None } else { Some(doc.disk_base()) };
         let (uri, ext_version) = (doc.uri.clone(), doc.ext_version());
         let t = self.token();
         self.saves.insert(t, (key.to_owned(), ext_version, bytes.clone()));
-        self.out.push(Effect::WriteFile { uri, bytes, token: t });
+        self.saving.insert(key.to_owned(), t);
+        self.out.push(Effect::WriteFile { uri, bytes, token: t, expect });
+    }
+
+    /// The write of `token` ended: the next save asked for meanwhile can start.
+    fn save_ended(&mut self, key: &str, token: Token) {
+        if self.saving.get(key) == Some(&token) {
+            self.saving.remove(key);
+        }
+        if self.save_queued.remove(key) {
+            self.on_save(key);
+        }
     }
 
     fn on_file_written(&mut self, uri: &UriComponents, token: Token, result: Result<(), String>) {
@@ -1215,18 +1323,38 @@ impl SessionCore {
         let Some((key, ext_version, bytes)) = self.saves.remove(&token) else { return };
         match result {
             Ok(()) => {
-                let Some(doc) = self.docs.get_mut(&key) else { return };
-                let calls = doc.saved(ext_version, &bytes);
-                let dirty = doc.is_dirty();
-                for c in calls {
-                    self.rpc(c);
+                if let Some(doc) = self.docs.get_mut(&key) {
+                    let calls = doc.saved(ext_version, &bytes);
+                    let dirty = doc.is_dirty();
+                    for c in calls {
+                        self.rpc(c);
+                    }
+                    self.conflicts.remove(&key);
+                    self.ui(SessionUpdate::Saved { uri: uri.clone() });
+                    self.ui(SessionUpdate::Dirty { uri: uri.clone(), dirty });
+                    self.send_tab_model();
                 }
-                self.ui(SessionUpdate::Saved { uri: uri.clone() });
-                self.ui(SessionUpdate::Dirty { uri: uri.clone(), dirty });
-                self.send_tab_model();
             }
             Err(error) => self.ui(SessionUpdate::SaveFailed { uri: uri.clone(), error }),
         }
+        self.save_ended(&key, token);
+    }
+
+    /// The file no longer holds what the buffer was based on, so the save was not written. The window
+    /// gets the conflict (reload or overwrite is the user's choice) and the failed save.
+    fn on_save_stale(&mut self, uri: &UriComponents, token: Token) {
+        let Some((key, _, _)) = self.saves.remove(&token) else { return };
+        // A save queued behind this one would overwrite what this one refused to.
+        self.save_queued.remove(&key);
+        self.save_ended(&key, token);
+        if !self.docs.contains_key(&key) {
+            return;
+        }
+        self.raise_conflict(&key);
+        self.ui(SessionUpdate::SaveFailed {
+            uri: uri.clone(),
+            error: "the file changed on disk after it was opened or last saved, so nothing was written".to_owned(),
+        });
     }
 
     // ---- decoration activation / commands -----------------------------------------------------
@@ -1800,6 +1928,10 @@ impl SessionCore {
                         // put back over an empty document marked deleted, so the edits stay and a save writes
                         // the file again.
                         if self.restores.contains_key(&key) && is_missing_file(&error) {
+                            // There is no file to compare with: the buffer goes back as it is.
+                            if let Some(restore) = self.restores.get_mut(&key) {
+                                restore.1 = None;
+                            }
                             self.finish_open(uri.clone(), Vec::new());
                             if self.docs.contains_key(&key) {
                                 self.ui(SessionUpdate::ExternalChange { uri, change: ExternalChange::Deleted });
@@ -1815,20 +1947,24 @@ impl SessionCore {
             }
             ReadPurpose::Reload => {
                 let key = uri.key();
-                let Ok(bytes) = result else { return };
                 let Some(doc) = self.docs.get(&key) else { return };
-                let (text, encoding) = match decode_reload(&bytes, doc.encoding()) {
+                let (text, encoding) = match result.map_err(|e| e.to_string()).and_then(|bytes| decode_reload(&bytes, doc.encoding()).map_err(|e| e.to_string())) {
                     Ok(t) => t,
-                    Err(_) => return,
+                    Err(detail) => {
+                        // The buffer may be behind the file now: say so, a save would overwrite the change.
+                        let uri = doc.uri.clone();
+                        self.ui(SessionUpdate::FileNotice { uri: Some(uri), kind: FileNoticeKind::ReloadFailed, detail });
+                        return;
+                    }
                 };
                 if doc.matches_disk(&text) || doc.matches_buffer(&text) {
                     return; // our own save, or nothing new
                 }
                 if doc.is_dirty() {
-                    let uri = doc.uri.clone();
-                    self.ui(SessionUpdate::ExternalChange { uri, change: ExternalChange::ChangedWhileDirty });
+                    self.raise_conflict(&key);
                     return;
                 }
+                self.conflicts.remove(&key);
                 self.reset_doc(&key, &text, Some(encoding));
             }
             ReadPurpose::ForceReload => {
@@ -1858,6 +1994,7 @@ impl SessionCore {
                         return;
                     }
                 };
+                self.conflicts.remove(&key);
                 self.reset_doc(&key, &text, Some(encoding));
                 self.ui(SessionUpdate::Dirty { uri, dirty: false });
             }
@@ -2020,7 +2157,7 @@ impl SessionCore {
                 let token = self.token();
                 let write = ReplaceWrite { id, key, replaced: r.replaced, skipped: r.skipped, open: open.map(|v| (v, r.text)) };
                 self.replace_writes.insert(token, write);
-                self.out.push(Effect::WriteFile { uri, bytes, token });
+                self.out.push(Effect::WriteFile { uri, bytes, token, expect: None });
             }
             Err(e) => self.replace_file_failed(id, &uri, e),
         }
@@ -2191,8 +2328,7 @@ impl SessionCore {
     /// Replace a document's content with what `replace` puts in it, as a new widget generation: the
     /// extension host is re-announced, the overlays of the old text end, and the widget gets `SetText`.
     fn replace_doc(&mut self, key: &str, replace: impl FnOnce(&mut OpenDocument, u64) -> Vec<Call>) {
-        self.next_generation += 1;
-        let generation = self.next_generation;
+        let generation = next_generation();
         let Some(doc) = self.docs.get_mut(key) else { return };
         let calls = replace(doc, generation);
         let (uri, widget_text) = (doc.uri.clone(), doc.widget_text());

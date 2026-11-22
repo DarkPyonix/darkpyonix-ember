@@ -1,0 +1,14 @@
+{
+  "name": "ember-probe",
+  "displayName": "Ember probe",
+  "description": "Test-only providers for Ember's live editor tests (SPEC FR-E12, #32). Never published.",
+  "publisher": "darkpyonix",
+  "version": "0.0.1",
+  "license": "MIT",
+  "engines": { "vscode": "^1.90.0" },
+  "main": "./extension.js",
+  "activationEvents": ["onLanguage:plaintext"],
+  "contributes": {
+    "commands": [{ "command": "emberProbe.noop", "title": "Ember probe: no-op" }]
+  }
+}

@@ -29,3 +29,6 @@ jobs:
   test_previews:
     uses: ./.github/workflows/test-previews.yml
     secrets: inherit
+  test_android:
+    uses: ./.github/workflows/test-android.yml
+    secrets: inherit

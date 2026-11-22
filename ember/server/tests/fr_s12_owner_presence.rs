@@ -366,7 +366,7 @@ async fn fr_s12_project_patch_and_delete_need_the_owner() {
     assert_ne!(got.1["archived"], json!(true), "unchanged: {got:?}");
 
     let key = f.owner.grant(f.owner.next_claim(), who());
-    let got = call_with(&f.app, "PATCH", "/api/projects/acme", Some(&f.token), Some(&key), Some(json!({ "repository": "github.com/a/b" }))).await;
+    let got = call_with(&f.app, "PATCH", "/api/projects/acme", Some(&f.token), Some(&key), Some(json!({ "repository": "github.com/a/b", "archived": true }))).await;
     assert_eq!(got.0, StatusCode::OK, "{got:?}");
     assert_eq!(got.1["repository"], "github.com/a/b");
     let got = call_with(&f.app, "DELETE", "/api/projects/acme", Some(&f.token), Some(&key), None).await;
@@ -383,7 +383,7 @@ async fn fr_s12_project_patch_and_delete_warn_and_log() {
     let f = fx_with(Presence::Warn);
     let got = call_with(&f.app, "POST", "/api/projects", Some(&f.token), None, Some(json!({ "name": "acme" }))).await;
     assert!(got.0.is_success(), "{got:?}");
-    let got = call_with(&f.app, "PATCH", "/api/projects/acme", Some(&f.token), None, Some(json!({ "repository": "github.com/a/b" }))).await;
+    let got = call_with(&f.app, "PATCH", "/api/projects/acme", Some(&f.token), None, Some(json!({ "repository": "github.com/a/b", "archived": true }))).await;
     assert_eq!(got.0, StatusCode::OK, "{got:?}");
     let got = call_with(&f.app, "DELETE", "/api/projects/acme", Some(&f.token), None, None).await;
     assert!(got.0.is_success(), "{got:?}");

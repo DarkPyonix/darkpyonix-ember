@@ -86,7 +86,13 @@ fn NewSessionForm(preset: &str) {
 
     let projects: Vec<String> = {
         let _ = ui.live.launcher.get();
-        services().client.read(|s| s.projects().into_iter().map(|p| p.name).collect())
+        services().client.read(|s| {
+            s.projects()
+                .into_iter()
+                .filter(|p| !s.project(&p.name).is_some_and(|pr| pr.archived))
+                .map(|p| p.name)
+                .collect()
+        })
     };
 
     // Initial selection: the preset project (or the last one used), and what was last used

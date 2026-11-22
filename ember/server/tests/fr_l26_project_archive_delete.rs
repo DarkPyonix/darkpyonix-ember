@@ -9,6 +9,8 @@ use axum::http::{Method, Request, StatusCode};
 use ember_server::agents::scripted::ScriptedAdapter;
 use ember_server::agents::{AgentAdapter, AgentKind};
 use ember_server::channels::NewChannel;
+use ember_server::events::{AgentEvent, TurnOutcome};
+use ember_server::schedules::{ManualClock, NewSchedule, ScheduleKind, ScheduleTarget, Scheduler};
 use ember_server::session::{NewSession, Push, Sessions};
 use ember_server::store::Store;
 use http_body_util::BodyExt;
@@ -131,7 +133,54 @@ async fn fr_l26_the_default_project_cannot_be_archived_or_deleted() {
 }
 
 #[tokio::test]
-async fn fr_l26_delete_an_empty_project_removes_it_and_pushes() {
+async fn fr_l26_archive_refused_while_sessions_run() {
+    let f = fixture();
+    let s1 = new_session(&f.sessions, "busy");
+    let s2 = new_session(&f.sessions, "busy");
+
+    // A running session refuses archive with 409 sessions_running.
+    f.sessions
+        .record_event(&s1, &AgentEvent::UserMessage { text: "working".into() })
+        .unwrap();
+    let (st, body) = call(&f.app, Method::PATCH, &uri("busy"), Some(json!({ "archived": true }))).await;
+    assert_eq!((st, body["code"].as_str()), (StatusCode::CONFLICT, Some("sessions_running")), "{body}");
+    assert_eq!(body["running"], 1);
+    assert!(!f.store.project("busy").unwrap().unwrap().archived);
+
+    // A waiting_for_approval session also counts as running.
+    f.sessions
+        .record_event(&s1, &AgentEvent::TurnEnded { outcome: TurnOutcome::Completed })
+        .unwrap();
+    f.sessions
+        .record_event(&s2, &AgentEvent::UserMessage { text: "ask".into() })
+        .unwrap();
+    f.sessions
+        .record_event(
+            &s2,
+            &AgentEvent::ApprovalRequested {
+                approval_id: "a1".into(),
+                tool: "bash".into(),
+                input: json!({}),
+                needs_person: false,
+            },
+        )
+        .unwrap();
+    let (st, body) = call(&f.app, Method::PATCH, &uri("busy"), Some(json!({ "archived": true }))).await;
+    assert_eq!((st, body["code"].as_str()), (StatusCode::CONFLICT, Some("sessions_running")), "{body}");
+    assert_eq!(body["running"], 1);
+    assert!(!f.store.project("busy").unwrap().unwrap().archived);
+
+    // Once all sessions finish, archiving succeeds.
+    f.sessions
+        .record_event(&s2, &AgentEvent::TurnEnded { outcome: TurnOutcome::Completed })
+        .unwrap();
+    let (st, body) = call(&f.app, Method::PATCH, &uri("busy"), Some(json!({ "archived": true }))).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body["archived"], true);
+}
+
+#[tokio::test]
+async fn fr_l26_delete_requires_archive_first() {
     let f = fixture();
     f.store.ensure_project("empty").unwrap();
     f.store.assign_computer("empty", "local").unwrap();
@@ -139,6 +188,14 @@ async fn fr_l26_delete_an_empty_project_removes_it_and_pushes() {
     f.store.assign_computer("other", "local").unwrap();
     let mut rx = f.sessions.subscribe();
 
+    // Deleting an unarchived project (even empty) is refused with 409 project_not_archived.
+    let (st, body) = call(&f.app, Method::DELETE, &uri("empty"), None).await;
+    assert_eq!((st, body["code"].as_str()), (StatusCode::CONFLICT, Some("project_not_archived")), "{body}");
+    assert!(f.store.project("empty").unwrap().is_some());
+
+    // Archive first, then delete succeeds and pushes project_deleted.
+    let (st, _) = call(&f.app, Method::PATCH, &uri("empty"), Some(json!({ "archived": true }))).await;
+    assert_eq!(st, StatusCode::OK);
     let (st, body) = call(&f.app, Method::DELETE, &uri("empty"), None).await;
     assert_eq!(st, StatusCode::NO_CONTENT, "{body}");
     assert!(f.store.project("empty").unwrap().is_none());
@@ -155,19 +212,85 @@ async fn fr_l26_delete_an_empty_project_removes_it_and_pushes() {
 }
 
 #[tokio::test]
-async fn fr_l26_delete_refuses_a_project_with_sessions_or_channels() {
+async fn fr_l26_delete_archived_project_cascades_all_records() {
     let f = fixture();
-    let s = new_session(&f.sessions, "busy");
-    let (st, body) = call(&f.app, Method::DELETE, &uri("busy"), None).await;
-    assert_eq!((st, body["code"].as_str()), (StatusCode::CONFLICT, Some("project_not_empty")), "{body}");
-    assert_eq!(body["sessions"], 1);
-    assert!(f.store.project("busy").unwrap().is_some());
-    assert!(f.store.session(&s).unwrap().is_some(), "nothing was deleted");
+    let doomed_s = new_session(&f.sessions, "doomed");
+    let survivor_s = new_session(&f.sessions, "survivor");
+    f.store.assign_computer("doomed", "local").unwrap();
+    f.store.assign_computer("survivor", "local").unwrap();
 
-    f.store.ensure_project("chan").unwrap();
-    f.store.create_channel(NewChannel { project: "chan".into(), name: "ops".into(), agents: vec![] }).unwrap();
-    let (st, body) = call(&f.app, Method::DELETE, &uri("chan"), None).await;
-    assert_eq!((st, body["code"].as_str()), (StatusCode::CONFLICT, Some("project_not_empty")));
-    assert_eq!(body["channels"], 1);
-    assert!(f.store.project("chan").unwrap().is_some());
+    // Add searchable messages to both projects and end turns so they are not running.
+    f.sessions
+        .record_event(&doomed_s, &AgentEvent::UserMessage { text: "cascade_needle_doomed hello".into() })
+        .unwrap();
+    f.sessions
+        .record_event(&doomed_s, &AgentEvent::AssistantMessage { text: "cascade_needle_doomed reply".into() })
+        .unwrap();
+    f.sessions
+        .record_event(&doomed_s, &AgentEvent::TurnEnded { outcome: TurnOutcome::Completed })
+        .unwrap();
+    f.sessions
+        .record_event(&survivor_s, &AgentEvent::UserMessage { text: "cascade_needle_survivor hello".into() })
+        .unwrap();
+    f.sessions
+        .record_event(&survivor_s, &AgentEvent::TurnEnded { outcome: TurnOutcome::Completed })
+        .unwrap();
+
+    // Add channel, schedule, and team to doomed.
+    let chan = f
+        .store
+        .create_channel(NewChannel {
+            project: "doomed".into(),
+            name: "ops".into(),
+            agents: vec![doomed_s.clone()],
+        })
+        .unwrap();
+    f.store.post_channel_message(&chan.id, "user", "bye").unwrap();
+    let team = f.store.create_team(&doomed_s, "doomed").unwrap();
+    let sched = Scheduler::new(f.sessions.clone(), ManualClock::new(1_000_000));
+    sched
+        .create(
+            NewSchedule {
+                project: "doomed".into(),
+                agent: None,
+                account: None,
+                computer: None,
+                cwd: None,
+                prompt: "ping".into(),
+                kind: ScheduleKind::Interval { seconds: 3600 },
+                target: ScheduleTarget::Continue { session_id: doomed_s.clone() },
+                catch_up: false,
+                paused: false,
+            },
+            None,
+        )
+        .unwrap();
+
+    // Archive and delete doomed.
+    let (st, _) = call(&f.app, Method::PATCH, &uri("doomed"), Some(json!({ "archived": true }))).await;
+    assert_eq!(st, StatusCode::OK);
+    let mut rx = f.sessions.subscribe();
+    let (st, body) = call(&f.app, Method::DELETE, &uri("doomed"), None).await;
+    assert_eq!(st, StatusCode::NO_CONTENT, "{body}");
+
+    let mut pushed = false;
+    while let Ok(p) = rx.try_recv() {
+        pushed |= matches!(p, Push::ProjectDeleted { ref name } if name == "doomed");
+    }
+    assert!(pushed, "project_deleted is pushed");
+
+    // All doomed records are gone from SQLite, including FTS5.
+    assert!(f.store.project("doomed").unwrap().is_none());
+    assert!(f.store.session(&doomed_s).unwrap().is_none());
+    assert!(f.store.events_after(&doomed_s, 0).unwrap().is_empty());
+    assert!(f.store.search("cascade_needle_doomed", 10).unwrap().is_empty());
+    assert!(f.store.channels(Some("doomed")).unwrap().is_empty());
+    assert!(sched.list(Some("doomed")).unwrap().is_empty());
+    assert!(f.store.team_row(&team.id).unwrap().is_none());
+    assert_eq!(f.store.projects_of_computer("local").unwrap(), ["survivor"]);
+
+    // Survivor is completely untouched.
+    assert!(f.store.project("survivor").unwrap().is_some());
+    assert!(f.store.session(&survivor_s).unwrap().is_some());
+    assert_eq!(f.store.search("cascade_needle_survivor", 10).unwrap().len(), 1);
 }

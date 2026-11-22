@@ -60,9 +60,11 @@ the project path does not exist on the server.
 Environment: `CLAUDE_CODE_SHELL_PREFIX=<abs path of ember-exec>`, `EMBER_EXEC_NODE_URL`,
 `EMBER_EXEC_NODE_TOKEN`, `EMBER_EXEC_REMOTE_SHELL` (the node's `$SHELL`), and with the mount
 enabled `EMBER_MOUNT_CTL`. Read / Edit / Write / Glob / Grep operate on the server's disk, where
-the session's cwd is mounted from the node (§ Project mount); with the mount off (`EMBER_MOUNT=off`
-or a build without the features) the project path must exist on the server as before (the
-adapter refuses to start otherwise). Hooks and stdio MCP launches, which
+the session's cwd is mounted from the node (§ Project mount); with the mount off (`EMBER_MOUNT=off`,
+a build without the features, or an OS without a mount client) a Claude Code or ACP session on a
+node is refused at start (`MountError::Unavailable`, FR-X1), because its file tools would
+otherwise edit the server's own copy of the path. The release build has the mount on (NFS on
+macOS, FUSE on Linux). Hooks and stdio MCP launches, which
 the prefix also wraps, run locally by default (`EMBER_EXEC_NON_TOOL=remote` sends them too).
 
 ## Project mount
@@ -167,7 +169,7 @@ whose node is unreachable fails with "computer … is unreachable".
   costs one deadline per request until the transport's own idle timeout closes it and the next
   request re-dials (forgetting the connection on timeout would also cut healthy concurrent
   requests). WebSockets (exec, terminal attach) still have no deadline on either reach.
-- **Project mount not built in CI or run** (features off by default). Written against `nfsserve` 0.11.0 and `fuser` 0.18.0
+- **Project mount not built in CI or run** (features off by default; the release build turns them on, so a release is its first compile). Written against `nfsserve` 0.11.0 and `fuser` 0.18.0
   read from their published sources. To verify on the Mac mini and the Pi: non-root
   `mount_nfs` on a user-owned directory, the exact `mount_nfs` option names (`deadtimeout`,
   `nonegnamecache`, `actimeo`, `retrycnt`), macOS NFS client behaviour with nfsserve

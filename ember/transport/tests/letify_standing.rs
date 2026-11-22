@@ -338,3 +338,45 @@ async fn fr_n9_revoking_a_device_ends_its_path_through_the_relay() {
         .expect("a revoked device fails within its connect timeout");
     assert!(again.is_err(), "a revoked device must not reconnect");
 }
+
+/// `FR-N9` (#920): flooding the public relay address with unauthenticated TCP connections
+/// from loopback cannot starve the server's own standing requests or block an allowed peer
+/// from completing a relay handshake once the flooder's per-source budget is capped.
+#[tokio::test]
+async fn fr_n9_relay_flood_from_loopback_does_not_block_standing_requests() {
+    let (server, relay_url) = main_server().await;
+    let addr: std::net::SocketAddr = relay_addr(&relay_url).parse().expect("relay socket addr");
+    spawn_echo(&server, "svc");
+
+    let key = SecretKey::generate();
+    let gate = PeerGate::allow_list([key.peer_id()]);
+    gate.attach(&server);
+
+    // Open 16 unauthenticated TCP connections from loopback and hold them open to try to
+    // exhaust the relay's pre-auth slots. RelayGuard caps per-source concurrency and rate,
+    // while the server's standing requests dial the backend loopback relay directly.
+    let mut held = Vec::new();
+    for _ in 0..16 {
+        if let Ok(s) = tokio::net::TcpStream::connect(addr).await {
+            held.push(s);
+        }
+    }
+    drop(held);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let phone = Transport::bind(
+        TransportConfig::new(key)
+            .backend(BackendKind::Letify)
+            .bind_addr("127.0.0.1:0".parse().unwrap())
+            .relay(RelayConfig::Custom(vec![relay_url])),
+    )
+    .await
+    .unwrap();
+    // Wait past the 4 s rate window since the flood above also came from 127.0.0.1.
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    let conn = tokio::time::timeout(Duration::from_secs(20), phone.connect(server.peer_id(), "svc"))
+        .await
+        .expect("allowed device connects after flood")
+        .expect("relay handshake succeeds");
+    assert_eq!(echo_roundtrip(&conn, b"after-flood").await, b"after-flood");
+}

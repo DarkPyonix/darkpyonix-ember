@@ -2134,6 +2134,30 @@ pub struct MetricsSample {
     pub processes: Vec<ProcessMetrics>,
     #[serde(default)]
     pub process_count: u32,
+    /// The processor's name as the OS reports it (`Apple M2 Pro`), #389.
+    #[serde(default)]
+    pub chip: Option<String>,
+    /// The OS name (`macOS`) and version (`15.2`) as the node reads them.
+    #[serde(default)]
+    pub os_name: Option<String>,
+    #[serde(default)]
+    pub os_version: Option<String>,
+    /// Why the processes' `power_watts` are empty, when they are.
+    #[serde(default)]
+    pub power_reason: Option<String>,
+    /// The agent processes of Ember sessions on this computer (FR-X7): the server fills it for
+    /// the computer its agents run on.
+    #[serde(default)]
+    pub sessions: Vec<SessionProcess>,
+}
+
+/// One agent process of a session: the process row with this pid is the member's (FR-L21).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct SessionProcess {
+    #[serde(default)]
+    pub pid: u32,
+    #[serde(default)]
+    pub session: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -2217,6 +2241,9 @@ pub struct ProcessMetrics {
     pub cpu_percent: f32,
     #[serde(default)]
     pub memory_bytes: u64,
+    /// Watts drawn by the process, where the node reports it (#389).
+    #[serde(default)]
+    pub power_watts: Option<f32>,
 }
 
 impl Api {
@@ -2237,6 +2264,32 @@ mod metrics_tests {
     #[test]
     fn fr_x7_the_metrics_path_escapes_the_computer_id() {
         assert_eq!(metrics_path("a b", 20), "/computers/a%20b/metrics?top=20");
+    }
+
+    #[test]
+    fn fr_x7_a_sample_decodes_chip_os_power_and_sessions_and_an_older_node_leaves_them_empty() {
+        let s: MetricsSample = serde_json::from_value(serde_json::json!({
+            "at_ms": 5,
+            "chip": "Apple M2 Pro",
+            "os_name": "macOS",
+            "os_version": "15.2",
+            "power_reason": "not collected",
+            "processes": [{"pid": 7, "name": "claude", "cpu_percent": 3.0, "memory_bytes": 1, "power_watts": 1.5}],
+            "sessions": [{"pid": 7, "session": "s1"}]
+        }))
+        .unwrap();
+        assert_eq!(s.chip.as_deref(), Some("Apple M2 Pro"));
+        assert_eq!((s.os_name.as_deref(), s.os_version.as_deref()), (Some("macOS"), Some("15.2")));
+        assert_eq!(s.power_reason.as_deref(), Some("not collected"));
+        assert_eq!(s.processes[0].power_watts, Some(1.5));
+        assert_eq!(s.sessions, vec![SessionProcess { pid: 7, session: "s1".into() }]);
+        let old: MetricsSample = serde_json::from_value(serde_json::json!({
+            "at_ms": 5, "processes": [{"pid": 7, "name": "a", "cpu_percent": 0.0, "memory_bytes": 0}]
+        }))
+        .unwrap();
+        assert_eq!((old.chip, old.os_name, old.os_version, old.power_reason), (None, None, None, None));
+        assert!(old.sessions.is_empty());
+        assert_eq!(old.processes[0].power_watts, None);
     }
 
     #[test]

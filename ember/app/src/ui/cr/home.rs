@@ -95,8 +95,6 @@ const ICON_TEAM: &str = line_icon!("M18 18.72a9.094 9.094 0 0 0 3.741-.479 3 3 0
 const ICON_SHIELD: &str = include_str!("../../../assets/nav/shield.svg");
 const ICON_FOLDER: &str = include_str!("../../../assets/nav/folder.svg");
 const ICON_PC: &str = include_str!("../../../assets/nav/pc.svg");
-// TODO(item 6): the model chip's harness glyph; the terminal stands in.
-const ICON_TERMINAL: &str = include_str!("../../../assets/nav/terminal.svg");
 const ICON_GIT: &str = include_str!("../../../assets/nav/git.svg");
 const ICON_CHART_NAV: &str = include_str!("../../../assets/nav/chart.svg");
 /// Heroicons 2.2.0 `sparkles` (MIT), the mockup's `spark` (`icons.js`).
@@ -633,6 +631,8 @@ impl Composer {
             account: None,
             computer: computer_id.clone(),
             model: body.model.clone(),
+            effort: sel.option.effort.map(str::to_string),
+            mode: Some(sel.mode.key().to_string()),
             cwd,
         };
         let project_name = sel.project.clone();
@@ -905,12 +905,9 @@ impl Composer {
         let window = crate::ui::window_size::current_window_size();
         { use ::compose_rust::ui::Popover; Popover!(open, dismiss.clone(), placement = compose_rust::PopoverPlacement::Bottom, align = compose_rust::PopoverAlign::Start, offset = composer_pop_offset(COMPOSER_PAD), modifier = pop_anchor_weight(
                 share,
-                // A fixed height, not `equal_height` (#849): the toolkit then counted a child
-                // holding a scrolling list as 0, so the row took the rail's height and the list
-                // showed one row. TODO(#673): the pin measures a scrolling child of fixed height
-                // at that height (compose-rust#766), but this list fills the row rather than
-                // having a height of its own, so going back to `equal_height` waits for a capture
-                // of the open picker at 1440 and 390 showing every row. `elevation(0)` as in
+                // A fixed height, not `equal_height` (#849): the scrolling list fills the row
+                // rather than carrying its own fixed height, so `model_popover_height` keeps all
+                // rows visible instead of collapsing to the rail's height. `elevation(0)` as in
                 // `PopoverMenu`: the box casts its own shadow.
                 with_shadows(Modifier::new(), theme.shadow_lg())
                     .elevation(0.0)
@@ -1545,7 +1542,7 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
                                         let o = c.open.clone();
                                         move || o.set(None)
                                     };
-                                    let one = || chip(text, ICON_TERMINAL, Pick::Model, width);
+                                    let one = || chip(text, harness_glyph(sel.option.harness), Pick::Model, width);
                                     if l.compact {
                                         one();
                                     } else {
@@ -1620,8 +1617,6 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
         }) };
 }
 
-/// The glyph of the `i`th suggestion in a line. TODO(item 6): the mockup's spark star needs the
-/// harness glyph asset; `code.svg` stands in until it lands.
 /// The glyph of the `i`th suggestion of [`SUGGESTIONS`], counted over all lines: spark, branch,
 /// chart (`home.js:9`). Design review 2026-11-13 B11: the index restarted on every line, so at 390
 /// the first and the third chip both showed the code glyph.
@@ -3378,11 +3373,127 @@ mod design_review_tests {
     #[test]
     fn design_b11_harness_chip_shows_the_harness_glyph_in_its_colour() {
         for h in [Harness::ClaudeCode, Harness::Codex, Harness::Gemini] {
-            let (glyph, tint) = composer_chip_icon(Pick::Model, ICON_TERMINAL, h);
+            let (glyph, tint) = composer_chip_icon(Pick::Model, ICON_FOLDER, h);
             assert_eq!(glyph, harness_glyph(h));
             assert!(tint.is_some());
         }
         assert_eq!(composer_chip_icon(Pick::Project, ICON_FOLDER, Harness::Codex), (ICON_FOLDER, None));
+    }
+
+    #[test]
+    fn fr_l11_model_chip_draws_chosen_harness_glyph() {
+        use compose_rust::{Host, Recomposer};
+        use compose_rust::protocol::{decode_batch, Mutation};
+        const TERMINAL_SVG: &str = include_str!("../../../assets/nav/terminal.svg");
+        let _guard = crate::services::test_guard();
+
+        let nav_icon_props = |svg: &'static str, argb: u32, size: f32| -> Vec<String> {
+            let mut host = Host::new(move || {
+                Box::new(Recomposer::new(move || {
+                    NavIcon(svg, argb, size);
+                }))
+            });
+            let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+            let mut image_node = None;
+            let mut props = Vec::new();
+            for m in batch {
+                match m {
+                    Mutation::Create { node_id, widget } if format!("{widget:?}") == "Image" => {
+                        image_node = Some(node_id);
+                    }
+                    Mutation::SetProp { node_id, property, value } if Some(node_id) == image_node => {
+                        props.push(format!("{property:?}={value:?}"));
+                    }
+                    _ => {}
+                }
+            }
+            assert!(image_node.is_some(), "NavIcon must emit an Image node");
+            props
+        };
+
+        let model_chip_icon_props = |harness: Harness| -> Vec<String> {
+            let option = model_catalog().into_iter().find(|o| o.harness == harness).expect("harness option");
+            let label = option.chip_label();
+            let mut host = Host::new(move || {
+                let opt = option.clone();
+                Box::new(Recomposer::new(move || {
+                    let c = remember(|| {
+                        let c = Composer::new();
+                        let mut sel = c.selection.get_untracked();
+                        sel.option = opt.clone();
+                        c.selection.set(sel);
+                        c
+                    });
+                    ComposerCard(&c, shared_ui(), composer_width(1390.0), layout(1440.0));
+                }))
+            });
+            let bytes = host.rebuild().expect("rebuild");
+            let batch = decode_batch(bytes).expect("decode");
+            let mut parent: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+            let mut image_nodes = Vec::new();
+            let mut widths: std::collections::HashMap<u32, f32> = std::collections::HashMap::new();
+            let mut props: std::collections::HashMap<u32, Vec<String>> = std::collections::HashMap::new();
+            let mut chip_label_node = None;
+            for m in batch {
+                match m {
+                    Mutation::Create { node_id, widget } if format!("{widget:?}") == "Image" => {
+                        image_nodes.push(node_id);
+                    }
+                    Mutation::Insert { parent_id, node_id, .. } => {
+                        parent.insert(node_id, parent_id);
+                    }
+                    Mutation::SetModifier {
+                        node_id,
+                        modifier: compose_rust::Modifier::Width(w) | compose_rust::Modifier::Size { width: w, .. },
+                        ..
+                    } => {
+                        widths.insert(node_id, w);
+                    }
+                    Mutation::SetProp { node_id, property, value } => {
+                        let formatted = format!("{property:?}={value:?}");
+                        if formatted.contains(&label) {
+                            chip_label_node = Some(node_id);
+                        }
+                        props.entry(node_id).or_default().push(formatted);
+                    }
+                    _ => {}
+                }
+            }
+            // The chip's Row holds both the leading 16 dp Image and the label Text (which may be
+            // wrapped in a weighted Box when the chip shares the row).
+            let label_node = chip_label_node.expect("model chip label node");
+            let p1 = *parent.get(&label_node).expect("model chip label parent");
+            let chip_root = parent.get(&p1).copied().unwrap_or(p1);
+            let is_descendant = |mut node: u32| -> bool {
+                while let Some(&p) = parent.get(&node) {
+                    if p == p1 || p == chip_root {
+                        return true;
+                    }
+                    node = p;
+                }
+                false
+            };
+            let icon_node = image_nodes
+                .into_iter()
+                .find(|&id| is_descendant(id) && widths.get(&id).copied() == Some(16.0))
+                .expect("model chip has a 16 dp leading icon Image");
+            props.remove(&icon_node).unwrap_or_default()
+        };
+
+        let claude_chip = model_chip_icon_props(Harness::ClaudeCode);
+        let claude_glyph = nav_icon_props(harness_glyph(Harness::ClaudeCode), harness_tint(Harness::ClaudeCode), 16.0);
+        assert_eq!(claude_chip, claude_glyph, "Claude model chip must draw Claude harness glyph");
+
+        let codex_chip = model_chip_icon_props(Harness::Codex);
+        let codex_glyph = nav_icon_props(harness_glyph(Harness::Codex), harness_tint(Harness::Codex), 16.0);
+        assert_eq!(codex_chip, codex_glyph, "Codex model chip must draw Codex harness glyph");
+
+        assert_ne!(claude_chip, codex_chip, "Claude and Codex chips must draw distinct glyphs");
+
+        let terminal_icon = nav_icon_props(TERMINAL_SVG, ember_theme().palette.text_2.to_argb(), 16.0);
+        assert_ne!(claude_chip, terminal_icon, "Claude model chip must not draw terminal stand-in");
+        assert_ne!(codex_chip, terminal_icon, "Codex model chip must not draw terminal stand-in");
+        assert!(!source().contains("ICON_TERMINAL"), "no terminal stand-in left in production code");
     }
 
     #[test]

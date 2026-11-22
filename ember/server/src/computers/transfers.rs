@@ -64,6 +64,7 @@ fn plain(code: StatusCode, msg: impl Into<String>) -> Response {
 }
 
 /// The node client for a computer that may receive files, or the refusal.
+#[expect(clippy::result_large_err, reason = "return the Axum error response directly without boxing it")]
 fn target(c: &Computers, id: &str) -> Result<NodeClient, Response> {
     if id == LOCAL {
         return Err(plain(StatusCode::BAD_REQUEST, "the server's own computer receives on /api/transfers"));
@@ -90,6 +91,7 @@ fn target(c: &Computers, id: &str) -> Result<NodeClient, Response> {
 }
 
 /// A transfer id as the node makes them (`tr-` and hex); anything else never reaches a node path.
+#[expect(clippy::result_large_err, reason = "return the Axum error response directly without boxing it")]
 fn check_tid(tid: &str) -> Result<(), Response> {
     if !tid.is_empty() && tid.len() <= 64 && tid.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_') {
         Ok(())

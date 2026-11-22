@@ -12,9 +12,6 @@
 
 #![allow(non_snake_case)]
 
-use std::cell::RefCell;
-use std::rc::Rc;
-
 use compose_rust::runtime::{mutable_state_of, remember, MutableState};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
@@ -30,15 +27,11 @@ pub use crate::ui::files::{
     Transfer, TransferAction, TransferService, action_button_name, TransferState, FILE_DIALOG_TITLE, FILE_PICKER_AVAILABLE, FILE_PICK_REASON, PickOutcome, pick_outcome,
     FILE_PICK_UNAVAILABLE, LOCK_LINE, UNAVAILABLE, clean_member_name, demo_files, is_demo,
 };
-/// Whether the share sheet picks files itself. It does not yet: its file card only says what is
-/// chosen, and the tray's 파일 고르기 opens the dialog.
-const SHARE_SHEET_PICKS_FILES: bool = false;
-
 use crate::ui::files::{choose_target, chip_avail, chip_label, chip_rows, chip_text_max_for, chip_width_est, files_line, fit_chip_text, send_state_at, server_status, share_tap_at, tile_tap_notice};
 use super::compat::Banner;
 use crate::model::Tone;
 use super::characters::{CharState, Character};
-use super::components::{EmberSheetSized, AppButton, ButtonKind, Clickable, EmberCard, EmberSheet, FilterChip, InkIconButton, Label, Pill, PillTone};
+use super::components::{EmberSheetSized, AppButton, ButtonKind, Clickable, EmberCard, EmberSheet, FilterChip, InkIconButton, Label, NamedClickable, Pill, PillTone};
 use super::home::{fit_label, text_px, Cols, Part};
 use super::notice;
 use super::project::{HeaderGap, ThemeButton};
@@ -333,10 +326,11 @@ pub fn sample_model() -> (FilesModel, Vec<Offer>) {
         ReceivedFile { name: "screenshot-0925.png".into(), size: 2 << 20, from: "BREW의 iPhone".into() },
         ReceivedFile { name: "notes.pdf".into(), size: 640 << 10, from: "iPad Pro".into() },
     ];
+    let now = crate::demo::now_ms();
     let history = vec![
-        HistoryEntry { name: "release-notes.md".into(), device: "ws-linux-01".into(), direction: Direction::Send, size: 12 << 10, result: HistoryResult::Done, when: "오늘 09:41".into() },
-        HistoryEntry { name: "dump.sql".into(), device: "iPad Pro".into(), direction: Direction::Receive, size: 48 << 20, result: HistoryResult::Failed, when: "어제 22:10".into() },
-        HistoryEntry { name: "photo.heic".into(), device: "Pixel 10".into(), direction: Direction::Send, size: 4 << 20, result: HistoryResult::Declined, when: "어제 18:02".into() },
+        HistoryEntry { name: "release-notes.md".into(), device: "ws-linux-01".into(), direction: Direction::Send, size: 12 << 10, result: HistoryResult::Done, when: "오늘 09:41".into(), timestamp_ms: Some(now - 3 * 3_600_000) },
+        HistoryEntry { name: "dump.sql".into(), device: "iPad Pro".into(), direction: Direction::Receive, size: 48 << 20, result: HistoryResult::Failed, when: "어제 22:10".into(), timestamp_ms: Some(now - 86_400_000) },
+        HistoryEntry { name: "photo.heic".into(), device: "Pixel 10".into(), direction: Direction::Send, size: 4 << 20, result: HistoryResult::Declined, when: "어제 18:02".into(), timestamp_ms: Some(now - 86_400_000 - 4 * 3_600_000) },
     ];
     let offers = vec![Offer { id: "o1".into(), from: "BREW의 iPhone".into(), files: vec!["IMG_2042.heic".into(), "IMG_2043.heic".into()], total: 9 << 20 }];
     (FilesModel { devices, transfers, received, history, ready: true, lost: false }, offers)
@@ -559,7 +553,12 @@ pub struct KpiCell {
 
 /// The four KPIs as the mockup draws them. What the service cannot say is "준비 중입니다".
 pub fn kpi_cells(m: &FilesModel) -> [KpiCell; 4] {
-    let base = kpis(m);
+    kpi_cells_at(m, crate::demo::now_ms())
+}
+
+/// [`kpi_cells`] evaluated at `now_ms`.
+pub fn kpi_cells_at(m: &FilesModel, now_ms: i64) -> [KpiCell; 4] {
+    let base = crate::ui::files::kpis_at(m, now_ms);
     let unavailable = |label| KpiCell { label, value: UNAVAILABLE.to_string(), unit: "", pill: None, meter: None, available: false };
     let running = m.transfers.iter().filter(|t| matches!(t.state, TransferState::Sending | TransferState::Queued)).count();
     let stopped = m.transfers.iter().filter(|t| matches!(t.state, TransferState::Paused | TransferState::Failed)).count();
@@ -575,6 +574,18 @@ pub fn kpi_cells(m: &FilesModel) -> [KpiCell; 4] {
     } else {
         unavailable("지금 전송 중")
     };
+    let sent_week = if base[2].available {
+        KpiCell {
+            label: "이번 주 보낸 용량",
+            value: base[2].value.clone(),
+            unit: "",
+            pill: None,
+            meter: None,
+            available: true,
+        }
+    } else {
+        unavailable("이번 주 보낸 용량")
+    };
     let direct = match base[3].value.strip_suffix('%').and_then(|v| v.parse::<u32>().ok()).filter(|_| base[3].available) {
         Some(p) => KpiCell { label: "직접 연결 비율", value: p.to_string(), unit: "%", pill: None, meter: Some(p), available: true },
         None => unavailable("직접 연결 비율"),
@@ -589,7 +600,7 @@ pub fn kpi_cells(m: &FilesModel) -> [KpiCell; 4] {
             available: true,
         },
         active,
-        unavailable("이번 주 보낸 용량"),
+        sent_week,
         direct,
     ]
 }
@@ -779,23 +790,7 @@ fn Stage(model: &FilesModel, members: &[CrewMember], extras: &Extras, st: &State
                     true,
                     members
                         .iter()
-                        .map(|m| -> Part {
-                            let s = st.sheet.clone();
-                            let demo = is_demo();
-                            Box::new(move || {
-                                AgentTile(m, ui, text_w, move |id| {
-                                    let initial_files = if demo {
-                                        vec![demo_files()[0].to_string()]
-                                    } else {
-                                        Vec::new()
-                                    };
-                                    s.set(Some(SendDraft {
-                                        target: Some(SendTarget::Agent(id)),
-                                        files: initial_files,
-                                    }))
-                                })
-                            })
-                        })
+                        .map(|m| -> Part { Box::new(move || AgentTile(m, ui, text_w)) })
                         .collect(),
                 );
             }
@@ -910,23 +905,20 @@ pub fn agent_host(project: &str) -> String {
 }
 
 /// An agent's tile: its character (48 px, as the mockup's `.fl-dev-ic.bot`), name, computer and
-/// task, its status, and actions to open its conversation (`ui.open_conversation`) or send files
-/// to the computer it works on. The tile is the container's `on_click` (compose-rust#372).
-fn AgentTile(m: &CrewMember, ui: &SharedUi, text_w: f32, on_send: impl FnMut(String) + 'static) {
+/// task, and its status. Clicking the tile opens its conversation (`ui.open_conversation`), as in
+/// the mockup; sending to an agent stays in the top "보내기" send sheet. The tile is the
+/// container's `on_click` (compose-rust#372).
+fn AgentTile(m: &CrewMember, ui: &SharedUi, text_w: f32) {
     let p = ember_theme().palette;
-    let send_id = m.id.clone();
     let open_id = m.id.clone();
     let ui_open = ui.clone();
     let name = clean_member_name(&m.project, &m.agent, &m.title);
     let state = if m.waiting { CharState::Wait } else { CharState::Run };
     let host = agent_host(&m.project);
-    let send = Rc::new(RefCell::new(on_send));
-    let send_card = send.clone();
-    let send_card_id = send_id.clone();
     Clickable(
         Modifier::new().fill_max_width().background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_LG).padding(SP[3]),
         Alignment::TopStart,
-        move || (send_card.borrow_mut())(send_card_id.clone()),
+        move || ui_open.open_conversation(&open_id),
         || {
             { use ::compose_rust::ui::Column; Column!(spacing = 2.0, modifier = Modifier::new().fill_max_width(), {
                 Character(&m.agent, false, 48.0, &name, &m.project, state, None);
@@ -940,19 +932,6 @@ fn AgentTile(m: &CrewMember, ui: &SharedUi, text_w: f32, on_send: impl FnMut(Str
                 } else {
                     Pill("실행 중", PillTone::Blue, false);
                 }
-                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[1])) };
-                { use ::compose_rust::ui::Row; Row!(spacing = SP[1], alignment = Alignment::CenterStart, {
-                    let u = ui_open.clone();
-                    let oid = open_id.clone();
-                    AppButton("대화 열기", None, ButtonKind::Default, true, true, false, move || {
-                        u.open_conversation(&oid);
-                    });
-                    let send_btn = send.clone();
-                    let sid = send_id.clone();
-                    AppButton("보내기", None, ButtonKind::Default, true, true, false, move || {
-                        (send_btn.borrow_mut())(sid.clone());
-                    });
-                }) };
             }) };
         },
     );
@@ -1584,15 +1563,18 @@ pub(super) fn ShareSheet(open: &MutableState<bool>, devices: &[Device], members:
     let room = super::components::sheet_body_max_height(window.width_dp, window.height_dp, false, 0.0);
     let rows = share_devices(devices);
     let agents = share_agents(members);
-    // The share sheet has no file step of its own (TODO(#673): open the file dialog from its file
-    // card), so it reads as it did before the tray's 파일 고르기 took the dialog.
-    let (file_title, file_why) = share_file_card(&[], SHARE_SHEET_PICKS_FILES);
+    let picked = remember(|| mutable_state_of(Vec::<String>::new()));
+    let files = picked.get();
+    let (file_title, file_why) = share_file_card(&files, FILE_PICKER_AVAILABLE);
     let tap = {
-        let (devices, o) = (devices.to_vec(), open.clone());
-        move |target: SendTarget| match share_tap_at(&target, &devices, &[], SHARE_SHEET_PICKS_FILES, ready, lost) {
+        let (devices, o, files, picked_clear) = (devices.to_vec(), open.clone(), files.clone(), picked.clone());
+        move |target: SendTarget| match share_tap_at(&target, &devices, &files, FILE_PICKER_AVAILABLE, ready, lost) {
             ShareTap::Blocked(why) => notice::post(why),
-            ShareTap::Send(SendTarget::Device(id)) => match transfer_service().send(&id, Vec::new()) {
-                Ok(()) => o.set(false),
+            ShareTap::Send(SendTarget::Device(id)) => match transfer_service().send(&id, files.clone()) {
+                Ok(()) => {
+                    picked_clear.set(Vec::new());
+                    o.set(false);
+                }
                 Err(why) => notice::post(why),
             },
             // The service has no send to an agent's computer yet.
@@ -1618,13 +1600,43 @@ pub(super) fn ShareSheet(open: &MutableState<bool>, devices: &[Device], members:
                         }
                         // The file being shared, with the sheet's close button (`.fl-share-file`).
                         { use ::compose_rust::ui::Row; Row!(spacing = SP[2], alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width().background(paint(p.surface)).corner_radius(CORNER_MD).padding(SP[2]), {
-                                { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().size(44.0, 44.0).background(paint(p.surface_2)).corner_radius(CORNER_LG), alignment = Alignment::Center, content = || NavIcon(ICON_DOC, p.text_2.to_argb(), 22.0)) };
-                                { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), {
-                                    Label(&file_title, Fs::Md, Weight::Semibold, None, Some(1));
-                                    if let Some(why) = file_why {
-                                        Label(why, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                                    }
-                                }) };
+                                let pick_content = || {
+                                    { use ::compose_rust::ui::Row; Row!(spacing = SP[2], alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
+                                        { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().size(44.0, 44.0).background(paint(p.surface_2)).corner_radius(CORNER_LG), alignment = Alignment::Center, content = || NavIcon(ICON_DOC, p.text_2.to_argb(), 22.0)) };
+                                        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), {
+                                            Label(&file_title, Fs::Md, Weight::Semibold, None, Some(1));
+                                            if let Some(why) = file_why {
+                                                Label(why, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                                            }
+                                        }) };
+                                    }) };
+                                };
+                                if FILE_PICKER_AVAILABLE {
+                                    let picked = picked.clone();
+                                    NamedClickable(
+                                        "파일 고르기",
+                                        Modifier::new().weight(1.0).corner_radius(CORNER_SM),
+                                        Alignment::CenterStart,
+                                        move || {
+                                            let picked = picked.clone();
+                                            compose_rust::FileDialog::open_files().title(FILE_DIALOG_TITLE).show(move |result| {
+                                                let outcome = match result {
+                                                    compose_rust::FileDialogResult::Chosen { paths, .. } => pick_outcome(Some(paths), true),
+                                                    compose_rust::FileDialogResult::Cancelled => pick_outcome(None, true),
+                                                    compose_rust::FileDialogResult::Unavailable => pick_outcome(None, false),
+                                                };
+                                                match outcome {
+                                                    PickOutcome::Draft(draft) => picked.set(draft.files),
+                                                    PickOutcome::Nothing => {}
+                                                    PickOutcome::Say(why) => notice::post(why),
+                                                }
+                                            });
+                                        },
+                                        pick_content,
+                                    );
+                                } else {
+                                    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().weight(1.0), alignment = Alignment::CenterStart, content = pick_content) };
+                                }
                                 super::components::CloseButton(close.clone());
                             }) };
                         ShareSectionLabel("Ember로 보내기");
@@ -1902,12 +1914,29 @@ mod tests {
         let k = kpi_cells(&m);
         assert_eq!((k[0].value.as_str(), k[0].pill.clone()), ("4", Some(("전체 7".to_string(), PillTone::Green))));
         assert_eq!(k[1].pill.as_ref().map(|p| p.0.as_str()), Some("멈춤 1"));
-        assert!(!k[2].available);
+        assert!(k[2].available);
+        assert_eq!(k[2].value, "12 KB");
         assert_eq!((k[3].unit, k[3].meter), ("%", Some(75)));
         // No service data: only the connected count is known.
         let none = FilesModel { ready: false, ..m };
         let k = kpi_cells(&none);
-        assert!(k[0].available && !k[1].available && !k[3].available);
+        assert!(k[0].available && !k[1].available && !k[2].available && !k[3].available);
+        assert_eq!(k[2].value, UNAVAILABLE);
+    }
+
+    #[test]
+    fn fr_l27_kpi_cells_sent_week_shows_zero_bytes_when_ready_and_unavailable_when_not() {
+        const NOW: i64 = 1_800_000_000_000;
+        let (mut m, _) = sample_model();
+        m.history.clear();
+        let k_ready = kpi_cells_at(&m, NOW);
+        assert!(k_ready[2].available);
+        assert_eq!(k_ready[2].value, "0 B");
+
+        m.ready = false;
+        let k_not_ready = kpi_cells_at(&m, NOW);
+        assert!(!k_not_ready[2].available);
+        assert_eq!(k_not_ready[2].value, UNAVAILABLE);
     }
 
     #[test]
@@ -1993,17 +2022,13 @@ mod tests {
     }
 
     #[test]
-    fn fr_l27_agent_tile_renders_open_conversation_and_send_buttons_and_opens_conversation() {
+    fn fr_l27_agent_tile_opens_conversation_on_card_click_without_buttons() {
         use compose_rust::{EventPayload, PropertyKind};
-        use std::sync::{Arc, Mutex};
         let _guard = crate::services::test_guard();
         let ui = shared_ui();
         ui.go(crate::ui::Route::Projects);
-        let sent_to: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-        let sent_cb = sent_to.clone();
-        let mut host = Host::new(move || {
-            let sent_cb = sent_cb.clone();
-            Box::new(Recomposer::new(move || {
+        let mut host = Host::new(|| {
+            Box::new(Recomposer::new(|| {
                 let member = CrewMember {
                     id: "demo-s1".into(),
                     title: "프록시 리팩토링".into(),
@@ -2011,74 +2036,35 @@ mod tests {
                     agent: "claude".into(),
                     waiting: false,
                 };
-                let sent_cb = sent_cb.clone();
-                AgentTile(&member, shared_ui(), 200.0, move |id| {
-                    *sent_cb.lock().expect("lock") = Some(id);
-                });
+                AgentTile(&member, shared_ui(), 200.0);
             }))
         });
         let raw = host.rebuild().expect("rebuild").to_vec();
         let batch = decode_batch(&raw).expect("decode");
         let all = texts(&batch);
-        assert!(all.iter().any(|t| t == "대화 열기"), "missing 대화 열기: {all:?}");
-        assert!(all.iter().any(|t| t == "보내기"), "missing 보내기: {all:?}");
+        assert!(!all.iter().any(|t| t == "대화 열기"), "unexpected 대화 열기 button: {all:?}");
+        assert!(!all.iter().any(|t| t == "보내기"), "unexpected 보내기 button: {all:?}");
 
-        // Find the Button node labeled "대화 열기" and its OnClick handler_id, then click it.
-        let open_node = batch
+        // The card itself is the sole OnClick target and opens the conversation.
+        let click_targets: Vec<(u32, u64)> = batch
             .iter()
-            .find_map(|m| match m {
-                Mutation::SetProp {
-                    node_id,
-                    property: PropertyKind::Text,
-                    value: PropertyValue::String("대화 열기"),
-                } => Some(*node_id),
-                _ => None,
-            })
-            .expect("대화 열기 button node");
-        let open_handler = batch
-            .iter()
-            .find_map(|m| match m {
+            .filter_map(|m| match m {
                 Mutation::SetProp {
                     node_id,
                     property: PropertyKind::OnClick,
                     value: PropertyValue::Integer(h),
-                } if *node_id == open_node => Some(*h as u64),
+                } => Some((*node_id, *h as u64)),
                 _ => None,
             })
-            .expect("대화 열기 OnClick handler");
-        host.dispatch(HostEvent::new(open_node, open_handler, EventPayload::Clicked))
-        .expect("dispatch click");
+            .collect();
+        assert_eq!(click_targets.len(), 1, "expected only the card click handler: {click_targets:?}");
+        let (card_node, card_handler) = click_targets[0];
+        host.dispatch(HostEvent::new(card_node, card_handler, EventPayload::Clicked))
+            .expect("dispatch card click");
         assert_eq!(
             ui.route.get_untracked(),
             crate::ui::Route::Conversation("demo-s1".into())
         );
-
-        // Find the Button node labeled "보내기" and click it.
-        let send_node = batch
-            .iter()
-            .find_map(|m| match m {
-                Mutation::SetProp {
-                    node_id,
-                    property: PropertyKind::Text,
-                    value: PropertyValue::String("보내기"),
-                } => Some(*node_id),
-                _ => None,
-            })
-            .expect("보내기 button node");
-        let send_handler = batch
-            .iter()
-            .find_map(|m| match m {
-                Mutation::SetProp {
-                    node_id,
-                    property: PropertyKind::OnClick,
-                    value: PropertyValue::Integer(h),
-                } if *node_id == send_node => Some(*h as u64),
-                _ => None,
-            })
-            .expect("보내기 OnClick handler");
-        host.dispatch(HostEvent::new(send_node, send_handler, EventPayload::Clicked))
-        .expect("dispatch send click");
-        assert_eq!(sent_to.lock().expect("lock").as_deref(), Some("demo-s1"));
     }
 
     /// The screen's texts for a model, rendered once at the default window size.
@@ -2137,7 +2123,22 @@ mod tests {
             assert!(production.contains(arm), "{arm}");
         }
         assert!(production.contains("let can_pick = FILE_PICKER_AVAILABLE || demo;"), "the button is off where there is no dialog");
-        assert!(!SHARE_SHEET_PICKS_FILES);
+    }
+
+    #[test]
+    fn fr_l27_7_share_sheet_file_card_opens_file_dialog_when_available() {
+        let _guard = crate::services::test_guard();
+        let production = include_str!("files.rs").split("#[cfg(test)]").next().unwrap();
+        let sheet = &production[production.find("fn ShareSheet(").unwrap()..];
+        assert!(sheet.contains("share_file_card(&files, FILE_PICKER_AVAILABLE)"));
+        assert!(sheet.contains("compose_rust::FileDialog::open_files().title(FILE_DIALOG_TITLE).show("));
+        let nodes = share_nodes((1440.0, 900.0));
+        let has_picker = nodes.iter().any(|n| {
+            n.0 == "Box"
+                && n.1.iter().any(|p| p == "AccessibleName=String(\"파일 고르기\")")
+                && n.1.iter().any(|p| p.starts_with("OnClick="))
+        });
+        assert_eq!(has_picker, FILE_PICKER_AVAILABLE);
     }
 
     #[test]

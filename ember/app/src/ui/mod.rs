@@ -32,6 +32,7 @@ pub mod editor_scm_repo;
 pub mod editor_menu;
 pub mod editor_tree_menu;
 pub mod editor_states;
+pub mod editor_windows;
 pub mod editor_workbench;
 pub mod find;
 pub mod palette;

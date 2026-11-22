@@ -142,9 +142,12 @@ enum ProbeOutcome {
     /// The command was still running after [`FLAG_PROBE_WINDOW`]: the flag is accepted.
     StillRunning,
     /// The command could not be started: the io error kind and its redacted text.
-    SpawnFailed(std::io::ErrorKind, String),
+    SpawnFailed(
+        std::io::ErrorKind,
+        #[expect(dead_code, reason = "redacted detail for Debug diagnostics")] String,
+    ),
     /// Waiting for the command failed, or its pipes were missing: redacted text.
-    WaitFailed(String),
+    WaitFailed(#[expect(dead_code, reason = "redacted detail for Debug diagnostics")] String),
 }
 
 /// True for ETXTBSY ("text file busy"): an executable written a moment ago while another thread

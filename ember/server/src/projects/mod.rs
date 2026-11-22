@@ -94,6 +94,9 @@ pub struct Project {
     /// Per-member character overrides saved from the team character editor (FR-L22, #489).
     #[serde(default)]
     pub character_overrides: BTreeMap<String, CharacterOverride>,
+    /// Session id of the project's leader, chosen from existing sessions in this project (FR-L26, D52 Q5).
+    #[serde(default)]
+    pub leader_session: Option<String>,
 }
 
 /// `PATCH /api/projects/{name}`. Every field is optional; `Some(None)` clears a nullable field.
@@ -118,6 +121,9 @@ pub struct ProjectPatch {
     /// one; `null` is refused for the field itself (send `{}` to clear).
     #[serde(default, deserialize_with = "nullable")]
     pub character_overrides: Option<Option<BTreeMap<String, Option<CharacterOverride>>>>,
+    /// Session id of the project's leader, or `null` / empty string to clear (FR-L26, D52 Q5).
+    #[serde(default, deserialize_with = "nullable")]
+    pub leader_session: Option<Option<String>>,
     /// Archive (`true`) or restore (`false`) the project (FR-L26, #384 PR 4). Only a bool;
     /// `null` is refused.
     #[serde(default, deserialize_with = "not_null")]
@@ -156,9 +162,12 @@ pub enum ProjectError {
     /// A rename onto the name of another project.
     #[error("a project named {0:?} already exists")]
     NameTaken(String),
-    /// A delete of a project that still holds records (FR-L26, #384 PR 5).
-    #[error("project {name:?} still has {sessions} sessions, {channels} channels, {schedules} schedules and {teams} teams")]
-    NotEmpty { name: String, sessions: i64, channels: i64, schedules: i64, teams: i64 },
+    /// Archiving or deleting a project while sessions in it are still running (FR-L26, D52 Q3).
+    #[error("project {name:?} still has {running} running session(s)")]
+    SessionsRunning { name: String, running: usize },
+    /// Deleting a project before it has been archived (FR-L26, D52 Q4).
+    #[error("project {name:?} must be archived before it can be deleted")]
+    NotArchived { name: String },
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -176,7 +185,7 @@ const RENAMED_TABLES: &[&str] =
     &["project_computers", "channels", "sessions", "schedules", "teams", "browser_egress"];
 
 const PROJECT_COLUMNS: &str =
-    "name, created_at, repository, default_branch, member_defaults, character_style, archived, profile_overrides, character_overrides";
+    "name, created_at, repository, default_branch, member_defaults, character_style, archived, profile_overrides, character_overrides, leader_session";
 
 fn project_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
     let defaults: String = r.get(4)?;
@@ -198,7 +207,23 @@ fn project_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
             .get::<_, Option<String>>(8)?
             .and_then(|j| serde_json::from_str(&j).ok())
             .unwrap_or_default(),
+        leader_session: r.get(9)?,
     })
+}
+
+fn normalize_leader_session(v: Option<&str>) -> Option<String> {
+    v.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+}
+
+fn table_exists(tx: &rusqlite::Transaction<'_>, table: &str) -> rusqlite::Result<bool> {
+    Ok(tx
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            params![table],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
 }
 
 fn bad(msg: impl Into<String>) -> ProjectError {
@@ -471,8 +496,13 @@ impl Store {
             Some(n) => Some(check_new_name(n)?),
             None => None,
         };
+        let leader_session = patch
+            .leader_session
+            .as_ref()
+            .map(|v| normalize_leader_session(v.as_deref()));
+        let setting_leader = leader_session.as_ref().is_some_and(|v| v.is_some());
         let renames = new_name.as_deref().is_some_and(|n| n != name);
-        if (renames || patch.archived == Some(true)) && name == DEFAULT_PROJECT_NAME {
+        if (renames || patch.archived == Some(true) || setting_leader) && name == DEFAULT_PROJECT_NAME {
             return Err(ProjectError::Protected(name.into()));
         }
         let repository = patch.repository.as_ref().map(|v| check_repository(v.as_deref())).transpose()?;
@@ -492,6 +522,33 @@ impl Store {
                 None => None,
             };
             let tx = conn.transaction()?;
+            if patch.archived == Some(true) {
+                let running: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM sessions WHERE project = ?1 AND status IN ('running', 'waiting_for_approval')",
+                    params![name],
+                    |r| r.get(0),
+                )?;
+                if running > 0 {
+                    return Err(ProjectError::SessionsRunning { name: name.into(), running: running as usize });
+                }
+            }
+            if let Some(v) = &leader_session {
+                if let Some(sid) = v {
+                    let owner: Option<String> = tx
+                        .query_row("SELECT project FROM sessions WHERE id = ?1", params![sid], |r| r.get(0))
+                        .optional()?;
+                    match owner {
+                        None => return Err(bad(format!("leader_session: session {sid} does not exist"))),
+                        Some(p) if p != name => {
+                            return Err(bad(format!(
+                                "leader_session: session {sid} belongs to project {p:?}, not {name:?}"
+                            )))
+                        }
+                        Some(_) => {}
+                    }
+                }
+                tx.execute("UPDATE projects SET leader_session = ?1 WHERE name = ?2", params![v, name])?;
+            }
             if let Some(v) = &overrides {
                 let json = if v.is_empty() { None } else { Some(serde_json::to_string(v).map_err(anyhow::Error::from)?) };
                 tx.execute("UPDATE projects SET profile_overrides = ?1 WHERE name = ?2", params![json, name])?;
@@ -527,9 +584,9 @@ impl Store {
                 // first, the dependants move, then the old row goes.
                 tx.execute(
                     "INSERT INTO projects (name, created_at, repository, default_branch, member_defaults,
-                                           character_style, archived, profile_overrides, character_overrides)
+                                           character_style, archived, profile_overrides, character_overrides, leader_session)
                      SELECT ?1, created_at, repository, default_branch, member_defaults, character_style, archived,
-                            profile_overrides, character_overrides
+                            profile_overrides, character_overrides, leader_session
                      FROM projects WHERE name = ?2",
                     params![new, name],
                 )?;
@@ -546,49 +603,112 @@ impl Store {
         self.project(&final_name)?.ok_or(ProjectError::NotFound(final_name))
     }
 
-    /// Delete a project (FR-L26, #384 PR 5) [provisional]. Only a project with no sessions,
-    /// channels, schedules or teams is deleted; otherwise `NotEmpty` with the counts, and the
-    /// owner archives it instead. Its computer assignments and browser egress row go with it, in
-    /// one transaction. 기본 프로젝트 is `Protected`.
-    pub fn delete_project(&self, name: &str) -> Result<(), ProjectError> {
-        if self.project(name)?.is_none() {
+    /// Delete an archived project and cascade-remove all its records (FR-L26, D52 Q2/Q4, #327,
+    /// #384). Refuses 기본 프로젝트 (`Protected`), missing projects (`NotFound`), unarchived
+    /// projects (`NotArchived`), and projects with running or waiting sessions (`SessionsRunning`).
+    /// Returns the deleted session ids so the caller can release any idle live agent processes.
+    pub fn delete_project(&self, name: &str) -> Result<Vec<String>, ProjectError> {
+        let Some(project) = self.project(name)? else {
             return Err(ProjectError::NotFound(name.into()));
-        }
+        };
         if name == DEFAULT_PROJECT_NAME {
             return Err(ProjectError::Protected(name.into()));
         }
+        if !project.archived {
+            return Err(ProjectError::NotArchived { name: name.into() });
+        }
         let mut conn = self.conn();
         let tx = conn.transaction()?;
-        let count = |table: &str| -> rusqlite::Result<i64> {
-            tx.query_row(&format!("SELECT COUNT(*) FROM {table} WHERE project = ?1"), params![name], |r| r.get(0))
-        };
-        // The default channel is made on demand for every project (FR-T10), so an untouched one
-        // (no messages, agents or invites) is not a record and goes with the project.
-        let count_channels = || -> rusqlite::Result<i64> {
-            tx.query_row(
-                "SELECT COUNT(*) FROM channels c WHERE c.project = ?1 AND (c.is_default = 0
-                   OR EXISTS (SELECT 1 FROM channel_messages m WHERE m.channel_id = c.id)
-                   OR EXISTS (SELECT 1 FROM channel_agents a WHERE a.channel_id = c.id)
-                   OR EXISTS (SELECT 1 FROM channel_invites i WHERE i.channel_id = c.id))",
-                params![name],
-                |r| r.get(0),
-            )
-        };
-        let (sessions, channels, schedules, teams) =
-            (count("sessions")?, count_channels()?, count("schedules")?, count("teams")?);
-        if sessions + channels + schedules + teams > 0 {
-            return Err(ProjectError::NotEmpty { name: name.into(), sessions, channels, schedules, teams });
+        let archived: Option<i64> = tx
+            .query_row("SELECT archived FROM projects WHERE name = ?1", params![name], |r| r.get(0))
+            .optional()?;
+        match archived {
+            None => return Err(ProjectError::NotFound(name.into())),
+            Some(0) => return Err(ProjectError::NotArchived { name: name.into() }),
+            Some(_) => {}
         }
+        let running: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM sessions WHERE project = ?1 AND status IN ('running', 'waiting_for_approval')",
+            params![name],
+            |r| r.get(0),
+        )?;
+        if running > 0 {
+            return Err(ProjectError::SessionsRunning { name: name.into(), running: running as usize });
+        }
+
+        let session_ids: Vec<String> = {
+            let mut stmt = tx.prepare("SELECT id FROM sessions WHERE project = ?1")?;
+            let rows = stmt.query_map(params![name], |r| r.get(0))?;
+            rows.collect::<Result<_, _>>()?
+        };
+        let channel_ids: Vec<String> = {
+            let mut stmt = tx.prepare("SELECT id FROM channels WHERE project = ?1")?;
+            let rows = stmt.query_map(params![name], |r| r.get(0))?;
+            rows.collect::<Result<_, _>>()?
+        };
+        let schedule_ids: Vec<String> = {
+            let mut stmt = tx.prepare("SELECT id FROM schedules WHERE project = ?1")?;
+            let rows = stmt.query_map(params![name], |r| r.get(0))?;
+            rows.collect::<Result<_, _>>()?
+        };
+        let team_ids: Vec<String> = {
+            let mut stmt = tx.prepare("SELECT id FROM teams WHERE project = ?1")?;
+            let rows = stmt.query_map(params![name], |r| r.get(0))?;
+            rows.collect::<Result<_, _>>()?
+        };
+
+        let has_a2a_tokens = table_exists(&tx, "a2a_tokens")?;
+        let has_a2a_messages = table_exists(&tx, "a2a_messages")?;
+        let has_a2a_grants = table_exists(&tx, "a2a_terminal_grants")?;
+        let has_a2a_switches = table_exists(&tx, "a2a_switches")?;
+
+        for sid in &session_ids {
+            tx.execute("DELETE FROM messages_fts WHERE session_id = ?1", params![sid])?;
+            tx.execute("DELETE FROM events WHERE session_id = ?1", params![sid])?;
+            tx.execute("DELETE FROM shim_offsets WHERE session_id = ?1", params![sid])?;
+            tx.execute("DELETE FROM session_forks WHERE session_id = ?1 OR parent_id = ?1", params![sid])?;
+            tx.execute("DELETE FROM session_computer WHERE session_id = ?1", params![sid])?;
+            tx.execute("DELETE FROM session_designated WHERE session_id = ?1", params![sid])?;
+            tx.execute("DELETE FROM session_proxy WHERE session_id = ?1", params![sid])?;
+            if has_a2a_tokens {
+                tx.execute("DELETE FROM a2a_tokens WHERE session_id = ?1", params![sid])?;
+            }
+            if has_a2a_messages {
+                tx.execute("DELETE FROM a2a_messages WHERE from_session = ?1 OR to_session = ?1", params![sid])?;
+            }
+            if has_a2a_grants {
+                tx.execute("DELETE FROM a2a_terminal_grants WHERE reader = ?1 OR target = ?1", params![sid])?;
+            }
+            if has_a2a_switches {
+                let scope = format!("session:{sid}");
+                tx.execute("DELETE FROM a2a_switches WHERE scope = ?1 OR scope = ?2", params![sid, scope])?;
+            }
+        }
+        for tid in &team_ids {
+            tx.execute("DELETE FROM team_members WHERE team_id = ?1", params![tid])?;
+            tx.execute("DELETE FROM team_tasks WHERE team_id = ?1", params![tid])?;
+            tx.execute("DELETE FROM team_mail WHERE team_id = ?1", params![tid])?;
+            tx.execute("DELETE FROM teams WHERE id = ?1", params![tid])?;
+        }
+        for cid in &channel_ids {
+            tx.execute("DELETE FROM channel_guests WHERE channel_id = ?1", params![cid])?;
+            tx.execute("DELETE FROM channel_invites WHERE channel_id = ?1", params![cid])?;
+            tx.execute("DELETE FROM channel_agents WHERE channel_id = ?1", params![cid])?;
+            tx.execute("DELETE FROM channel_messages WHERE channel_id = ?1", params![cid])?;
+            tx.execute("DELETE FROM channel_reads WHERE channel_id = ?1", params![cid])?;
+            tx.execute("DELETE FROM channels WHERE id = ?1", params![cid])?;
+        }
+        for scid in &schedule_ids {
+            tx.execute("DELETE FROM schedule_runs WHERE schedule_id = ?1", params![scid])?;
+            tx.execute("DELETE FROM schedule_events WHERE schedule_id = ?1", params![scid])?;
+            tx.execute("DELETE FROM schedules WHERE id = ?1", params![scid])?;
+        }
+        tx.execute("DELETE FROM sessions WHERE project = ?1", params![name])?;
         tx.execute("DELETE FROM project_computers WHERE project = ?1", params![name])?;
         tx.execute("DELETE FROM browser_egress WHERE project = ?1", params![name])?;
-        tx.execute(
-            "DELETE FROM channel_reads WHERE channel_id IN (SELECT id FROM channels WHERE project = ?1)",
-            params![name],
-        )?;
-        tx.execute("DELETE FROM channels WHERE project = ?1", params![name])?;
         tx.execute("DELETE FROM projects WHERE name = ?1", params![name])?;
         tx.commit()?;
-        Ok(())
+        Ok(session_ids)
     }
 
     /// Create `name` if it does not exist. Returns the project and whether it was created.

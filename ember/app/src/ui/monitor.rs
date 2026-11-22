@@ -560,24 +560,24 @@ pub fn card_view(metric: Metric, feed: &MonitorFeed) -> Option<CardView> {
             },
         },
         Metric::Disk => {
-            let worst = s
-                .disks
-                .iter()
-                .map(|d| disk_used_percent(d.total_bytes, d.available_bytes))
-                .fold(None, |a: Option<f32>, v| Some(a.map_or(v, |a| a.max(v))));
+            let headline = match main_disk(s) {
+                Some(main) => format!("{} 여유", bytes_text(main.available_bytes)),
+                None => "-".into(),
+            };
             let mut lines: Vec<String> = s
                 .disks
                 .iter()
                 .take(3)
                 .map(|d| {
                     let used = d.total_bytes.saturating_sub(d.available_bytes);
+                    let pct = disk_used_percent(d.total_bytes, d.available_bytes);
                     if s.disks.len() == 1 {
-                        format!("{} / {} 사용 중입니다", bytes_text(used), bytes_text(d.total_bytes))
+                        format!("{} 사용 \u{00B7} {:.0}%", bytes_text(used), pct)
                     } else {
                         format!(
                             "{} {} ({} / {})",
                             d.mount,
-                            percent_text(Some(disk_used_percent(d.total_bytes, d.available_bytes))),
+                            percent_text(Some(pct)),
                             bytes_text(used),
                             bytes_text(d.total_bytes)
                         )
@@ -590,7 +590,7 @@ pub fn card_view(metric: Metric, feed: &MonitorFeed) -> Option<CardView> {
             if s.disks.is_empty() {
                 lines.push("디스크를 찾지 못했습니다".into());
             }
-            CardView { headline: percent_text(worst), lines, bars: vec![] }
+            CardView { headline, lines, bars: vec![] }
         }
         Metric::Network => match feed.rates() {
             Some((rx, tx)) => CardView {
@@ -741,6 +741,89 @@ pub fn hero_parts(headline: &str) -> (String, String) {
     (number, unit)
 }
 
+/// Split a card headline into `(number, unit, sub)` so a trailing qualifier like `"여유"` or
+/// `"받기"` renders in the smaller muted style beside the unit. Whole-number free storage drops
+/// a redundant `.0` (e.g. `"210.0 GB 여유"` becomes `("210", "GB", "여유")`).
+pub fn hero_triple(headline: &str) -> (String, String, String) {
+    let (mut number, unit_and_sub) = hero_parts(headline);
+    let (unit, sub) = if let Some(u) = unit_and_sub.strip_suffix(" 여유") {
+        (u.to_string(), "여유".to_string())
+    } else if let Some(u) = unit_and_sub.strip_suffix(" 받기") {
+        (u.to_string(), "받기".to_string())
+    } else {
+        (unit_and_sub, String::new())
+    };
+    if sub == "여유"
+        && let Some(whole) = number.strip_suffix(".0")
+    {
+        number = whole.to_string();
+    }
+    (number, unit, sub)
+}
+
+/// Replace ASCII spaces before byte and temperature units with a non-breaking space so multi-line
+/// labels never orphan `"GB"` or `"TB"` on a line by itself.
+pub fn no_unit_wrap(text: &str) -> String {
+    text.replace(" TB", "\u{00A0}TB")
+        .replace(" GB", "\u{00A0}GB")
+        .replace(" MB", "\u{00A0}MB")
+        .replace(" KB", "\u{00A0}KB")
+        .replace(" B", "\u{00A0}B")
+        .replace(" \u{00B0}C", "\u{00A0}\u{00B0}C")
+}
+
+/// Number of historical samples seeded into the monitor feed in demo mode so the SVG graphs
+/// render full curves on the first frame.
+pub const DEMO_SEED_SAMPLES: usize = 20;
+
+/// Enrich a demo metrics sample with varied memory, GPU, and monotonically increasing network
+/// wave counters so the monitor's SVG graphs render visible curves instead of flat lines.
+pub fn demo_varied_sample(mut base: MetricsSample) -> MetricsSample {
+    let t = (base.at_ms / 1000) as f64;
+    if let Some(m) = base.memory.as_mut()
+        && m.total_bytes > 0
+    {
+        let frac = (0.58 + 0.11 * (t / 7.0).sin() + 0.05 * (t / 3.1 + 1.3).cos()).clamp(0.25, 0.88);
+        m.used_bytes = ((m.total_bytes as f64) * frac) as u64;
+    }
+    if base.gpu.devices.is_empty() {
+        let util = (34.0 + 18.0 * (t / 6.0 + 0.7).sin() + 8.0 * (t / 2.7).cos()).clamp(4.0, 92.0) as f32;
+        base.gpu = ember_client::api::GpuReport {
+            devices: vec![ember_client::api::GpuMetrics {
+                name: base.chip.clone().unwrap_or_else(|| "내장 GPU".to_string()),
+                utilization_percent: Some(util),
+                memory_total_bytes: None,
+                memory_used_bytes: None,
+            }],
+            reason: None,
+        };
+    }
+    for (idx, net) in base.network.iter_mut().enumerate() {
+        let phase = idx as f64 * 0.9;
+        // Derivatives stay strictly positive:
+        // d(rx)/dt >= 2_400_000 - 1_125_000 - 521_739 > 750_000 B/s
+        // d(tx)/dt >= 520_000 - 200_000 - 120_000 = 200_000 B/s
+        let rx = t * 2_400_000.0
+            + 4_500_000.0 * (1.0 + (t / 4.0 + phase).sin())
+            + 1_200_000.0 * (1.0 + (t / 2.3 + 0.8 + phase).cos());
+        let tx = t * 520_000.0
+            + 900_000.0 * (1.0 + (t / 4.5 + 1.2 + phase).sin())
+            + 300_000.0 * (1.0 + (t / 2.5 + 2.1 + phase).cos());
+        net.rx_bytes = rx.max(0.0) as u64;
+        net.tx_bytes = tx.max(0.0) as u64;
+    }
+    base
+}
+
+/// Seed `DEMO_SEED_SAMPLES` varied history samples ending one poll interval before `now_ms`.
+pub fn seed_demo_feed(feed: &mut MonitorFeed, now_ms: u64, sample_at: impl Fn(u64) -> MetricsSample) {
+    let step_ms = POLL_SECS * 1000;
+    for step in (1..=DEMO_SEED_SAMPLES as u64).rev() {
+        let at = now_ms.saturating_sub(step * step_ms);
+        feed.push(demo_varied_sample(sample_at(at)));
+    }
+}
+
 /// The CPU card's core bars (`.mon-cores`): 44 high, 3 apart, green with 2 dp top corners at
 /// 85 percent (review M2; they were blue square bars 32 high).
 pub const CORE_BARS_H: f32 = 44.0;
@@ -889,7 +972,11 @@ pub fn metric_badge(metric: Metric, s: &MetricsSample) -> Option<(String, crate:
             let iface = s.network.iter().find(|n| !n.interface.is_empty())?;
             Some((iface.interface.clone(), PillTone::Blue))
         }
-        Metric::Fans => None,
+        Metric::Fans => {
+            let cpu = s.cpu.total_percent.filter(|v| v.is_finite())?;
+            let tone = if cpu > 60.0 { PillTone::Orange } else { PillTone::Grey };
+            Some((format!("부하 {:.0}%", cpu), tone))
+        }
     }
 }
 
@@ -1544,9 +1631,8 @@ mod tests {
         assert_eq!(mem.headline, "50.0%");
         assert_eq!(mem.lines, vec!["8.0 GB / 16.0 GB".to_string(), "스왑 1.0 GB / 4.0 GB".to_string()]);
         let disk = card_view(Metric::Disk, &f).unwrap();
-        assert_eq!(disk.headline, "60.0%");
-        assert_eq!(disk.lines, vec!["60 B / 100 B 사용 중입니다".to_string()]);
-        assert!(!disk.lines[0].contains('%'));
+        assert_eq!(disk.headline, "40 B 여유");
+        assert_eq!(disk.lines, vec!["60 B 사용 \u{00B7} 60%".to_string()]);
         let net = card_view(Metric::Network, &f).unwrap();
         assert_eq!(net.headline, "\u{2193} 2.0 KB/s");
         assert_eq!(net.lines, vec!["\u{2191} 1.0 KB/s".to_string()]);
@@ -1883,5 +1969,76 @@ mod tests {
         assert!(326.0 - fixed_sum >= 120.0, "name column needs room on 390 dp: fixed={fixed_sum}");
         assert_eq!(max_process_cpu(&[row("a", Some(1), Some(35.0), None), row("b", Some(2), Some(5.0), None)]), 35.0);
         assert_eq!(max_process_cpu(&[]), 1.0);
+    }
+
+    #[test]
+    fn fr_l21_demo_seed_produces_non_flat_memory_gpu_and_network_series() {
+        let mut feed = MonitorFeed::default();
+        let now = 1_700_000_000_000u64;
+        seed_demo_feed(&mut feed, now, crate::demo::metrics_sample);
+        feed.push(demo_varied_sample(crate::demo::metrics_sample(now)));
+
+        let span = |vals: &[f32]| -> f32 {
+            let min = vals.iter().copied().fold(f32::INFINITY, f32::min);
+            let max = vals.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            max - min
+        };
+        let mem = card_view(Metric::Memory, &feed).unwrap().bars;
+        let gpu = card_view(Metric::Gpu, &feed).unwrap().bars;
+        let net_rx = feed.net_rx_series();
+        let net_tx = feed.net_tx_series();
+
+        assert_eq!(mem.len(), DEMO_SEED_SAMPLES + 1);
+        assert_eq!(gpu.len(), DEMO_SEED_SAMPLES + 1);
+        assert_eq!(net_rx.len(), DEMO_SEED_SAMPLES);
+        assert_eq!(net_tx.len(), DEMO_SEED_SAMPLES);
+        assert!(span(&mem) > 5.0, "memory demo curve must vary, got {mem:?}");
+        assert!(span(&gpu) > 10.0, "gpu demo curve must vary, got {gpu:?}");
+        assert!(span(net_rx) > 500_000.0, "network rx demo curve must vary, got {net_rx:?}");
+        assert!(span(net_tx) > 100_000.0, "network tx demo curve must vary, got {net_tx:?}");
+        assert!(net_rx.iter().all(|&v| v > 0.0), "network rx must stay positive");
+        assert!(net_tx.iter().all(|&v| v > 0.0), "network tx must stay positive");
+    }
+
+    #[test]
+    fn fr_l21_no_unit_wrap_binds_numbers_to_storage_units() {
+        assert_eq!(
+            no_unit_wrap("저장 공간이 넉넉합니다 \u{00B7} 여유 210.0 GB"),
+            "저장 공간이 넉넉합니다 \u{00B7} 여유 210.0\u{00A0}GB"
+        );
+        assert_eq!(no_unit_wrap("2.0 TB / 512 MB / 4.0 KB"), "2.0\u{00A0}TB / 512\u{00A0}MB / 4.0\u{00A0}KB");
+    }
+
+    #[test]
+    fn fr_l21_disk_hero_and_triple_split_free_space_and_sub_label() {
+        assert_eq!(hero_triple("210.0 GB 여유"), ("210".into(), "GB".into(), "여유".into()));
+        assert_eq!(hero_triple("1.5 TB 여유"), ("1.5".into(), "TB".into(), "여유".into()));
+        assert_eq!(hero_triple("\u{2193} 2.3 MB/s"), ("2.3".into(), "MB/s".into(), "받기".into()));
+        assert_eq!(hero_triple("23.1%"), ("23".into(), "%".into(), String::new()));
+
+        let mut f = MonitorFeed::default();
+        let mut s = sample(1000, 0, 0);
+        s.disks = vec![DiskMetrics {
+            name: "Macintosh HD".into(),
+            mount: "/".into(),
+            total_bytes: 500 << 30,
+            available_bytes: 210 << 30,
+        }];
+        f.push(s);
+        let disk = card_view(Metric::Disk, &f).unwrap();
+        assert_eq!(disk.headline, "210.0 GB 여유");
+        assert_eq!(disk.lines, vec!["290.0 GB 사용 \u{00B7} 58%".to_string()]);
+    }
+
+    #[test]
+    fn fr_l21_fan_badge_shows_cpu_load_with_tone() {
+        use crate::ui::components::PillTone;
+        let mut s = sample(1000, 0, 0);
+        s.cpu.total_percent = Some(34.2);
+        assert_eq!(metric_badge(Metric::Fans, &s), Some(("부하 34%".into(), PillTone::Grey)));
+        s.cpu.total_percent = Some(72.6);
+        assert_eq!(metric_badge(Metric::Fans, &s), Some(("부하 73%".into(), PillTone::Orange)));
+        s.cpu.total_percent = None;
+        assert_eq!(metric_badge(Metric::Fans, &s), None);
     }
 }

@@ -68,7 +68,18 @@ impl SessionCore {
             Some(Ok(Some(Outcome::Deferred))) => {}
             Some(Err(e)) => {
                 tracing::warn!("ember-editor: cannot decode {:?}.{}: {e}", r.proxy, r.method);
-                self.fallback_reply(&r);
+                // `workspace.openTextDocument` and `languages.setTextDocumentLanguage` reject on a
+                // bad uri; resolving them with `undefined` hands the extension a document that is
+                // not there.
+                let rejected = match (r.proxy, method) {
+                    (Some(main_thread_documents::PROXY), "$tryOpenDocument") => Some("bad uri"),
+                    (Some(main_thread_languages::PROXY), "$changeLanguage") => Some("bad arguments"),
+                    _ => None,
+                };
+                match rejected {
+                    Some(why) => self.respond(r.req, Err(Some(ember_editor_conn::rpc::js_error("Error", why)))),
+                    None => self.fallback_reply(&r),
+                }
             }
             Some(Ok(Some(Outcome::Unimplemented))) | Some(Ok(None)) | None => {
                 self.count_unimplemented(&r);

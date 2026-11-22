@@ -33,9 +33,11 @@ Terminal access (FR-T9):
 Teams (FR-T7):
   ember-a2a team list [--json]
       Your team: members (name, session, agent, status) and tasks.
-  ember-a2a team spawn <name> [--agent <kind>] [--account <id>] [--computer <id>]
-                       [--title <title>] <first prompt...>
+  ember-a2a team spawn <name> [--agent <kind>] [--computer <id>] [--title <title>]
+                       [--profile default] [--account <id>] <first prompt...>
       Start a teammate session in this project; the first spawn makes you the leader.
+      The teammate runs under its harness's profile (accounts and routing). --account
+      pins one account, for verification and debugging only.
   ember-a2a team end <name>
       Stop a teammate (leader only).
   ember-a2a task list [--json]
@@ -595,7 +597,7 @@ fn run_team(args: &[String]) -> Result<String, CliError> {
             Ok(format_team(&v))
         }
         "spawn" => {
-            let a = parse_args(rest, &["agent", "account", "computer", "title"], &[])?;
+            let a = parse_args(rest, &["agent", "profile", "account", "computer", "title"], &[])?;
             let (name, words) = a
                 .positional
                 .split_first()
@@ -605,6 +607,7 @@ fn run_team(args: &[String]) -> Result<String, CliError> {
                 "name": name,
                 "prompt": prompt,
                 "agent": a.flags.get("agent"),
+                "profile": a.flags.get("profile"),
                 "account": a.flags.get("account"),
                 "computer": a.flags.get("computer"),
                 "title": a.flags.get("title"),

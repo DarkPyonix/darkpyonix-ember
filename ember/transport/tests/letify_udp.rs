@@ -1,12 +1,12 @@
-//! EM-11 (#10, SPEC `FR-N1`..`FR-N5`, `NFR-N1`): the letify backend punches a direct UDP path
-//! and falls back to the main server's relay when punching fails. Device admission and
+//! EM-11 (#10, SPEC `FR-N1`..`FR-N5`, `NFR-N1`): the letify backend punches a direct path
+//! (letify-link's driver: TCP simultaneous open first, UDP beside it) and falls back to the main server's relay when punching fails. Device admission and
 //! revocation (`FR-N3`, #314) hold on a punched path as they do on TCP and on the relay.
 //!
 //! What this network models, in the style of letify-link's `tests/nat.rs`: real UDP and TCP on
 //! loopback, the real letify-link relay, QAD address observer, punch and QUIC path. The node
 //! advertises a TCP address that refuses every connection, so the only direct path between the
-//! client and the node is the one the punch makes: a path reported as direct is the punched UDP
-//! path. What it does not model: a NAT between the peers (letify-link has no NAT simulation on
+//! client and the node is the one the punch makes: a path reported as direct is a punched path
+//! (TCP or UDP; the transport API does not report which). What it does not model: a NAT between the peers (letify-link has no NAT simulation on
 //! loopback; NAT behaviour on real networks is not verified here).
 #![cfg(all(feature = "letify", feature = "http"))]
 
@@ -200,7 +200,7 @@ async fn punched(n: &Net) -> Connection {
 async fn em11_two_peers_punch_a_direct_udp_path_and_carry_http_over_it() {
     let n = net(true).await;
     let conn = punched(&n).await;
-    // The node's only TCP address refuses every dial, so direct means the punched UDP path.
+    // The node's only TCP address refuses every dial, so direct means a punched path.
     match conn.path_state() {
         PathState::Direct { .. } => {}
         other => panic!("expected the punched direct path, got {other}"),

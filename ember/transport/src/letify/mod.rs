@@ -20,25 +20,29 @@
 //!   server. letify-link's relay only pairs two requests; it never hands one to a local acceptor.
 //! - **Address observation**: the main server runs a `QadResponder`; other endpoints ask it for
 //!   their public address and publish it in their record.
-//! - **UDP hole punching** (EM-11, #10): an endpoint with a rendezvous and an address observer
-//!   adds a punched UDP candidate to every dial and answers the punch offers of the peers it
-//!   admits ([`punch_driver`], a thin stand-in for a public letify-link driver). The path
-//!   manager starts the session on the first path that completes, and leaves the relay once the
-//!   punched path carries traffic. A punch that fails leaves the session on TCP or the relay.
+//! - **Hole punching** (EM-11, #10): letify-link's public punch driver (`letify_link::driver`,
+//!   3.0.6) runs every punch, TCP simultaneous open first and UDP beside it; [`punching`] routes
+//!   its rendezvous messages and puts the punched path into the peer's session. An endpoint with
+//!   a rendezvous adds a punch candidate to every dial except one to the main server, and answers
+//!   the punch offers of the peers it admits. Its public IP comes from the configured observer,
+//!   or by default from the main server's relay host on UDP 7443. The path manager starts the
+//!   session on the first path that completes and leaves the relay once a punched path carries
+//!   traffic; a punch that fails (`PunchError`) leaves the session on TCP or the relay, which
+//!   stays Ember's own.
 //! - **Revocation** (`FR-N3`): [`crate::PeerGate`] calls `revoke_peer`, which revokes the key in
 //!   the acceptor (handshakes, live sessions) and in the relay (waiting and spliced pairs).
 //! - **Power** (`FR-N5` mobile): `set_power_state` and `resume_now` map to letify-link's
 //!   `PowerState`, `Session::resume_now` and `PathManager::invalidate_paths`.
 //! - Rekeying and resumption are letify-link's own: Noise IK, key epochs, resume on a new path.
 //!
-//! Not done yet (TODO in the SPEC): TCP simultaneous open (the punch is UDP only; TCP paths are
-//! dialed), NAT classification beyond the one QAD mapping (it needs three observers), the
-//! real-network acceptance run of the punch, and discovering the main server's relay address from
-//! the hub (it is configured with `EMBER_RELAY_URL` for now).
+//! Not done yet (TODO in the SPEC): NAT classification (letify's driver classifies only with
+//! three STUN servers; Ember offers its one QAD-observed IP), IPv6 punching (the driver binds
+//! IPv4 sockets), the real-network acceptance run of the punch, and discovering the main
+//! server's relay address from the hub (it is configured with `EMBER_RELAY_URL` for now).
 
 mod link;
 mod pkarr;
-mod punch_driver;
+mod punching;
 mod relay_guard;
 mod relay_url;
 
@@ -66,7 +70,7 @@ pub use pkarr::HttpPkarrStore;
 
 use link::{run_demux, run_path_watch, Cmd, OpenError, PeerLink};
 use pkarr::PkarrNode;
-use punch_driver::PunchDriver;
+use punching::Puncher;
 pub use pkarr::{direct_addresses_from_txt, is_record_label};
 use relay_url::{parse_relay_url, RelayTarget};
 
@@ -311,7 +315,7 @@ struct Inner {
     signal: Mutex<Option<Arc<SignalAdapter>>>,
     /// The UDP punch driver, set with the rendezvous when punching is on and an address
     /// observer is configured (EM-11).
-    punch: Mutex<Option<Arc<PunchDriver<SignalAdapter>>>>,
+    punch: Mutex<Option<Arc<Puncher<SignalAdapter>>>>,
     /// Devices admitted through an attached gate (canonical ids); `None` until a gate attaches.
     admitted: Mutex<Option<std::collections::HashSet<NodeId>>>,
     pkarr: Mutex<Option<Arc<PkarrNode>>>,
@@ -531,7 +535,7 @@ impl Inner {
         self.pkarr.lock().unwrap().clone()
     }
 
-    fn punch(&self) -> Option<Arc<PunchDriver<SignalAdapter>>> {
+    fn punch(&self) -> Option<Arc<Puncher<SignalAdapter>>> {
         self.punch.lock().unwrap().clone()
     }
 
@@ -642,14 +646,7 @@ impl Inner {
                 Some(obs) => vec![Arc::new(QadObserver::new(obs.addr, obs.node.map(node_of)).wait(PUNCH_OBSERVE_WAIT))],
                 None => vec![Arc::new(RelayHostObserver { inner: Arc::downgrade(self) })],
             };
-            // Punch sockets bind where the TCP listener does; on any interface, in the
-            // configured observer's address family (IPv4 by default).
-            let bind_ip: std::net::IpAddr = match self.listen.ip() {
-                ip if !ip.is_unspecified() => ip,
-                _ if self.cfg.observer.is_some_and(|o| o.addr.is_ipv6()) => std::net::Ipv6Addr::UNSPECIFIED.into(),
-                _ => std::net::Ipv4Addr::UNSPECIFIED.into(),
-            };
-            *self.punch.lock().unwrap() = Some(PunchDriver::new(adapter.clone(), bind_ip, observers));
+            *self.punch.lock().unwrap() = Some(Puncher::new(adapter.clone(), observers));
         }
         let weak = Arc::downgrade(self);
         let pairing = RelayPairing::new(adapter.clone(), self.identity.clone(), self.acceptor.clone(), move |sender, relay, _address| {
@@ -763,37 +760,32 @@ impl Inner {
         }
     }
 
-    /// A rendezvous message that is not a relay offer: a punch answer goes to the dial waiting
-    /// for it, and a UDP punch offer from an admitted peer is answered (EM-11). The punched path
-    /// goes through the acceptor like a TCP connection, so the policy's revocations and the
-    /// gate's admission apply to it unchanged (`FR-N3`). Offers from a peer this endpoint does
-    /// not admit get no answer, as its relay offers get no meeting. Without a punch driver
-    /// (punching off, or no observer) every punch message is ignored, as before EM-11.
+    /// A rendezvous message that is not a relay offer: a punch message goes to the punch that
+    /// waits for it, and a punch offer from an admitted peer starts letify's driver as the
+    /// responder (EM-11). Every punched path goes through the acceptor like a TCP connection, so
+    /// the policy's revocations and the gate's admission apply to it unchanged (`FR-N3`). Offers
+    /// from a peer this endpoint does not admit get no answer, as its relay offers get no meeting.
+    /// With punching off every punch message is ignored, as before EM-11.
     fn on_punch_message(self: &Arc<Self>, from: NodeId, msg: Message) {
-        let Some(driver) = self.punch() else { return };
-        if driver.take_answer(from, &msg) {
+        let Some(puncher) = self.punch() else { return };
+        if puncher.deliver(from, &msg) || !punching::is_offer(&msg) {
             return;
         }
-        let Some((offer, peer_nat)) = punch_driver::udp_offer(&msg) else { return };
         if !self.admits(&from) || self.closed.load(Ordering::SeqCst) {
             tracing::debug!(peer = %from, "ignoring a punch offer from a peer that is not admitted");
             return;
         }
         let inner = self.clone();
-        tokio::spawn(async move {
-            let path = match driver.respond(from, offer, peer_nat).await {
-                Ok(path) => path,
-                Err(e) => {
-                    tracing::debug!(peer = %from, error = %e, "answering a punch failed");
+        puncher.answer(from, &msg, move |path: letify_link::driver::PunchedPath| {
+            let inner = inner.clone();
+            async move {
+                if inner.closed.load(Ordering::SeqCst) {
                     return;
                 }
-            };
-            if inner.closed.load(Ordering::SeqCst) {
-                return;
-            }
-            match inner.acceptor.accept(path).await {
-                Ok(accepted) => inner.on_accepted(accepted, Via::Direct),
-                Err(e) => tracing::debug!(peer = %from, error = %e, "a punched path was refused"),
+                match inner.acceptor.accept(path.into_transport()).await {
+                    Ok(accepted) => inner.on_accepted(accepted, Via::Direct),
+                    Err(e) => tracing::debug!(peer = %from, error = %e, "a punched path was refused"),
+                }
             }
         });
     }

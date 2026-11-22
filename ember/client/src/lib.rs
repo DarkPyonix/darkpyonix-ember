@@ -10,6 +10,8 @@
 //! - [`owner`]: owner presence (FR-S12): the owner routes, the claim over `owner.sock`, the key.
 //! - [`cache`]: the cold-start snapshot file.
 //! - [`transfers`]: file transfer wire types and the chunked, resumable upload (FR-F5).
+//! - [`relay_stream`]: the OSE's byte stream over the server's relay route (FR-N9.1), for the
+//!   editor window and the gateway (FR-W5b).
 //! - [`client`]: the sync engine tying them together.
 //!
 //! A UI holds a [`Client`], reads with [`Client::read`], and redraws on
@@ -22,6 +24,7 @@ pub mod owner;
 pub mod client;
 pub mod fs_watch;
 pub mod push;
+pub mod relay_stream;
 pub mod state;
 pub mod token;
 pub mod transcript;

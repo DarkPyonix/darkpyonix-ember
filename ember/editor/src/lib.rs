@@ -23,6 +23,7 @@
 //! | [`text_format`] | FR-L31.7: line ending and encoding detection, decode / encode, the status bar's document format |
 //! | [`textmate`] | FR-E6: the grammars extensions contribute (`contributes.grammars`), read into the raw rule model |
 //! | [`ids`] | stable, non-zero, session-unique decoration ids |
+//! | [`debugger`] | debug sessions through the extension host: configuration resolution, DAP order, breakpoints, stack, variables, console |
 //! | [`coords`] | widget (0-based) ↔ extension host (1-based) positions, UTF-16 helpers, ranges through edits |
 //! | [`widget`] | the FR-38 `CodeEditor` wire contract (44-byte decoration records, events, commands) |
 //! | [`bridge`] | [`WidgetBridge`]: `SessionUpdate` → per-document widget state and encoded `Decorations` bytes |
@@ -41,6 +42,7 @@ pub mod bridge;
 pub mod codelens;
 pub mod commands;
 pub mod coords;
+pub mod debugger;
 pub mod engine;
 pub mod extensions;
 pub mod fallback;
@@ -81,6 +83,7 @@ pub use crate::engine::{CoreOptions, Effect, ExternalChange, Input, SessionCore,
 pub use crate::languages::LanguageInfo;
 pub use crate::text_format::{DocumentFormat, Encoding, EncodingMode, Eol};
 pub use crate::coords::{WidgetPos, WidgetRange};
+pub use crate::debugger::{ConfigSelector, DebugRequest, DebugUpdate};
 pub use crate::language::{LanguageRequest, LanguageUpdate};
 pub use crate::session::{DirLister, EditorSession, ServerSettingsFile, SessionConfig};
 pub use crate::settings::{EditorSettings, SettingsLayer, SettingsScope, SettingsScopes};

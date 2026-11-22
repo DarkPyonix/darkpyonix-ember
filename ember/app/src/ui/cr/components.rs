@@ -1298,10 +1298,10 @@ pub fn name_then_pill_width(room: f32, natural: f32, pill: f32, gap: f32) -> Opt
 /// pill and whatever follows the row stay on screen (CSS `flex:0 1 auto;min-width:0` on the
 /// name and `flex:none` on the pill; `.detail .topbar` in the mockup). The pill never shrinks.
 ///
-/// TODO(compose-rust, unfiled: a weight that leaves a child its own size): the measuring below
-/// goes when the toolkit has one. compose-rust#778 brought `Modifier::max_width`, `max_height`
-/// and `size_in`, which cap a node at a fixed size but not at what its siblings leave, and
-/// `Modifier::weight` still fills its whole share (no `fill = false`).
+/// TODO(compose-rust#981): the measuring below goes when the toolkit adds a weight that leaves
+/// a child its own size (`weight(fill = false)`). compose-rust#778 brought `Modifier::max_width`,
+/// `max_height` and `size_in`, which cap a node at a fixed size but not at what its siblings
+/// leave, and `Modifier::weight` still fills its whole share (no `fill = false`).
 ///
 /// So a weighted child fills its share, and unweighted ones are measured
 /// first, in order, each with what the ones before it left (compose-rust
@@ -1778,11 +1778,11 @@ pub fn EmberCardSized(
         .border(1.0, paint(border))
         .corner_radius(CORNER_LG);
     // A Box rather than `Card`, whose design-system shape ignores `corner_radius`.
-    // TODO(#673): the mockup's 16/20 padding is asymmetric. The toolkit has per-side padding
-    // (`Modifier::padding_xy`, `padding_each`), but putting it on the card in place of the
+    // TODO(compose-rust#982): the mockup's 16/20 padding is asymmetric. The toolkit has per-side
+    // padding (`Modifier::padding_xy`, `padding_each`), but putting it on the card in place of the
     // spacers below (tried in 1f507612) moved the first hatched bar of the home 비용과 토큰 추이
-    // card at 1440 so its left edge was clipped by one pixel. Until a display pass finds why, 16
-    // is used on all sides unless the caller passes one, and the side spacers stay.
+    // card at 1440 so its left edge was clipped by one pixel. Keep uniform 16 + 4 dp side spacers
+    // until compose-rust#982 lands (tracked under #673).
     // The 4 dp spacers raise the uniform 16 to the mockup's 20 on the sides (`--pad-card`).
     let side = if padding.is_some() { 0.0 } else { PAD_CARD_H - PAD_CARD_V };
     { use ::compose_rust::ui::Box; Box!(modifier = m.padding(padding.unwrap_or(PAD_CARD_V)), {
@@ -1809,10 +1809,11 @@ pub fn InsetPanelSized(fill_max_width: bool, fill_max_height: bool, content: imp
     if fill_max_height {
         m = m.fill_max_height();
     }
-    // TODO(#673): the mockup's 12/16 padding is asymmetric; 12 on all sides and the 4 dp
-    // spacers below. The toolkit has per-side padding (`Modifier::padding_xy`, `padding_each`),
+    // TODO(compose-rust#982): the mockup's 12/16 padding is asymmetric; 12 on all sides and the
+    // 4 dp spacers below. The toolkit has per-side padding (`Modifier::padding_xy`, `padding_each`),
     // but the same change on cards (tried in 1f507612) clipped a chart bar's left edge by one
-    // pixel at 1440, and no captured screen shows an inset panel, so it waits for a display pass.
+    // pixel at 1440, and no captured screen shows an inset panel. Keep uniform 12 + 4 dp side
+    // spacers until compose-rust#982 lands (tracked under #673).
     let alignment = if fill_max_height { Some(Alignment::CenterStart) } else { None };
     { use ::compose_rust::ui::Box; Box!(
         modifier = m.background(paint(theme.palette.surface_2)).corner_radius(CORNER_MD).padding(PAD_ROW_V),

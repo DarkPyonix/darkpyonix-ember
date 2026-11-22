@@ -5,9 +5,20 @@ import type { ViewCell } from "../format/cells";
 import type { HostCell, NotebookHost, NotifyLevel } from "../collab/session";
 import type { OutputsHost } from "../connection";
 import type { DocumentCell, Kernel, NbOutput } from "../manager/types";
-import { convertOutput, type ConvertedOutput } from "../run/outputs";
+import {
+  convertOutput, convertOutputWithQuarkdown, hasQuarkdownOutput, type ConvertedOutput,
+} from "../run/outputs";
+import { renderQuarkdown } from "../run/quarkdown";
 import type { ExecHandle, ExecSink, RunInfo } from "../run/tracker";
 import { META_KEY, bindCellId, cellData, cellIdOf, viewOfCell } from "./serializer";
+
+function quarkdownCliPath(): string {
+  return vscode.workspace.getConfiguration("darkpyonix").get<string>("quarkdown.cliPath") || "quarkdown";
+}
+
+function renderQuarkdownWithConfig(source: string) {
+  return renderQuarkdown(source, { cliPath: quarkdownCliPath() });
+}
 
 export function toCellOutput(c: ConvertedOutput): vscode.NotebookCellOutput {
   return new vscode.NotebookCellOutput(
@@ -156,8 +167,19 @@ export class VsNotebookHost implements NotebookHost, OutputsHost {
     }
     exec.start();
     if (typeof cell.execution_count === "number") exec.executionOrder = cell.execution_count;
-    void exec.replaceOutput((cell.outputs ?? []).map((o) => toCellOutput(convertOutput(o))));
-    exec.end(cell.status === "ok" ? true : cell.status ? false : undefined);
+    const rawOutputs = cell.outputs ?? [];
+    const hasQd = rawOutputs.some(hasQuarkdownOutput);
+    if (!hasQd) {
+      void exec.replaceOutput(rawOutputs.map((o) => toCellOutput(convertOutput(o))));
+      exec.end(cell.status === "ok" ? true : cell.status ? false : undefined);
+    } else {
+      void Promise.all(
+        rawOutputs.map((o) => convertOutputWithQuarkdown(o, renderQuarkdownWithConfig)),
+      ).then((converted) => {
+        void exec.replaceOutput(converted.map(toCellOutput));
+        exec.end(cell.status === "ok" ? true : cell.status ? false : undefined);
+      });
+    }
     if (cell.stale) this.ui.stale.add(nbCell);
     else this.ui.stale.delete(nbCell);
     this.ui.onChange();
@@ -225,6 +247,14 @@ export class VsExecSink implements ExecSink {
         outputs.push(out);
         last = { out, stream: conv.stream };
         void exec.appendOutput(out);
+        if (hasQuarkdownOutput(o)) {
+          void convertOutputWithQuarkdown(o, renderQuarkdownWithConfig).then((rendered) => {
+            void exec.replaceOutputItems(
+              rendered.items.map((i) => new vscode.NotebookCellOutputItem(i.data, i.mime)),
+              out,
+            );
+          });
+        }
       },
       clear(wait: boolean) {
         if (wait) {

@@ -906,3 +906,110 @@ fn fr_e1_unimplemented_main_thread_calls_fall_back_and_are_counted() {
     assert_eq!(fx, vec![Effect::Respond { req: 5, result: Ok(Reply::Empty) }]);
     assert_eq!(c.unimplemented_calls(), &before);
 }
+
+// ---- FR-L31.16: log output channels arrive as registered loggers (#1019) ----------------------
+
+fn logger_uri(name: &str) -> Value {
+    json!({"$mid": 1, "scheme": "vscode-remote", "authority": AUTH, "path": format!("/logs/{name}.log")})
+}
+
+fn register_logger(c: &mut SessionCore, t0: Instant, req: u32, id: &str, name: &str, hidden: bool) -> Vec<Effect> {
+    let logger = json!({"resource": logger_uri(id), "id": id, "name": name, "hidden": hidden, "extensionId": "vscode.json-language-features"});
+    c.handle(t0, request(req, "MainThreadLogger", "$registerLogger", vec![logger]))
+}
+
+fn channel_list(fx: &[Effect]) -> Option<Vec<ember_editor::OutputChannel>> {
+    updates(fx).into_iter().rev().find_map(|u| match u {
+        SessionUpdate::OutputChannels { channels, .. } => Some(channels.clone()),
+        _ => None,
+    })
+}
+
+#[test]
+fn fr_l31_16_a_registered_logger_becomes_an_output_channel_showing_its_file() {
+    let t0 = Instant::now();
+    let mut c = core(t0);
+    let fx = register_logger(&mut c, t0, 1, "json.log", "JSON Language Server", false);
+    assert!(fx.contains(&Effect::Respond { req: 1, result: Ok(Reply::Empty) }), "{fx:#?}");
+    let list = channel_list(&fx).expect("the channel list changes");
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].label, "JSON Language Server");
+    assert_eq!(list[0].file, Some(serde_json::from_value(logger_uri("json.log")).unwrap()));
+    // The file is read right away and its text is the channel's.
+    let read = channel_reads(&fx).remove(0);
+    assert_eq!(read.0, serde_json::from_value(logger_uri("json.log")).unwrap());
+    let (_, up) = serve_channel_read(&mut c, t0, read, "[info] started\n");
+    assert_eq!(up.unwrap()[0].text, "[info] started\n");
+
+    // Registering the same logger again updates the channel instead of adding a second one.
+    let fx = register_logger(&mut c, t0, 2, "json.log", "JSON Language Server", false);
+    assert_eq!(channel_list(&fx).unwrap().len(), 1);
+}
+
+#[test]
+fn fr_l31_16_a_log_channel_follows_its_file() {
+    let t0 = Instant::now();
+    let mut c = core(t0);
+    let fx = register_logger(&mut c, t0, 1, "json.log", "JSON Language Server", false);
+    let read = channel_reads(&fx).remove(0);
+    serve_channel_read(&mut c, t0, read, "one\n");
+    assert!(c.next_wake().is_some(), "a visible log channel schedules its next read");
+
+    // Nothing is read before the second is up.
+    let fx = c.handle(t0 + Duration::from_millis(500), Input::Tick);
+    assert!(channel_reads(&fx).is_empty());
+
+    // A second after the registration the shown log channel is read again and shows the growth.
+    let t1 = t0 + Duration::from_millis(1100);
+    let fx = c.handle(t1, Input::Tick);
+    let read = channel_reads(&fx).remove(0);
+    let (_, up) = serve_channel_read(&mut c, t1, read, "one\ntwo\n");
+    assert_eq!(up.unwrap()[0].text, "one\ntwo\n");
+
+    // A log channel the window does not show is not read.
+    let fx = register_logger(&mut c, t1, 2, "other.log", "Other", false);
+    let read = channel_reads(&fx).remove(0);
+    serve_channel_read(&mut c, t1, read, "");
+    c.handle(t1, Input::ActiveOutputChannel { id: Some("ember-logger-other.log".into()) });
+    let fx = c.handle(t1 + Duration::from_millis(1100), Input::Tick);
+    let reads = channel_reads(&fx);
+    assert_eq!(reads.len(), 1);
+    assert_eq!(reads[0].0, serde_json::from_value(logger_uri("other.log")).unwrap());
+}
+
+#[test]
+fn fr_l31_16_deregister_and_visibility_of_a_logger() {
+    let t0 = Instant::now();
+    let mut c = core(t0);
+    let fx = register_logger(&mut c, t0, 1, "json.log", "JSON Language Server", false);
+    let read = channel_reads(&fx).remove(0);
+    serve_channel_read(&mut c, t0, read, "text\n");
+
+    // Hidden: gone from the list, text kept.
+    let fx = c.handle(t0, request(2, "MainThreadLogger", "$setVisibility", vec![logger_uri("json.log"), json!(false)]));
+    assert!(fx.contains(&Effect::Respond { req: 2, result: Ok(Reply::Empty) }));
+    assert!(channel_list(&fx).unwrap().is_empty());
+
+    // Shown again: back in the list with its text, and the file is read again.
+    let fx = c.handle(t0, request(3, "MainThreadLogger", "$setVisibility", vec![logger_uri("json.log"), json!(true)]));
+    let list = channel_list(&fx).unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].text, "text\n");
+    assert_eq!(channel_reads(&fx).len(), 1);
+
+    // Deregistered: removed.
+    let fx = c.handle(t0, request(4, "MainThreadLogger", "$deregisterLogger", vec![logger_uri("json.log")]));
+    assert!(fx.contains(&Effect::Respond { req: 4, result: Ok(Reply::Empty) }));
+    assert!(channel_list(&fx).unwrap().is_empty());
+}
+
+#[test]
+fn fr_l31_16_a_hidden_logger_is_not_a_channel() {
+    let t0 = Instant::now();
+    let mut c = core(t0);
+    let fx = register_logger(&mut c, t0, 1, "quiet.log", "Quiet", true);
+    assert!(fx.contains(&Effect::Respond { req: 1, result: Ok(Reply::Empty) }));
+    assert!(channel_list(&fx).map_or(true, |l| l.is_empty()));
+    assert!(channel_reads(&fx).is_empty());
+    assert!(c.next_wake().is_none());
+}

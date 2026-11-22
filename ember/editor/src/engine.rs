@@ -136,6 +136,8 @@ pub enum Input {
     /// The user closed extension message `id`: with the chosen button's handle, or `None` for
     /// `undefined` (FR-L31.16).
     AnswerMessage { id: u64, handle: Option<i64> },
+    /// The window shows output channel `id`; a log channel is read again only while it is shown.
+    ActiveOutputChannel { id: Option<String> },
     /// A language feature the window asks for (FR-L31.13); answered with [`SessionUpdate::Language`].
     Language(crate::language::LanguageRequest),
     /// An event of an extension webview or its host (FR-E8).
@@ -339,6 +341,10 @@ pub struct SessionCore {
     trust: crate::trust::WorkspaceTrust,
     output_seq: u64,
     output_channels: Vec<crate::output::OutputChannel>,
+    /// The output channel the window shows, as [`Input::ActiveOutputChannel`] last said.
+    active_output: Option<String>,
+    /// When the log channels are read again (one second apart while any is visible).
+    log_poll: crate::inline::Debouncer,
     /// Open `$showMessage` calls by Ember message id (FR-L31.16).
     pending_messages: HashMap<u64, u32>,
     next_message_id: u64,
@@ -407,6 +413,8 @@ impl SessionCore {
             trust: crate::trust::WorkspaceTrust::default(),
             output_seq: 0,
             output_channels: Vec::new(),
+            active_output: None,
+            log_poll: Default::default(),
             pending_messages: HashMap::new(),
             next_message_id: 0,
             unimplemented: BTreeMap::new(),
@@ -461,6 +469,7 @@ impl SessionCore {
             Input::SetEncoding { uri, encoding, mode } => self.on_set_encoding(&uri, encoding, mode),
             Input::SetLanguage { uri, language_id } => self.on_set_language(&uri, language_id),
             Input::DecideWorkspaceTrust { trusted } => self.on_decide_trust(trusted),
+            Input::ActiveOutputChannel { id } => self.active_output = id,
             Input::AnswerMessage { id, handle } => {
                 if let Some(req) = self.pending_messages.remove(&id) {
                     let reply = match handle { Some(h) => Reply::Json(Value::from(h)), None => Reply::Empty };
@@ -494,7 +503,8 @@ impl SessionCore {
         let b = self.codelens_due.values().filter_map(|d| d.deadline());
         let c = self.folding_due.values().filter_map(|d| d.deadline());
         let d = self.semantic_due.values().filter_map(|d| d.deadline());
-        a.chain(b).chain(c).chain(d).min()
+        let e = self.log_poll.deadline();
+        a.chain(b).chain(c).chain(d).chain(e).min()
     }
 
     /// Every known language with its display name (FR-L31.7).
@@ -2180,6 +2190,9 @@ impl SessionCore {
 
     fn run_timers(&mut self) {
         let now = self.now;
+        if self.log_poll.take_due(now) {
+            self.poll_log_channel();
+        }
         let due_inline: Vec<String> =
             self.inline.iter_mut().filter_map(|(k, s)| s.debounce.take_due(now).then(|| k.clone())).collect();
         for k in due_inline {

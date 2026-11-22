@@ -33,6 +33,16 @@ pub struct OutputChannel {
     /// An `$update` arrived while a read was in flight; read once more when it lands.
     #[serde(skip)]
     pub dirty: bool,
+    /// The channel is a registered logger (`MainThreadLogger.$registerLogger`): the extension host
+    /// wrote its file and sends no `$update`, so the session reads the file again on a timer.
+    #[serde(skip)]
+    pub log: bool,
+    /// A logger the extension host set invisible: kept with its text, left out of the channel list.
+    #[serde(skip)]
+    pub hidden: bool,
+    /// The text is built from `MainThreadLogger.$log` calls; the file is not read.
+    #[serde(skip)]
+    pub in_memory: bool,
 }
 
 impl OutputChannel {
@@ -45,6 +55,9 @@ impl OutputChannel {
             start: 0,
             reading: false,
             dirty: false,
+            log: false,
+            hidden: false,
+            in_memory: false,
         }
     }
 

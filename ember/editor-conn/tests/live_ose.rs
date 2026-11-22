@@ -307,6 +307,9 @@ fn live_reply(proxy: Option<&str>, method: &str, seq: u64) -> Reply {
 #[derive(Default)]
 struct OutputLog {
     registers: Vec<(String, UriComponents)>,
+    /// `MainThreadLogger.$registerLogger` calls: (name or id, resource). A log output channel
+    /// (`createOutputChannel(name, { log: true })`) arrives this way.
+    loggers: Vec<(String, UriComponents)>,
     updates: Vec<(String, Value, Value)>,
 }
 
@@ -358,6 +361,14 @@ async fn respond_loop(
                             log.updates.push((channel, json(1), json(2)));
                         }
                         _ => {}
+                    }
+                }
+                if r.proxy == Some("MainThreadLogger") && r.method == "$registerLogger" {
+                    let logger = r.args.first().and_then(Arg::as_json).cloned().unwrap_or(Value::Null);
+                    let label = ["name", "id"].iter().find_map(|k| logger.get(*k).and_then(Value::as_str)).unwrap_or_default().to_owned();
+                    match logger.get("resource").cloned().map(serde_json::from_value::<UriComponents>) {
+                        Some(Ok(file)) => outputs.lock().unwrap_or_else(|e| e.into_inner()).loggers.push((label, file)),
+                        _ => eprintln!("[live-ose] cannot parse the resource of {name}; args {}", args_preview(&r.args)),
                     }
                 }
                 if r.proxy == Some(ember_editor_conn::actors::generated::main_thread_diagnostics::PROXY) && r.method == "$changeMany" {
@@ -721,40 +732,69 @@ async fn live_ose_end_to_end() {
     assert!(markers.iter().any(|m| m.severity == 8), "expected an Error marker: {markers:?}");
     steps.done("4. MainThreadDiagnostics.$changeMany (JSON errors)");
 
-    // The JSON language client registered an output channel for its log. The text of a channel is
-    // not sent over RPC: it is in the channel's log file, which `$update` says has changed.
-    let (label, file, update_calls) = {
+    // The JSON language client's log is a log output channel (`createOutputChannel(name, { log: true })`):
+    // the extension host's logger service writes the file and registers it with
+    // `MainThreadLogger.$registerLogger`. A plain channel would arrive as `MainThreadOutputService.$register`
+    // instead, and both are accepted. The text of a channel is never sent over RPC; it is in the file.
+    let channel_file = |outputs: &Mutex<OutputLog>| -> Result<(String, UriComponents), String> {
         let log = outputs.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((l, f)) = log.loggers.iter().find(|(l, _)| l == "JSON Language Server") {
+            return Ok((format!("MainThreadLogger.$registerLogger {l}"), f.clone()));
+        }
+        if let Some((l, f)) = log.registers.iter().find(|(l, _)| l == "JSON Language Server") {
+            return Ok((format!("MainThreadOutputService.$register {l}"), f.clone()));
+        }
+        let loggers: Vec<&str> = log.loggers.iter().map(|(l, _)| l.as_str()).collect();
         let labels: Vec<&str> = log.registers.iter().map(|(l, _)| l.as_str()).collect();
-        let (label, file) = log
-            .registers
-            .iter()
-            .find(|(l, _)| l == "JSON Language Server")
-            .unwrap_or_else(|| panic!("no MainThreadOutputService.$register for \"JSON Language Server\" arrived; registered channels: {labels:?}"));
-        // The extension host named the channel with the id we answered `$register` with.
-        let n = log.updates.iter().filter(|(id, _, _)| id.starts_with("ember-live-output-")).count();
-        (label.clone(), file.clone(), n)
+        Err(format!("no output channel named \"JSON Language Server\" arrived; registered loggers: {loggers:?}; registered channels: {labels:?}"))
     };
-    println!("[live-ose]   output channel {label:?}: file {} ({} $update calls seen)", file.key(), update_calls);
+    // The extension host registers the logger when the client starts, so wait for it as for the file.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let (via, file) = loop {
+        match channel_file(&outputs) {
+            Ok(found) => break found,
+            Err(why) if tokio::time::Instant::now() >= deadline => panic!("timed out after 30 s: {why}"),
+            Err(_) => tokio::time::sleep(Duration::from_millis(250)).await,
+        }
+    };
+    let update_calls = outputs.lock().unwrap_or_else(|e| e.into_inner()).updates.len();
+    println!("[live-ose]   JSON Language Server arrived as {via}: file {} ({update_calls} $update calls seen)", file.key());
     for (id, mode, till) in outputs.lock().unwrap_or_else(|e| e.into_inner()).updates.iter() {
         println!("[live-ose]   $update {id} mode={mode} till={till}");
     }
     // The URI transformer normally hands us `vscode-remote://`; a `file:` one is a path on the server.
     let log_file = if file.scheme == "file" { UriComponents::remote(&authority, &file.path) } else { file.clone() };
-    // The extension host flushes the log on its own schedule, so give it a moment.
-    let log_bytes = within("the output channel's log file", 30, async {
+    // The JSON client logs nothing at the default log level, so its file is created and stays empty
+    // (0 bytes at 1.139.1). It has to be readable through the file channel; and some registered
+    // logger's file, read the same way, has to have text, or reading a log file would be untested.
+    let json_log = within("the JSON Language Server log file to be readable", 30, async {
         loop {
             match fs.read_file(&log_file).await {
-                Ok(bytes) if !bytes.is_empty() => return bytes,
-                Ok(_) => {}
+                Ok(bytes) => return bytes,
                 Err(e) => println!("[live-ose]   log file not readable yet: {e}"),
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
     })
     .await;
-    println!("[live-ose]   log file has {} bytes: {:?}", log_bytes.len(), String::from_utf8_lossy(&log_bytes).lines().next());
-    steps.done("4. output channel log file exists and is non-empty");
+    println!("[live-ose]   JSON Language Server log file: {} bytes", json_log.len());
+    let (with_text, log_bytes) = within("a registered logger's file to have text", 30, async {
+        loop {
+            let files: Vec<(String, UriComponents)> = outputs.lock().unwrap_or_else(|e| e.into_inner()).loggers.clone();
+            for (name, f) in files {
+                let f = if f.scheme == "file" { UriComponents::remote(&authority, &f.path) } else { f };
+                if let Ok(bytes) = fs.read_file(&f).await {
+                    if !bytes.is_empty() {
+                        return (name, bytes);
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    })
+    .await;
+    println!("[live-ose]   logger {with_text:?} file has {} bytes: {:?}", log_bytes.len(), String::from_utf8_lossy(&log_bytes).lines().next());
+    steps.done("4. output channel log file is readable, and a logger file has text");
 
     // ---- 5. shutdown ----------------------------------------------------------------------------
     exthost::terminate(peer.connection());

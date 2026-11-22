@@ -8,7 +8,7 @@
 
 use ember_editor_conn::actors::generated::{
     main_thread_bulk_edits, main_thread_commands, main_thread_diagnostics, main_thread_documents, main_thread_language_features,
-    main_thread_languages, main_thread_message_service, main_thread_output_service, main_thread_search, main_thread_window,
+    main_thread_languages, main_thread_logger, main_thread_message_service, main_thread_output_service, main_thread_search, main_thread_window,
     main_thread_workspace,
 };
 use ember_editor_conn::actors::{Ctx, Outcome};
@@ -23,6 +23,11 @@ use crate::codelens::CommandDto;
 use crate::registry::{InlineMeta, RegistryCall};
 use crate::replies::session_reply;
 use crate::trust::TrustAnswer;
+
+/// How often the log channel the window shows is read again. Log files are written by the
+/// extension host, which sends no `$update` for them, and the editor watches the workspace folder
+/// only, so a log file outside it has no change event to wait for.
+const LOG_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
 fn empty() -> Outcome {
     Outcome::Reply(Reply::Empty)
@@ -51,6 +56,7 @@ impl SessionCore {
         let routed = match r.proxy {
             Some(main_thread_diagnostics::PROXY) => Some(main_thread_diagnostics::dispatch(self, &cx, method, args)),
             Some(main_thread_commands::PROXY) => Some(main_thread_commands::dispatch(self, &cx, method, args)),
+            Some(main_thread_logger::PROXY) => Some(main_thread_logger::dispatch(self, &cx, method, args)),
             Some(main_thread_output_service::PROXY) => Some(main_thread_output_service::dispatch(self, &cx, method, args)),
             Some(main_thread_message_service::PROXY) => Some(main_thread_message_service::dispatch(self, &cx, method, args)),
             Some(main_thread_search::PROXY) => Some(main_thread_search::dispatch(self, &cx, method, args)),
@@ -135,7 +141,7 @@ impl SessionCore {
     }
 
     fn output_changed(&mut self, active_id: Option<String>) {
-        let channels = self.output_channels.clone();
+        let channels = self.output_channels.iter().filter(|c| !c.hidden).cloned().collect();
         self.ui(SessionUpdate::OutputChannels { channels, active_id });
     }
 
@@ -175,6 +181,40 @@ impl SessionCore {
         }
         if again {
             self.read_output_channel(id);
+        }
+    }
+
+    /// Index of the logger channel whose file is `file`.
+    fn log_channel_of(&self, file: &UriComponents) -> Option<usize> {
+        let key = file.key();
+        self.output_channels.iter().position(|c| c.log && c.file.as_ref().is_some_and(|f| f.key() == key))
+    }
+
+    /// The channel the window shows: the one it named, else the first in the list, as the window does.
+    fn shown_output_channel(&self) -> Option<&crate::output::OutputChannel> {
+        let mut visible = self.output_channels.iter().filter(|c| !c.hidden);
+        match &self.active_output {
+            Some(id) => self.output_channels.iter().find(|c| &c.id == id && !c.hidden).or_else(|| visible.next()),
+            None => visible.next(),
+        }
+    }
+
+    /// Start the one-second read cycle of the log channels unless it is running.
+    fn start_log_poll(&mut self) {
+        if self.log_poll.deadline().is_none() {
+            self.log_poll.schedule(self.now, LOG_POLL);
+        }
+    }
+
+    /// The log channel the window shows is read again; the cycle goes on while any log channel
+    /// is visible.
+    pub(super) fn poll_log_channel(&mut self) {
+        if let Some(ch) = self.shown_output_channel().filter(|c| c.log && !c.in_memory) {
+            let id = ch.id.clone();
+            self.read_output_channel(&id);
+        }
+        if self.output_channels.iter().any(|c| c.log && !c.hidden) {
+            self.log_poll.schedule(self.now, LOG_POLL);
         }
     }
 
@@ -238,6 +278,105 @@ impl main_thread_commands::Commands for SessionCore {
     }
 }
 
+/// The fields of an `ILoggerResource` the editor uses.
+struct LoggerResource {
+    resource: UriComponents,
+    id: String,
+    name: Option<String>,
+    hidden: bool,
+}
+
+impl LoggerResource {
+    fn parse(v: &Value) -> Option<Self> {
+        let resource = serde_json::from_value(v.get("resource")?.clone()).ok()?;
+        let id = v.get("id")?.as_str()?.to_owned();
+        let name = v.get("name").and_then(Value::as_str).map(str::to_owned);
+        let hidden = v.get("hidden").and_then(Value::as_bool).unwrap_or(false);
+        Some(Self { resource, id, name, hidden })
+    }
+}
+
+/// A log output channel is a logger the extension host registered: the workbench shows its file
+/// as an output channel (`logs.contribution.ts`), unless the logger is hidden. The extension host
+/// writes the file itself, so the channel is the file's text, read again while it is shown.
+impl main_thread_logger::Logger for SessionCore {
+    fn register_logger(&mut self, _cx: &Ctx, args: main_thread_logger::RegisterLoggerArgs) -> Outcome {
+        let Some(logger) = LoggerResource::parse(&args.logger) else {
+            tracing::warn!("ember-editor: cannot decode MainThreadLogger.$registerLogger: {}", args.logger);
+            return empty();
+        };
+        let id = format!("ember-logger-{}", logger.id);
+        let label = logger.name.unwrap_or_else(|| logger.id.clone());
+        let existing = self.output_channels.iter().position(|c| c.id == id);
+        match existing {
+            Some(i) => {
+                let ch = &mut self.output_channels[i];
+                ch.label = label;
+                ch.file = Some(logger.resource);
+                ch.hidden = logger.hidden;
+            }
+            None => {
+                let mut ch = crate::output::OutputChannel::with_file(id.clone(), label, logger.resource);
+                ch.log = true;
+                ch.hidden = logger.hidden;
+                self.output_channels.push(ch);
+            }
+        }
+        if !logger.hidden {
+            self.start_log_poll();
+            self.read_output_channel(&id);
+        }
+        self.output_changed(None);
+        empty()
+    }
+
+    fn deregister_logger(&mut self, _cx: &Ctx, args: main_thread_logger::DeregisterLoggerArgs) -> Outcome {
+        if let Some(i) = self.log_channel_of(&args.resource) {
+            self.output_channels.remove(i);
+            self.output_changed(None);
+        }
+        empty()
+    }
+
+    fn set_visibility(&mut self, _cx: &Ctx, args: main_thread_logger::SetVisibilityArgs) -> Outcome {
+        if let Some(i) = self.log_channel_of(&args.resource) {
+            let id = self.output_channels[i].id.clone();
+            self.output_channels[i].hidden = !args.visible;
+            if args.visible {
+                self.start_log_poll();
+                self.read_output_channel(&id);
+            }
+            self.output_changed(None);
+        }
+        empty()
+    }
+
+    /// A logger the workbench would write itself: when a channel shows that file, its lines are
+    /// kept in memory as the channel's text. Nothing is written to the file.
+    fn create_logger(&mut self, _cx: &Ctx, _args: main_thread_logger::CreateLoggerArgs) -> Outcome {
+        empty()
+    }
+
+    fn log(&mut self, _cx: &Ctx, args: main_thread_logger::LogArgs) -> Outcome {
+        if let Some(i) = self.log_channel_of(&args.file) {
+            let ch = &mut self.output_channels[i];
+            ch.in_memory = true;
+            for m in &args.messages {
+                if let Some(line) = m.get(1).and_then(Value::as_str) {
+                    ch.append(line);
+                    ch.append("\n");
+                }
+            }
+            self.output_changed(None);
+        }
+        empty()
+    }
+
+    fn flush(&mut self, _cx: &Ctx, _args: main_thread_logger::FlushArgs) -> Outcome {
+        empty()
+    }
+}
+
 impl main_thread_output_service::OutputService for SessionCore {
     fn register(&mut self, _cx: &Ctx, args: main_thread_output_service::RegisterArgs) -> Outcome {
         Outcome::Reply(self.register_output_channel(args.label, args.file))
@@ -265,6 +404,7 @@ impl main_thread_output_service::OutputService for SessionCore {
     }
 
     fn reveal(&mut self, _cx: &Ctx, args: main_thread_output_service::RevealArgs) -> Outcome {
+        self.active_output = Some(args.channel_id.clone());
         self.output_changed(Some(args.channel_id));
         empty()
     }

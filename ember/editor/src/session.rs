@@ -759,6 +759,11 @@ impl EditorSession {
         self.send(Command::Input(Input::AnswerMessage { id, handle }))
     }
 
+    /// The window shows output channel `id`; the session reads a log channel again only while it is shown.
+    pub fn set_active_output_channel(&self, id: Option<String>) -> Result<(), Error> {
+        self.send(Command::Input(Input::ActiveOutputChannel { id }))
+    }
+
     /// Replace the chosen matches (FR-E7); answered with [`SessionUpdate::ReplaceDone`].
     pub fn replace(&self, id: u64, request: crate::search::ReplaceRequest) -> Result<(), Error> {
         self.send(Command::Input(Input::Replace { id, request }))

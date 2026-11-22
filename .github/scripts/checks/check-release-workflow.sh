@@ -67,11 +67,45 @@ if git ls-files 2>/dev/null | grep -Eiq '\.(jks|keystore)$'; then
     echo 'error: a keystore is committed; it belongs in the EMBER_ANDROID_* secrets' >&2; fail=1
 fi
 [ "$(grep -c 'contents: write' "$f")" = 1 ] || { echo "error: $f: only the publish job may have contents: write" >&2; fail=1; }
+# OSE install bundle in Ember release archives (FR-W4 acceptance step 6, #83).
+need 'ember/ose/VERSION' 'release must read ember/ose/VERSION for OSE_VERSION'
+need 'cp ember/server/scripts/install-ose\.sh "stage/\$name/"' 'release archives must bundle install-ose.sh'
+need 'stage/\$name/OSE_VERSION' 'release archives must bundle OSE_VERSION'
 for s in .github/scripts/release/check-tag-version.sh .github/scripts/release/pack-velopack.sh \
-         .github/scripts/release/dry-run-summary.sh ember/app/scripts/build-android.sh; do
+         .github/scripts/release/dry-run-summary.sh ember/app/scripts/build-android.sh \
+         ember/server/scripts/install-ose.sh ember/ose/VERSION; do
     [ -f "$s" ] || { echo "error: $s missing" >&2; fail=1; }
 done
 grep -q 'scripts/package-velopack\.py' .github/scripts/release/pack-velopack.sh 2>/dev/null \
     || { echo 'error: pack-velopack.sh must call compose-rust scripts/package-velopack.py' >&2; fail=1; }
 if grep -q "pull_request\|branches:" "$f"; then echo "error: $f must be tag-only" >&2; fail=1; fi
+
+# OSE release publishing invariants (FR-W4 acceptance step 6, #83).
+ose_pub=.github/workflows/publish-ose.yml
+ose_test=.github/workflows/test-ose.yml
+need_in() { grep -Eq -e "$2" "$1" || { echo "error: $1: $3" >&2; fail=1; }; }
+for wf in "$ose_pub" "$ose_test"; do
+    [ -f "$wf" ] || { echo "error: $wf missing" >&2; fail=1; }
+done
+if [ -f "$ose_pub" ]; then
+    need_in "$ose_pub" 'workflows: \["OSE build"\]' 'must trigger on "OSE build" workflow_run'
+    need_in "$ose_pub" "startsWith\\(github\\.event\\.workflow_run\\.head_branch, 'ose-v'\\)" 'publish job must run only on an ose-v* tag'
+    need_in "$ose_pub" 'repos/\$GITHUB_REPOSITORY/commits/\$TAG' 'publish job must verify the tag commit SHA'
+    need_in "$ose_pub" '"\$tagged" != "\$SHA"' 'publish job must fail when the tag SHA moved'
+    need_in "$ose_pub" 'sha256sum -c \./\*\.sha256' 'publish job must verify .sha256 checksums'
+    need_in "$ose_pub" 'cat \./\*\.sha256 > SHA256SUMS' 'publish job must generate SHA256SUMS'
+    need_in "$ose_pub" 'gh release create "\$TAG" dist/\*\.tar\.gz dist/SHA256SUMS' 'publish job must upload tar.gz archives and SHA256SUMS'
+    need_in "$ose_pub" '--verify-tag' 'OSE release must verify the tag'
+    [ "$(grep -c 'contents: write' "$ose_pub")" = 1 ] \
+        || { echo "error: $ose_pub: only the publish job may have contents: write" >&2; fail=1; }
+    if sed -n '1,/^jobs:/p' "$ose_pub" | grep -q 'contents: write'; then
+        echo "error: $ose_pub: top-level permissions must not grant contents: write" >&2; fail=1
+    fi
+    sed -n '/^  publish:/,/^  [a-z-]*:$/p' "$ose_pub" | grep -q 'contents: write' \
+        || { echo "error: $ose_pub: publish job must hold contents: write" >&2; fail=1; }
+fi
+if [ -f "$ose_test" ]; then
+    need_in "$ose_test" '^name: OSE build$' 'workflow name must be "OSE build" to match publish-ose.yml'
+    need_in "$ose_test" 'tags: \["ose-v\*"\]' 'must trigger on ose-v* tags'
+fi
 exit "$fail"

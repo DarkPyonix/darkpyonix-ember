@@ -946,7 +946,7 @@ impl Scheduler {
                 self.finish_run(&run.id, RunStatus::Failed, Some(&why))?
             }
         }
-        Ok(self.run(&run.id).map_err(|e| anyhow::anyhow!("{e}"))?)
+        self.run(&run.id).map_err(|e| anyhow::anyhow!("{e}"))
     }
 
     /// The text sent for a run.

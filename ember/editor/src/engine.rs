@@ -38,6 +38,7 @@ use crate::semantic::{decode_semantic_tokens, overlay_semantic_runs, DocSemantic
 use crate::widget::{Decoration, DecorationKind, WidgetCommand, WidgetEvent};
 
 mod actors;
+mod debugging;
 mod language;
 
 /// How many versions behind the document an answer of the highlighter may be and still be shown.
@@ -87,8 +88,12 @@ pub enum ReadPurpose {
     Replace { id: u64 },
     /// A file that is not open, read for workspace edit `id` (FR-L31.13).
     WorkspaceEdit { id: u64 },
+    /// The log file of output channel `id`, read after `MainThreadOutputService.$update`.
+    OutputChannel { id: String },
     /// A local resource request `request` of webview `handle` (FR-E8).
     WebviewResource { handle: String, request: u64 },
+    /// `.vscode/launch.json` for debug start `start`.
+    LaunchJson { start: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -140,10 +145,14 @@ pub enum Input {
     /// The user closed extension message `id`: with the chosen button's handle, or `None` for
     /// `undefined` (FR-L31.16).
     AnswerMessage { id: u64, handle: Option<i64> },
+    /// The window shows output channel `id`; a log channel is read again only while it is shown.
+    ActiveOutputChannel { id: Option<String> },
     /// A language feature the window asks for (FR-L31.13); answered with [`SessionUpdate::Language`].
     Language(crate::language::LanguageRequest),
     /// An event of an extension webview or its host (FR-E8).
     Webview(crate::webview::WebviewEvent),
+    /// A request of the debugging window; answered with [`SessionUpdate::Debug`].
+    Debug(crate::debugger::DebugRequest),
     /// Result of reading one persisted extension storage file (`MainThreadStorage`).
     StorageRead { shared: bool, extension_id: String, result: Result<Option<Vec<u8>>, String> },
     /// Result of writing or deleting one persisted extension storage file (`MainThreadStorage`).
@@ -275,6 +284,8 @@ pub enum SessionUpdate {
     Language(crate::language::LanguageUpdate),
     /// An extension webview changed (FR-E8): the window applies it to its webview host and panes.
     Webview(crate::webview::WebviewUpdate),
+    /// Debug sessions, call stacks, variables, console lines and breakpoints.
+    Debug(crate::debugger::DebugUpdate),
 }
 
 #[derive(Debug, Clone)]
@@ -294,6 +305,8 @@ enum Pending {
     Language(language::PendingLang),
     /// A call of the webview model (FR-E8).
     Webview(crate::webview::Pending),
+    /// A call of the debug session layer.
+    Debug(crate::debugger::Pending),
 }
 
 /// The running search: the window's id, the provider session, its call, and the open documents whose
@@ -375,6 +388,8 @@ pub struct SessionCore {
     lang: language::LangState,
     /// Extension webviews (FR-E8).
     webviews: crate::webview::Webviews,
+    /// Debug configurations, sessions and breakpoints.
+    debug: crate::debugger::DebugState,
     /// Persistent extension storage (`MainThreadStorage`).
     storage: crate::storage::ExtensionStorage,
     next_token: Token,
@@ -385,6 +400,10 @@ pub struct SessionCore {
     trust: crate::trust::WorkspaceTrust,
     output_seq: u64,
     output_channels: Vec<crate::output::OutputChannel>,
+    /// The output channel the window shows, as [`Input::ActiveOutputChannel`] last said.
+    active_output: Option<String>,
+    /// When the log channels are read again (one second apart while any is visible).
+    log_poll: crate::inline::Debouncer,
     /// Open `$showMessage` calls by Ember message id (FR-L31.16).
     pending_messages: HashMap<u64, u32>,
     next_message_id: u64,
@@ -448,6 +467,7 @@ impl SessionCore {
             replace_writes: HashMap::new(),
             lang: language::LangState::default(),
             webviews: crate::webview::Webviews::new(),
+            debug: crate::debugger::DebugState::new(now),
             storage: crate::storage::ExtensionStorage::default(),
             next_token: 0,
             next_editor: 0,
@@ -456,6 +476,8 @@ impl SessionCore {
             trust: crate::trust::WorkspaceTrust::default(),
             output_seq: 0,
             output_channels: Vec::new(),
+            active_output: None,
+            log_poll: Default::default(),
             pending_messages: HashMap::new(),
             next_message_id: 0,
             unimplemented: BTreeMap::new(),
@@ -511,6 +533,7 @@ impl SessionCore {
             Input::SetEncoding { uri, encoding, mode } => self.on_set_encoding(&uri, encoding, mode),
             Input::SetLanguage { uri, language_id } => self.on_set_language(&uri, language_id),
             Input::DecideWorkspaceTrust { trusted } => self.on_decide_trust(trusted),
+            Input::ActiveOutputChannel { id } => self.active_output = id,
             Input::AnswerMessage { id, handle } => {
                 if let Some(req) = self.pending_messages.remove(&id) {
                     let reply = match handle { Some(h) => Reply::Json(Value::from(h)), None => Reply::Empty };
@@ -522,6 +545,7 @@ impl SessionCore {
                 let out = self.webviews.on_event(event);
                 self.apply_webview(out);
             }
+            Input::Debug(request) => self.on_debug_request(request),
             Input::StorageRead { shared, extension_id, result } => {
                 for (req, reply) in self.storage.on_read_done(shared, &extension_id, result) {
                     self.respond(req, Ok(reply));
@@ -554,7 +578,8 @@ impl SessionCore {
         let b = self.codelens_due.values().filter_map(|d| d.deadline());
         let c = self.folding_due.values().filter_map(|d| d.deadline());
         let d = self.semantic_due.values().filter_map(|d| d.deadline());
-        a.chain(b).chain(c).chain(d).min()
+        let e = self.log_poll.deadline();
+        a.chain(b).chain(c).chain(d).chain(e).chain(self.debug.next_deadline()).min()
     }
 
     /// Every known language with its display name (FR-L31.7).
@@ -609,6 +634,12 @@ impl SessionCore {
 
     fn ui(&mut self, u: SessionUpdate) {
         self.out.push(Effect::Ui(u));
+    }
+
+    /// The workspace folder: where `.vscode/launch.json` is read and what `${workspaceFolder}`
+    /// stands for. Set once, before the first input.
+    pub fn set_workspace_folder(&mut self, folder: UriComponents) {
+        self.debug.set_workspace(folder);
     }
 
     /// The trust state the extension host was started with (FR-L31.18); set once, before the
@@ -1854,6 +1885,7 @@ impl SessionCore {
                 let out = self.webviews.on_reply(pending, result);
                 self.apply_webview(out);
             }
+            Pending::Debug(pending) => self.on_debug_reply(pending, result),
         }
     }
 
@@ -1967,6 +1999,7 @@ impl SessionCore {
                 self.ui(SessionUpdate::Dirty { uri, dirty: false });
             }
             ReadPurpose::ExtHostOpen { req } => self.finish_exthost_open(uri, req, result),
+            ReadPurpose::OutputChannel { id } => self.finish_output_read(&id, result),
             ReadPurpose::Grammar { scope } => self.on_grammar_read(&scope, &uri, result),
             ReadPurpose::Replace { id } => self.on_replace_read(id, uri, result),
             ReadPurpose::WorkspaceEdit { id } => self.on_workspace_edit_read(id, uri, result),
@@ -1974,6 +2007,7 @@ impl SessionCore {
                 let out = self.webviews.on_resource_read(handle, request, &uri, result);
                 self.apply_webview(out);
             }
+            ReadPurpose::LaunchJson { start } => self.on_launch_json_read(start, result),
         }
     }
 
@@ -2349,6 +2383,9 @@ impl SessionCore {
 
     fn run_timers(&mut self) {
         let now = self.now;
+        if self.log_poll.take_due(now) {
+            self.poll_log_channel();
+        }
         let due_inline: Vec<String> =
             self.inline.iter_mut().filter_map(|(k, s)| s.debounce.take_due(now).then(|| k.clone())).collect();
         for k in due_inline {
@@ -2369,6 +2406,7 @@ impl SessionCore {
         for k in due_sem {
             self.fire_semantic(&k);
         }
+        self.debug_tick();
     }
 
     /// The `Decorations` prop of every document whose decorations may have changed.

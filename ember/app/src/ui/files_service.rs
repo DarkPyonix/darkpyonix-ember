@@ -368,6 +368,7 @@ impl Book {
             size: h.size,
             result: h.result,
             when: when_text(now_ms, h.at_ms),
+            timestamp_ms: (h.at_ms > 0).then_some(h.at_ms),
         });
         let recorded = s.history.iter().map(|h| {
             let mine = self.sent.iter().find(|(id, _)| id == &h.id);
@@ -381,6 +382,7 @@ impl Book {
                 size: h.size,
                 result: result_of(h.result),
                 when: when_text(now_ms, h.timestamp_ms),
+                timestamp_ms: (h.timestamp_ms > 0).then_some(h.timestamp_ms),
             }
         });
         relayed.chain(recorded).collect()
@@ -1295,5 +1297,16 @@ mod tests {
         b.mark_failed(&TransferError::Connection);
         assert!(b.mark_failed(&TransferError::Unsupported));
         assert!(!b.lost());
+    }
+
+    #[test]
+    fn fr_l27_8_history_carries_timestamps_from_server_and_relayed_sends() {
+        let (mut b, id) = relayed_book();
+        b.finish_send_at(&id, &Ok(UploadEnd::Done(Vec::new())), NOW - 60_000);
+        let h = b.history(NOW);
+        assert_eq!(h[0].timestamp_ms, Some(NOW - 60_000));
+        assert_eq!(h[1].timestamp_ms, Some(NOW - 600_000));
+        assert_eq!(h[2].timestamp_ms, Some(NOW - 10_000));
+        assert_eq!(crate::ui::files::sent_week_bytes_at(&h, NOW), 1000);
     }
 }

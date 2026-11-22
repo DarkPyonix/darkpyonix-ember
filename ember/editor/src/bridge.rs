@@ -402,6 +402,8 @@ impl WidgetBridge {
             SessionUpdate::SearchHits { .. } | SessionUpdate::SearchDone { .. } | SessionUpdate::ReplaceDone { .. } => BridgeAction::None,
             // Language feature answers are the window's lists and boxes, not a document's props (FR-L31.13).
             SessionUpdate::Language(_) => BridgeAction::None,
+            // Sessions, stacks, variables and breakpoints are the Run and Debug tool window's.
+            SessionUpdate::Debug(_) => BridgeAction::None,
             SessionUpdate::Webview(update) => {
                 self.webview_panes.apply(&update);
                 BridgeAction::Webview(update)

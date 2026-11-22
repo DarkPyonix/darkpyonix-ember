@@ -7,7 +7,8 @@
 //! [`SessionCore::unimplemented_calls`], which says where behaviour is needed next.
 
 use ember_editor_conn::actors::generated::{
-    main_thread_bulk_edits, main_thread_commands, main_thread_diagnostics, main_thread_documents, main_thread_language_features,
+    main_thread_bulk_edits, main_thread_commands, main_thread_debug_service, main_thread_diagnostics, main_thread_documents,
+    main_thread_language_features,
     main_thread_languages, main_thread_message_service, main_thread_output_service, main_thread_search, main_thread_window,
     main_thread_workspace,
 };
@@ -63,6 +64,7 @@ impl SessionCore {
             Some(main_thread_bulk_edits::PROXY) => Some(main_thread_bulk_edits::dispatch(self, &cx, method, args)),
             Some(main_thread_workspace::PROXY) => Some(main_thread_workspace::dispatch(self, &cx, method, args)),
             Some(main_thread_window::PROXY) => Some(main_thread_window::dispatch(self, &cx, method, args)),
+            Some(main_thread_debug_service::PROXY) => Some(main_thread_debug_service::dispatch(self, &cx, method, args)),
             _ => None,
         };
         match routed {

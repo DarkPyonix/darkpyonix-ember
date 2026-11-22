@@ -7,6 +7,7 @@
 #                        (scripts/gen-actors/gen.sh --check), and every SUPPORTED_BUILDS commit
 #                        is admitted by scripts/gen-actors/compare.sh (FR-E10), when present
 #   vendored-css         .github/scripts/checks/check-vendored-css.sh + check-no-has-selector.sh (D23, #143)
+#   vscode-bundle-diff   .github/scripts/checks/check-vscode-bundle-diff.py (SPEC FR-W2)
 #   no-webview           .github/scripts/checks/check-no-webview.sh (SPEC NFR-L2), when present
 #   sync-release         .github/scripts/tests/sync-release.test.sh (release keeps develop's history)
 #   bench-summary        .github/scripts/bench/tests/summarize-matrix.test.sh (NFR-N1 matrix summarizer)
@@ -120,6 +121,15 @@ jobs:
         run: bash .github/scripts/checks/check-vendored-css.sh
       - name: No :has( in Ember-owned CSS
         run: bash .github/scripts/checks/check-no-has-selector.sh
+
+  vscode-bundle-diff:
+    name: VS Code Web bundle diff check (FR-W2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Run .github/scripts/checks/check-vscode-bundle-diff.py --self-check
+        run: python3 .github/scripts/checks/check-vscode-bundle-diff.py --self-check
 
   no-webview:
     name: No webview in the launcher (NFR-L2)

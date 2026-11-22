@@ -40,6 +40,7 @@
 //! - at connect time [`handshake::verify_server`] reads the server's `GET /version` and refuses any
 //!   other commit with [`Error::UnsupportedServerVersion`].
 
+pub mod actors;
 pub mod connection;
 pub mod document;
 pub mod exthost;

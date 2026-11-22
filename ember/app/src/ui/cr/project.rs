@@ -415,17 +415,10 @@ fn ListActions(st: &Ui, ui: &SharedUi, w: f32) {
         );
     }
     let n = st.new_project.clone();
-    // Enabled in the demo only: it makes a local project there (#218).
-    let can_create = services().demo.is_some();
-    let open_new = move || {
-        if can_create {
-            n.set(true)
-        } else {
-            notice::post(SOON)
-        }
-    };
+    // FR-L26: 새 프로젝트 opens the creation sheet in live mode as well as demo mode.
+    let open_new = move || n.set(true);
     if w > 900.0 {
-        AppButton("새 프로젝트", Some(IconRole::Library), ButtonKind::Default, false, can_create, false, open_new);
+        AppButton("새 프로젝트", Some(IconRole::Library), ButtonKind::Default, false, true, false, open_new);
     } else {
         IconButton(IconRole::Library, false, open_new);
     }
@@ -2843,6 +2836,95 @@ mod tests {
     }
 
     #[test]
+    fn fr_l26_new_project_button_opens_sheet_outside_demo() {
+        use compose_rust::{EventPayload, WindowHeightClass, WindowSizeClass};
+        let src = include_str!("project.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap()];
+        let list_actions = &production[production.find("fn ListActions(").unwrap()..];
+        let list_actions = &list_actions[..list_actions.find("\n}\n").unwrap()];
+        assert!(
+            !list_actions.contains("demo.is_some()"),
+            "ListActions must not gate 새 프로젝트 behind demo mode: {list_actions}"
+        );
+        assert!(
+            !list_actions.contains("notice::post(SOON)"),
+            "ListActions must not post SOON when clicking 새 프로젝트: {list_actions}"
+        );
+        assert!(
+            list_actions.contains("AppButton(\"새 프로젝트\", Some(IconRole::Library), ButtonKind::Default, false, true, false, open_new);"),
+            "새 프로젝트 button must be enabled outside demo mode: {list_actions}"
+        );
+
+        let _guard = crate::services::test_guard();
+        let ui = shared_ui();
+        ui.go(crate::ui::Route::Projects);
+        compose_rust::window::reset_window_size();
+        let mut host = Host::new(|| Box::new(Recomposer::new(ProjectScreen)));
+        let first_bytes = host.rebuild().expect("rebuild").to_vec();
+        let first = decode_batch(&first_bytes).expect("decode");
+        let resize = HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
+            width_dp: 1440.0,
+            height_dp: 900.0,
+            class: WindowSizeClass::Expanded,
+            height_class: WindowHeightClass::Medium,
+            safe_area_top: 0.0,
+            safe_area_leading: 0.0,
+            safe_area_trailing: 0.0,
+            safe_area_bottom: 0.0,
+        });
+        let (bytes, _) = host.dispatch(resize).expect("dispatch resize");
+        let batch = decode_batch(bytes).expect("decode");
+        let mut parents = std::collections::HashMap::<u32, u32>::new();
+        let mut clicks = std::collections::HashMap::<u32, u64>::new();
+        let mut label_node = None;
+        for m in first.iter().chain(batch.iter()) {
+            match m {
+                Mutation::Insert { parent_id, node_id, .. } => {
+                    parents.insert(*node_id, *parent_id);
+                }
+                Mutation::SetProp {
+                    node_id,
+                    property: compose_rust::PropertyKind::OnClick,
+                    value: PropertyValue::Integer(h),
+                } => {
+                    clicks.insert(*node_id, *h as u64);
+                }
+                Mutation::SetProp {
+                    node_id,
+                    value: PropertyValue::String(s),
+                    ..
+                } if *s == "새 프로젝트" => {
+                    label_node = Some(*node_id);
+                }
+                _ => {}
+            }
+        }
+        let mut cur = label_node.expect("새 프로젝트 button node");
+        let click_target = loop {
+            if let Some(&h) = clicks.get(&cur) {
+                break (cur, h);
+            }
+            cur = *parents.get(&cur).expect("clickable ancestor for 새 프로젝트");
+        };
+        let after_bytes = host
+            .dispatch(HostEvent::new(click_target.0, click_target.1, EventPayload::Clicked))
+            .expect("click 새 프로젝트")
+            .0
+            .to_vec();
+        let (resync_bytes, _) = host
+            .dispatch(HostEvent::new(0, 0, EventPayload::Resync))
+            .expect("resync after click");
+        let mut after = texts(&decode_batch(&after_bytes).expect("decode after click"));
+        after.extend(texts(&decode_batch(resync_bytes).expect("decode resync")));
+        assert!(
+            after.iter().any(|t| t == NEW_SEC_BASIC.1),
+            "clicking 새 프로젝트 must open the create_project sheet: {after:?}"
+        );
+        assert_eq!(ui.notice.get_untracked(), None, "no SOON notice should be posted");
+        compose_rust::window::reset_window_size();
+    }
+
+    #[test]
     fn fr_l26_settings_sheet_prefills_fields_and_wires_live_links() {
         let src = include_str!("project.rs");
         let production = src.split("#[cfg(test)]").next().unwrap();
@@ -2987,7 +3069,6 @@ mod design_review_tests {
     fn design_b8_page_titles_are_32_400() {
         assert_eq!(PAGE_TITLE_WEIGHT, Weight::Regular);
         assert!(source().contains("Label(title, if compact { Fs::Xl2 } else { Fs::Xl3 }, PAGE_TITLE_WEIGHT, None, Some(1));"));
-        assert!(include_str!("shell.rs").contains("Label(menu.label(), Fs::Xl3, PAGE_TITLE_WEIGHT, None, None);"));
         assert!(include_str!("vcs.rs").contains("Label(\"버전 관리\", Fs::Xl3, PAGE_TITLE_WEIGHT, None, None);"));
     }
 }

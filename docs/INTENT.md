@@ -1101,7 +1101,7 @@ What trust does not protect. Under D37 agents and terminals run with the full au
 
 **Rejected.** One pin only (a self-updated client falls back for no reason); per-commit signature branches (an untestable matrix); connecting to unknown commits.
 
-**Status.** Not built: today the editor checks one pin at connect.
+**Status.** Built: the set (`SUPPORTED_BUILDS`) and the comparison (`ember/editor-conn/scripts/gen-actors/compare.sh`, #1046). The set holds the pin only; on 2026-11-23 the comparison admitted Code-OSS 1.138.0, 1.139.0, 1.140.0, 1.141.0 and 1.142.0, which wait for the leader because the rule does not compare the `ExtHost*` calls Ember makes.
 
 ### D51: channel_post answers a mention: the 30-minute window, the open thread, and the open per-harness decisions
 

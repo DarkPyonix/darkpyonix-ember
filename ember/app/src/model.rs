@@ -30,13 +30,13 @@ pub fn status_rank(s: LauncherStatus) -> u8 {
 
 pub fn status_label(s: LauncherStatus) -> &'static str {
     match s {
-        LauncherStatus::Idle => "Idle",
-        LauncherStatus::Running => "Running",
-        LauncherStatus::WaitingForApproval => "Needs approval",
-        LauncherStatus::FinishedUnread => "Finished, unread",
-        LauncherStatus::Finished => "Finished",
-        LauncherStatus::Failed => "Failed",
-        LauncherStatus::Unknown => "Unknown",
+        LauncherStatus::Idle => "대기 중",
+        LauncherStatus::Running => "실행 중",
+        LauncherStatus::WaitingForApproval => "승인 대기",
+        LauncherStatus::FinishedUnread => "읽지 않음",
+        LauncherStatus::Finished => "완료",
+        LauncherStatus::Failed => "실패",
+        LauncherStatus::Unknown => "알 수 없음",
     }
 }
 
@@ -48,19 +48,19 @@ pub fn is_busy(s: LauncherStatus) -> bool {
 /// Banner shown on a conversation while its approve-everything mode is on (FR-A5); `None` when
 /// off, so the indicator is visible exactly while the mode is active.
 pub fn approve_all_banner(on: bool) -> Option<&'static str> {
-    on.then_some("Approve everything is on: this session's tool requests are allowed without asking.")
+    on.then_some("모든 요청 자동 승인이 켜져 있습니다: 이 세션의 도구 요청을 묻지 않고 허용합니다.")
 }
 
 /// Menu entry that flips the mode.
 pub fn approve_all_menu_label(on: bool) -> &'static str {
-    if on { "Ask before tools again" } else { "Approve everything" }
+    if on { "도구 실행 전 다시 묻기" } else { "모두 자동 승인" }
 }
 
 /// Menu entry that forks from the last completed turn (FR-S5).
-pub const FORK_MENU_LABEL: &str = "Fork from last turn";
+pub const FORK_MENU_LABEL: &str = "마지막 턴에서 포크";
 
 /// Button under a completed turn.
-pub const FORK_TURN_LABEL: &str = "Fork from here";
+pub const FORK_TURN_LABEL: &str = "여기서 포크";
 
 /// Whether the menu entry is enabled: the server reports a completed turn, or the transcript
 /// already shows one (the fork facts are fetched when the view opens, so a turn that ended
@@ -69,17 +69,17 @@ pub fn fork_menu_enabled(info: &ForkInfo, transcript_has_completed_turn: bool) -
     info.can_fork || transcript_has_completed_turn
 }
 
-/// Whether the "Fork from here" button under the turn that ended at `seq` with `outcome` is
+/// Whether the "여기서 포크" button under the turn that ended at `seq` with `outcome` is
 /// enabled. Only completed turns can be forked from; when the server listed its turns, `seq`
 /// must be one of them.
 pub fn fork_turn_enabled(info: &ForkInfo, outcome: TurnOutcome, seq: i64) -> bool {
     outcome == TurnOutcome::Completed && (info.turns.is_empty() || info.turns.contains(&seq))
 }
 
-/// "Forked from <parent>" line of a forked session; the parent's title when known, else its id.
+/// "<parent>에서 포크됨" line of a forked session; the parent's title when known, else its id.
 pub fn fork_origin_label(origin: &ForkOrigin, parent_title: Option<&str>) -> String {
     let name = parent_title.filter(|t| !t.is_empty()).unwrap_or(&origin.parent_id);
-    format!("Forked from {name}")
+    format!("{name}에서 포크됨")
 }
 
 /// Badge tone; the UI maps it to colour roles.
@@ -123,16 +123,16 @@ impl ProjectSummary {
     pub fn badges(&self) -> Vec<(String, Tone)> {
         let mut out = Vec::new();
         if self.waiting > 0 {
-            out.push((format!("{} need approval", self.waiting), Tone::Warning));
+            out.push((format!("승인 대기 {}", self.waiting), Tone::Warning));
         }
         if self.running > 0 {
-            out.push((format!("{} running", self.running), Tone::Accent));
+            out.push((format!("실행 중 {}", self.running), Tone::Accent));
         }
         if self.failed > 0 {
-            out.push((format!("{} failed", self.failed), Tone::Error));
+            out.push((format!("실패 {}", self.failed), Tone::Error));
         }
         if self.unread > 0 {
-            out.push((format!("{} unread", self.unread), Tone::Success));
+            out.push((format!("읽지 않음 {}", self.unread), Tone::Success));
         }
         out
     }
@@ -147,18 +147,18 @@ pub fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// "just now", "5m", "3h", "2d", "5w"; timestamps are unix milliseconds.
+/// `방금`, `5분`, `3시간`, `2일`, `5주`; timestamps are unix milliseconds.
 pub fn relative_time(now: i64, at: i64) -> String {
     if at <= 0 {
         return String::new();
     }
     let secs = (now - at).max(0) / 1000;
     match secs {
-        0..=44 => "just now".into(),
-        45..=3599 => format!("{}m", (secs / 60).max(1)),
-        3600..=86_399 => format!("{}h", secs / 3600),
-        86_400..=604_799 => format!("{}d", secs / 86_400),
-        _ => format!("{}w", secs / 604_800),
+        0..=44 => "방금".into(),
+        45..=3599 => format!("{}분", (secs / 60).max(1)),
+        3600..=86_399 => format!("{}시간", secs / 3600),
+        86_400..=604_799 => format!("{}일", secs / 86_400),
+        _ => format!("{}주", secs / 604_800),
     }
 }
 
@@ -181,10 +181,10 @@ pub fn preview(t: &Transcript) -> Option<String> {
         TranscriptItem::Assistant { text, .. } | TranscriptItem::User { text, .. } if !text.trim().is_empty() => {
             Some(one_line(text, 120))
         }
-        TranscriptItem::ToolCall { name, .. } if !name.is_empty() => Some(format!("Tool: {name}")),
-        TranscriptItem::Approval { tool, .. } => Some(format!("Approval requested: {tool}")),
+        TranscriptItem::ToolCall { name, .. } if !name.is_empty() => Some(format!("도구: {name}")),
+        TranscriptItem::Approval { tool, .. } => Some(format!("승인 요청: {tool}")),
         TranscriptItem::Question { questions, .. } => {
-            questions.first().map(|q| format!("Question: {}", one_line(&q.text, 60)))
+            questions.first().map(|q| format!("질문: {}", one_line(&q.text, 60)))
         }
         TranscriptItem::Error { message, .. } => Some(one_line(message, 120)),
         _ => None,
@@ -247,15 +247,15 @@ pub fn account_labels(accounts: &[Account]) -> HashMap<String, String> {
 /// One line of the usage view for a ChatGPT plan account (FR-U4): tokens today, the weekly
 /// cap (which OpenAI does not report, so the line says where it is set) and a limit notice.
 pub fn chatgpt_usage_line(a: &ChatGptAccount) -> String {
-    let mut parts = vec![format!("{} tokens today", a.tokens_today)];
+    let mut parts = vec![format!("오늘 {} 토큰", a.tokens_today)];
     match &a.weekly_cap {
-        Some(c) if c.known => parts.push("weekly cap known".to_string()),
-        Some(_) => parts.push("weekly cap set in ChatGPT settings, not reported to apps".to_string()),
+        Some(c) if c.known => parts.push("주간 한도 확인됨".to_string()),
+        Some(_) => parts.push("주간 한도는 ChatGPT 설정에서 확인하실 수 있습니다".to_string()),
         None => {}
     }
     if a.limited {
-        let reason = a.limit_reason.as_deref().unwrap_or("limit reached");
-        parts.push(format!("limited: {reason}"));
+        let reason = a.limit_reason.as_deref().unwrap_or("한도 도달");
+        parts.push(format!("제한됨: {reason}"));
     }
     parts.join(" | ")
 }
@@ -429,9 +429,9 @@ pub fn merge_computers(previous: &[Computer], fresh: &[ComputerStatus]) -> Vec<C
 
 pub fn reachability_label(r: Reachability) -> &'static str {
     match r {
-        Reachability::Online => "Online",
-        Reachability::Offline => "Offline",
-        Reachability::Unknown => "Checking\u{2026}",
+        Reachability::Online => "온라인",
+        Reachability::Offline => "오프라인",
+        Reachability::Unknown => "확인 중\u{2026}",
     }
 }
 
@@ -439,20 +439,20 @@ pub fn reachability_label(r: Reachability) -> &'static str {
 pub fn connection_banner(c: &ConnectionState) -> Option<(String, Tone)> {
     match c {
         ConnectionState::Connected => None,
-        ConnectionState::Offline => Some(("Offline: showing cached data".into(), Tone::Neutral)),
-        ConnectionState::Connecting { .. } => Some(("Connecting to the main server\u{2026}".into(), Tone::Neutral)),
+        ConnectionState::Offline => Some(("오프라인: 저장된 데이터를 보여주는 중입니다".into(), Tone::Neutral)),
+        ConnectionState::Connecting { .. } => Some(("메인 서버에 연결하는 중입니다\u{2026}".into(), Tone::Neutral)),
         ConnectionState::Reconnecting { retry_in_ms, error, .. } => Some((
-            format!("Disconnected ({error}). Retrying in {}s", retry_in_ms.div_ceil(1000)),
+            format!("연결이 끊어졌습니다({error}). {}초 후 다시 시도합니다", retry_in_ms.div_ceil(1000)),
             Tone::Warning,
         )),
         // FR-S11, #982: no retry loop; say where the token was looked for.
         ConnectionState::Unauthorized { error, looked_in } => {
-            let mut text = format!("The server refused the token ({error}).");
+            let mut text = format!("서버가 토큰을 거부했습니다({error}).");
             if !looked_in.is_empty() {
-                text.push_str(&format!(" Looked for the token in: {}.", looked_in.join(", ")));
+                text.push_str(&format!(" 토큰을 찾은 곳: {}.", looked_in.join(", ")));
             }
             text.push_str(
-                " Put the server's server-token file in one of those places, or set EMBER_SERVER_TOKEN, and restart the app.",
+                " 서버의 server-token 파일을 이 중 한 곳에 두거나 EMBER_SERVER_TOKEN을 설정한 뒤 앱을 다시 시작해 주세요.",
             );
             Some((text, Tone::Error))
         }
@@ -690,10 +690,22 @@ pub fn team_member_rows(state: &State, team: &TeamView, this: &str) -> Vec<TeamM
     rows
 }
 
-/// One task line: `#3 [in progress] Write tests · alice`.
+/// Korean label for a team task's status.
+pub fn task_status_label(s: TaskStatus) -> &'static str {
+    match s {
+        TaskStatus::Open => "열림",
+        TaskStatus::InProgress => "진행 중",
+        TaskStatus::Blocked => "차단됨",
+        TaskStatus::Done => "완료",
+        TaskStatus::Cancelled => "취소됨",
+        TaskStatus::Unknown => "알 수 없음",
+    }
+}
+
+/// One task line: `#3 [진행 중] Write tests · alice`.
 pub fn task_line(t: &TeamTask) -> String {
-    let who = t.assignee_name.as_deref().unwrap_or(if t.assignee.is_some() { "someone" } else { "unassigned" });
-    format!("#{} [{}] {} \u{00b7} {who}", t.number, t.status.label(), t.title)
+    let who = t.assignee_name.as_deref().unwrap_or(if t.assignee.is_some() { "팀원" } else { "미배정" });
+    format!("#{} [{}] {} \u{00b7} {who}", t.number, task_status_label(t.status), t.title)
 }
 
 #[cfg(test)]
@@ -749,9 +761,9 @@ mod tests {
         sum.add(LauncherStatus::FinishedUnread);
         assert_eq!(sum.top, Some(LauncherStatus::WaitingForApproval));
         let badges = sum.badges();
-        assert_eq!(badges[0], ("1 need approval".to_string(), Tone::Warning));
-        assert_eq!(badges[1], ("2 running".to_string(), Tone::Accent));
-        assert_eq!(badges[2], ("1 unread".to_string(), Tone::Success));
+        assert_eq!(badges[0], ("승인 대기 1".to_string(), Tone::Warning));
+        assert_eq!(badges[1], ("실행 중 2".to_string(), Tone::Accent));
+        assert_eq!(badges[2], ("읽지 않음 1".to_string(), Tone::Success));
         assert!(status_rank(LauncherStatus::WaitingForApproval) > status_rank(LauncherStatus::Running));
     }
 
@@ -770,22 +782,22 @@ mod tests {
             weekly_cap: Some(WeeklyCap { known: false, manage_url: String::new(), note: String::new() }),
         };
         let line = chatgpt_usage_line(&a);
-        assert!(line.contains("15 tokens today") && line.contains("weekly cap"), "{line}");
+        assert!(line.contains("오늘 15 토큰") && line.contains("주간 한도"), "{line}");
         a.limited = true;
         a.limit_reason = Some("subscription_sharing_usage_limit_exceeded".into());
-        assert!(chatgpt_usage_line(&a).contains("limited: subscription_sharing_usage_limit_exceeded"));
+        assert!(chatgpt_usage_line(&a).contains("제한됨: subscription_sharing_usage_limit_exceeded"));
     }
 
     #[test]
     fn relative_times() {
         let now = 10_000_000_000;
-        assert_eq!(relative_time(now, now - 1000), "just now");
-        assert_eq!(relative_time(now, now - 5 * 60_000), "5m");
-        assert_eq!(relative_time(now, now - 3 * 3_600_000), "3h");
-        assert_eq!(relative_time(now, now - 2 * 86_400_000), "2d");
-        assert_eq!(relative_time(now, now - 15 * 86_400_000), "2w");
+        assert_eq!(relative_time(now, now - 1000), "방금");
+        assert_eq!(relative_time(now, now - 5 * 60_000), "5분");
+        assert_eq!(relative_time(now, now - 3 * 3_600_000), "3시간");
+        assert_eq!(relative_time(now, now - 2 * 86_400_000), "2일");
+        assert_eq!(relative_time(now, now - 15 * 86_400_000), "2주");
         assert_eq!(relative_time(now, 0), "");
-        assert_eq!(relative_time(now, now + 5000), "just now");
+        assert_eq!(relative_time(now, now + 5000), "방금");
     }
 
     #[test]
@@ -955,9 +967,10 @@ mod tests {
         };
         let (text, tone) = connection_banner(&c).unwrap();
         assert_eq!(tone, Tone::Error);
-        assert!(text.starts_with("The server refused the token (missing or invalid server token)."), "{text}");
-        assert!(text.contains("Looked for the token in: EMBER_SERVER_TOKEN, /h/.ember/server-token."), "{text}");
-        assert!(!text.contains("Retrying"), "no retry loop: {text}");
+        assert!(text.starts_with("서버가 토큰을 거부했습니다(missing or invalid server token)."), "{text}");
+        assert!(text.contains("토큰을 찾은 곳: EMBER_SERVER_TOKEN, /h/.ember/server-token."), "{text}");
+        assert!(text.ends_with("다시 시작해 주세요."), "{text}");
+        assert!(!text.contains("다시 시도합니다"), "no retry loop: {text}");
     }
 
     fn cand(id: &str, title: &str) -> MentionCandidate {
@@ -1035,17 +1048,17 @@ mod tests {
         let rows = team_member_rows(&State::new(), &team, "a");
         assert_eq!(rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), vec!["lead", "alice", "old"]);
         assert!(rows[1].this && !rows[0].this && rows[2].ended);
-        assert_eq!((rows[1].open_tasks, rows[1].status), (1, "Running"));
-        assert_eq!(task_line(&team.tasks[0]), "#1 [in progress] task 1 \u{b7} alice");
-        assert_eq!(task_line(&team.tasks[2]), "#3 [open] task 3 \u{b7} unassigned");
+        assert_eq!((rows[1].open_tasks, rows[1].status), (1, "실행 중"));
+        assert_eq!(task_line(&team.tasks[0]), "#1 [진행 중] task 1 \u{b7} alice");
+        assert_eq!(task_line(&team.tasks[2]), "#3 [열림] task 3 \u{b7} 미배정");
     }
 
     #[test]
     fn fr_a5_indicator_shows_only_while_approve_all_is_on() {
         assert!(approve_all_banner(false).is_none());
-        assert!(approve_all_banner(true).unwrap().contains("Approve everything is on"));
-        assert_eq!(approve_all_menu_label(false), "Approve everything");
-        assert_eq!(approve_all_menu_label(true), "Ask before tools again");
+        assert!(approve_all_banner(true).unwrap().contains("모든 요청 자동 승인이 켜져 있습니다"));
+        assert_eq!(approve_all_menu_label(false), "모두 자동 승인");
+        assert_eq!(approve_all_menu_label(true), "도구 실행 전 다시 묻기");
     }
 
     #[test]
@@ -1075,9 +1088,30 @@ mod tests {
     #[test]
     fn fr_s5_forked_session_names_its_parent() {
         let o = ForkOrigin { parent_id: "abc".into(), turn_seq: 4, forked_at: 1 };
-        assert_eq!(fork_origin_label(&o, Some("Fix login")), "Forked from Fix login");
-        assert_eq!(fork_origin_label(&o, Some("")), "Forked from abc");
-        assert_eq!(fork_origin_label(&o, None), "Forked from abc");
+        assert_eq!(fork_origin_label(&o, Some("Fix login")), "Fix login에서 포크됨");
+        assert_eq!(fork_origin_label(&o, Some("")), "abc에서 포크됨");
+        assert_eq!(fork_origin_label(&o, None), "abc에서 포크됨");
+    }
+
+    #[test]
+    fn nfr_l4_model_user_facing_strings_are_korean() {
+        assert_eq!(status_label(LauncherStatus::WaitingForApproval), "승인 대기");
+        assert_eq!(status_label(LauncherStatus::Running), "실행 중");
+        assert_eq!(status_label(LauncherStatus::Finished), "완료");
+        assert_eq!(reachability_label(Reachability::Online), "온라인");
+        assert_eq!(reachability_label(Reachability::Offline), "오프라인");
+        assert_eq!(reachability_label(Reachability::Unknown), "확인 중\u{2026}");
+        assert_eq!(FORK_MENU_LABEL, "마지막 턴에서 포크");
+        assert_eq!(FORK_TURN_LABEL, "여기서 포크");
+        for state in [
+            ConnectionState::Offline,
+            ConnectionState::Connecting { attempt: 1 },
+            ConnectionState::Reconnecting { attempt: 1, retry_in_ms: 2000, error: "err".into() },
+            ConnectionState::Unauthorized { error: "err".into(), looked_in: vec!["a".into()] },
+        ] {
+            let (text, _) = connection_banner(&state).expect("banner");
+            assert!(!text.contains("하십시오"), "must use 합니다체, not 하십시오체: {text}");
+        }
     }
 
     #[test]

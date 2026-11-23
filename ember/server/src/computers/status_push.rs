@@ -57,3 +57,45 @@ fn publish_changes(
     }
     *previous = current;
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::computers::ComputerView;
+    use crate::store::Store;
+
+    fn status(reachable: bool) -> ComputerStatus {
+        let mut computer = ComputerView::local();
+        computer.id = "worker".to_owned();
+        ComputerStatus {
+            computer,
+            reachable: Some(reachable),
+            error: (!reachable).then(|| "probe timed out".to_owned()),
+            version: None,
+            env: None,
+        }
+    }
+
+    #[test]
+    fn pr_1_computer_status_push_only_reports_changes() {
+        let sessions = Sessions::new(Arc::new(Store::open_in_memory().unwrap()), Vec::new());
+        let mut observed = sessions.subscribe();
+        let mut previous = HashMap::new();
+        publish_changes(&sessions, &mut previous, vec![status(true)]);
+        publish_changes(&sessions, &mut previous, vec![status(true)]);
+        publish_changes(&sessions, &mut previous, vec![status(false)]);
+        publish_changes(&sessions, &mut previous, vec![status(false)]);
+        let messages: Vec<_> = std::iter::from_fn(|| observed.try_recv().ok())
+            .map(|push| serde_json::to_value(push).unwrap())
+            .collect();
+        assert_eq!(
+            messages,
+            [
+                serde_json::json!({"type":"computer_status","computer_id":"worker","reachable":true,"error":null}),
+                serde_json::json!({"type":"computer_status","computer_id":"worker","reachable":false,"error":"probe timed out"}),
+            ]
+        );
+    }
+}

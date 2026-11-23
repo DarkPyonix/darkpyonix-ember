@@ -12,6 +12,10 @@
 
 #![allow(non_snake_case)]
 
+use std::ffi::OsString;
+use std::path::{Component, Path, PathBuf};
+use std::process::Command;
+
 use compose_rust::runtime::{mutable_state_of, remember, MutableState};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
@@ -937,12 +941,116 @@ fn AgentTile(m: &CrewMember, ui: &SharedUi, text_w: f32) {
     );
 }
 
-/// Where received files land. TODO(FR-F8): the real inbox comes from the transfer settings.
-pub const DEFAULT_INBOX: &str = "~/Downloads/Ember";
+/// Fallback inbox path when the OS reports no downloads directory (`FR-F8`: the target default
+/// is `Ember Received/` under the user's downloads).
+pub const DEFAULT_INBOX: &str = "~/Downloads/Ember Received";
 
-/// The receiver's real folder when the service knows it (`FR-F8`), else the mockup's.
+/// Folder name of the target default inbox under the downloads folder (`FR-F8`).
+pub const INBOX_FOLDER: &str = "Ember Received";
+
+/// Message shown when a received file cannot be found on disk (`FR-F8`).
+pub const RECEIVED_FILE_MISSING: &str = "받은 파일을 찾을 수 없습니다";
+
+/// The target default inbox folder (`FR-F8`): `<downloads>/Ember Received` when the OS reports
+/// a downloads directory, otherwise [`DEFAULT_INBOX`]. Shown only while the transfer service
+/// has not reported its real `received_dir`.
+pub fn default_inbox_path() -> PathBuf {
+    dirs::download_dir()
+        .map(|d| d.join(INBOX_FOLDER))
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_INBOX))
+}
+
+/// Display label for the default inbox folder (`FR-F8`).
+pub fn default_inbox_label() -> String {
+    default_inbox_path().to_string_lossy().into_owned()
+}
+
+/// The receiver's real folder when the service knows it (`FR-F8`), else the target default.
 fn inbox_label() -> String {
-    transfer_service().inbox().unwrap_or_else(|| DEFAULT_INBOX.to_string())
+    transfer_service().inbox().unwrap_or_else(default_inbox_label)
+}
+
+/// Resolves `name` inside `inbox` (`FR-F8`), expanding a leading `~/` against the user's home
+/// directory. Rejects empty inputs and any path traversal or multi-component filename.
+pub fn resolve_received_path(inbox: &str, name: &str) -> Option<PathBuf> {
+    let inbox = inbox.trim();
+    if inbox.is_empty() || name.trim().is_empty() {
+        return None;
+    }
+    if name.contains('/') || name.contains('\\') || name.contains('\0') {
+        return None;
+    }
+    let mut components = Path::new(name).components();
+    let file_name = match (components.next(), components.next()) {
+        (Some(Component::Normal(part)), None) => part,
+        _ => return None,
+    };
+    let inbox_dir = if let Some(rest) = inbox.strip_prefix("~/").or_else(|| inbox.strip_prefix("~\\")) {
+        dirs::home_dir()?.join(rest)
+    } else if inbox == "~" {
+        dirs::home_dir()?
+    } else {
+        PathBuf::from(inbox)
+    };
+    Some(inbox_dir.join(file_name))
+}
+
+/// OS command and arguments to reveal `path` in the file manager (`FR-F8`).
+/// Never invokes a shell.
+pub fn reveal_file_command(path: &Path) -> (&'static str, Vec<OsString>) {
+    if cfg!(target_os = "macos") {
+        ("open", vec![OsString::from("-R"), path.as_os_str().to_os_string()])
+    } else if cfg!(target_os = "windows") {
+        let mut arg = OsString::from("/select,");
+        arg.push(path.as_os_str());
+        ("explorer", vec![arg])
+    } else {
+        let dir = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(path);
+        ("xdg-open", vec![dir.as_os_str().to_os_string()])
+    }
+}
+
+/// Opens a received file with the OS default handler (`FR-F8`).
+/// Checks existence first so the OS viewer is never spawned for a missing path.
+pub fn open_received_file(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Err(RECEIVED_FILE_MISSING.to_string());
+    }
+    // The same OS opener the app uses for links (`crate::ide::open_external`).
+    let target = path.to_str().ok_or_else(|| "파일을 열 수 없습니다".to_string())?;
+    crate::ide::open_external(target).map_err(|e| {
+        tracing::warn!("failed to open received file {}: {e}", path.display());
+        "파일을 열 수 없습니다".to_string()
+    })
+}
+
+/// Reveals a received file in the OS file manager (`FR-F8`).
+/// Checks existence first so the OS file manager is never spawned for a missing path.
+pub fn reveal_received_file(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Err(RECEIVED_FILE_MISSING.to_string());
+    }
+    let (program, args) = reveal_file_command(path);
+    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    {
+        // explorer parses `/select,` itself and does not accept the whole argument in quotes,
+        // which std would add for a path with spaces (`Ember Received`).
+        use std::os::windows::process::CommandExt;
+        let _ = args;
+        cmd.raw_arg(format!("/select,\"{}\"", path.display()));
+    }
+    #[cfg(not(windows))]
+    cmd.args(&args);
+    cmd.spawn()
+        .map(|_| ())
+        .map_err(|e| {
+            tracing::warn!("failed to reveal received file {}: {e}", path.display());
+            "폴더를 열 수 없습니다".to_string()
+        })
 }
 
 /// The incoming offer (FR-F3) as the mockup's floating card (`.fl-offer`): the sender's icon and
@@ -1178,9 +1286,24 @@ fn ReceivedTile(f: &ReceivedFile, at: Option<&str>) {
         }
         Label(&inbox_label(), Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
         { use ::compose_rust::ui::Row; Row!(spacing = SP[1], alignment = Alignment::CenterStart, {
-            // TODO(FR-F8): opening and revealing a received file need the transfer client.
-            AppButton("열기", None, ButtonKind::Default, true, true, false, || notice::post(UNAVAILABLE));
-            RoundGlyph(ICON_FOLDER, "폴더에서 보기", || notice::post(UNAVAILABLE));
+            let open_name = f.name.clone();
+            AppButton("열기", None, ButtonKind::Default, true, true, false, move || {
+                let res = resolve_received_path(&inbox_label(), &open_name)
+                    .ok_or_else(|| RECEIVED_FILE_MISSING.to_string())
+                    .and_then(|path| open_received_file(&path));
+                if let Err(err) = res {
+                    notice::post(err);
+                }
+            });
+            let reveal_name = f.name.clone();
+            RoundGlyph(ICON_FOLDER, "폴더에서 보기", move || {
+                let res = resolve_received_path(&inbox_label(), &reveal_name)
+                    .ok_or_else(|| RECEIVED_FILE_MISSING.to_string())
+                    .and_then(|path| reveal_received_file(&path));
+                if let Err(err) = res {
+                    notice::post(err);
+                }
+            });
         }) };
     }) };
 }
@@ -2296,5 +2419,152 @@ mod tests {
         let src = include_str!("files.rs");
         assert!(src.contains("HeaderGap(\"파일\""), "header exists");
         assert!(src.contains("w < 700.0"), "768 header keeps actions beside the title");
+    }
+
+    #[test]
+    fn fr_f8_default_inbox_resolves_downloads_ember_or_fallback() {
+        let path = default_inbox_path();
+        let expected = dirs::download_dir()
+            .map(|d| d.join("Ember Received"))
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_INBOX));
+        assert_eq!(path, expected);
+        assert!(DEFAULT_INBOX.ends_with("/Ember Received"));
+        assert_eq!(default_inbox_label(), path.to_string_lossy());
+    }
+
+    #[test]
+    fn fr_f8_resolve_received_path_joins_normal_names_expands_tilde_and_rejects_traversal() {
+        let abs_inbox = if cfg!(windows) { r"C:\ember\inbox" } else { "/tmp/ember-inbox" };
+        assert_eq!(
+            resolve_received_path(abs_inbox, "notes.pdf"),
+            Some(PathBuf::from(abs_inbox).join("notes.pdf"))
+        );
+        assert_eq!(
+            resolve_received_path(abs_inbox, "스크린샷 (1).png"),
+            Some(PathBuf::from(abs_inbox).join("스크린샷 (1).png"))
+        );
+
+        if let Some(home) = dirs::home_dir() {
+            assert_eq!(
+                resolve_received_path("~/Downloads/Ember Received", "notes.pdf"),
+                Some(home.join("Downloads/Ember Received").join("notes.pdf"))
+            );
+            assert_eq!(
+                resolve_received_path("~", "notes.pdf"),
+                Some(home.join("notes.pdf"))
+            );
+        }
+
+        for bad in [
+            "",
+            "   ",
+            ".",
+            "..",
+            "../secret.txt",
+            "sub/../notes.pdf",
+            "..\\secret.txt",
+            "sub/notes.pdf",
+            "sub\\notes.pdf",
+            "/etc/passwd",
+            "a\0b.txt",
+        ] {
+            assert_eq!(
+                resolve_received_path(abs_inbox, bad),
+                None,
+                "must reject unsafe filename {bad:?}"
+            );
+        }
+        assert_eq!(resolve_received_path("", "notes.pdf"), None);
+        assert_eq!(resolve_received_path("   ", "notes.pdf"), None);
+    }
+
+    #[test]
+    fn fr_f8_open_and_reveal_commands_match_current_os_without_shell() {
+        let target = Path::new("/tmp/ember-inbox/notes.pdf");
+        let open_argv = crate::ide::open_command(target.to_str().unwrap());
+        let (open_bin, open_args) = (open_argv[0].as_str(), open_argv[1..].to_vec());
+        let (reveal_bin, reveal_args) = reveal_file_command(target);
+
+        for bin in [open_bin, reveal_bin] {
+            assert!(
+                !matches!(bin, "sh" | "bash" | "zsh" | "cmd" | "cmd.exe" | "powershell"),
+                "must never invoke a shell: {bin}"
+            );
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(open_bin, "open");
+            assert_eq!(open_args, vec![target.to_str().unwrap().to_string()]);
+            assert_eq!(reveal_bin, "open");
+            assert_eq!(reveal_args, vec![OsString::from("-R"), OsString::from(target)]);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            assert_eq!(open_bin, "rundll32");
+            assert_eq!(open_args, vec!["url.dll,FileProtocolHandler".to_string(), target.to_str().unwrap().to_string()]);
+            assert_eq!(reveal_bin, "explorer");
+            assert_eq!(
+                reveal_args,
+                vec![OsString::from(format!("/select,{}", target.display()))]
+            );
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            assert_eq!(open_bin, "xdg-open");
+            assert_eq!(open_args, vec![target.to_str().unwrap().to_string()]);
+            assert_eq!(reveal_bin, "xdg-open");
+            assert_eq!(reveal_args, vec![OsString::from("/tmp/ember-inbox")]);
+        }
+    }
+
+    #[test]
+    fn fr_f8_open_and_reveal_reject_missing_file_with_korean_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("does-not-exist.pdf");
+        assert!(!missing.exists());
+
+        assert_eq!(open_received_file(&missing), Err(RECEIVED_FILE_MISSING.to_string()));
+        assert_eq!(reveal_received_file(&missing), Err(RECEIVED_FILE_MISSING.to_string()));
+    }
+
+    #[test]
+    fn fr_f8_received_tile_open_and_reveal_buttons_post_missing_file_notice() {
+        use compose_rust::{EventPayload, PropertyKind};
+        let _guard = crate::services::test_guard();
+        shared_ui().notice.set(None);
+        let mut host = Host::new(|| {
+            Box::new(Recomposer::new(|| {
+                let file = ReceivedFile {
+                    name: "definitely-missing-frf8-test.bin".into(),
+                    size: 128,
+                    from: "iPhone".into(),
+                };
+                ReceivedTile(&file, None);
+            }))
+        });
+        let raw = host.rebuild().expect("rebuild").to_vec();
+        let batch = decode_batch(&raw).expect("decode");
+        let click_targets: Vec<(u32, u64)> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetProp {
+                    node_id,
+                    property: PropertyKind::OnClick,
+                    value: PropertyValue::Integer(h),
+                } => Some((*node_id, *h as u64)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(click_targets.len(), 2, "expected 열기 and 폴더에서 보기 handlers: {click_targets:?}");
+
+        for (node_id, handler_id) in click_targets {
+            shared_ui().notice.set(None);
+            host.dispatch(HostEvent::new(node_id, handler_id, EventPayload::Clicked))
+                .expect("dispatch click");
+            let notice = shared_ui().notice.get_untracked().map(|(_, text)| text);
+            assert_eq!(notice.as_deref(), Some(RECEIVED_FILE_MISSING));
+        }
+        shared_ui().notice.set(None);
     }
 }

@@ -58,7 +58,10 @@ use super::components::{
     FieldOptions, IconButton, Label, OptionSheet, PickChip, Pill, PillTone, PopExtra, PopKind, PopMenu, PopRow, PopoverMenu, PopoverMenuWith, SearchField, Select, SheetFooter, Txt,
     SEARCH_FIELD_H_COMPACT,
 };
-use super::conversation::{ConversationView, ICON_SEND_SVG, ICON_TERMINAL_SVG, TranscriptRow, tail_start_index};
+use super::conversation::{
+    ConversationView, ICON_SEND_SVG, ICON_TERMINAL_SVG, TranscriptDisplayRow,
+    tail_display_start_index,
+};
 use super::notice;
 use super::shell::{
     ICON_CHEVRON_DOWN_SVG, ICON_CLOSE_SVG, ICON_CPU_SVG, ICON_PLUS_SVG, ICON_USERS_SVG, NavIcon,
@@ -1193,8 +1196,9 @@ pub fn PaneTranscript(session: &str, agent: &str) {
                     - 56.0
                     - (if window.width_dp <= 560.0 { 164.0 } else { 0.0 });
                 let exp_set = expanded.get();
-                let start_idx = tail_start_index(&items, &exp_set, avail_h);
-                let items_c = items[start_idx..].to_vec();
+                let display_items = crate::ui::conversation::group_shell_calls(&items);
+                let start_idx = tail_display_start_index(&display_items, &exp_set, avail_h);
+                let items_c = display_items[start_idx..].to_vec();
                 let sid_c = sid.clone();
                 let agent_c = agent_name.clone();
                 let exp_c = expanded.clone();
@@ -1203,7 +1207,7 @@ pub fn PaneTranscript(session: &str, agent: &str) {
                 { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(scroll_state = &scroll, modifier = Modifier::new().fill_max_width().fill_max_height(), content = move || {
                         { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width().padding(SP[1]), content = move || {
                                 for item in items_c.iter() {
-                                    TranscriptRow(&sid_c, &agent_c, item, &exp_c, &ans_c, computer_c.as_deref(), true);
+                                    TranscriptDisplayRow(&sid_c, &agent_c, item, &exp_c, &ans_c, computer_c.as_deref(), true);
                                 }
                                 { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(12.0)) };
                             }) };

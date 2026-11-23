@@ -34,7 +34,7 @@ impl Fixture {
         let base = format!("http://127.0.0.1:{port}");
         let server = Command::new(env!("CARGO_BIN_EXE_ember-server"))
             .env("EMBER_DATA_DIR", dir.path())
-            .env("EMBER_LISTEN", port.to_string())
+            .env("EMBER_LISTEN", format!("127.0.0.1:{port}"))
             .env("EMBER_TRANSPORT", "0")
             .env("EMBER_OWNER_PRESENCE", "warn")
             .kill_on_drop(true)

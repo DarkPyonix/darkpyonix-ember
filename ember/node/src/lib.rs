@@ -33,6 +33,7 @@ pub mod enrol_seal;
 pub mod envinfo;
 pub mod exec;
 pub mod exec_server;
+pub mod exec_server_guard;
 pub mod fs;
 pub mod fs_kind;
 pub mod fs_watch;

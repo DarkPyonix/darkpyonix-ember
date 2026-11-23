@@ -887,6 +887,7 @@ dependencies = [
  "tokio-tungstenite 0.29.0",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
  "x25519-dalek",
  "zeroize",

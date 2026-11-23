@@ -319,9 +319,10 @@ async fn metadata_and_assignment_reach_a_second_client_by_push() {
     assert_eq!(two.api().fork_session(&id, None).await.unwrap_err().status(), Some(409));
 }
 
-/// FR-L26 (#327): what the app's danger zone relies on. Archive keeps the project in the list
-/// with `archived: true` (the app hides it), a project that still holds a session is refused
-/// with 409 `project_not_empty` and stays, and an empty project is dropped from the state.
+/// FR-L26 (D52, #327): what the app's settings and danger zone rely on. `leader_session`
+/// round-trips, archive keeps the project with `archived: true`, deleting an unarchived project is
+/// refused with 409 `project_not_archived`, and deleting an archived project cascades to its
+/// sessions and drops both the project and its sessions from client state.
 #[tokio::test]
 async fn fr_l26_archive_and_delete_through_the_client() {
     let (_s, url) = start_server().await;
@@ -339,22 +340,50 @@ async fn fr_l26_archive_and_delete_through_the_client() {
     assert!(!c.patch_project("empty", &restore).await.unwrap().archived);
     assert!(c.read(|st| st.project("empty").is_some_and(|p| !p.archived)));
 
-    c.create_session(&NewSession {
-        project: "busy".into(),
-        agent: "scripted".into(),
-        cwd: std::env::temp_dir().to_string_lossy().into(),
-        model: None,
-        title: None,
-    })
-    .await
-    .unwrap();
-    c.load_projects().await.unwrap();
-    let refused = c.delete_project("busy").await.unwrap_err();
-    assert_eq!((refused.status(), refused.code()), (Some(409), Some("project_not_empty")));
-    assert!(c.read(|st| st.project("busy").is_some()), "a refused delete drops nothing");
+    // Unarchived empty project cannot be deleted (Q4: archive required first).
+    let refused = c.delete_project("empty").await.unwrap_err();
+    assert_eq!((refused.status(), refused.code()), (Some(409), Some("project_not_archived")));
+    assert!(c.read(|st| st.project("empty").is_some()), "a refused delete drops nothing");
 
+    // Archive then delete empty project succeeds.
+    c.patch_project("empty", &archive).await.unwrap();
     c.delete_project("empty").await.unwrap();
     assert!(c.read(|st| st.project("empty").is_none()));
     let gone = c.delete_project("empty").await.unwrap_err();
     assert_eq!((gone.status(), gone.code()), (Some(404), Some("not_found")));
+
+    // Create a project with a session, test leader_session round-trip, then archive + cascade delete.
+    let sid = c
+        .create_session(&NewSession {
+            project: "busy".into(),
+            agent: "scripted".into(),
+            cwd: std::env::temp_dir().to_string_lossy().into(),
+            model: None,
+            title: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    c.load_projects().await.unwrap();
+
+    let set_leader = wire::ProjectPatch { leader_session: Some(Some(sid.clone())), ..Default::default() };
+    let updated = c.patch_project("busy", &set_leader).await.unwrap();
+    assert_eq!(updated.leader_session.as_deref(), Some(sid.as_str()));
+    assert_eq!(c.read(|st| st.project("busy").and_then(|p| p.leader_session.clone())), Some(sid.clone()));
+
+    let clear_leader = wire::ProjectPatch { leader_session: Some(None), ..Default::default() };
+    let cleared = c.patch_project("busy", &clear_leader).await.unwrap();
+    assert_eq!(cleared.leader_session, None);
+    assert_eq!(c.read(|st| st.project("busy").and_then(|p| p.leader_session.clone())), None);
+
+    // Unarchived busy project is refused with 409 project_not_archived.
+    let refused = c.delete_project("busy").await.unwrap_err();
+    assert_eq!((refused.status(), refused.code()), (Some(409), Some("project_not_archived")));
+    assert!(c.read(|st| st.project("busy").is_some() && st.session(&sid).is_some()));
+
+    // Archive then delete cascades and drops both the project and its session from client state.
+    c.patch_project("busy", &archive).await.unwrap();
+    c.delete_project("busy").await.unwrap();
+    assert!(c.read(|st| st.project("busy").is_none()), "project dropped from state");
+    assert!(c.read(|st| st.session(&sid).is_none()), "project sessions dropped from state");
 }

@@ -203,8 +203,10 @@ async fn fr_n2_letify_peers_are_found_through_the_pkarr_directory() {
     // directory (here the in-memory hub) and the dialer resolves the peer's record from it.
     let store = MemoryPkarrStore::new();
     let make = || {
-        let mut letify = ember_transport::LetifyConfig::default();
-        letify.pkarr = Some(std::sync::Arc::new(store.clone()));
+        let letify = ember_transport::LetifyConfig {
+            pkarr: Some(std::sync::Arc::new(store.clone())),
+            ..Default::default()
+        };
         TransportConfig::new(ember_transport::SecretKey::generate())
             .backend(ember_transport::BackendKind::Letify)
             .bind_addr("127.0.0.1:0".parse().unwrap())

@@ -1344,7 +1344,7 @@ impl Enrol {
             State::Expired => return Err(EnrolError::Expired(enrol_id.into())),
             other => return Err(EnrolError::WrongState { id: enrol_id.into(), state: other.as_str() }),
         }
-        if row.confirm_deadline_ms.map_or(true, |d| now_ms >= d) {
+        if row.confirm_deadline_ms.is_none_or(|d| now_ms >= d) {
             return Err(EnrolError::Expired(enrol_id.into()));
         }
         let expected = expect_fingerprint.map(normalise_fingerprint).transpose()?;

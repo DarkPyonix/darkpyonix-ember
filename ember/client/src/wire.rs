@@ -270,6 +270,9 @@ pub struct Project {
     /// Per-member character overrides saved from the team character editor (FR-L22, #489).
     #[serde(default, deserialize_with = "null_as_default")]
     pub character_overrides: std::collections::BTreeMap<String, CharacterOverride>,
+    /// Session id of the project's leader (FR-L26, D52 Q5); `None` when none is set or the server is older.
+    #[serde(default)]
+    pub leader_session: Option<String>,
 }
 
 /// A saved character override for one member name in a project (FR-L22, #489).
@@ -319,8 +322,8 @@ impl MemberDefaults {
 }
 
 /// `PATCH /projects/{name}` body (FR-L26). `None` fields are omitted. For the text fields an
-/// empty string clears; `member_defaults: Some(None)` sends `null` and clears. The client never
-/// sends `leader_session` or `archived` (the server answers 400 `not_yet`).
+/// empty string clears; `member_defaults: Some(None)` and `leader_session: Some(None)` send
+/// `null` and clear.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct ProjectPatch {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -341,6 +344,10 @@ pub struct ProjectPatch {
     /// all; FR-L22, #489).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub character_overrides: Option<std::collections::BTreeMap<String, Option<CharacterOverride>>>,
+    /// Session id of the project's leader (`Some(Some(id))` sets, `Some(None)` sends `null` to
+    /// clear, `None` leaves it unchanged; FR-L26, D52 Q5).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leader_session: Option<Option<String>>,
     /// Archive (`Some(true)`) or restore (`Some(false)`) the project (FR-L26, #384). Never `null`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub archived: Option<bool>,

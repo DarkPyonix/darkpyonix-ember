@@ -216,7 +216,7 @@ impl AddrLimiter {
         let key = addr_key(ip);
         let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
         st.calls += 1;
-        if st.calls % SWEEP_EVERY == 0 {
+        if st.calls.is_multiple_of(SWEEP_EVERY) {
             st.map.retain(|_, e| {
                 e.prune(now);
                 !(e.accept.is_empty() && e.other.is_empty())

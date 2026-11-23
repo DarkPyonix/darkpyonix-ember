@@ -422,6 +422,7 @@ impl EditorSession {
         let commands = crate::commands::parse_contributed_commands(&extensions);
         let mut core = SessionCore::new(LanguageRegistry::from_extensions(&extensions), config.core.clone(), Instant::now());
         core.set_settings(settings.clone());
+        core.set_workspace_folder(workspace.folders[0].uri.clone());
         core.set_grammar_catalog(crate::textmate::GrammarCatalog::from_extensions(&extensions));
         core.set_workspace_trust(crate::trust::WorkspaceTrust::new(config.workspace_trusted, extensions.clone()));
         core.set_storage_roots(storage_roots);
@@ -735,7 +736,14 @@ impl EditorSession {
     /// Show `text` as the buffer of `uri`, opening the file if needed (FR-L31.6): the window's buffer
     /// kept across a reconnect. Dirty unless it equals the file on disk.
     pub fn restore(&self, uri: UriComponents, text: String) -> Result<(), Error> {
-        self.send(Command::Input(Input::Restore { uri, text }))
+        self.restore_with_base(uri, text, None)
+    }
+
+    /// [`EditorSession::restore`] with the file text the buffer was based on (the bridge's
+    /// `DocumentWidgetState::disk_base`). If the file no longer holds it, a buffer with edits is put
+    /// back with the conflict raised, and a buffer without edits is not put back over the newer file.
+    pub fn restore_with_base(&self, uri: UriComponents, text: String, base: Option<String>) -> Result<(), Error> {
+        self.send(Command::Input(Input::Restore { uri, text, base }))
     }
 
     /// The editor showing `uri` got focus.
@@ -774,6 +782,11 @@ impl EditorSession {
     /// was closed without one.
     pub fn answer_message(&self, id: u64, handle: Option<i64>) -> Result<(), Error> {
         self.send(Command::Input(Input::AnswerMessage { id, handle }))
+    }
+
+    /// The window shows output channel `id`; the session reads a log channel again only while it is shown.
+    pub fn set_active_output_channel(&self, id: Option<String>) -> Result<(), Error> {
+        self.send(Command::Input(Input::ActiveOutputChannel { id }))
     }
 
     /// Replace the chosen matches (FR-E7); answered with [`SessionUpdate::ReplaceDone`].
@@ -818,6 +831,22 @@ impl EditorSession {
     /// `WebviewDriver::set_view_state`; answered with [`SessionUpdate::Webview`].
     pub fn webview(&self, event: crate::webview::WebviewEvent) -> Result<(), Error> {
         self.send(Command::Input(Input::Webview(event)))
+    }
+
+    /// A request of the debugging window; answered with [`SessionUpdate::Debug`].
+    pub fn debug(&self, request: crate::debugger::DebugRequest) -> Result<(), Error> {
+        self.send(Command::Input(Input::Debug(request)))
+    }
+
+    /// Start the configuration of `.vscode/launch.json` that `selector` names. Answered with
+    /// [`crate::debugger::DebugUpdate::Sessions`], or [`crate::debugger::DebugUpdate::StartFailed`].
+    pub fn start_debugging(&self, selector: crate::debugger::ConfigSelector) -> Result<(), Error> {
+        self.debug(crate::debugger::DebugRequest::Start { selector })
+    }
+
+    /// Stop one debug session, or all of them with `None`.
+    pub fn stop_debugging(&self, session: Option<String>) -> Result<(), Error> {
+        self.debug(crate::debugger::DebugRequest::Stop { session })
     }
 
     /// After [`SessionUpdate::Desync`]: re-send the session's text as a new generation.
@@ -1060,6 +1089,7 @@ impl Driver {
                     Some(WatchEvent::Changes(list)) => Some(Input::FilesChanged(list)),
                     Some(WatchEvent::Error(e)) => {
                         tracing::warn!("ember-editor: file watcher error: {e}");
+                        let _ = self.updates.send(SessionUpdate::FileNotice { uri: None, kind: crate::engine::FileNoticeKind::WatcherError, detail: e });
                         None
                     }
                     None => {
@@ -1177,18 +1207,22 @@ impl Driver {
                         continue;
                     }
                     let (fs, tx) = (Arc::clone(&self.fs), internal.clone());
+                    // An output channel's log file is named by the extension host with a server path. The
+                    // server's URI transformer usually maps it to `vscode-remote` already; a `file` URI is
+                    // a path on the server, never on this machine, so read it through the same authority.
+                    let target = if uri.scheme == "file" { UriComponents::remote(&self.authority, &uri.path) } else { uri.clone() };
                     // A grammar file comes from an extension on the server: ask how big it is before reading it.
                     let cap = matches!(purpose, crate::engine::ReadPurpose::Grammar { .. }).then_some(crate::textmate::MAX_GRAMMAR_BYTES);
                     tokio::spawn(async move {
                         let read = async {
                             if let Some(cap) = cap {
-                                match fs.stat(&uri).await {
+                                match fs.stat(&target).await {
                                     Ok(st) if st.size > cap => return Err("the grammar file is too large".to_owned()),
                                     Ok(_) => {}
                                     Err(e) => return Err(e.to_string()),
                                 }
                             }
-                            fs.read_file(&uri).await.map_err(|e| e.to_string())
+                            fs.read_file(&target).await.map_err(|e| e.to_string())
                         };
                         // A grammar read is bounded in time as well as in size.
                         let result = match cap {
@@ -1201,7 +1235,7 @@ impl Driver {
                         let _ = tx.send(Input::FileRead { uri, purpose, result });
                     });
                 }
-                Effect::WriteFile { uri, bytes, token } => {
+                Effect::WriteFile { uri, bytes, token, expect } => {
                     if let Some(local) = self.user_file(&uri) {
                         let tx = internal.clone();
                         tokio::spawn(async move {
@@ -1215,6 +1249,23 @@ impl Driver {
                     }
                     let (fs, tx) = (Arc::clone(&self.fs), internal.clone());
                     tokio::spawn(async move {
+                        // A save writes over whatever is there: first see that it is what the buffer was
+                        // based on. A file that is gone passes (the save makes it again).
+                        if let Some(base) = &expect {
+                            match fs.read_file(&uri).await {
+                                Ok(disk) if !base.holds(&disk) => {
+                                    let _ = tx.send(Input::SaveStale { uri, token });
+                                    return;
+                                }
+                                Ok(_) => {}
+                                Err(e) if is_not_found(&e) => {}
+                                Err(e) => {
+                                    let result = Err(format!("could not check the file before saving: {e}"));
+                                    let _ = tx.send(Input::FileWritten { uri, token, result });
+                                    return;
+                                }
+                            }
+                        }
                         let result = fs.write_file(&uri, bytes, &WriteOptions::default()).await.map_err(|e| e.to_string());
                         let _ = tx.send(Input::FileWritten { uri, token, result });
                     });
@@ -1270,13 +1321,21 @@ impl Driver {
                     if self.workspace_watch.as_deref().is_some_and(|ws| crate::watch::covered_by_workspace_watch(ws, &uri.path)) {
                         continue;
                     }
-                    let (fs, watches) = (Arc::clone(&self.fs), Arc::clone(&self.watches));
+                    let (fs, watches, updates) = (Arc::clone(&self.fs), Arc::clone(&self.watches), self.updates.clone());
                     tokio::spawn(async move {
                         match fs.watch(&uri, &WatchOptions::default()).await {
                             Ok(req) => {
                                 watches.lock().unwrap().insert(uri.key(), req);
                             }
-                            Err(e) => tracing::warn!("ember-editor: cannot watch {}: {e}", uri.path),
+                            Err(e) => {
+                                tracing::warn!("ember-editor: cannot watch {}: {e}", uri.path);
+                                // Nothing reports a change to this file now: the window says so.
+                                let _ = updates.send(SessionUpdate::FileNotice {
+                                    uri: Some(uri),
+                                    kind: crate::engine::FileNoticeKind::WatchRefused,
+                                    detail: e.to_string(),
+                                });
+                            }
                         }
                     });
                 }

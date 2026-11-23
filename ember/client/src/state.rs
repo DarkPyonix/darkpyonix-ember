@@ -404,7 +404,35 @@ impl State {
                 }
             }
             Input::Push(Push::ProjectDeleted { name }) => {
-                if self.project_records.remove(&name).is_some() {
+                let removed_project = self.project_records.remove(&name).is_some();
+                let removed_sessions: Vec<String> = self
+                    .sessions
+                    .iter()
+                    .filter(|(_, rec)| rec.project == name)
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                for id in &removed_sessions {
+                    self.sessions.remove(id);
+                    self.transcripts.remove(id);
+                    self.open.remove(id);
+                    self.last_seen.remove(id);
+                    self.approve_all.remove(id);
+                    self.fork_info.remove(id);
+                    self.unlink_session(id, &mut ch);
+                    ch.sessions.insert(id.clone());
+                }
+                let removed_teams: Vec<String> = self
+                    .teams
+                    .iter()
+                    .filter(|(_, t)| t.project == name)
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                for tid in removed_teams {
+                    self.teams.remove(&tid);
+                    self.team_of.retain(|_, v| v != &tid);
+                    ch.teams.insert(tid);
+                }
+                if removed_project || !removed_sessions.is_empty() {
                     ch.projects = true;
                     ch.persist = true;
                     ch.computers |= self.derive_computer_projects();

@@ -20,8 +20,20 @@ pub struct DocumentWidgetState {
     pub uri: UriComponents,
     /// The node key for `CodeEditor`.
     pub generation: u64,
-    /// The document version as last edited or reported.
+    /// The document version in the session's numbering: the widget's own version plus
+    /// [`DocumentWidgetState::widget_base`], raised by the versions the session reports.
     pub version: u32,
+    /// The session's document version at the moment the current widget started counting from 0.
+    /// A widget that is mounted again (a tab switch, a pane that was out of the tree) restarts at
+    /// version 0 while the session keeps counting, so every version the widget sends is moved up
+    /// by this much and every version sent to it is moved down.
+    pub widget_base: u32,
+    /// The version of the widget's last change, in the widget's own numbering.
+    pub widget_last: u32,
+    /// The file text the buffer is based on, as far as the window has seen it: the text the file
+    /// had when the document was opened or last saved. A restore after a reconnect passes it as the
+    /// base, so a file that changed meanwhile is noticed.
+    pub disk_base: Option<String>,
     /// The current text prop / buffer mirror (`\n`-normalized).
     pub text: String,
     pub language_id: String,
@@ -44,6 +56,31 @@ pub struct DocumentWidgetState {
     pub format: Option<crate::text_format::DocumentFormat>,
     /// The foldable regions of the document (FR-E6).
     pub folds: Vec<FoldRegion>,
+}
+
+impl DocumentWidgetState {
+    /// The widget counts from 0 again: the session's current version becomes the base.
+    fn restart_widget_count(&mut self) {
+        self.widget_base += self.widget_last;
+        self.widget_last = 0;
+        self.version = self.version.max(self.widget_base);
+        self.decoration_bytes = encode_for_widget(&self.decorations, self.widget_base);
+    }
+
+    /// A version of the session's numbering as the widget numbers it.
+    pub fn widget_version_of(&self, session_version: u32) -> u32 {
+        session_version.saturating_sub(self.widget_base)
+    }
+}
+
+/// The decorations' wire blob with their versions in the widget's numbering.
+fn encode_for_widget(decorations: &[Decoration], base: u32) -> Vec<u8> {
+    if base == 0 {
+        return Decoration::encode_records(decorations);
+    }
+    let moved: Vec<Decoration> =
+        decorations.iter().map(|d| Decoration { version: d.version.saturating_sub(base), ..d.clone() }).collect();
+    Decoration::encode_records(&moved)
 }
 
 /// The coloured runs the session last reported for a document.
@@ -73,6 +110,9 @@ pub enum BridgeAction {
     CommandFailed { id: String, error: String },
     /// Reopening a document with an encoding failed (FR-L31.7).
     FormatFailed { uri: UriComponents, error: String },
+    /// Something about a file went wrong without a user action to blame: a reload that failed, a
+    /// watch the server refused, an edit the widget did not apply. Show it.
+    FileNotice { uri: Option<UriComponents>, kind: crate::engine::FileNoticeKind, detail: String },
     /// An extension webview changed (FR-E8): pass it to the window's `WebviewDriver`. The bridge has
     /// already updated its placeholder panes ([`WidgetBridge::webview_panes`]).
     Webview(crate::webview::WebviewUpdate),
@@ -172,6 +212,22 @@ impl WidgetBridge {
         match update {
             SessionUpdate::Opened { uri, generation, text, language_id, tab_width } => {
                 let key = uri.key();
+                // Opening a document that is already open (a click on its explorer row or its tab)
+                // brings it forward. Its unsaved state, pending edits, conflict bar, save error and
+                // decorations stay: rebuilding them would show an unsaved buffer as saved, and
+                // closing that tab would then skip the save prompt.
+                if let Some(doc) = self.docs.get_mut(&key).filter(|d| d.generation == generation) {
+                    if doc.text != text || doc.tab_width != tab_width {
+                        let lines: Vec<String> = text.split('\n').map(str::to_owned).collect();
+                        let indent = compute_indent_folds(&lines, tab_width);
+                        doc.folds = merge_folds(0, lines.len(), &[], &indent, &std::collections::HashSet::new());
+                    }
+                    doc.text = text;
+                    doc.language_id = language_id;
+                    doc.tab_width = tab_width;
+                    self.active = Some(key);
+                    return BridgeAction::None;
+                }
                 let lines: Vec<String> = text.split('\n').map(str::to_owned).collect();
                 let indent = compute_indent_folds(&lines, tab_width);
                 let folds = merge_folds(0, lines.len(), &[], &indent, &std::collections::HashSet::new());
@@ -181,6 +237,9 @@ impl WidgetBridge {
                         uri,
                         generation,
                         version: 0,
+                        widget_base: 0,
+                        widget_last: 0,
+                        disk_base: Some(text.clone()),
                         text,
                         language_id,
                         tab_width,
@@ -209,6 +268,8 @@ impl WidgetBridge {
                             let folds = merge_folds(0, lines.len(), &[], &indent, &std::collections::HashSet::new());
                             doc.generation = generation;
                             doc.version = 0;
+                            doc.widget_base = 0;
+                            doc.widget_last = 0;
                             doc.text = text;
                             doc.decorations.clear();
                             doc.decoration_bytes.clear();
@@ -228,7 +289,7 @@ impl WidgetBridge {
             SessionUpdate::Decorations { uri, generation, decorations } => {
                 if let Some(doc) = self.docs.get_mut(&uri.key()) {
                     if doc.generation == generation {
-                        doc.decoration_bytes = Decoration::encode_records(&decorations);
+                        doc.decoration_bytes = encode_for_widget(&decorations, doc.widget_base);
                         doc.decorations = decorations;
                     }
                 }
@@ -272,6 +333,7 @@ impl WidgetBridge {
                     if !dirty {
                         // Nothing is left to save (saved, or reverted to the disk version).
                         doc.save_error = None;
+                        doc.disk_base = Some(doc.text.clone());
                     }
                 }
                 BridgeAction::None
@@ -297,6 +359,7 @@ impl WidgetBridge {
                 BridgeAction::None
             }
             SessionUpdate::RunCommand { command } => BridgeAction::RunCommand(command),
+            SessionUpdate::FileNotice { uri, kind, detail } => BridgeAction::FileNotice { uri, kind, detail },
             SessionUpdate::Desync { uri, .. } => BridgeAction::Resync(uri),
             SessionUpdate::Closed { uri } => {
                 let key = uri.key();
@@ -339,6 +402,8 @@ impl WidgetBridge {
             SessionUpdate::SearchHits { .. } | SessionUpdate::SearchDone { .. } | SessionUpdate::ReplaceDone { .. } => BridgeAction::None,
             // Language feature answers are the window's lists and boxes, not a document's props (FR-L31.13).
             SessionUpdate::Language(_) => BridgeAction::None,
+            // Sessions, stacks, variables and breakpoints are the Run and Debug tool window's.
+            SessionUpdate::Debug(_) => BridgeAction::None,
             SessionUpdate::Webview(update) => {
                 self.webview_panes.apply(&update);
                 BridgeAction::Webview(update)
@@ -369,11 +434,35 @@ impl WidgetBridge {
         }
     }
 
+    /// The edits queued for the widget of `uri`, with their base versions in the widget's own
+    /// numbering (they were written against the session's).
     pub fn take_pending_edits(&mut self, uri: &UriComponents) -> Vec<WidgetCommand> {
-        self.docs
-            .get_mut(&uri.key())
-            .map(|d| std::mem::take(&mut d.pending_edits))
-            .unwrap_or_default()
+        let Some(doc) = self.docs.get_mut(&uri.key()) else { return Vec::new() };
+        let base = doc.widget_base;
+        std::mem::take(&mut doc.pending_edits)
+            .into_iter()
+            .map(|edit| match edit {
+                WidgetCommand::EditCode { request_id, base_version, range, text } => {
+                    WidgetCommand::EditCode { request_id, base_version: base_version.saturating_sub(base), range, text }
+                }
+                WidgetCommand::InsertSnippet { base_version, range, snippet } => {
+                    WidgetCommand::InsertSnippet { base_version: base_version.saturating_sub(base), range, snippet }
+                }
+                other => other,
+            })
+            .collect()
+    }
+
+    /// The `CodeEditor` of `uri` with node key `generation` was mounted: it counts versions from 0
+    /// again, while the session keeps its own count. Call it once per mount, from the mount of the
+    /// widget. A mount of a node whose key is not the document's current generation is ignored.
+    ///
+    /// Without this call a restart is still noticed when the widget sends a version that is not
+    /// above its last one, but a command queued for the widget before its first change would be
+    /// written against the wrong version.
+    pub fn on_widget_mounted(&mut self, uri: &UriComponents, generation: u64) {
+        let Some(doc) = self.docs.get_mut(&uri.key()).filter(|d| d.generation == generation) else { return };
+        doc.restart_widget_count();
     }
 
     pub fn on_code_changed(
@@ -384,11 +473,20 @@ impl WidgetBridge {
         text: String,
     ) -> Option<(UriComponents, u64, WidgetEvent)> {
         let doc = self.docs.get_mut(&uri.key())?;
-        doc.version = version;
+        if version <= doc.widget_last {
+            // The widget went back to a lower number: it was mounted again and counts from 0.
+            doc.restart_widget_count();
+        }
+        doc.widget_last = version;
+        let session_version = doc.widget_base + version;
+        doc.version = session_version;
+        // The edit is unsaved from this moment. The session says so too, but not before a round
+        // trip, and not at all while no session answers: closing the tab in that time must still ask.
+        doc.dirty = true;
         if let Some(updated) = apply_text_change(&doc.text, range, &text) {
             doc.text = updated;
         }
-        Some((doc.uri.clone(), doc.generation, WidgetEvent::CodeChanged { version, range, text }))
+        Some((doc.uri.clone(), doc.generation, WidgetEvent::CodeChanged { version: session_version, range, text }))
     }
 
     pub fn on_edit_rejected(
@@ -403,7 +501,12 @@ impl WidgetBridge {
         Some((
             doc.uri.clone(),
             doc.generation,
-            WidgetEvent::CodeEditRejected { request_id, base_version, current_version, range },
+            WidgetEvent::CodeEditRejected {
+                request_id,
+                base_version: doc.widget_base + base_version,
+                current_version: doc.widget_base + current_version,
+                range,
+            },
         ))
     }
 
@@ -420,7 +523,7 @@ impl WidgetBridge {
 
     pub fn on_save_requested(&self, uri: &UriComponents, version: u32) -> Option<(UriComponents, u64, WidgetEvent)> {
         let doc = self.docs.get(&uri.key())?;
-        Some((doc.uri.clone(), doc.generation, WidgetEvent::CodeSaveRequested { version }))
+        Some((doc.uri.clone(), doc.generation, WidgetEvent::CodeSaveRequested { version: doc.widget_base + version }))
     }
 
     pub fn on_decoration_activated(&self, uri: &UriComponents, decoration: u64) -> Option<(UriComponents, u64, WidgetEvent)> {
@@ -436,7 +539,7 @@ impl WidgetBridge {
         active: WidgetPos,
     ) -> Option<(UriComponents, u64, WidgetEvent)> {
         let doc = self.docs.get(&uri.key())?;
-        Some((doc.uri.clone(), doc.generation, WidgetEvent::SelectionChanged { version, anchor, active }))
+        Some((doc.uri.clone(), doc.generation, WidgetEvent::SelectionChanged { version: doc.widget_base + version, anchor, active }))
     }
 
     pub fn on_visible_range_changed(
@@ -450,7 +553,7 @@ impl WidgetBridge {
         Some((
             doc.uri.clone(),
             doc.generation,
-            WidgetEvent::VisibleRangeChanged { version, first_line, last_line },
+            WidgetEvent::VisibleRangeChanged { version: doc.widget_base + version, first_line, last_line },
         ))
     }
 

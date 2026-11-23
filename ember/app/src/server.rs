@@ -456,17 +456,46 @@ pub struct ServerApi {
     /// The server over the transport (FR-N9): every call goes through this `Api`
     /// (`Api::raw_request`) instead of `http`. `None`: plain HTTP to `base`.
     peer: Option<ember_client::api::Api>,
+    /// The `Authorization` header for plain HTTP, added per request so a token read again after
+    /// a 401 (a rotated `server-token`, FR-S9, #369, #1048) reaches every clone. Marked
+    /// sensitive: `Debug` never prints the token.
+    auth: std::sync::Arc<std::sync::RwLock<Option<reqwest::header::HeaderMap>>>,
+    /// Where the token is read again after a 401; `None` for a token given by the caller.
+    reload: Option<TokenReload>,
+}
+
+/// Reads the server token again (FR-S11 lookup order); shared by clones.
+#[derive(Clone)]
+struct TokenReload(std::sync::Arc<dyn Fn() -> Option<String> + Send + Sync>);
+
+impl std::fmt::Debug for TokenReload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TokenReload")
+    }
 }
 
 impl ServerApi {
     /// Reads the server token once from the environment (FR-S11, `ember_client::token`).
     /// Fails when the HTTP client cannot be built.
+    /// After a 401 the token is read again the same way, once, and the call is retried when it
+    /// changed (#369, #1048).
     pub fn new(base_url: &str) -> ServerResult<ServerApi> {
-        // A server that is not local gets no token and none is read (FR-S11).
-        let token = ember_client::token::token_allowed_for(base_url)
-            .then(ember_client::token::server_token_from_env)
-            .flatten();
-        ServerApi::with_token(base_url, token)
+        Self::with_token_source(base_url, ember_client::token::server_token_from_env)
+    }
+
+    /// Like [`ServerApi::new`] with the token read by `read`, now and again after a 401. A server
+    /// that is not local gets no token and `read` is never called (FR-S11).
+    pub fn with_token_source(
+        base_url: &str,
+        read: impl Fn() -> Option<String> + Send + Sync + 'static,
+    ) -> ServerResult<ServerApi> {
+        let allowed = ember_client::token::token_allowed_for(base_url);
+        let token = if allowed { read() } else { None };
+        let mut api = ServerApi::with_token(base_url, token)?;
+        if allowed {
+            api.reload = Some(TokenReload(std::sync::Arc::new(read)));
+        }
+        Ok(api)
     }
 
     /// Like [`ServerApi::new`] with the token given; `None` sends no `Authorization` header, and
@@ -477,11 +506,26 @@ impl ServerApi {
             .filter(|_| ember_client::token::token_allowed_for(base_url))
             .as_deref()
             .and_then(ember_client::token::auth_headers);
-        let mut builder = reqwest::Client::builder();
-        if let Some(headers) = auth {
-            builder = builder.default_headers(headers);
+        let api = Self::from_built(reqwest::Client::builder().build(), base_url)?;
+        *api.auth.write().unwrap_or_else(|e| e.into_inner()) = auth;
+        Ok(api)
+    }
+
+    /// Reads the token again when this client was made by [`ServerApi::new`] or
+    /// [`ServerApi::with_token_source`]. True when a token was found and differs from the one in
+    /// use, so the caller retries once.
+    fn reload_token(&self) -> bool {
+        let Some(reload) = &self.reload else { return false };
+        let Some(fresh) = (reload.0)().as_deref().and_then(ember_client::token::auth_headers) else {
+            return false;
+        };
+        let mut cur = self.auth.write().unwrap_or_else(|e| e.into_inner());
+        let auth = reqwest::header::AUTHORIZATION;
+        if cur.as_ref().and_then(|h| h.get(&auth)) == fresh.get(&auth) {
+            return false;
         }
-        Self::from_built(builder.build(), base_url)
+        *cur = Some(fresh);
+        true
     }
 
     /// The server over the transport (FR-N9): the same calls, sent through `api` (an
@@ -500,7 +544,14 @@ impl ServerApi {
         base_url: &str,
     ) -> ServerResult<ServerApi> {
         let http = built.map_err(|e| ServerError::Client(e.to_string()))?;
-        Ok(ServerApi { http, base: base_url.trim_end_matches('/').to_string(), owner: Default::default(), peer: None })
+        Ok(ServerApi {
+            http,
+            base: base_url.trim_end_matches('/').to_string(),
+            owner: Default::default(),
+            peer: None,
+            auth: Default::default(),
+            reload: None,
+        })
     }
 
     /// True when the calls go over the transport (FR-N9).
@@ -557,11 +608,29 @@ impl ServerApi {
             return Ok((status, String::from_utf8_lossy(&bytes).into_owned()));
         }
         let key = if owner { self.owner_header(&method, path) } else { None };
+        let answer = self.send_http(method.clone(), path, body.as_ref(), key.clone()).await?;
+        // A rotated server token (#369, #1048): read it again once and retry when it changed.
+        if answer.0 == 401 && self.reload_token() {
+            return self.send_http(method, path, body.as_ref(), key).await;
+        }
+        Ok(answer)
+    }
+
+    async fn send_http(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&serde_json::Value>,
+        key: Option<reqwest::header::HeaderValue>,
+    ) -> ServerResult<(u16, String)> {
         let mut req = self.http.request(method, self.url(path));
+        if let Some(headers) = self.auth.read().unwrap_or_else(|e| e.into_inner()).clone() {
+            req = req.headers(headers);
+        }
         if let Some(v) = key {
             req = req.header(ember_client::owner::OWNER_HEADER, v);
         }
-        if let Some(b) = &body {
+        if let Some(b) = body {
             req = req.json(b);
         }
         let res = req.send().await?;
@@ -980,6 +1049,52 @@ mod tests {
         assert!(!ServerApi::with_token("http://127.0.0.1:1", None).unwrap().is_over_transport());
         assert_eq!(ide_targets_path("s 1", Some("a/b")), "/sessions/s%201/ide?computer=a%2Fb");
         assert_eq!(ide_targets_path("s", None), "/sessions/s/ide");
+    }
+
+    /// A rotated token is read again after a 401 and the call retried once; an unchanged token
+    /// is not retried, and a token given by the caller is never read again (#369, #1048).
+    #[tokio::test]
+    async fn fr_s11_server_api_rereads_a_rotated_token_once() {
+        use std::sync::{Arc, Mutex};
+        use axum::http::{HeaderMap, StatusCode};
+        let current = Arc::new(Mutex::new("new".to_string()));
+        let seen: Arc<Mutex<Vec<Option<String>>>> = Arc::default();
+        let (cur, log) = (current.clone(), seen.clone());
+        let accounts = move |headers: HeaderMap| {
+            let (cur, log) = (cur.clone(), log.clone());
+            async move {
+                let auth = headers.get("authorization").and_then(|v| v.to_str().ok()).map(str::to_string);
+                log.lock().unwrap().push(auth.clone());
+                if auth.as_deref() == Some(&format!("Bearer {}", cur.lock().unwrap())) {
+                    (StatusCode::OK, axum::Json(serde_json::json!([])))
+                } else {
+                    (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({"error": "unauthorized"})))
+                }
+            }
+        };
+        let app = axum::Router::new().route("/api/accounts", axum::routing::get(accounts));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let file = Arc::new(Mutex::new("old".to_string()));
+        let read = file.clone();
+        let api = ServerApi::with_token_source(&url, move || Some(read.lock().unwrap().clone())).unwrap();
+        // Unchanged: one attempt, the auth error.
+        assert!(matches!(api.accounts().await, Err(ServerError::Unauthorized(_))));
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        // Rotated: read again, retried with the new token, and kept for the next call.
+        *file.lock().unwrap() = "new".into();
+        assert!(api.clone().accounts().await.is_ok());
+        assert!(api.accounts().await.is_ok());
+        assert_eq!(
+            seen.lock().unwrap()[1..],
+            [Some("Bearer old".into()), Some("Bearer new".into()), Some("Bearer new".into())]
+        );
+        // Given by the caller: never read again.
+        let fixed = ServerApi::with_token(&url, Some("old".into())).unwrap();
+        assert!(matches!(fixed.accounts().await, Err(ServerError::Unauthorized(_))));
+        assert_eq!(seen.lock().unwrap().len(), 5);
     }
 
     #[test]

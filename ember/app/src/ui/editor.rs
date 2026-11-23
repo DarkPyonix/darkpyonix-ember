@@ -112,7 +112,9 @@ pub fn base_name(path: &str) -> &str {
 /// control characters, and is not for the person: the caller logs it and shows this.
 pub fn file_failure_reason(error: &str) -> &'static str {
     let e = error.to_lowercase();
-    if e.contains("entrynotfound") || e.contains("enoent") || e.contains("not found") || e.contains("no such file") {
+    if e.contains("changed on disk") {
+        "파일이 디스크에서 바뀌어 저장하지 않았습니다. 비교한 뒤 다시 저장하면 덮어씁니다"
+    } else if e.contains("entrynotfound") || e.contains("enoent") || e.contains("not found") || e.contains("no such file") {
         "파일이 없습니다. 지워졌거나 이름이 바뀌었을 수 있습니다"
     } else if e.contains("nopermissions") || e.contains("eacces") || e.contains("eperm") || e.contains("permission") {
         "파일을 읽거나 쓸 권한이 없습니다"
@@ -124,6 +126,27 @@ pub fn file_failure_reason(error: &str) -> &'static str {
         "파일이 너무 커서 열 수 없습니다"
     } else {
         "알 수 없는 오류입니다. 자세한 내용은 로그에 있습니다"
+    }
+}
+
+/// What the window says about a [`ember_editor::FileNoticeKind`] the session reported, in Korean and
+/// naming the file when the notice has one. The server's own words are logged, never shown.
+pub fn file_notice_text(kind: ember_editor::FileNoticeKind, name: Option<&str>) -> String {
+    use ember_editor::FileNoticeKind::{EditRejected, ReloadFailed, WatchRefused, WatcherError};
+    let file = name.map(display_name);
+    match (kind, file) {
+        (ReloadFailed, file) => format!(
+            "{}이(가) 디스크에서 바뀐 것을 다시 읽지 못했습니다. 화면의 내용이 파일과 다를 수 있습니다",
+            file.as_deref().unwrap_or("파일")
+        ),
+        (WatchRefused, Some(file)) => format!("서버가 {file}의 변경을 감시하지 않습니다. 다른 곳에서 바뀌어도 알려 드리지 못합니다"),
+        (WatchRefused, None) => "서버가 파일의 변경을 감시하지 않습니다. 다른 곳에서 바뀌어도 알려 드리지 못합니다".to_string(),
+        (WatcherError, Some(file)) => format!("서버의 파일 감시에 오류가 있습니다 ({file}). 파일이 바뀌어도 알려 드리지 못할 수 있습니다"),
+        (WatcherError, None) => "서버의 파일 감시에 오류가 있습니다. 파일이 바뀌어도 알려 드리지 못할 수 있습니다".to_string(),
+        (EditRejected, file) => format!(
+            "{}에 적용하려던 변경이 입력한 내용과 겹쳐 적용하지 못했습니다",
+            file.as_deref().unwrap_or("파일")
+        ),
     }
 }
 

@@ -38,6 +38,14 @@ fn fr_l31_save_states_a_dirty_buffer_changed_on_disk_offers_compare_overwrite_an
 }
 
 #[test]
+fn fr_l31_6_b3_window_a_stale_save_bar_says_so_in_korean() {
+    let english = "the file changed on disk after it was opened or last saved, so nothing was written";
+    let bar = doc_bar("a.json", Some(ExternalChange::ChangedWhileDirty), Some(english)).expect("a bar");
+    assert_eq!(bar.text, "a.json을(를) 저장하지 못했습니다: 파일이 디스크에서 바뀌어 저장하지 않았습니다. 비교한 뒤 다시 저장하면 덮어씁니다");
+    assert!(!bar.text.contains("nothing was written"));
+}
+
+#[test]
 fn fr_l31_save_states_a_manual_save_waits_for_the_conflict_choice() {
     assert_eq!(manual_save_gate(None), Ok(()));
     assert_eq!(manual_save_gate(Some(ExternalChange::Deleted)), Ok(()), "saving a deleted file writes it again");

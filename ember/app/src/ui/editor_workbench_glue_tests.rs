@@ -1667,3 +1667,51 @@ fn fr_l31_6_a2_window_after_a_reconnect_a_dirty_tab_shows_the_conflict_and_a_cle
     assert!(!b.dirty);
     assert!(page.text().contains("a.rs 파일이 디스크에서 바뀌었습니다"), "{}", page.text());
 }
+
+fn posted_notice() -> Option<String> {
+    crate::ui::coexist::shared_ui().notice.get_untracked().map(|(_, text)| text)
+}
+
+// FR-L31.6 (B3, window half): a file notice from the session (a reload that failed, a watch the server
+// refused, a watcher error, an edit the editor did not apply) is shown, in Korean, naming the file.
+#[test]
+fn fr_l31_6_b3_window_each_file_notice_kind_is_shown_with_the_file_name() {
+    use ember_editor::FileNoticeKind::{EditRejected, ReloadFailed, WatchRefused, WatcherError};
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open();
+    page.click_row();
+    page.deliver(opened(7));
+    let mut seen = Vec::new();
+    for (kind, uri_of, expect) in [
+        (ReloadFailed, Some(uri()), "다시 읽지 못했습니다"),
+        (WatchRefused, Some(uri()), "감시"),
+        (WatcherError, None, "파일 감시"),
+        (EditRejected, Some(uri()), "적용하지 못했습니다"),
+    ] {
+        page.deliver(SessionUpdate::FileNotice { uri: uri_of.clone(), kind, detail: "EIO: raw server text at /secret".into() });
+        let text = posted_notice().unwrap_or_else(|| panic!("{kind:?} shows nothing"));
+        assert!(text.contains(expect), "{kind:?}: {text}");
+        assert_eq!(text.contains("a.rs"), uri_of.is_some(), "{kind:?} names the file when it has one: {text}");
+        assert!(!text.contains("secret") && !text.contains("EIO"), "the server's words are not shown: {text}");
+        assert!(!seen.contains(&text), "each kind says its own thing");
+        seen.push(text);
+    }
+}
+
+// FR-L31.6 (B3, window half): a save the session refused because the file changed on disk says so in
+// Korean, not in the session's English.
+#[test]
+fn fr_l31_6_b3_window_a_stale_save_is_shown_in_korean() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open();
+    page.click_row();
+    page.deliver(opened(7));
+    page.deliver(SessionUpdate::ExternalChange { uri: uri(), change: ember_editor::ExternalChange::ChangedWhileDirty });
+    page.deliver(SessionUpdate::SaveFailed {
+        uri: uri(),
+        error: "the file changed on disk after it was opened or last saved, so nothing was written".into(),
+    });
+    let text = posted_notice().expect("the failed save is shown");
+    assert!(text.contains("a.rs") && text.contains("디스크에서 바뀌어"), "{text}");
+    assert!(!text.contains("nothing was written") && !text.contains("알 수 없는 오류"), "{text}");
+}

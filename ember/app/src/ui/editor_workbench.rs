@@ -1509,6 +1509,11 @@ pub mod page {
                     tracing::warn!(path = %uri.path, %error, "reopening a file with an encoding failed");
                     notice(crate::ui::editor_status::reopen_failure_text(&crate::ui::editor::display_name(base_name(&uri.path)), None, &error));
                 }
+                BridgeAction::FileNotice { uri, kind, detail } => {
+                    tracing::warn!(path = ?uri.as_ref().map(|u| u.path.as_str()), ?kind, %detail, "the editor session reported a file problem");
+                    let name = uri.as_ref().map(|u| crate::ui::editor::display_name(base_name(&u.path)));
+                    notice(crate::ui::editor::file_notice_text(kind, name.as_deref()));
+                }
                 BridgeAction::Webview(ref wv_update) => {
                     handle_webview_update(&s, wv_update);
                 }

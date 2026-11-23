@@ -277,7 +277,7 @@ impl RunningFixture {
         std::fs::read_to_string(&self.0)
             .unwrap_or_default()
             .split_whitespace()
-            .map(|pid| pid.parse().unwrap())
+            .filter_map(|pid| pid.parse().ok().filter(|pid| *pid > 0))
             .collect()
     }
 }
@@ -311,7 +311,7 @@ async fn fr_w4_ose_shutdown_cancels_an_active_install_and_its_descendant() {
         .env("EMBER_OSE_DATA_DIR", dir.path().join("ose-data"))
         .kill_on_drop(true)
         .spawn().unwrap();
-    let http = reqwest::Client::new();
+    let http = reqwest::Client::builder().no_proxy().build().unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if http.get(format!("{base}/api/health")).send().await.is_ok_and(|r| r.status().is_success()) {
@@ -353,6 +353,14 @@ fn wait_for_fixture_exit(fixture: &RunningFixture) {
             if unsafe { libc::kill(pid, 0) } != 0
                 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
             {
+                break;
+            }
+            #[cfg(target_os = "linux")]
+            if std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .ok().and_then(|stat| stat.rsplit_once(") ").map(|(_, rest)| rest.starts_with("Z ")))
+                .unwrap_or(false)
+            {
+                // The signal already stopped the process. PID 1 may not have reaped it yet.
                 break;
             }
             assert!(std::time::Instant::now() < end, "process {pid} survived OSE cleanup");

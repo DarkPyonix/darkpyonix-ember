@@ -305,13 +305,12 @@ impl DebugView {
                 // Code-OSS expands the first scope that is not expensive the first time it is
                 // shown; after that the user's choice is kept.
                 let any_known = scopes.iter().any(|sc| self.seen_scopes.contains(&sc.name));
-                if !any_known {
-                    if let Some(first) = scopes
-                        .iter()
-                        .find(|sc| !sc.expensive && sc.variables_reference > 0)
-                    {
-                        self.expanded.insert(first.name.clone());
-                    }
+                let first_cheap = scopes
+                    .iter()
+                    .find(|sc| !sc.expensive && sc.variables_reference > 0)
+                    .filter(|_| !any_known);
+                if let Some(first) = first_cheap {
+                    self.expanded.insert(first.name.clone());
                 }
                 for sc in scopes {
                     self.seen_scopes.insert(sc.name.clone());
@@ -379,16 +378,14 @@ impl DebugView {
                         format!("console:{lid}")
                     }
                 };
-                if let Ok(r) = result {
-                    if r.variables_reference > 0 {
-                        let key = (session.clone(), r.variables_reference);
-                        self.ref_path.insert(key.clone(), path.clone());
-                        if self.expanded.contains(&path) && !self.variables.contains_key(&key) {
-                            fx.requests.push(DebugRequest::Variables {
-                                session: session.clone(),
-                                reference: r.variables_reference,
-                            });
-                        }
+                if let Some(r) = result.as_ref().ok().filter(|r| r.variables_reference > 0) {
+                    let key = (session.clone(), r.variables_reference);
+                    self.ref_path.insert(key.clone(), path.clone());
+                    if self.expanded.contains(&path) && !self.variables.contains_key(&key) {
+                        fx.requests.push(DebugRequest::Variables {
+                            session: session.clone(),
+                            reference: r.variables_reference,
+                        });
                     }
                 }
             }
@@ -533,14 +530,14 @@ impl DebugView {
         uri: Option<UriComponents>,
         line: Option<u32>,
     ) {
-        if let Some(last) = self.console.last_mut() {
-            if matches!(&last.kind, LineKind::Output(c) if c == category)
+        let joins = |last: &&mut ConsoleLine| {
+            matches!(&last.kind, LineKind::Output(c) if c == category)
                 && !last.text.ends_with('\n')
                 && last.uri.is_none()
-            {
-                last.text.push_str(text);
-                return;
-            }
+        };
+        if let Some(last) = self.console.last_mut().filter(joins) {
+            last.text.push_str(text);
+            return;
         }
         self.push_line(
             LineKind::Output(category.to_owned()),
@@ -877,8 +874,7 @@ pub(crate) fn on_update(s: &Shared, update: &ember_editor::SessionUpdate) {
     let fx = match update {
         ember_editor::SessionUpdate::Debug(update) => {
             let mut view = s.debug_view;
-            let fx = view.write().apply(update);
-            fx
+            view.write().apply(update)
         }
         ember_editor::SessionUpdate::ConnectionLost { .. } => {
             let mut view = s.debug_view;

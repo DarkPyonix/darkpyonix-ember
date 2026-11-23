@@ -607,6 +607,7 @@ async fn serve_main() -> anyhow::Result<()> {
         Some(devices.clone()),
         Some(computers.clone()),
     );
+    transfers.publish_updates_to(sessions.clone());
     // The guest router is built only when the door is on, wrapped only by the door's guards, and
     // never merged into `app` (not under auth::protect either).
     let guest_app = guest_door.as_ref().map(|d| {
@@ -782,6 +783,11 @@ async fn serve_main() -> anyhow::Result<()> {
         }
         (t, _) => t,
     };
+    let computer_status = tokio::spawn({
+        let computers = computers.clone();
+        let sessions = sessions.clone();
+        async move { computers::status_push::run(&computers, &sessions).await }
+    });
     let shutdown_ose = ose.clone();
     let served = axum::serve(listener, local_app)
         .with_graceful_shutdown(async move {
@@ -789,6 +795,7 @@ async fn serve_main() -> anyhow::Result<()> {
             shutdown_ose.shutdown();
         })
         .await;
+    computer_status.abort();
     ose.shutdown();
     let _ = stop_tx.send(true);
     if let Some(mut task) = guest_task {

@@ -782,10 +782,18 @@ Security boundary:
   `--server-data-dir`; the OSE is not known to serve or list it (unverified).
 - The 200 and 502 `output` is what the OSE printed and can contain absolute paths of the server machine; only the
   owner sees it.
-- Tests: `ember/server/tests/fr_w4_ose_data_dir.rs`.
-- Unverified: the `@version` form, and `--list-extensions` (not documented in this repository, so there is no list
-  route). How several OSE processes behave on one data dir is unknown. A server shutdown or panic does not kill
-  a running install or the OSE start's grandchildren (follow-up).
+- Timeout and graceful server or node shutdown stop an active extension command and its
+  descendants. Both OSE servers and extension commands run in their own process group on Unix.
+  On Windows they join a kill-on-close Job Object before the launcher starts running.
+  A failed start also cleans up the process tree.
+- Tests in `ember/server/tests/fr_w4_ose_data_dir.rs`:
+  `fr_w4_ose_data_dir_a_timeout_kills_the_whole_process_group`,
+  `fr_w4_ose_shutdown_cancels_an_active_install_and_its_descendant` and
+  `fr_w4_ose_start_failure_kills_the_launcher_descendant`. The Windows node/server CI job
+  runs `fr_w4_windows_ose_kills_the_tree_even_if_the_launcher_exits_first`.
+- Still open: the `@version` form and `--list-extensions` against the real OSE, and running
+  several OSE processes against one data dir. On Unix a forced daemon exit (SIGKILL or abort)
+  can leave descendants. Windows token file ACLs remain open.
 
 ### FR-W4 acceptance: the OSE runtime
 
@@ -848,9 +856,9 @@ again on the downloaded archive, including `/version`). Step 4 does not: the liv
 process groups and `pkill` and are `#![cfg(unix)]`, so they do not run on Windows (not built).
 `ember-node` starts the Windows server as `<dir>/node.exe <dir>/out/server-main.js` (what the
 `.cmd` runs), with the Windows variables `SystemRoot`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`,
-`TEMP`, `TMP`, `PATHEXT` and `COMSPEC` added to the cleared environment. Not built on Windows:
-killing the extension host with the server (no process tree kill; only `node.exe` is killed) and
-token file ACLs (the default ACL, as in the token directory row). Build and **Smoke
+`TEMP`, `TMP`, `PATHEXT` and `COMSPEC` added to the cleared environment. A kill-on-close Job
+Object owns `node.exe` and its descendants, including the extension host. Token files still use
+the default ACL. Build and **Smoke
 (windows-x64)** passed in CI runs 43692860054 and 45000437147 (2026-11-22); the first
 `ose-v1.139.1` GitHub release publish remains owner-gated.
 

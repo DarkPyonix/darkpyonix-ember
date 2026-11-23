@@ -685,9 +685,11 @@ mod tests {
         let detached = state_for("p", "/ws", None);
         assert!(!detached.live && !detached.sessions.is_empty());
         let mut detached = detached;
+        let turns = |st: &AgentState| st.sessions.iter().map(|s| s.turns.len()).collect::<Vec<_>>();
+        let before = turns(&detached);
         assert_eq!(detached.send_prompt("hi"), None);
         assert_eq!(detached.status_note.as_deref(), Some(NOT_CONNECTED_NOTE));
-        assert!(detached.sessions.iter().all(|s| s.turns.iter().all(|t| !t.is_user)), "nothing recorded as sent");
+        assert_eq!(turns(&detached), before, "nothing recorded as sent");
         // Connected with no session: the list stays empty, the samples do not come back.
         let empty = state_for("p", "/ws", Some(Vec::new()));
         assert!(empty.live && empty.sessions.is_empty() && empty.selected_session().is_none());

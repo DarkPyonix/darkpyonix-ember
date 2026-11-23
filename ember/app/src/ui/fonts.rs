@@ -49,6 +49,27 @@ fn register(faces: &[Face]) -> Vec<u32> {
     faces.iter().map(|f| asset(AssetKind::Font, f.bytes)).collect()
 }
 
+/// Registers the bundled Pretendard faces once and returns their asset ids.
+///
+/// Shared between [`app_font`] and [`mono_font`] so `register(&PRETENDARD)` (~4.5 MiB) is
+/// never called twice (NFR-L1, #1082).
+pub(crate) fn pretendard_ids() -> &'static [u32] {
+    static IDS: OnceLock<Vec<u32>> = OnceLock::new();
+    IDS.get_or_init(|| register(&PRETENDARD))
+}
+
+fn app_font_stack() -> FontStack {
+    FontStack::new()
+        .family(register(&INTER))
+        .family(pretendard_ids().iter().copied())
+}
+
+fn mono_font_stack() -> FontStack {
+    FontStack::new()
+        .family(register(&JETBRAINS_MONO))
+        .family(pretendard_ids().iter().copied())
+}
+
 /// Registers the faces and the stack once and returns the stack's font id.
 ///
 /// Registrations ride the batch and are re-sent to a new Host, so calling this while the
@@ -56,9 +77,7 @@ fn register(faces: &[Face]) -> Vec<u32> {
 /// but the call costs nothing to repeat.
 pub fn app_font() -> u32 {
     static STACK: OnceLock<u32> = OnceLock::new();
-    *STACK.get_or_init(|| {
-        FontStack::new().family(register(&INTER)).family(register(&PRETENDARD)).register()
-    })
+    *STACK.get_or_init(|| app_font_stack().register())
 }
 
 /// Registers JetBrains Mono, with Pretendard behind it for Hangul in comments and strings,
@@ -67,7 +86,7 @@ pub fn mono_font() -> u32 {
     static STACK: OnceLock<u32> = OnceLock::new();
     *STACK.get_or_init(|| {
         let _ = app_font();
-        FontStack::new().family(register(&JETBRAINS_MONO)).family(register(&PRETENDARD)).register()
+        mono_font_stack().register()
     })
 }
 
@@ -171,20 +190,26 @@ pub const APP_OVERLAY: OverlayTokens = OverlayTokens::new()
     .toast_padding(16, 10)
     .toast_type(13, 18);
 
-/// The toolkit theme the app launches with: the prose roles in Inter and Pretendard, `Mono`
-/// in JetBrains Mono.
+/// The toolkit theme the app launches with: the prose roles in Inter and Pretendard.
+///
+/// `TypeRole::Mono` is left unset (NFR-L1, #1082) so launcher startup does not eagerly
+/// register the three `JetBrainsMono-*.ttf` faces (~805 KiB). Launcher `Mono` text falls
+/// back to the platform monospace font; [`editor_theme`] attaches [`mono_font`] lazily
+/// when the editor window launches.
 pub fn app_theme(scheme: ColorScheme) -> Theme {
     Theme::unified(DesignSystem::Cupertino)
         .with_palette(&APP_PALETTE)
         .with_overlay_tokens(&APP_OVERLAY)
         .with_color_scheme(scheme)
         .with_default_font(app_font())
-        .with_font(TypeRole::Mono, mono_font())
 }
 
-/// The theme of the separate editor window: [`app_theme`] with the editor palette.
+/// The theme of the separate editor window: [`app_theme`] with the editor palette and
+/// `TypeRole::Mono` set to the bundled JetBrains Mono stack ([`mono_font`]).
 pub fn editor_theme(scheme: ColorScheme) -> Theme {
-    app_theme(scheme).with_palette(&EDITOR_PALETTE)
+    app_theme(scheme)
+        .with_palette(&EDITOR_PALETTE)
+        .with_font(TypeRole::Mono, mono_font())
 }
 
 #[cfg(test)]
@@ -352,15 +377,65 @@ mod tests {
         }
     }
 
-    /// Design review 2026-11-13 C6: `Mono` is the bundled JetBrains Mono stack, not a system face.
+    /// Design review 2026-11-13 C6: in the editor window, `Mono` is the bundled JetBrains Mono
+    /// stack, not a system face. Launcher startup defers `mono_font` (NFR-L1, #1082).
     #[test]
     fn design_c6_mono_role_is_the_bundled_jetbrains_mono() {
-        for theme in [app_theme(ColorScheme::Light), editor_theme(ColorScheme::Dark)] {
+        for theme in [editor_theme(ColorScheme::Light), editor_theme(ColorScheme::Dark)] {
             let mono = theme.font(TypeRole::Mono).expect("Mono has a font");
             assert_ne!(mono, 0);
             assert_eq!(mono, mono_font());
             assert_ne!(Some(mono), theme.font(TypeRole::Body));
         }
+    }
+
+    /// NFR-L1 (#1082): launcher startup (`app_theme`) registers only `app_font` and leaves
+    /// `TypeRole::Mono` unset so the three `JetBrainsMono-*.ttf` faces (~805 KiB) are not
+    /// eagerly registered; `editor_theme` attaches `mono_font`.
+    #[test]
+    fn nfr_l1_app_theme_does_not_register_jetbrains_mono_while_editor_theme_does() {
+        for scheme in [ColorScheme::Light, ColorScheme::Dark] {
+            let app = app_theme(scheme);
+            assert_eq!(app.font(TypeRole::Body), Some(app_font()));
+            assert_eq!(
+                app.font(TypeRole::Mono),
+                None,
+                "app_theme must leave Mono unset to avoid eager JetBrainsMono registration"
+            );
+
+            let editor = editor_theme(scheme);
+            assert_eq!(editor.font(TypeRole::Body), Some(app_font()));
+            assert_eq!(editor.font(TypeRole::Mono), Some(mono_font()));
+            assert_ne!(editor.font(TypeRole::Mono), editor.font(TypeRole::Body));
+        }
+        let src = include_str!("fonts.rs");
+        let app_theme_body = src
+            .split("pub fn app_theme(")
+            .nth(1)
+            .and_then(|s| s.split("\n}\n").next())
+            .expect("app_theme body");
+        assert!(!app_theme_body.contains("mono_font"), "app_theme must not call mono_font()");
+    }
+
+    /// NFR-L1 (#1082): `pretendard_ids` caches the registered Pretendard asset ids once so
+    /// `app_font` and `mono_font` share the exact same ids without re-registering ~4.5 MiB.
+    #[test]
+    fn nfr_l1_pretendard_ids_are_cached_and_shared_between_app_and_mono_fonts() {
+        let first = pretendard_ids();
+        let second = pretendard_ids();
+        assert_eq!(first.len(), PRETENDARD.len());
+        assert!(first.iter().all(|&id| id != 0));
+        assert!(std::ptr::eq(first.as_ptr(), second.as_ptr()));
+        assert_eq!(first, second);
+
+        let app_stack = app_font_stack();
+        let mono_stack = mono_font_stack();
+        assert_eq!(app_stack.families().len(), 2);
+        assert_eq!(mono_stack.families().len(), 2);
+        assert_eq!(app_stack.families()[1].as_slice(), first);
+        assert_eq!(mono_stack.families()[1].as_slice(), first);
+        assert_eq!(app_stack.families()[0].len(), INTER.len());
+        assert_eq!(mono_stack.families()[0].len(), JETBRAINS_MONO.len());
     }
 
     /// #873: the toast is the mockup's inverted ink pill (dark on light theme, light on dark),

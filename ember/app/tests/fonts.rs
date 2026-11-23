@@ -32,13 +32,16 @@ fn license_texts_sit_beside_the_faces() {
 }
 
 #[test]
-fn app_theme_sets_the_bundled_font_and_jetbrains_mono_for_mono() {
+fn app_theme_sets_the_bundled_font_and_defers_jetbrains_mono_to_editor() {
     let theme = app_theme(ColorScheme::Light);
     assert!(theme.font(TypeRole::Body).is_some_and(|id| id != 0));
     assert!(theme.font(TypeRole::Title).is_some_and(|id| id != 0));
     assert_eq!(theme.font(TypeRole::Body), theme.font(TypeRole::Title));
-    assert_eq!(theme.font(TypeRole::Mono), Some(mono_font()));
-    assert_ne!(theme.font(TypeRole::Mono), theme.font(TypeRole::Body));
+    assert_eq!(theme.font(TypeRole::Mono), None);
+
+    let editor = editor_theme(ColorScheme::Light);
+    assert_eq!(editor.font(TypeRole::Mono), Some(mono_font()));
+    assert_ne!(editor.font(TypeRole::Mono), editor.font(TypeRole::Body));
 }
 
 #[test]

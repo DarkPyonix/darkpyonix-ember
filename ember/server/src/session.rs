@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{broadcast, mpsc, watch, Mutex};
 
 use crate::agents::{AgentAdapter, AgentKind, AgentRun, Detected, Probe, StartRequest};
 use crate::events::{
@@ -53,6 +53,8 @@ pub enum Push {
     ApproveAll { session_id: String, enabled: bool },
     /// A message was appended to a channel's log (FR-T10, FR-L12).
     ChannelMessage { channel_id: String, message: crate::channels::Message },
+    ComputerStatus { computer_id: String, reachable: Option<bool>, error: Option<String> },
+    TransferUpdated { transfer: crate::transfers::TransferUpdate },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -236,6 +238,14 @@ pub struct AgentDefaults {
     pub mode: Option<String>,
 }
 
+pub(crate) struct PushClient(watch::Sender<usize>);
+
+impl Drop for PushClient {
+    fn drop(&mut self) {
+        self.0.send_modify(|count| *count -= 1);
+    }
+}
+
 pub struct Sessions {
     store: Arc<Store>,
     start_hooks: std::sync::Mutex<Vec<StartHook>>,
@@ -251,6 +261,7 @@ pub struct Sessions {
     adapters: HashMap<AgentKind, Arc<dyn AgentAdapter>>,
     live: Mutex<HashMap<String, LiveRun>>,
     push: broadcast::Sender<Push>,
+    push_clients: watch::Sender<usize>,
     /// Last time each session recorded an event or received a message (FR-S6).
     last_active: std::sync::Mutex<HashMap<String, Instant>>,
     /// Sessions a client is looking at, and until when (FR-S6). Renewed by the client.
@@ -287,6 +298,7 @@ impl Sessions {
             adapters: adapters.into_iter().map(|a| (a.kind(), a)).collect(),
             live: Mutex::new(HashMap::new()),
             push,
+            push_clients: watch::channel(0).0,
             last_active: std::sync::Mutex::new(HashMap::new()),
             leases: std::sync::Mutex::new(HashMap::new()),
             approve_all: std::sync::Mutex::new(HashSet::new()),
@@ -472,6 +484,16 @@ impl Sessions {
 
     pub fn subscribe(&self) -> broadcast::Receiver<Push> {
         self.push.subscribe()
+    }
+
+    /// Count upgraded sockets only. Internal broadcast subscriptions do not trigger probes.
+    pub(crate) fn push_client_connected(&self) -> PushClient {
+        self.push_clients.send_modify(|count| *count += 1);
+        PushClient(self.push_clients.clone())
+    }
+
+    pub(crate) fn subscribe_push_clients(&self) -> watch::Receiver<usize> {
+        self.push_clients.subscribe()
     }
 
     /// How many push receivers are alive (one per open `/api/push` socket, plus internal

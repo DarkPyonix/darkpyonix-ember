@@ -54,6 +54,26 @@ struct FakeState {
     /// already in flight when the refusal left is not one).
     first_refusal: Option<Instant>,
     sends_after_refusal: usize,
+    /// The longest a `/recv` is held, seconds (letify's Worker: 25).
+    poll_cap: u64,
+    /// `/recv` requests being held now, and the most held at once, by caller: one pump of a
+    /// client holds at most one.
+    inflight: HashMap<String, usize>,
+    max_inflight: HashMap<String, usize>,
+}
+
+/// Counts one held `/recv` while it lives (also when the client drops the request).
+struct Held {
+    state: Arc<Mutex<FakeState>>,
+    node: String,
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        if let Some(n) = self.state.lock().unwrap().inflight.get_mut(&self.node) {
+            *n = n.saturating_sub(1);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -65,7 +85,12 @@ struct FakeWorker {
 
 impl FakeWorker {
     async fn start(mode: Mode) -> Self {
-        let state = Arc::new(Mutex::new(FakeState { mode, ..FakeState::default() }));
+        Self::start_with(mode, 25).await
+    }
+
+    /// A fake whose `/recv` is held at most `poll_cap` seconds.
+    async fn start_with(mode: Mode, poll_cap: u64) -> Self {
+        let state = Arc::new(Mutex::new(FakeState { mode, poll_cap, ..FakeState::default() }));
         let arrived = Arc::new(tokio::sync::Notify::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -86,6 +111,10 @@ impl FakeWorker {
 
     fn recvs(&self, node: PeerId) -> usize {
         self.state.lock().unwrap().recvs.get(&node.to_string()).copied().unwrap_or(0)
+    }
+
+    fn max_inflight(&self, node: PeerId) -> usize {
+        self.state.lock().unwrap().max_inflight.get(&node.to_string()).copied().unwrap_or(0)
     }
 
     fn sends_after_refusal(&self) -> usize {
@@ -148,16 +177,28 @@ async fn recv(
     Query(q): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Response {
-    let mode = {
+    let who = caller(&headers);
+    let (mode, cap) = {
         let mut st = fake.state.lock().unwrap();
-        *st.recvs.entry(caller(&headers)).or_default() += 1;
-        st.mode
+        *st.recvs.entry(who.clone()).or_default() += 1;
+        (st.mode, st.poll_cap)
     };
     if let Some(r) = refused(mode) {
         return r;
     }
+    let _held = {
+        let mut st = fake.state.lock().unwrap();
+        let now = {
+            let n = st.inflight.entry(who.clone()).or_default();
+            *n += 1;
+            *n
+        };
+        let most = st.max_inflight.entry(who.clone()).or_default();
+        *most = (*most).max(now);
+        Held { state: fake.state.clone(), node: who }
+    };
     let after: u64 = q.get("after").and_then(|v| v.parse().ok()).unwrap_or(0);
-    let wait: u64 = q.get("wait").and_then(|v| v.parse().ok()).unwrap_or(0).min(25);
+    let wait: u64 = q.get("wait").and_then(|v| v.parse().ok()).unwrap_or(0).min(cap);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(wait);
     loop {
         let notified = fake.arrived.notified();
@@ -407,4 +448,104 @@ async fn em11_worker_a_worker_failure_falls_back_to_the_relay() {
     assert!(conn.path_state().is_relayed(), "expected the relay, got {}", conn.path_state());
     assert_eq!(echo_roundtrip(&conn, b"still through the relay").await, b"still through the relay");
     assert_eq!(w.worker.recvs(w.node.peer_id()), 0, "the node was woken although the Worker refused the offer");
+}
+
+// ----- many devices at one answering node (letify-link 3.0.8 Demux) -------------------------
+
+/// A node behind a gate that admits `n` clients, the fake Worker held at most `poll_cap`
+/// seconds per `/recv`, and Ember's own rendezvous dropping punch messages, so every punch must
+/// go through the Worker. No relay: a connect succeeds only over a punched path.
+async fn crowd(n: usize, poll_cap: u64) -> (Transport, Transport, Vec<Transport>, FakeWorker) {
+    let worker = FakeWorker::start_with(Mode::Ok, poll_cap).await;
+    let qad = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+    let server_key = SecretKey::generate();
+    let server_id = server_key.peer_id();
+    let server = Transport::bind(
+        TransportConfig::new(server_key)
+            .backend(BackendKind::Letify)
+            .bind_addr("127.0.0.1:0".parse().unwrap())
+            .letify(LetifyConfig { qad_listen: Some(qad), worker_rendezvous: false, ..LetifyConfig::default() }),
+    )
+    .await
+    .unwrap();
+    let signals = MemorySignalHub::new();
+    let device = |key: SecretKey, advertise: Vec<SocketAddr>| {
+        let channel: Arc<dyn SignalChannel> = signals.channel(key.peer_id());
+        let letify = LetifyConfig {
+            observer: Some(ObserverAddr { addr: qad, node: Some(server_id) }),
+            advertise,
+            signal: Some(Arc::new(NoPunchSignal(channel))),
+            worker_rendezvous: true,
+            worker_url: Some(worker.url.clone()),
+            connect_timeout: Duration::from_secs(20),
+            ..LetifyConfig::default()
+        };
+        TransportConfig::new(key).backend(BackendKind::Letify).bind_addr("127.0.0.1:0".parse().unwrap()).letify(letify)
+    };
+    let node = Transport::bind(device(SecretKey::generate(), vec![dead_address()])).await.unwrap();
+    let mut clients = Vec::new();
+    for _ in 0..n {
+        let c = Transport::bind(device(SecretKey::generate(), vec![])).await.unwrap();
+        c.add_peer_addr(PeerAddr { peer: node.peer_id(), relays: vec![], direct: node.local_addr().direct });
+        clients.push(c);
+    }
+    PeerGate::allow_list(clients.iter().map(|c| c.peer_id())).attach(&node);
+    spawn_echo(&node, "echo");
+    (server, node, clients, worker)
+}
+
+/// Every client connects to the node at once; each connection must reach a direct path.
+async fn all_at_once(node: &Transport, clients: &[Transport]) -> Vec<Connection> {
+    let dials = clients.iter().map(|c| async move {
+        let conn = tokio::time::timeout(Duration::from_secs(25), c.connect(node.peer_id(), "echo"))
+            .await
+            .expect("connect timed out")
+            .unwrap();
+        wait_direct(&conn).await;
+        conn
+    });
+    futures::future::join_all(dials).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn em11_worker_three_devices_woken_at_once_all_punch_through_the_worker() {
+    let (_server, node, clients, worker) = crowd(3, 25).await;
+    let conns = all_at_once(&node, &clients).await;
+    for (i, conn) in conns.iter().enumerate() {
+        let msg = format!("device {i} over its own punch");
+        assert_eq!(echo_roundtrip(conn, msg.as_bytes()).await, msg.as_bytes());
+    }
+    for c in &clients {
+        assert!(worker.sends(c.peer_id()) >= 1, "every device punched through the Worker");
+    }
+    assert!(worker.recvs(node.peer_id()) >= 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn em11_worker_a_second_wake_up_in_an_open_window_shares_its_one_pump() {
+    // Two devices woken together: the node answers both from one windowed Demux, so it never
+    // holds more than one `/recv` at the Worker at a time.
+    let (_server, node, clients, worker) = crowd(2, 25).await;
+    let conns = all_at_once(&node, &clients).await;
+    assert_eq!(conns.len(), 2);
+    assert!(worker.recvs(node.peer_id()) >= 1);
+    assert_eq!(worker.max_inflight(node.peer_id()), 1, "the node ran more than one pump at once");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn em11_worker_the_pump_stops_when_the_window_closes() {
+    // A Worker that holds a `/recv` at most 2 s: a pump still running after the window would
+    // poll again at least every 2 s, so a count that stays flat over 5 s means it stopped.
+    let (_server, node, clients, worker) = crowd(2, 2).await;
+    let _conns = all_at_once(&node, &clients).await;
+    assert!(worker.recvs(node.peer_id()) >= 1);
+    tokio::time::sleep(PUNCH_OVER).await;
+    let polls = worker.recvs(node.peer_id());
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(worker.recvs(node.peer_id()), polls, "the node's pump outlived its window");
+    for c in &clients {
+        let polls = worker.recvs(c.peer_id());
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert_eq!(worker.recvs(c.peer_id()), polls, "a client's pump outlived its dial");
+    }
 }

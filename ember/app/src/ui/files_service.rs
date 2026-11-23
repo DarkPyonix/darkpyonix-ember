@@ -717,8 +717,8 @@ async fn send_steps(
                 let _ = api.cancel_transfer_at(&target, &created.id).await;
                 return Ok(UploadEnd::Cancelled);
             }
-            // Only the server computer's offer is accepted here. A node accepts the owner's
-            // offer itself (`FR-F15`) and accepting for a computer is not relayed (403).
+            // Preserve the server-computer shortcut. A node in ask mode waits for an
+            // explicit answer, so the sender never accepts a pending node offer here.
             if created.status == "offered" && target == TransferTarget::Server {
                 api.accept_transfer_offer(&created.id).await.map_err(|e| TransferError::from_api(&e))?;
             }

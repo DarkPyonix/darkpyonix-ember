@@ -425,6 +425,8 @@ impl WidgetBridge {
                 self.webview_panes.apply(&update);
                 BridgeAction::Webview(update)
             }
+            // Protocol coverage records are for the regression run and the logs (FR-E9).
+            SessionUpdate::ProtocolGap { .. } => BridgeAction::None,
         }
     }
 

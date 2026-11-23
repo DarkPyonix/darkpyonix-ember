@@ -308,6 +308,10 @@ pub enum SessionUpdate {
     Webview(crate::webview::WebviewUpdate),
     /// Debug sessions, call stacks, variables, console lines and breakpoints.
     Debug(crate::debugger::DebugUpdate),
+    /// A call to a `todo` method of the coverage ledger that returns a value got the fallback
+    /// reply (FR-E9). `count` is the number of such calls to `proxy.method` in this session so
+    /// far; `extension` is set only when an argument of this call names the extension.
+    ProtocolGap { proxy: String, method: String, extension: Option<String>, count: u32 },
 }
 
 #[derive(Debug, Clone)]

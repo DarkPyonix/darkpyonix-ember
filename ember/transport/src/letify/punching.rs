@@ -26,10 +26,11 @@
 //!   its bound port.
 //! - **Backoff.** Each offer is a rendezvous message (pkarr requests on the hub, SPEC `FR-N2`
 //!   budget), so after a failed punch the next offer to that peer waits.
-//! - **The Worker** (`super::worker`, on by default): when it is ready, the dialing side runs the
-//!   punch over letify's signalling Worker and wakes the peer through Ember's own rendezvous; a
-//!   woken peer answers over the Worker. A Worker failure falls back to the punch over Ember's
-//!   own rendezvous, in the same dial.
+//! - **The Worker** (`super::worker`, on by default): the dialing side runs the punch over
+//!   letify's signalling Worker and wakes the peer through Ember's own rendezvous; a woken peer
+//!   answers over the Worker. Dials and answers that run at once each take a handle on one
+//!   windowed Demux, which lives only while one of them is open. A Worker failure falls back to
+//!   the punch over Ember's own rendezvous, in the same dial.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -186,7 +187,7 @@ struct Backoff {
 
 /// Runs punches with letify-link's driver over the shared rendezvous `R`, and over the
 /// signalling Worker `W` when it is on.
-pub(crate) struct Puncher<R, W> {
+pub(crate) struct Puncher<R, W: Rendezvous + 'static> {
     shared: Arc<R>,
     worker: Option<Worker<W>>,
     /// Asked in turn for this side's public IP.
@@ -287,8 +288,10 @@ impl<R: Rendezvous + 'static, W: Rendezvous + 'static> Puncher<R, W> {
     /// The answering side, woken through Ember's own rendezvous: `from` punches through the
     /// Worker, with the wake-up `nonce`. Polls the Worker for one punch at most
     /// ([`worker::ANSWER_POLL`]) and hands every punched path to `handler`. The caller checks that
-    /// it admits `from` first. Does nothing with the Worker off or not ready, for a nonce already
-    /// seen, or while [`MAX_ANSWERING`] punches are answered.
+    /// it admits `from` first. Each woken peer gets its own handle on the windowed Demux, so
+    /// several answer at once. Does nothing with the Worker off or in a 429's Retry-After, for a
+    /// nonce already seen, while an exchange with `from` is open, or while [`MAX_ANSWERING`]
+    /// punches are answered.
     pub(crate) fn answer_woken<F, Fut>(self: &Arc<Self>, from: NodeId, nonce: [u8; 16], handler: F)
     where
         F: Fn(PunchedPath) -> Fut + Clone + Send + 'static,
@@ -298,14 +301,14 @@ impl<R: Rendezvous + 'static, W: Rendezvous + 'static> Puncher<R, W> {
         if !worker.first_sight(nonce) {
             return;
         }
-        let Some(busy) = worker.ready() else {
-            tracing::debug!(peer = %from, "the signalling Worker is busy or rate limited; ignoring a wake-up");
+        if !worker.available() {
+            tracing::debug!(peer = %from, "the signalling Worker is rate limited; ignoring a wake-up");
             return;
-        };
+        }
         let Ok(permit) = self.answering.clone().try_acquire_owned() else { return };
         let puncher = self.clone();
         tokio::spawn(async move {
-            let _permits = (busy, permit);
+            let _permit = permit;
             let Some(worker) = &puncher.worker else { return };
             let public_ip = match puncher.public_ip().await {
                 Ok(ip) => ip,
@@ -314,9 +317,13 @@ impl<R: Rendezvous + 'static, W: Rendezvous + 'static> Puncher<R, W> {
                     return;
                 }
             };
-            let exchange = worker.exchange::<R>(None);
+            let Some(exchange) = worker.exchange::<R>(from, None) else {
+                tracing::debug!(peer = %from, "a Worker exchange with this peer is already open, or the Worker is rate limited");
+                return;
+            };
             let opts = options(public_ip);
-            match tokio::time::timeout(worker::ANSWER_POLL, driver::punch(&exchange, from, Role::Responder, &opts)).await {
+            let answered = tokio::time::timeout(worker::ANSWER_POLL, driver::punch(&exchange, from, Role::Responder, &opts)).await;
+            match answered {
                 Ok(Ok(punched)) => {
                     drop(exchange);
                     if let Err(e) = punched.accept_with(handler) {
@@ -341,18 +348,32 @@ impl<R: Rendezvous + 'static, W: Rendezvous + 'static> Puncher<R, W> {
             .register(peer, false)
             .ok_or_else(|| io::Error::new(io::ErrorKind::WouldBlock, "a punch with this peer is already running"))?;
         let opts = options(public_ip);
-        if let Some((worker, _permit)) = self.worker.as_ref().and_then(|w| Some((w, w.ready()?))) {
-            let mut nonce = [0u8; 16];
-            getrandom::fill(&mut nonce).map_err(|e| io::Error::other(e.to_string()))?;
-            let exchange = worker.exchange(Some((&*self.shared, peer, worker::wake_up(nonce))));
-            match driver::punch(&exchange, peer, Role::Initiator, &opts).await {
-                Ok(punched) => return self.finish(peer, punched).await,
-                Err(e) => match exchange.failure() {
-                    // The Worker failed: punch over Ember's own rendezvous instead.
-                    Some(failure) => worker.note_failure(&failure),
-                    // The Worker carried the exchange and the network did not allow a path.
-                    None => return Err(punch_failed(peer, e)),
-                },
+        // A dial takes a handle on the same windowed Demux as the answers, so dials and answers
+        // that run at once share the Worker's one receive cursor.
+        let mut nonce = [0u8; 16];
+        getrandom::fill(&mut nonce).map_err(|e| io::Error::other(e.to_string()))?;
+        let exchange = self.worker.as_ref().and_then(|w| Some((w, w.exchange(peer, Some((&*self.shared, peer, worker::wake_up(nonce))))?)));
+        if let Some((worker, exchange)) = exchange {
+            let punched = driver::punch(&exchange, peer, Role::Initiator, &opts).await;
+            match punched {
+                Ok(punched) => {
+                    // Close the exchange (and the window, if it was the last) before the QUIC
+                    // connect of the vetting.
+                    drop(exchange);
+                    return self.finish(peer, punched).await;
+                }
+                Err(e) => {
+                    let failure = exchange.failure();
+                    // Close the exchange first, so the window does not stay open through the
+                    // fallback punch.
+                    drop(exchange);
+                    match failure {
+                        // The Worker failed: punch over Ember's own rendezvous instead.
+                        Some(failure) => worker.note_failure(&failure),
+                        // The Worker carried the exchange and the network did not allow a path.
+                        None => return Err(punch_failed(peer, e)),
+                    }
+                }
             }
         }
         let punched = driver::punch(&rdv, peer, Role::Initiator, &opts).await.map_err(|e| punch_failed(peer, e))?;

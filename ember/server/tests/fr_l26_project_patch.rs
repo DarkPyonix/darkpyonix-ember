@@ -181,19 +181,53 @@ async fn fr_l26_unknown_field_is_400() {
 }
 
 #[tokio::test]
-async fn fr_l26_fields_built_later_are_400_not_yet() {
+async fn fr_l26_leader_session_set_clear_validate_and_rename() {
     let f = fixture();
-    new_session(&f.sessions, "p");
-    for body in [
-        json!({ "leader_session": null }),
-        json!({ "leader_session": "s1" }),
-        json!({ "name": "q", "leader_session": null }),
-    ] {
-        let (st, resp) = patch(&f, "p", body.clone()).await;
-        assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
-        assert_eq!(resp["code"], "not_yet", "{body}");
+    let s1 = new_session(&f.sessions, "p");
+    let other_s = new_session(&f.sessions, "other");
+    let def_s = new_session(&f.sessions, DEFAULT);
+
+    // Setting a valid session in the same project succeeds and is returned everywhere.
+    let (st, p) = patch(&f, "p", json!({ "leader_session": s1 })).await;
+    assert_eq!(st, StatusCode::OK, "{p}");
+    assert_eq!(p["leader_session"], s1.as_str());
+    let (_, got) = call(&f.app, Method::GET, "/api/projects/p", None).await;
+    assert_eq!(got["leader_session"], s1.as_str());
+
+    // Renaming the project preserves leader_session.
+    let (st, renamed) = patch(&f, "p", json!({ "name": "p-renamed" })).await;
+    assert_eq!(st, StatusCode::OK, "{renamed}");
+    assert_eq!(renamed["leader_session"], s1.as_str());
+
+    // Clearing with null sets leader_session to null.
+    let (st, cleared) = patch(&f, "p-renamed", json!({ "leader_session": null })).await;
+    assert_eq!(st, StatusCode::OK, "{cleared}");
+    assert_eq!(cleared["leader_session"], Value::Null);
+
+    // Setting again and clearing with empty string also clears it.
+    let (st, _) = patch(&f, "p-renamed", json!({ "leader_session": format!("  {s1}  ") })).await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, cleared) = patch(&f, "p-renamed", json!({ "leader_session": "   " })).await;
+    assert_eq!(st, StatusCode::OK, "{cleared}");
+    assert_eq!(cleared["leader_session"], Value::Null);
+
+    // Unknown session or session from another project is 400 invalid_field.
+    for bad in ["no-such-session", other_s.as_str()] {
+        let (st, resp) = patch(&f, "p-renamed", json!({ "leader_session": bad })).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{bad}: {resp}");
+        assert_eq!(resp["code"], "invalid_field", "{bad}: {resp}");
     }
-    assert!(f.store.project("p").unwrap().is_some(), "nothing was renamed");
+    assert_eq!(f.store.project("p-renamed").unwrap().unwrap().leader_session, None);
+
+    // DEFAULT_PROJECT_NAME refuses setting a leader_session (403 protected_project),
+    // while clearing is a no-op (200 OK).
+    let uri_def = DEFAULT.replace(' ', "%20");
+    let (st, resp) = patch(&f, &uri_def, json!({ "leader_session": def_s })).await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{resp}");
+    assert_eq!(resp["code"], "protected_project", "{resp}");
+    let (st, resp) = patch(&f, &uri_def, json!({ "leader_session": null })).await;
+    assert_eq!(st, StatusCode::OK, "{resp}");
+    assert_eq!(resp["leader_session"], Value::Null);
 }
 
 #[tokio::test]
@@ -287,8 +321,8 @@ async fn fr_l26_a_new_project_has_empty_settings() {
     let (st, p) = call(&f.app, Method::POST, "/api/projects", Some(json!({ "name": "fresh" }))).await;
     assert_eq!(st, StatusCode::CREATED);
     assert_eq!(
-        (&p["repository"], &p["default_branch"], &p["character_style"], &p["archived"], &p["member_defaults"], &p["character_overrides"]),
-        (&Value::Null, &Value::Null, &Value::Null, &json!(false), &json!({}), &json!({}))
+        (&p["repository"], &p["default_branch"], &p["character_style"], &p["archived"], &p["member_defaults"], &p["character_overrides"], &p["leader_session"]),
+        (&Value::Null, &Value::Null, &Value::Null, &json!(false), &json!({}), &json!({}), &Value::Null)
     );
 }
 

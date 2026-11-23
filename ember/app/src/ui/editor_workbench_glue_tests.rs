@@ -9,7 +9,8 @@ use std::cell::RefCell;
 use dioxus_compose::html::prelude::dioxus_core::ScopeId;
 use dioxus_compose::html::prelude::dioxus_elements::{Code, Key, Modifiers};
 use dioxus_compose::html::prelude::*;
-use dioxus_compose::html::{HtmlDom, NodeId};
+use dioxus_compose::html::{HtmlDom, NodeId, PointerInput};
+use dioxus_compose::prelude::ReadableExt;
 use ember_editor::{SessionUpdate, WidgetEvent};
 use ember_editor_conn::uri::UriComponents;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -65,7 +66,10 @@ fn describe(command: &HostCommand) -> String {
             format!("save {} generation {generation} version {version}", uri.path)
         }
         HostCommand::Widget(uri, _, _) => format!("widget event {}", uri.path),
+        HostCommand::SetIndentation { path, action } => format!("set indentation {path} {action:?}"),
         HostCommand::CreateFile { parent, name } => format!("create file {parent} {name}"),
+        HostCommand::Rename { path, new_name } => format!("rename {path} {new_name}"),
+        HostCommand::MovePaths { sources, dest_dir } => format!("move {} -> {dest_dir}", sources.join(",")),
         HostCommand::Webview(event) => match event {
             ember_editor::webview::WebviewEvent::Ready { handle } => format!("webview ready {handle}"),
             ember_editor::webview::WebviewEvent::Message { handle, message } => format!("webview message {handle} {}", message.json),
@@ -366,7 +370,7 @@ fn fr_l31_5_double_click_and_right_click_are_the_real_events() {
     assert!(!editor.contains(concat!("pub struct Double", "Click")) && !editor.contains(concat!("DOUBLE_CLICK", "_MS")));
     let tree = &production[production.find(r#"role: "treeitem", "aria-label": "{row_label}""#).expect("tree row")..];
     let tree = &tree[..tree.find("chev-sp").expect("row content")];
-    assert!(tree.contains("ondoubleclick:") && tree.contains("keep_open(&keep_path)"), "a double-click keeps the preview");
+    assert!(tree.contains("ondoubleclick:") && tree.contains("open_tab_file(&keep_s, &keep_path)"), "a double-click keeps the preview");
     assert!(tree.contains("oncontextmenu:") && tree.contains("TreeMenuAt::Pointer"), "a right-click opens the context menu");
     let tab = &production[production.find(r#"role: "tab", "aria-selected": "{selected}""#).expect("editor tab")..];
     let tab = &tab[..tab.find("onkeydown:").expect("tab keys")];
@@ -1113,4 +1117,455 @@ fn fr_e3_a_hover_draws_the_card_where_the_editor_says_the_word_is() {
     page.deliver(SessionUpdate::HoverHidden { uri: uri() });
     assert!(page.find("data-ed", "hover-card").is_none(), "the card goes with the hover");
     super::set_hover_rect((0, 0, 0), None);
+}
+
+impl Page {
+    /// The page with `a.rs` and `b.rs` listed under the project folder.
+    fn open_two_files() -> Page {
+        let mut page = Page::open();
+        page.host().state.lock().unwrap().listings.insert(
+            ROOT.to_string(),
+            vec![
+                ("a.rs".to_string(), ember_editor_conn::remote_fs::file_type::FILE),
+                ("b.rs".to_string(), ember_editor_conn::remote_fs::file_type::FILE),
+            ],
+        );
+        page.redraw();
+        page
+    }
+
+    fn tree_row(&self, name: &str) -> NodeId {
+        self.find_where(&format!("the {name} tree row"), |id| {
+            self.attr(id, "role").as_deref() == Some("treeitem") && self.attr(id, "aria-label").as_deref() == Some(name)
+        })
+        .unwrap_or_else(|| panic!("the {name} row in the project tree"))
+    }
+
+    fn tab_of(&self, path: &str) -> NodeId {
+        self.find_where(&format!("the tab of {path}"), |id| {
+            self.attr(id, "role").as_deref() == Some("tab") && self.attr(id, "title").as_deref() == Some(path)
+        })
+        .unwrap_or_else(|| panic!("the tab of {path}"))
+    }
+
+    fn press(&mut self, node: Option<NodeId>, key: Key, code: Code) {
+        let input = dioxus_compose::html::KeyInput::new(key, code, Modifiers::empty());
+        self.dom.key_down_input(node, &input);
+        self.dom.render();
+    }
+}
+
+// FR-L31.5 (#302): Down from a.rs, then Enter, opens b.rs, the row the arrow key selected, and never
+// a.rs, the row that had focus before it.
+#[test]
+fn fr_l31_tree_enter_opens_the_row_the_arrow_keys_selected() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_two_files();
+    page.click_row();
+    page.sent();
+
+    let a = page.tree_row("a.rs");
+    page.press(Some(a), Key::ArrowDown, Code::ArrowDown);
+    assert_eq!(page.attr(page.tree_row("b.rs"), "aria-selected").as_deref(), Some("true"));
+    page.sent();
+
+    // The key goes to whichever row holds focus, as the window delivers it.
+    page.press(None, Key::Enter, Code::Enter);
+    let sent = page.sent();
+    assert!(sent.contains(&format!("open {ROOT}/b.rs")), "{sent:?}");
+    assert!(!sent.contains(&format!("open {ROOT}/a.rs")), "{sent:?}");
+}
+
+// FR-L31.5 (#302): an arrow key moves keyboard focus to the row it selected, as Code-OSS does, so
+// the row with `tabindex="0"`, the selected row and the focused row are one.
+#[test]
+fn fr_l31_tree_focus_follows_the_arrow_selection() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_two_files();
+    page.click_row();
+
+    let a = page.tree_row("a.rs");
+    page.press(Some(a), Key::ArrowDown, Code::ArrowDown);
+    assert_eq!(page.dom.focused(), Some(page.tree_row("b.rs")), "Down moves focus to b.rs");
+    assert_eq!(page.attr(page.tree_row("b.rs"), "tabindex").as_deref(), Some("0"));
+
+    let b = page.tree_row("b.rs");
+    page.press(Some(b), Key::ArrowUp, Code::ArrowUp);
+    assert_eq!(page.dom.focused(), Some(page.tree_row("a.rs")), "Up moves focus back to a.rs");
+}
+
+// FR-L31.5 (#302): the arrow keys in the tab strip move focus to the tab they activated, as they do
+// in the tree.
+#[test]
+fn fr_l31_tabs_arrow_keys_move_focus_with_the_selection() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_two_files();
+    {
+        use dioxus_compose::html::prelude::dioxus_signals::WritableExt;
+        let mut tabs = super::shared().tabs;
+        let mut tabs = tabs.write();
+        tabs.open(&format!("{ROOT}/a.rs"));
+        tabs.open(&format!("{ROOT}/b.rs"));
+        tabs.activate(&format!("{ROOT}/a.rs"));
+    }
+    page.redraw();
+
+    let a = page.tab_of(&format!("{ROOT}/a.rs"));
+    page.press(Some(a), Key::ArrowRight, Code::ArrowRight);
+    assert!(page.current_tab_is(&format!("{ROOT}/b.rs")));
+    assert_eq!(page.dom.focused(), Some(page.tab_of(&format!("{ROOT}/b.rs"))), "Right moves focus to b.rs");
+
+    let b = page.tab_of(&format!("{ROOT}/b.rs"));
+    page.press(Some(b), Key::ArrowLeft, Code::ArrowLeft);
+    assert_eq!(page.dom.focused(), Some(page.tab_of(&format!("{ROOT}/a.rs"))), "Left moves focus back to a.rs");
+}
+
+// FR-L31.7 (#302): the tab width is a button with a name, as the line ending, the encoding and the
+// language are; it opens the indentation pick.
+#[test]
+fn fr_l31_status_tab_width_is_a_button_with_a_name() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open();
+    page.click_row();
+    page.deliver(opened(1));
+
+    let item = page.find("aria-label", "들여쓰기 선택: 4칸").expect("the tab width item is named");
+    let tag = page.dom.document().get_node(item).and_then(|n| n.element_data().map(|e| e.name.local.to_string()));
+    assert_eq!(tag.as_deref(), Some("button"), "the tab width is a button, not static text");
+    assert_eq!(page.attr(item, "title").as_deref(), Some("들여쓰기 선택"));
+
+    page.click("aria-label", "들여쓰기 선택: 4칸");
+    assert!(page.find("aria-label", "들여쓰기 작업 검색").is_some(), "the indentation pick is open");
+    assert!(page.find("aria-label", "설정 검색").is_none(), "the settings view is not");
+}
+
+impl Page {
+    /// The titles of the rows of the open pick, in order.
+    fn pick_rows(&self) -> Vec<String> {
+        // Document order: node ids follow creation order, and a row the list drew again has a new id.
+        let doc = self.dom.document();
+        let mut rows = Vec::new();
+        let mut stack = vec![doc.root_element().id];
+        while let Some(id) = stack.pop() {
+            if self.attr(id, "role").as_deref() == Some("option") {
+                rows.push(doc.get_node(id).map(|n| n.text_content()).unwrap_or_default());
+            }
+            if let Some(node) = doc.get_node(id) {
+                stack.extend(node.children.iter().rev());
+            }
+        }
+        rows
+    }
+
+    /// Clicks the row of the open pick whose text is `text`.
+    fn click_pick_row(&mut self, text: &str) {
+        let row = self
+            .find_where(&format!("the pick row {text:?}"), |id| {
+                self.attr(id, "role").as_deref() == Some("option")
+                    && self.dom.document().get_node(id).is_some_and(|n| n.text_content() == text)
+            })
+            .unwrap_or_else(|| panic!("no pick row {text:?} in {:?}", self.pick_rows()));
+        self.dom.click_node(row);
+        self.dom.render();
+    }
+
+    /// The indentation commands sent since the last call (closing a pick also cancels the file index).
+    fn sent_indentation(&mut self) -> Vec<String> {
+        self.sent().into_iter().filter(|c| c.starts_with("set indentation ")).collect()
+    }
+
+    /// A page with `a.rs` open and the indentation pick showing.
+    fn open_indentation_pick() -> Page {
+        let mut page = Page::open();
+        page.click_row();
+        page.deliver(opened(1));
+        let _ = page.sent();
+        page.click("aria-label", "들여쓰기 선택: 4칸");
+        page
+    }
+}
+
+// FR-L31.7 (#302): the status bar's indentation item opens Code-OSS's "Select Indentation" pick: the
+// rows of `showIndentationPicker` in its order, as Code-OSS's Korean pack words them.
+#[test]
+fn fr_l31_status_indentation_opens_the_select_indentation_pick() {
+    let _guard = crate::services::test_guard();
+    let page = Page::open_indentation_pick();
+    assert_eq!(
+        page.pick_rows(),
+        [
+            "공백을 사용한 들여쓰기",
+            "탭을 사용한 들여쓰기",
+            "탭 표시 크기 변경",
+            "콘텐츠에서 들여쓰기 감지",
+            "들여쓰기를 공백으로 변환",
+            "들여쓰기를 탭으로 변환",
+            "후행 공백 자르기",
+        ]
+    );
+}
+
+// FR-L31.7 (#302): spaces, then a size: the list of sizes marks the current one, the choice goes to
+// the session as that document's options, and the setting is not touched.
+#[test]
+fn fr_l31_indent_using_spaces_then_size_sets_the_document_options() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_indentation_pick();
+    page.click_pick_row("공백을 사용한 들여쓰기");
+    assert!(page.find("aria-label", "탭 크기 검색").is_some(), "the size list is open");
+    let rows = page.pick_rows();
+    assert_eq!(rows.len(), 8);
+    assert_eq!(rows[3], "4구성된 탭 크기", "the settings' size is marked");
+    assert_eq!(rows[1], "2");
+    page.click_pick_row("2");
+    let sent = page.sent_indentation();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(sent[0].starts_with("set indentation ") && sent[0].ends_with("IndentUsing { insert_spaces: true, size: 2 }"), "{sent:?}");
+
+    // The session answers with the document's options: the item shows them.
+    page.deliver(SessionUpdate::Indentation { uri: uri(), indentation: ember_editor::Indentation::new(2, true) });
+    assert!(page.find("aria-label", "들여쓰기 선택: 2칸").is_some());
+    page.deliver(SessionUpdate::Indentation { uri: uri(), indentation: ember_editor::Indentation::new(4, false) });
+    assert!(page.find("aria-label", "들여쓰기 선택: 탭 크기: 4").is_some());
+    // The user setting is what it was: the document's choice is not a setting.
+    assert_eq!(page.host().state.lock().unwrap().settings.editor(None).tab_size, 4);
+}
+
+#[test]
+fn fr_l31_change_tab_display_size_keeps_insert_spaces() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_indentation_pick();
+    page.click_pick_row("탭 표시 크기 변경");
+    page.click_pick_row("8");
+    let sent = page.sent_indentation();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(sent[0].ends_with("DisplaySize(8)"), "only the tab's width changes: {sent:?}");
+    page.deliver(SessionUpdate::Indentation {
+        uri: uri(),
+        indentation: ember_editor::Indentation { tab_size: 8, indent_size: 4, insert_spaces: true },
+    });
+    assert!(page.find("aria-label", "들여쓰기 선택: 4칸 (탭 크기: 8)").is_some());
+}
+
+#[test]
+fn fr_l31_detect_and_convert_indentation_go_to_the_session() {
+    let _guard = crate::services::test_guard();
+    sends_indentation_action("콘텐츠에서 들여쓰기 감지", "Detect");
+}
+
+#[test]
+fn fr_l31_convert_indentation_to_spaces_goes_to_the_session() {
+    let _guard = crate::services::test_guard();
+    sends_indentation_action("들여쓰기를 공백으로 변환", "Convert { to_spaces: true }");
+}
+
+#[test]
+fn fr_l31_convert_indentation_to_tabs_goes_to_the_session() {
+    let _guard = crate::services::test_guard();
+    sends_indentation_action("들여쓰기를 탭으로 변환", "Convert { to_spaces: false }");
+}
+
+#[test]
+fn fr_l31_trim_trailing_whitespace_goes_to_the_session() {
+    let _guard = crate::services::test_guard();
+    sends_indentation_action("후행 공백 자르기", "TrimTrailingWhitespace");
+}
+
+/// One page per test: the page's UI signals live in the first page's scope, so a second page in the
+/// same test reads dropped signals.
+fn sends_indentation_action(row: &str, ends_with: &str) {
+    let mut page = Page::open_indentation_pick();
+    page.click_pick_row(row);
+    let sent = page.sent_indentation();
+    assert_eq!(sent.len(), 1, "{row}: {sent:?}");
+    assert!(sent[0].ends_with(ends_with), "{row}: {sent:?}");
+}
+
+#[test]
+fn double_click_pins_preview_tab_from_tree_and_tab_strip() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_styled();
+    page.host().state.lock().unwrap().listings.insert(
+        ROOT.to_string(),
+        vec![
+            ("a.rs".to_string(), ember_editor_conn::remote_fs::file_type::FILE),
+            ("b.rs".to_string(), ember_editor_conn::remote_fs::file_type::FILE),
+            ("c.rs".to_string(), ember_editor_conn::remote_fs::file_type::FILE),
+            ("d.rs".to_string(), ember_editor_conn::remote_fs::file_type::FILE),
+        ],
+    );
+    page.redraw();
+    let _ = page.dom.layout(1280.0, 820.0, 1.0);
+
+    let row_of = |p: &Page, name: &str| {
+        p.find_where(&format!("tree row {name}"), |id| {
+            p.attr(id, "role").as_deref() == Some("treeitem") && p.attr(id, "aria-label").as_deref() == Some(name)
+        })
+        .unwrap_or_else(|| panic!("missing tree row {name}"))
+    };
+    let tab_of = |p: &Page, path: &str| {
+        p.find_where(&format!("tab {path}"), |id| {
+            p.attr(id, "role").as_deref() == Some("tab") && p.attr(id, "title").as_deref() == Some(path)
+        })
+    };
+
+    // Single-click opens a.rs as a preview tab.
+    let row_a = row_of(&page, "a.rs");
+    page.dom.click_node(row_a);
+    page.dom.render();
+    let _ = page.dom.layout(1280.0, 820.0, 1.0);
+    assert!(super::shared().tabs.read().is_preview("/w/a.rs"));
+
+    // Double-click on the tree row keeps a.rs permanent.
+    let row_a = row_of(&page, "a.rs");
+    page.dom.pointer_event(row_a, &PointerInput::press(10.0, 10.0, 1, 2));
+    page.dom.pointer_event(row_a, &PointerInput::release(10.0, 10.0, 1, 2));
+    page.dom.render();
+    let _ = page.dom.layout(1280.0, 820.0, 1.0);
+    assert!(!super::shared().tabs.read().is_preview("/w/a.rs"), "tree double-click keeps a.rs permanent");
+
+    // Single-click b.rs opens b.rs as preview without replacing a.rs.
+    let row_b = row_of(&page, "b.rs");
+    page.dom.click_node(row_b);
+    page.dom.render();
+    let _ = page.dom.layout(1280.0, 820.0, 1.0);
+    assert!(tab_of(&page, "/w/a.rs").is_some(), "a.rs stays open");
+    assert!(super::shared().tabs.read().is_preview("/w/b.rs"), "b.rs opens as preview");
+
+    // Double-click on the b.rs tab in the tab strip keeps b.rs permanent.
+    let tab_b = tab_of(&page, "/w/b.rs").expect("b.rs tab");
+    page.dom.pointer_event(tab_b, &PointerInput::press(10.0, 10.0, 1, 2));
+    page.dom.pointer_event(tab_b, &PointerInput::release(10.0, 10.0, 1, 2));
+    page.dom.render();
+    let _ = page.dom.layout(1280.0, 820.0, 1.0);
+    assert!(!super::shared().tabs.read().is_preview("/w/b.rs"), "tab double-click keeps b.rs permanent");
+
+    // Single-click c.rs opens c.rs as preview alongside both permanent tabs.
+    let row_c = row_of(&page, "c.rs");
+    page.dom.click_node(row_c);
+    page.dom.render();
+    let _ = page.dom.layout(1280.0, 820.0, 1.0);
+    assert!(tab_of(&page, "/w/a.rs").is_some());
+    assert!(tab_of(&page, "/w/b.rs").is_some());
+    assert!(tab_of(&page, "/w/c.rs").is_some());
+
+    // Double-clicking an unopened tree row directly (before onclick) opens it as permanent.
+    let row_d = row_of(&page, "d.rs");
+    page.dom.pointer_event(row_d, &PointerInput::press(10.0, 10.0, 1, 2));
+    page.dom.pointer_event(row_d, &PointerInput::release(10.0, 10.0, 1, 2));
+    page.dom.render();
+    assert!(!super::shared().tabs.read().is_preview("/w/d.rs"), "direct double-click opens d.rs permanent");
+    assert!(tab_of(&page, "/w/d.rs").is_some());
+}
+
+#[test]
+fn ctrl_tab_and_ctrl_shift_tab_switch_open_tabs() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open();
+    page.host().state.lock().unwrap().listings.insert(
+        ROOT.to_string(),
+        vec![
+            ("a.rs".to_string(), ember_editor_conn::remote_fs::file_type::FILE),
+            ("b.rs".to_string(), ember_editor_conn::remote_fs::file_type::FILE),
+            ("c.rs".to_string(), ember_editor_conn::remote_fs::file_type::FILE),
+        ],
+    );
+    super::page::open_tab_file(&super::shared(), "/w/a.rs");
+    super::page::open_tab_file(&super::shared(), "/w/b.rs");
+    super::page::open_tab_file(&super::shared(), "/w/c.rs");
+    page.redraw();
+    let _ = page.sent();
+    assert!(page.current_tab_is("/w/c.rs"));
+
+    let root = page.find("class", "ed").expect("workbench root");
+    page.dom.key_down(root, Key::Tab, Code::Tab, Modifiers::CONTROL);
+    page.dom.render();
+    assert!(page.current_tab_is("/w/a.rs"), "Ctrl+Tab wraps from last tab to first");
+    assert!(page.sent().iter().any(|c| c == "focus /w/a.rs"));
+
+    let root = page.find("class", "ed").expect("workbench root");
+    page.dom.key_down(root, Key::Tab, Code::Tab, Modifiers::CONTROL);
+    page.dom.render();
+    assert!(page.current_tab_is("/w/b.rs"), "Ctrl+Tab advances to second tab");
+    assert!(page.sent().iter().any(|c| c == "focus /w/b.rs"));
+
+    let root = page.find("class", "ed").expect("workbench root");
+    page.dom.key_down(root, Key::Tab, Code::Tab, Modifiers::CONTROL | Modifiers::SHIFT);
+    page.dom.render();
+    assert!(page.current_tab_is("/w/a.rs"), "Ctrl+Shift+Tab moves back to first tab");
+    assert!(page.sent().iter().any(|c| c == "focus /w/a.rs"));
+}
+
+#[test]
+fn tree_self_drop_and_unchanged_rename_do_not_send_noop_commands() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_styled();
+    page.host().state.lock().unwrap().listings.insert(
+        ROOT.to_string(),
+        vec![
+            ("a.rs".to_string(), ember_editor_conn::remote_fs::file_type::FILE),
+            ("b.rs".to_string(), ember_editor_conn::remote_fs::file_type::FILE),
+        ],
+    );
+    page.redraw();
+    let _ = page.dom.layout(1280.0, 820.0, 1.0);
+
+    let row_a = page
+        .find_where("a.rs tree row", |id| {
+            page.attr(id, "role").as_deref() == Some("treeitem") && page.attr(id, "aria-label").as_deref() == Some("a.rs")
+        })
+        .expect("a.rs row");
+    page.dom.click_node(row_a);
+    page.dom.render();
+    let _ = page.dom.layout(1280.0, 820.0, 1.0);
+    let _ = page.sent();
+
+    // Drag a.rs slightly and drop it on itself: same parent directory, so no MovePaths is sent.
+    let row_a = page
+        .find_where("a.rs tree row", |id| {
+            page.attr(id, "role").as_deref() == Some("treeitem") && page.attr(id, "aria-label").as_deref() == Some("a.rs")
+        })
+        .expect("a.rs row");
+    page.dom.pointer_event(row_a, &PointerInput::press(10.0, 10.0, 1, 1));
+    let mut move_ev = PointerInput::press(20.0, 10.0, 1, 0);
+    move_ev.kind = dioxus_compose::html::PointerKind::Move;
+    move_ev.buttons = 1;
+    page.dom.pointer_event(row_a, &move_ev);
+    page.dom.pointer_event(row_a, &PointerInput::release(20.0, 10.0, 1, 1));
+    page.dom.render();
+    let sent = page.sent();
+    assert!(
+        !sent.iter().any(|c| c.starts_with("move ")),
+        "dropping a file onto itself must not send MovePaths: {sent:?}"
+    );
+
+    // F2 starts rename; pressing Enter without editing closes the prompt without sending Rename.
+    let tree = page.find("role", "tree").expect("project tree");
+    page.dom.key_down(tree, Key::F2, Code::F2, Modifiers::empty());
+    page.dom.render();
+    let input = page.find("aria-label", "새 이름").expect("inline rename input");
+    page.dom.key_down(input, Key::Enter, Code::Enter, Modifiers::empty());
+    page.dom.render();
+    assert!(page.find("aria-label", "새 이름").is_none(), "rename input closes on unchanged Enter");
+    let sent = page.sent();
+    assert!(
+        !sent.iter().any(|c| c.starts_with("rename ")),
+        "unchanged rename must not send Rename: {sent:?}"
+    );
+
+    // F2 + new name + Enter still sends Rename.
+    let tree = page.find("role", "tree").expect("project tree");
+    page.dom.key_down(tree, Key::F2, Code::F2, Modifiers::empty());
+    page.dom.render();
+    let input = page.find("aria-label", "새 이름").expect("inline rename input");
+    page.dom.input(input, "renamed.rs");
+    page.dom.render();
+    let input = page.find("aria-label", "새 이름").expect("inline rename input");
+    page.dom.key_down(input, Key::Enter, Code::Enter, Modifiers::empty());
+    page.dom.render();
+    let sent = page.sent();
+    assert!(
+        sent.iter().any(|c| c == "rename /w/a.rs renamed.rs"),
+        "changed rename sends Rename: {sent:?}"
+    );
 }

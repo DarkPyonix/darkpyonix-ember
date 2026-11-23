@@ -424,6 +424,8 @@ pub fn command_of(action: Action) -> Option<&'static str> {
         Action::Settings => "workbench.action.openSettings",
         Action::SettingsJson => "workbench.action.openSettingsJson",
         Action::KeybindingsJson => "workbench.action.openGlobalKeybindingsFile",
+        Action::NextTab => "workbench.action.nextEditor",
+        Action::PrevTab => "workbench.action.previousEditor",
         _ => return None,
     })
 }
@@ -608,6 +610,20 @@ pub mod view {
         let mut focus = ui().focus_seq;
         let next = *focus.read() + 1;
         focus.set(next);
+    }
+
+    /// Show the settings view with `query` in its search field, so one setting is the whole list.
+    pub fn open_matching(s: &Shared, query: &str) {
+        let mut q = ui().query;
+        q.set(query.to_string());
+        let mut limit = ui().limit;
+        limit.set(SETTINGS_PAGE);
+        open(s);
+    }
+
+    /// What the settings view's search field holds.
+    pub fn query_text() -> String {
+        ui().query.read().clone()
     }
 
     /// Open a settings file as a document in a tab. The host makes the file first when it is not there.

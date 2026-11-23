@@ -216,6 +216,44 @@ async fn fr_s4_search_finds_messages_in_every_session_including_korean() {
 }
 
 #[tokio::test]
+async fn fr_s4_archived_project_excluded_from_search() {
+    let f = fixture();
+    let a = new_session(&f.sessions, "alpha");
+    let b = new_session(&f.sessions, "beta");
+    f.sessions
+        .record_event(&a, &AgentEvent::UserMessage { text: "unique_zebra_alpha message".into() })
+        .unwrap();
+    f.sessions
+        .record_event(&a, &AgentEvent::TurnEnded { outcome: ember_server::events::TurnOutcome::Completed })
+        .unwrap();
+    f.sessions
+        .record_event(&b, &AgentEvent::UserMessage { text: "unique_zebra_beta message".into() })
+        .unwrap();
+    f.sessions
+        .record_event(&b, &AgentEvent::TurnEnded { outcome: ember_server::events::TurnOutcome::Completed })
+        .unwrap();
+
+    // Both projects appear in search before archiving.
+    let (st, hits) = call(&f.app, Method::GET, "/api/search?q=unique_zebra", None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(hits.as_array().unwrap().len(), 2);
+
+    // Archiving alpha hides its messages from search while beta remains.
+    let (st, _) = call(&f.app, Method::PATCH, "/api/projects/alpha", Some(json!({ "archived": true }))).await;
+    assert_eq!(st, StatusCode::OK);
+    let (_, hits) = call(&f.app, Method::GET, "/api/search?q=unique_zebra", None).await;
+    let hits = hits.as_array().unwrap();
+    assert_eq!(hits.len(), 1, "archived project messages are excluded: {hits:?}");
+    assert_eq!(hits[0]["project"], "beta");
+
+    // Unarchiving alpha brings its messages back into search.
+    let (st, _) = call(&f.app, Method::PATCH, "/api/projects/alpha", Some(json!({ "archived": false }))).await;
+    assert_eq!(st, StatusCode::OK);
+    let (_, hits) = call(&f.app, Method::GET, "/api/search?q=unique_zebra", None).await;
+    assert_eq!(hits.as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
 async fn fr_l9_export_is_a_self_contained_transcript() {
     let f = fixture();
     let id = new_session(&f.sessions, "alpha");

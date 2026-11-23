@@ -32,7 +32,7 @@ checks the result, so it is safe anywhere.
 | `linux-arm64` | `ubuntu-22.04-arm` | Raspberry Pi 4/5 on a **64-bit** OS (Raspberry Pi OS Bookworm, glibc 2.36) |
 | `darwin-arm64` | `macos-15` | Apple silicon |
 | `darwin-x64` | `macos-15-intel` | Intel Mac |
-| `windows-x64` | `windows-2022` | Windows 10 and later, x64; launcher `bin/dpx-ose-server.cmd` (#83; built and smoke-tested in CI run 43692860054) |
+| `windows-x64` | `windows-2022` | Windows 10 and later, x64; launcher `bin/dpx-ose-server.cmd` (#83; built and smoke-tested in CI runs 43692860054 and 45000437147) |
 
 Each build produces `dpx-ose-<tag>-<target>.tar.gz` and its `.sha256`. The archive is
 self-contained: it bundles the Node runtime pinned in upstream `remote/.npmrc`, so the host does
@@ -61,8 +61,11 @@ After the build, the **Live checks** job runs once per target on the same runner
 checksum, unpacks it, and runs the Ember editor session's live tests against it
 (`ember/editor-conn/tests/live_ose.rs`, `ember/editor/tests/live_session.rs`,
 `ember/editor/tests/fr_l31_14_live_extensions.rs`), then the extension regression. A failing live
-test fails the run, so `publish-ose.yml` publishes nothing from it. This job is written and has
-not run in CI yet.
+test fails the run, so `publish-ose.yml` publishes nothing from it. In CI run 45000437147
+(2026-11-22, `ci/em-train-6`), all five build targets, all four Unix Live checks and NFR-W1
+regression legs (`linux-x64`, `linux-arm64`, `darwin-arm64`, `darwin-x64`), and **Smoke
+(windows-x64)** passed. The first `ose-v1.139.1` GitHub release has not been published yet
+(owner-gated).
 
 ### Windows
 
@@ -131,15 +134,15 @@ the extension host logs. In CI the Live checks job runs this per target and uplo
 Status today: the list is the five extensions the leader approved on 2026-11-15: two language
 servers (`redhat.vscode-yaml`, `dbaeumer.vscode-eslint`), the most used language extension
 (`ms-python.python`), a debugger (`ms-python.debugpy`) and a webview panel (`mhutchie.git-graph`).
-The first run of this list (Ember CI 44946499791, 2026-11-21) installed all five on all four
-targets and pinned `ms-python.debugpy` 2026.6.0 and `mhutchie.git-graph` 1.30.0. Its extension
-host logs show every entry activating, except `ms-python.debugpy` on linux-arm64; its
-`results.json` said `not-activated` for all of them, because `regress.sh` passed the log paths as
-an unquoted list and their names carry spaces (`1-Git Graph.log`). `regress.py parse-log` now
-walks the data folder itself, and a parse error fails the step (#84). `expected.json` keeps that
-run in `_runs`. The step still does not fail the job: the owner has not confirmed the list, and
-the gate changes in its own PR. The check is "installed and activated without a failure
-line". Results are compared with our own previous OSE release, not with another vendor's build.
+The first run (Ember CI 44946499791, 2026-11-21) pinned `ms-python.debugpy` 2026.6.0 and
+`mhutchie.git-graph` 1.30.0 and uncovered log-path splitting in `regress.sh` (fixed in #84 so
+`regress.py parse-log` walks the data folder itself and a parse error fails the step). In CI run
+45000437147 (2026-11-22, `ci/em-train-6`), all five extensions installed and activated on all four
+Unix targets (`linux-x64`, `linux-arm64`, `darwin-arm64`, `darwin-x64`), and `expected.json`
+records both runs in `_runs`. The step still runs with `continue-on-error: true`: the owner has
+not confirmed the extension list yet, and promoting it to blocking happens in its own PR. The
+check is "installed and activated without a failure line". Results are compared with our own
+previous OSE release, not with another vendor's build.
 
 ### Deep checks (#929)
 
@@ -154,8 +157,8 @@ page. Each check writes `pass`, `fail` or `not-run` with a reason to `OSE_REGRES
 OSE_REGRESS_MODE=deep OSE_REGRESS_OUT=.scratch/regress-deep ember/ose/regress.sh "$(dirname "$(dirname "$EMBER_OSE_SERVER")")"
 ```
 
-- **Webview** (`mhutchie.git-graph`, failed in run 44946499791 with `unregistered command
-  _setContext`, fixed in the client by #84, not yet rerun): the client runs `git-graph.view`
+- **Webview** (`mhutchie.git-graph`, passed on all four Unix targets in CI run 45000437147,
+  2026-11-22, after #84 fixed `_setContext` from run 44946499791): the client runs `git-graph.view`
   (retried while the extension registers it), waits for `$createWebviewPanel` and `$setHtml`,
   reports the page shown (`$onDidChangeWebviewPanelViewStates`) and ready, sends
   `{"command":"loadRepos","check":false}` with `$onMessage` and waits for a `$postMessage` whose
@@ -228,7 +231,8 @@ Then add a row below, in the pull request or commit that follows the release.
 | ------- | -------------- | ---- | -------------------------- | -------------------- | -- |
 | (none yet) | | | | | |
 
-No release has been checked this way yet.
+No release has been checked this way yet (waits for the first owner-gated `ose-v1.139.1` GitHub
+release and `darkpyonix#141`).
 
 ## Build notes
 

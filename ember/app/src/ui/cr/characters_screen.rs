@@ -235,7 +235,18 @@ pub fn CharactersScreen() {
     let cols = team_cols(width);
     let asked = ui.characters.get().unwrap_or_default();
     let svc = crate::services::try_services();
-    let names: Vec<String> = svc.as_ref().map(|s| s.client.read(|st| st.projects().into_iter().map(|v| v.name).collect())).unwrap_or_default();
+    let names: Vec<String> = svc
+        .as_ref()
+        .map(|s| {
+            s.client.read(|st| {
+                st.projects()
+                    .into_iter()
+                    .filter(|v| !st.project(&v.name).is_some_and(|pr| pr.archived))
+                    .map(|v| v.name)
+                    .collect()
+            })
+        })
+        .unwrap_or_default();
     let project = characters_project(&asked, ui.selected_project.get().as_deref(), &names);
     let project_name = project.clone().unwrap_or_default();
     let (server, server_overrides) = svc
@@ -687,7 +698,13 @@ mod tests {
         let _guard = crate::services::test_guard();
         let svc = crate::services::try_services().expect("test services");
         let ui = shared_ui();
-        let names: Vec<String> = svc.client.read(|st| st.projects().into_iter().map(|v| v.name).collect());
+        let names: Vec<String> = svc.client.read(|st| {
+            st.projects()
+                .into_iter()
+                .filter(|v| !st.project(&v.name).is_some_and(|pr| pr.archived))
+                .map(|v| v.name)
+                .collect()
+        });
         let asked = ui.characters.get_untracked().unwrap_or_default();
         let project = characters_project(&asked, ui.selected_project.get_untracked().as_deref(), &names).unwrap_or_default();
         let members = svc.client.read(|st| {

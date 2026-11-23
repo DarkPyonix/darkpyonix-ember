@@ -560,6 +560,7 @@ pub enum HistoryResult {
     Done,
     Failed,
     Declined,
+    Expired,
     Cancelled,
 }
 
@@ -569,6 +570,7 @@ impl HistoryResult {
             HistoryResult::Done => "완료",
             HistoryResult::Failed => "실패",
             HistoryResult::Declined => "거절됨",
+            HistoryResult::Expired => "만료됨",
             HistoryResult::Cancelled => "취소됨",
         }
     }
@@ -583,6 +585,8 @@ pub struct HistoryEntry {
     pub result: HistoryResult,
     /// A ready-made time text from the service.
     pub when: String,
+    /// Epoch milliseconds when the transfer ended, if known.
+    pub timestamp_ms: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -792,6 +796,7 @@ impl DemoTransferService {
                 from: "iPad Pro".into(),
             },
         ];
+        let now = crate::demo::now_ms();
         let history = vec![
             HistoryEntry {
                 name: "release-notes.md".into(),
@@ -800,6 +805,7 @@ impl DemoTransferService {
                 size: 12 << 10,
                 result: HistoryResult::Done,
                 when: "오늘 09:41".into(),
+                timestamp_ms: Some(now - 3 * 3_600_000),
             },
             HistoryEntry {
                 name: "dump.sql".into(),
@@ -808,6 +814,7 @@ impl DemoTransferService {
                 size: 48 << 20,
                 result: HistoryResult::Failed,
                 when: "어제 22:10".into(),
+                timestamp_ms: Some(now - 86_400_000),
             },
             HistoryEntry {
                 name: "photo.heic".into(),
@@ -816,6 +823,7 @@ impl DemoTransferService {
                 size: 4 << 20,
                 result: HistoryResult::Declined,
                 when: "어제 18:02".into(),
+                timestamp_ms: Some(now - 86_400_000 - 4 * 3_600_000),
             },
         ];
         let offers = vec![Offer {
@@ -905,6 +913,7 @@ impl TransferService for DemoTransferService {
                             size: o.total,
                             result: HistoryResult::Declined,
                             when: "오늘 방금".into(),
+                            timestamp_ms: Some(crate::demo::now_ms()),
                         },
                     );
                 }
@@ -929,6 +938,7 @@ impl TransferService for DemoTransferService {
                             size: t_clone.total,
                             result: HistoryResult::Cancelled,
                             when: "오늘 방금".into(),
+                            timestamp_ms: Some(crate::demo::now_ms()),
                         },
                     );
                 }
@@ -1113,9 +1123,41 @@ pub struct FilesKpi {
     pub available: bool,
 }
 
+/// Seven days in milliseconds, for the weekly sent-bytes KPI.
+pub const WEEK_MS: i64 = 7 * 86_400_000;
+
+/// Sum of bytes of completed sends (`Direction::Send`, `HistoryResult::Done`) whose timestamp
+/// falls within the last 7 days ending at `now_ms`.
+pub fn sent_week_bytes_at(history: &[HistoryEntry], now_ms: i64) -> u64 {
+    let cutoff = now_ms.saturating_sub(WEEK_MS);
+    history
+        .iter()
+        .filter(|h| h.direction == Direction::Send && h.result == HistoryResult::Done)
+        .filter(|h| h.timestamp_ms.is_some_and(|ts| ts >= cutoff))
+        .map(|h| h.size)
+        .fold(0u64, u64::saturating_add)
+}
+
+impl FilesModel {
+    /// Completed send bytes within the last 7 days ending at `now_ms`, or `None` while not ready.
+    pub fn sent_week_bytes_at(&self, now_ms: i64) -> Option<u64> {
+        self.ready.then(|| sent_week_bytes_at(&self.history, now_ms))
+    }
+
+    /// Completed send bytes within the last 7 days, or `None` while not ready.
+    pub fn sent_week_bytes(&self) -> Option<u64> {
+        self.sent_week_bytes_at(crate::demo::now_ms())
+    }
+}
+
 /// Connected devices, transfers in progress, sent this week, direct connection ratio.
 /// Only the first is known without the service; the others say [`UNAVAILABLE`].
 pub fn kpis(m: &FilesModel) -> [FilesKpi; 4] {
+    kpis_at(m, crate::demo::now_ms())
+}
+
+/// [`kpis`] evaluated at `now_ms` (for deterministic testing of the 7-day window).
+pub fn kpis_at(m: &FilesModel, now_ms: i64) -> [FilesKpi; 4] {
     let unavailable = |label| FilesKpi {
         label,
         value: UNAVAILABLE.to_string(),
@@ -1134,6 +1176,14 @@ pub fn kpis(m: &FilesModel) -> [FilesKpi; 4] {
         }
     } else {
         unavailable("전송 중")
+    };
+    let sent_week = match m.sent_week_bytes_at(now_ms) {
+        Some(bytes) => FilesKpi {
+            label: "이번 주 보낸 용량",
+            value: format_bytes(bytes),
+            available: true,
+        },
+        None => unavailable("이번 주 보낸 용량"),
     };
     let known: Vec<&Device> = m.devices.iter().filter(|d| d.path.is_some()).collect();
     let direct = if m.ready && !known.is_empty() {
@@ -1156,8 +1206,7 @@ pub fn kpis(m: &FilesModel) -> [FilesKpi; 4] {
             available: true,
         },
         in_progress,
-        // TODO(FR-F8): sum the sent bytes of the last 7 days once the history has timestamps.
-        unavailable("이번 주 보낸 용량"),
+        sent_week,
         direct,
     ]
 }
@@ -2613,5 +2662,71 @@ mod tests {
         }
         assert_ne!(SEND_SERVER_LOST, UNAVAILABLE);
         assert_eq!(crate::ui::files_service::NOT_CONNECTED, SEND_SERVER_LOST);
+    }
+
+    #[test]
+    fn fr_l27_sent_week_bytes_sums_only_completed_sends_within_seven_days() {
+        const NOW: i64 = 1_800_000_000_000;
+        let entry = |direction, result, size, timestamp_ms| HistoryEntry {
+            name: "f.bin".into(),
+            device: "mini".into(),
+            direction,
+            size,
+            result,
+            when: "최근 방금".into(),
+            timestamp_ms,
+        };
+        let history = vec![
+            // Included: completed sends within the 7-day window (including exact boundary).
+            entry(Direction::Send, HistoryResult::Done, 1024, Some(NOW - 60_000)),
+            entry(Direction::Send, HistoryResult::Done, 512, Some(NOW - WEEK_MS)),
+            // Excluded: receive, non-done results, older than 7 days, or missing timestamp.
+            entry(Direction::Receive, HistoryResult::Done, 10_000, Some(NOW - 60_000)),
+            entry(Direction::Send, HistoryResult::Failed, 20_000, Some(NOW - 60_000)),
+            entry(Direction::Send, HistoryResult::Declined, 30_000, Some(NOW - 60_000)),
+            entry(Direction::Send, HistoryResult::Cancelled, 40_000, Some(NOW - 60_000)),
+            entry(Direction::Send, HistoryResult::Done, 50_000, Some(NOW - WEEK_MS - 1)),
+            entry(Direction::Send, HistoryResult::Done, 60_000, None),
+        ];
+        assert_eq!(sent_week_bytes_at(&history, NOW), 1536);
+
+        let model = FilesModel {
+            devices: Vec::new(),
+            transfers: Vec::new(),
+            received: Vec::new(),
+            history,
+            ready: true,
+            lost: false,
+        };
+        let k = kpis_at(&model, NOW);
+        assert_eq!(k[2].label, "이번 주 보낸 용량");
+        assert_eq!(k[2].value, "1.5 KB");
+        assert!(k[2].available);
+    }
+
+    #[test]
+    fn fr_l27_sent_week_kpi_shows_zero_bytes_when_ready_and_unavailable_when_not() {
+        const NOW: i64 = 1_800_000_000_000;
+        let empty_ready = FilesModel {
+            devices: Vec::new(),
+            transfers: Vec::new(),
+            received: Vec::new(),
+            history: Vec::new(),
+            ready: true,
+            lost: false,
+        };
+        let k_ready = kpis_at(&empty_ready, NOW);
+        assert_eq!(k_ready[2].label, "이번 주 보낸 용량");
+        assert_eq!(k_ready[2].value, "0 B");
+        assert!(k_ready[2].available);
+
+        let not_ready = FilesModel {
+            ready: false,
+            ..empty_ready
+        };
+        let k_not_ready = kpis_at(&not_ready, NOW);
+        assert_eq!(k_not_ready[2].label, "이번 주 보낸 용량");
+        assert_eq!(k_not_ready[2].value, UNAVAILABLE);
+        assert!(!k_not_ready[2].available);
     }
 }

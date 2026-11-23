@@ -187,7 +187,8 @@ impl Store {
             let mut pending: Vec<FeedItem> = Vec::new();
             let mut summary: Option<String> = None;
             let mut error: Option<String> = None;
-            let mut ended: Option<(i64, i64, TurnOutcome, Option<String>, Option<String>)> = None;
+            type TurnEnd = (i64, i64, TurnOutcome, Option<String>, Option<String>);
+            let mut ended: Option<TurnEnd> = None;
             for e in self.events_after(&m.id, 0)? {
                 match e.event {
                     AgentEvent::ApprovalRequested { approval_id, tool, input, .. } => {

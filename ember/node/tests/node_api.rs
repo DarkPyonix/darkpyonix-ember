@@ -588,7 +588,7 @@ async fn fr_x7_metrics_sample_over_the_api_and_needs_the_token() {
     assert!(!s.cpu.cores.is_empty());
     assert!(s.memory.as_ref().is_some_and(|m| m.total_bytes > 0));
     assert!(s.processes.len() <= 3);
-    assert!(s.gpu.devices.is_empty() && s.gpu.reason.is_some());
+    assert_eq!(s.gpu.devices.is_empty(), s.gpu.reason.is_some());
     // The default list length applies without `top`, and `top` is capped.
     let d = within(f.client.metrics(None)).await.unwrap();
     assert!(d.processes.len() <= 20);

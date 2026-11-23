@@ -288,6 +288,7 @@ async fn nfr_w1_regression_client() {
         );
     }
 
+    let mut gaps = Gaps::default();
     let mut lost = false;
     for e in &entries {
         let Some(open) = &e.open else { continue };
@@ -300,7 +301,11 @@ async fn nfr_w1_regression_client() {
         // Wait for the answer so the opens do not pile up; a failed open is reported, not fatal.
         let answer = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
-                match rx.recv().await {
+                let update = rx.recv().await;
+                if let Some(u) = &update {
+                    gaps.observe(u);
+                }
+                match update {
                     Some(SessionUpdate::Opened { uri: u, language_id, .. }) if u.path == uri.path => return Ok(language_id),
                     Some(SessionUpdate::OpenFailed { uri: u, error }) if u.path == uri.path => return Err(error),
                     Some(SessionUpdate::ConnectionLost { reason }) => return Err(format!("connection lost: {reason}")),
@@ -327,6 +332,9 @@ async fn nfr_w1_regression_client() {
     if !lost {
         let until = tokio::time::Instant::now() + Duration::from_secs(settle);
         while let Ok(update) = tokio::time::timeout_at(until, rx.recv()).await {
+            if let Some(u) = &update {
+                gaps.observe(u);
+            }
             match update {
                 Some(SessionUpdate::ConnectionLost { reason }) => {
                     println!("[regress-client] connection lost while settling: {reason}");
@@ -339,8 +347,62 @@ async fn nfr_w1_regression_client() {
         }
     }
     session.shutdown().await;
+    if let Some(path) = std::env::var_os("OSE_REGRESS_GAPS").map(PathBuf::from) {
+        let json = gaps.to_json();
+        println!("[regress-client] {} protocol gap(s) recorded in {}", gaps.0.len(), path.display());
+        std::fs::write(&path, format!("{json:#}\n")).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+    }
     assert!(!lost, "the connection to the OSE was lost before the settle time ended; the log comparison would not be trustworthy");
     println!("[regress-client] done after {settle} s of settle time");
+}
+
+/// The FR-E9 records of one run: per `todo` method with a value, the session's call count and the
+/// extensions that named themselves in an argument.
+#[derive(Default)]
+struct Gaps(std::collections::BTreeMap<(String, String), (u32, BTreeSet<String>)>);
+
+impl Gaps {
+    fn observe(&mut self, u: &SessionUpdate) {
+        if let SessionUpdate::ProtocolGap { proxy, method, extension, count } = u {
+            let entry = self.0.entry((proxy.clone(), method.clone())).or_default();
+            entry.0 = entry.0.max(*count);
+            entry.1.extend(extension.clone());
+        }
+    }
+
+    fn to_json(&self) -> Value {
+        Value::Array(
+            self.0
+                .iter()
+                .map(|((actor, method), (count, extensions))| {
+                    json!({ "actor": actor, "method": method, "count": count, "extensions": extensions })
+                })
+                .collect(),
+        )
+    }
+}
+
+#[test]
+fn fr_e9_regression_client_keeps_the_records_per_method() {
+    let gap = |method: &str, extension: Option<&str>, count| SessionUpdate::ProtocolGap {
+        proxy: "MainThreadSecretState".into(),
+        method: method.into(),
+        extension: extension.map(String::from),
+        count,
+    };
+    let mut gaps = Gaps::default();
+    gaps.observe(&gap("$getPassword", Some("b.ext"), 1));
+    gaps.observe(&gap("$getPassword", None, 2));
+    gaps.observe(&gap("$getPassword", Some("a.ext"), 3));
+    gaps.observe(&gap("$getKeys", None, 1));
+    gaps.observe(&SessionUpdate::ConnectionLost { reason: "not a gap".into() });
+    assert_eq!(
+        gaps.to_json(),
+        json!([
+            { "actor": "MainThreadSecretState", "method": "$getKeys", "count": 1, "extensions": [] },
+            { "actor": "MainThreadSecretState", "method": "$getPassword", "count": 3, "extensions": ["a.ext", "b.ext"] },
+        ])
+    );
 }
 
 /// What the editor client still needs before the debug check can run (#445). Kept in one place so

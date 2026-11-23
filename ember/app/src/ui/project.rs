@@ -2423,6 +2423,7 @@ mod tests {
             name: name.into(),
             trigger: Trigger::Time,
             cron: cron.into(),
+            time_zone: Some("UTC".into()),
             prompt: "CI 실패를 요약합니다".into(),
             enabled: true,
             sel: crate::ui::home::Selection { project: project.into(), ..crate::ui::home::Selection::initial() },

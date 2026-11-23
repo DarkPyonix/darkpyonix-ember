@@ -86,6 +86,7 @@ pub enum TransferResult {
     Done,
     Failed,
     Declined,
+    Expired,
     Cancelled,
 }
 

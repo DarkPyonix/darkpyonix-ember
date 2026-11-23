@@ -428,6 +428,7 @@ impl From<crate::transfers::RecvError> for ApiError {
         use crate::transfers::RecvError as E;
         let (status, code) = match &e {
             E::NotFound(_) => (StatusCode::NOT_FOUND, ErrorCode::NotFound),
+            E::Expired(_) => (StatusCode::GONE, ErrorCode::Expired),
             E::BadRequest(_) => (StatusCode::BAD_REQUEST, ErrorCode::BadRequest),
             E::Forbidden(_) => (StatusCode::FORBIDDEN, ErrorCode::Forbidden),
             E::TooLarge(_) => (StatusCode::PAYLOAD_TOO_LARGE, ErrorCode::TooLarge),

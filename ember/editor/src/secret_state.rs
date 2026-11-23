@@ -23,9 +23,19 @@ pub fn account_key(extension_id: &str, key: &str) -> String {
 /// driver against the configured [`SecretStore`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SecretOp {
-    Get { extension_id: String, key: String },
-    Set { extension_id: String, key: String, value: String },
-    Delete { extension_id: String, key: String },
+    Get {
+        extension_id: String,
+        key: String,
+    },
+    Set {
+        extension_id: String,
+        key: String,
+        value: String,
+    },
+    Delete {
+        extension_id: String,
+        key: String,
+    },
 }
 
 /// The successful outcome of a [`SecretOp`].
@@ -35,7 +45,9 @@ pub enum SecretReply {
     /// A write succeeded and the entry changed.
     Unit,
     /// A delete succeeded; `existed` says whether an entry was removed.
-    Deleted { existed: bool },
+    Deleted {
+        existed: bool,
+    },
 }
 
 /// Storage backend for `MainThreadSecretState`.
@@ -54,11 +66,25 @@ pub trait SecretStore: Send + Sync + std::fmt::Debug {
 /// Run one [`SecretOp`] against `store`.
 pub fn execute_op(store: &dyn SecretStore, op: SecretOp) -> Result<SecretReply, String> {
     match op {
-        SecretOp::Get { extension_id, key } => store.get(&extension_id, &key).map(SecretReply::Value),
-        SecretOp::Set { extension_id, key, value } => store.set(&extension_id, &key, &value).map(|()| SecretReply::Unit),
+        SecretOp::Get { extension_id, key } => {
+            store.get(&extension_id, &key).map(SecretReply::Value)
+        }
+        SecretOp::Set {
+            extension_id,
+            key,
+            value,
+        } => store
+            .set(&extension_id, &key, &value)
+            .map(|()| SecretReply::Unit),
         SecretOp::Delete { extension_id, key } => {
-            let existed = store.get(&extension_id, &key)?.is_some();
-            store.delete(&extension_id, &key).map(|()| SecretReply::Deleted { existed })
+            // When the read fails the entry may still exist, so assume it did and let the
+            // delete report the real error, if any.
+            let existed = store
+                .get(&extension_id, &key)
+                .map_or(true, |value| value.is_some());
+            store
+                .delete(&extension_id, &key)
+                .map(|()| SecretReply::Deleted { existed })
         }
     }
 }
@@ -82,18 +108,29 @@ impl InMemorySecretStore {
 
 impl SecretStore for InMemorySecretStore {
     fn get(&self, extension_id: &str, key: &str) -> Result<Option<String>, String> {
-        let guard = self.entries.lock().map_err(|_| "secret store lock poisoned".to_owned())?;
-        Ok(guard.get(&(extension_id.to_owned(), key.to_owned())).cloned())
+        let guard = self
+            .entries
+            .lock()
+            .map_err(|_| "secret store lock poisoned".to_owned())?;
+        Ok(guard
+            .get(&(extension_id.to_owned(), key.to_owned()))
+            .cloned())
     }
 
     fn set(&self, extension_id: &str, key: &str, value: &str) -> Result<(), String> {
-        let mut guard = self.entries.lock().map_err(|_| "secret store lock poisoned".to_owned())?;
+        let mut guard = self
+            .entries
+            .lock()
+            .map_err(|_| "secret store lock poisoned".to_owned())?;
         guard.insert((extension_id.to_owned(), key.to_owned()), value.to_owned());
         Ok(())
     }
 
     fn delete(&self, extension_id: &str, key: &str) -> Result<(), String> {
-        let mut guard = self.entries.lock().map_err(|_| "secret store lock poisoned".to_owned())?;
+        let mut guard = self
+            .entries
+            .lock()
+            .map_err(|_| "secret store lock poisoned".to_owned())?;
         guard.remove(&(extension_id.to_owned(), key.to_owned()));
         Ok(())
     }
@@ -117,19 +154,27 @@ impl Default for OsSecretStore {
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 impl OsSecretStore {
     pub fn new() -> Self {
-        Self { service: KEYCHAIN_SERVICE.to_owned() }
+        Self {
+            service: KEYCHAIN_SERVICE.to_owned(),
+        }
     }
 
     pub fn with_service(service: impl Into<String>) -> Self {
-        Self { service: service.into() }
+        Self {
+            service: service.into(),
+        }
     }
 
     /// Probe whether the OS keychain answers on this host without writing any entry.
     pub fn available(&self) -> bool {
-        match keyring::Entry::new(&self.service, "editor-secret-probe").and_then(|e| e.get_password()) {
+        match keyring::Entry::new(&self.service, "editor-secret-probe")
+            .and_then(|e| e.get_password())
+        {
             Ok(_) | Err(keyring::Error::NoEntry) => true,
             Err(e) => {
-                tracing::debug!("ember-editor: OS keychain unavailable for MainThreadSecretState: {e}");
+                tracing::debug!(
+                    "ember-editor: OS keychain unavailable for MainThreadSecretState: {e}"
+                );
                 false
             }
         }
@@ -170,7 +215,12 @@ impl SecretStore for OsSecretStore {
 /// platforms, probes [`OsSecretStore`] and falls back to [`InMemorySecretStore`] when no keychain
 /// is available.
 pub fn default_secret_store() -> Arc<dyn SecretStore> {
-    if std::env::var("EMBER_KEYSTORE").ok().as_deref().map(str::trim) == Some("file") {
+    if std::env::var("EMBER_KEYSTORE")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+        == Some("file")
+    {
         return Arc::new(InMemorySecretStore::new());
     }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -191,7 +241,10 @@ mod tests {
     #[test]
     fn account_key_is_collision_free_across_delimiters() {
         assert_ne!(account_key("a:b", "c"), account_key("a", "b:c"));
-        assert_ne!(account_key("ext.one", "token"), account_key("ext.two", "token"));
+        assert_ne!(
+            account_key("ext.one", "token"),
+            account_key("ext.two", "token")
+        );
         assert!(account_key("ext.one", "token").starts_with("editor-secret:"));
     }
 
@@ -202,16 +255,31 @@ mod tests {
 
         store.set("ext.a", "apiKey", "secret-1").unwrap();
         store.set("ext.b", "apiKey", "secret-2").unwrap();
-        assert_eq!(store.get("ext.a", "apiKey").unwrap().as_deref(), Some("secret-1"));
-        assert_eq!(store.get("ext.b", "apiKey").unwrap().as_deref(), Some("secret-2"));
+        assert_eq!(
+            store.get("ext.a", "apiKey").unwrap().as_deref(),
+            Some("secret-1")
+        );
+        assert_eq!(
+            store.get("ext.b", "apiKey").unwrap().as_deref(),
+            Some("secret-2")
+        );
 
         store.set("ext.a", "apiKey", "secret-1-updated").unwrap();
-        assert_eq!(store.get("ext.a", "apiKey").unwrap().as_deref(), Some("secret-1-updated"));
-        assert_eq!(store.get("ext.b", "apiKey").unwrap().as_deref(), Some("secret-2"));
+        assert_eq!(
+            store.get("ext.a", "apiKey").unwrap().as_deref(),
+            Some("secret-1-updated")
+        );
+        assert_eq!(
+            store.get("ext.b", "apiKey").unwrap().as_deref(),
+            Some("secret-2")
+        );
 
         store.delete("ext.a", "apiKey").unwrap();
         assert_eq!(store.get("ext.a", "apiKey").unwrap(), None);
-        assert_eq!(store.get("ext.b", "apiKey").unwrap().as_deref(), Some("secret-2"));
+        assert_eq!(
+            store.get("ext.b", "apiKey").unwrap().as_deref(),
+            Some("secret-2")
+        );
 
         // Deleting a missing key succeeds.
         store.delete("ext.a", "apiKey").unwrap();
@@ -222,23 +290,59 @@ mod tests {
     fn execute_op_maps_get_set_delete() {
         let store = InMemorySecretStore::new();
         assert_eq!(
-            execute_op(&store, SecretOp::Get { extension_id: "e".into(), key: "k".into() }).unwrap(),
+            execute_op(
+                &store,
+                SecretOp::Get {
+                    extension_id: "e".into(),
+                    key: "k".into()
+                }
+            )
+            .unwrap(),
             SecretReply::Value(None),
         );
         assert_eq!(
-            execute_op(&store, SecretOp::Set { extension_id: "e".into(), key: "k".into(), value: "v".into() }).unwrap(),
+            execute_op(
+                &store,
+                SecretOp::Set {
+                    extension_id: "e".into(),
+                    key: "k".into(),
+                    value: "v".into()
+                }
+            )
+            .unwrap(),
             SecretReply::Unit,
         );
         assert_eq!(
-            execute_op(&store, SecretOp::Get { extension_id: "e".into(), key: "k".into() }).unwrap(),
+            execute_op(
+                &store,
+                SecretOp::Get {
+                    extension_id: "e".into(),
+                    key: "k".into()
+                }
+            )
+            .unwrap(),
             SecretReply::Value(Some("v".into())),
         );
         assert_eq!(
-            execute_op(&store, SecretOp::Delete { extension_id: "e".into(), key: "k".into() }).unwrap(),
+            execute_op(
+                &store,
+                SecretOp::Delete {
+                    extension_id: "e".into(),
+                    key: "k".into()
+                }
+            )
+            .unwrap(),
             SecretReply::Deleted { existed: true },
         );
         assert_eq!(
-            execute_op(&store, SecretOp::Get { extension_id: "e".into(), key: "k".into() }).unwrap(),
+            execute_op(
+                &store,
+                SecretOp::Get {
+                    extension_id: "e".into(),
+                    key: "k".into()
+                }
+            )
+            .unwrap(),
             SecretReply::Value(None),
         );
     }

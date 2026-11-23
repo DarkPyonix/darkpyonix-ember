@@ -13,7 +13,9 @@ use ember_editor::{EditorSession, InMemorySecretStore, SecretStore, SessionConfi
 use ember_editor_conn::actors::generated::main_thread_secret_state;
 use ember_editor_conn::exthost::{MSG_INITIALIZED, MSG_READY, MSG_TERMINATE};
 use ember_editor_conn::frame::{Frame, FrameDecoder, MessageType};
-use ember_editor_conn::ipc::{decode_message, deserialize, encode_message, request_type, response_type, IpcValue};
+use ember_editor_conn::ipc::{
+    decode_message, deserialize, encode_message, request_type, response_type, IpcValue,
+};
 use ember_editor_conn::rpc::{Arg, Reply, RpcMessage};
 use ember_editor_conn::rpc_ids;
 use ember_editor_conn::uri::UriComponents;
@@ -41,7 +43,10 @@ async fn read_http_head<S: AsyncReadExt + Unpin>(stream: &mut S) -> (String, Vec
     }
 }
 
-async fn recv_frame<S: AsyncReadExt + Unpin>(stream: &mut S, dec: &mut FrameDecoder) -> Option<Frame> {
+async fn recv_frame<S: AsyncReadExt + Unpin>(
+    stream: &mut S,
+    dec: &mut FrameDecoder,
+) -> Option<Frame> {
     let mut chunk = [0u8; 4096];
     loop {
         if let Some(f) = dec.next_frame().expect("decode frame") {
@@ -59,7 +64,10 @@ async fn accept_upgraded_handshake<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     server: &mut S,
 ) -> (FrameDecoder, Value) {
     let (head, leftover) = read_http_head(server).await;
-    assert!(head.contains("Upgrade: websocket"), "expected WebSocket upgrade: {head}");
+    assert!(
+        head.contains("Upgrade: websocket"),
+        "expected WebSocket upgrade: {head}"
+    );
     let mut dec = FrameDecoder::new();
     dec.push(&leftover);
     server
@@ -76,7 +84,9 @@ async fn accept_upgraded_handshake<S: AsyncReadExt + AsyncWriteExt + Unpin>(
         .await
         .unwrap();
 
-    let ct_frame = recv_frame(server, &mut dec).await.expect("connectionType frame");
+    let ct_frame = recv_frame(server, &mut dec)
+        .await
+        .expect("connectionType frame");
     assert_eq!(ct_frame.ty, MessageType::Control);
     let ct: Value = serde_json::from_slice(&ct_frame.data).unwrap();
     assert_eq!(ct["commit"].as_str(), Some(PINNED_COMMIT));
@@ -99,7 +109,9 @@ async fn run_fake_management(mut server: DuplexStream) {
     assert_eq!(ct["desiredConnectionType"], 1);
 
     let mut srv_id = 0u32;
-    let ctx_frame = recv_frame(&mut server, &mut dec).await.expect("ipc context frame");
+    let ctx_frame = recv_frame(&mut server, &mut dec)
+        .await
+        .expect("ipc context frame");
     let mut last_client_id = ctx_frame.id;
     let mut pos = 0;
     let _ = deserialize(&ctx_frame.data, &mut pos).unwrap();
@@ -195,7 +207,11 @@ enum Seen {
     /// The reply to a call the fake sent to Ember (`method` is the call's method).
     Reply(String),
     /// A request Ember sent to the extension host.
-    Request { rpc_id: u8, method: String, args: Vec<Arg> },
+    Request {
+        rpc_id: u8,
+        method: String,
+        args: Vec<Arg>,
+    },
 }
 
 struct FakeExtHostHandle {
@@ -215,7 +231,9 @@ impl FakeExtHostHandle {
     /// Whether the fake saw nothing more within a short grace period.
     async fn nothing_more_seen(&self) -> bool {
         let mut events = self.events.lock().await;
-        tokio::time::timeout(Duration::from_millis(300), events.recv()).await.is_err()
+        tokio::time::timeout(Duration::from_millis(300), events.recv())
+            .await
+            .is_err()
     }
 
     async fn call(&self, method: &str, args: Vec<Arg>) -> ExtHostReply {
@@ -234,21 +252,31 @@ impl FakeExtHostHandle {
     }
 
     async fn get_password(&self, extension_id: &str, key: &str) -> ExtHostReply {
-        self.call("$getPassword", vec![Arg::Json(json!(extension_id)), Arg::Json(json!(key))])
-            .await
+        self.call(
+            "$getPassword",
+            vec![Arg::Json(json!(extension_id)), Arg::Json(json!(key))],
+        )
+        .await
     }
 
     async fn set_password(&self, extension_id: &str, key: &str, value: &str) -> ExtHostReply {
         self.call(
             "$setPassword",
-            vec![Arg::Json(json!(extension_id)), Arg::Json(json!(key)), Arg::Json(json!(value))],
+            vec![
+                Arg::Json(json!(extension_id)),
+                Arg::Json(json!(key)),
+                Arg::Json(json!(value)),
+            ],
         )
         .await
     }
 
     async fn delete_password(&self, extension_id: &str, key: &str) -> ExtHostReply {
-        self.call("$deletePassword", vec![Arg::Json(json!(extension_id)), Arg::Json(json!(key))])
-            .await
+        self.call(
+            "$deletePassword",
+            vec![Arg::Json(json!(extension_id)), Arg::Json(json!(key))],
+        )
+        .await
     }
 }
 
@@ -268,18 +296,36 @@ async fn run_fake_exthost(
     // 1. Send Ready
     srv_id += 1;
     server
-        .write_all(&Frame::new(MessageType::Regular, srv_id, last_client_id, vec![MSG_READY]).encode())
+        .write_all(
+            &Frame::new(
+                MessageType::Regular,
+                srv_id,
+                last_client_id,
+                vec![MSG_READY],
+            )
+            .encode(),
+        )
         .await
         .unwrap();
 
     // 2. Receive IExtensionHostInitData
-    let init_frame = recv_frame(&mut server, &mut dec).await.expect("initData frame");
+    let init_frame = recv_frame(&mut server, &mut dec)
+        .await
+        .expect("initData frame");
     last_client_id = init_frame.id;
 
     // 3. Send Initialized
     srv_id += 1;
     server
-        .write_all(&Frame::new(MessageType::Regular, srv_id, last_client_id, vec![MSG_INITIALIZED]).encode())
+        .write_all(
+            &Frame::new(
+                MessageType::Regular,
+                srv_id,
+                last_client_id,
+                vec![MSG_INITIALIZED],
+            )
+            .encode(),
+        )
         .await
         .unwrap();
 
@@ -300,21 +346,44 @@ async fn run_fake_exthost(
             }
             let msg = RpcMessage::decode(&frame.data).expect("decode RPC message");
             match msg {
-                RpcMessage::Request { req, rpc_id: incoming_id, method, args, .. } => {
+                RpcMessage::Request {
+                    req,
+                    rpc_id: incoming_id,
+                    method,
+                    args,
+                    ..
+                } => {
                     srv_id += 1;
                     let ack = RpcMessage::Acknowledged { req }.encode().unwrap();
                     server
-                        .write_all(&Frame::new(MessageType::Regular, srv_id, last_client_id, ack).encode())
+                        .write_all(
+                            &Frame::new(MessageType::Regular, srv_id, last_client_id, ack).encode(),
+                        )
                         .await
                         .unwrap();
 
                     srv_id += 1;
-                    let ok = RpcMessage::ReplyOk { req, reply: Reply::Empty }.encode().unwrap();
+                    let ok = RpcMessage::ReplyOk {
+                        req,
+                        reply: Reply::Empty,
+                    }
+                    .encode()
+                    .unwrap();
                     server
-                        .write_all(&Frame::new(MessageType::Regular, srv_id, last_client_id, ok).encode())
+                        .write_all(
+                            &Frame::new(MessageType::Regular, srv_id, last_client_id, ok).encode(),
+                        )
                         .await
                         .unwrap();
-                    let _ = events.send(Seen::Request { rpc_id: incoming_id, method, args });
+                    // Startup requests such as `$initializeConfiguration` are not what these tests
+                    // watch for; only the secret change notice is recorded.
+                    if method == "$onDidChangePassword" {
+                        let _ = events.send(Seen::Request {
+                            rpc_id: incoming_id,
+                            method,
+                            args,
+                        });
+                    }
                 }
                 RpcMessage::Acknowledged { .. } => {}
                 RpcMessage::ReplyOk { req, reply } => {
@@ -370,7 +439,8 @@ async fn connect_with_store(store: Arc<dyn SecretStore>) -> (EditorSession, Fake
     let outbound_rx = Arc::new(tokio::sync::Mutex::new(Some(outbound_rx)));
     let dials = Arc::new(AtomicUsize::new(0));
 
-    let config = SessionConfig::new("127.0.0.1:8000", "/workspace/project").with_secret_store(store);
+    let config =
+        SessionConfig::new("127.0.0.1:8000", "/workspace/project").with_secret_store(store);
     let dials_cb = Arc::clone(&dials);
     let rx_cb = Arc::clone(&outbound_rx);
     let (session, _updates) = EditorSession::connect(config, move || {
@@ -384,7 +454,9 @@ async fn connect_with_store(store: Arc<dyn SecretStore>) -> (EditorSession, Fake
                     tokio::spawn(async move {
                         let (head, _) = read_http_head(&mut server).await;
                         assert!(head.starts_with("GET /version HTTP/1.0"));
-                        let resp = format!("HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\n\r\n{PINNED_COMMIT}");
+                        let resp = format!(
+                            "HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\n\r\n{PINNED_COMMIT}"
+                        );
                         server.write_all(resp.as_bytes()).await.unwrap();
                     });
                 }
@@ -403,7 +475,13 @@ async fn connect_with_store(store: Arc<dyn SecretStore>) -> (EditorSession, Fake
     .await
     .expect("EditorSession::connect should succeed");
 
-    (session, FakeExtHostHandle { tx: outbound_tx, events: tokio::sync::Mutex::new(events_rx) })
+    (
+        session,
+        FakeExtHostHandle {
+            tx: outbound_tx,
+            events: tokio::sync::Mutex::new(events_rx),
+        },
+    )
 }
 
 #[tokio::test]
@@ -412,11 +490,16 @@ async fn secret_state_set_get_overwrite_delete_and_missing_key() {
     let (session, exthost) = connect_with_store(store.clone()).await;
 
     // Missing key returns undefined (Reply::Empty).
-    assert_eq!(exthost.get_password("ext.alpha", "token").await, ExtHostReply::Ok(Reply::Empty));
+    assert_eq!(
+        exthost.get_password("ext.alpha", "token").await,
+        ExtHostReply::Ok(Reply::Empty)
+    );
 
     // Set then get returns the stored string.
     assert_eq!(
-        exthost.set_password("ext.alpha", "token", "s3cr3t-v1").await,
+        exthost
+            .set_password("ext.alpha", "token", "s3cr3t-v1")
+            .await,
         ExtHostReply::Ok(Reply::Empty)
     );
     assert_eq!(
@@ -426,7 +509,9 @@ async fn secret_state_set_get_overwrite_delete_and_missing_key() {
 
     // Overwriting replaces the stored string.
     assert_eq!(
-        exthost.set_password("ext.alpha", "token", "s3cr3t-v2").await,
+        exthost
+            .set_password("ext.alpha", "token", "s3cr3t-v2")
+            .await,
         ExtHostReply::Ok(Reply::Empty)
     );
     assert_eq!(
@@ -435,11 +520,20 @@ async fn secret_state_set_get_overwrite_delete_and_missing_key() {
     );
 
     // Delete removes the entry so subsequent get returns Reply::Empty.
-    assert_eq!(exthost.delete_password("ext.alpha", "token").await, ExtHostReply::Ok(Reply::Empty));
-    assert_eq!(exthost.get_password("ext.alpha", "token").await, ExtHostReply::Ok(Reply::Empty));
+    assert_eq!(
+        exthost.delete_password("ext.alpha", "token").await,
+        ExtHostReply::Ok(Reply::Empty)
+    );
+    assert_eq!(
+        exthost.get_password("ext.alpha", "token").await,
+        ExtHostReply::Ok(Reply::Empty)
+    );
 
     // Deleting an already-missing key succeeds.
-    assert_eq!(exthost.delete_password("ext.alpha", "token").await, ExtHostReply::Ok(Reply::Empty));
+    assert_eq!(
+        exthost.delete_password("ext.alpha", "token").await,
+        ExtHostReply::Ok(Reply::Empty)
+    );
     assert!(store.snapshot().is_empty());
 
     session.shutdown().await;
@@ -451,11 +545,15 @@ async fn secret_state_isolates_different_extension_ids() {
     let (session, exthost) = connect_with_store(store.clone()).await;
 
     assert_eq!(
-        exthost.set_password("ext.alpha", "api_key", "alpha-key").await,
+        exthost
+            .set_password("ext.alpha", "api_key", "alpha-key")
+            .await,
         ExtHostReply::Ok(Reply::Empty)
     );
     assert_eq!(
-        exthost.set_password("ext.beta", "api_key", "beta-key").await,
+        exthost
+            .set_password("ext.beta", "api_key", "beta-key")
+            .await,
         ExtHostReply::Ok(Reply::Empty)
     );
     assert_eq!(
@@ -489,8 +587,14 @@ async fn secret_state_isolates_different_extension_ids() {
     );
 
     // Deleting ext.alpha's key leaves ext.beta's key untouched.
-    assert_eq!(exthost.delete_password("ext.alpha", "api_key").await, ExtHostReply::Ok(Reply::Empty));
-    assert_eq!(exthost.get_password("ext.alpha", "api_key").await, ExtHostReply::Ok(Reply::Empty));
+    assert_eq!(
+        exthost.delete_password("ext.alpha", "api_key").await,
+        ExtHostReply::Ok(Reply::Empty)
+    );
+    assert_eq!(
+        exthost.get_password("ext.alpha", "api_key").await,
+        ExtHostReply::Ok(Reply::Empty)
+    );
     assert_eq!(
         exthost.get_password("ext.beta", "api_key").await,
         ExtHostReply::Ok(Reply::Json(json!("beta-key")))
@@ -546,7 +650,9 @@ fn change_request(extension_id: &str, key: &str) -> Seen {
     Seen::Request {
         rpc_id: rpc_ids::id_of("ExtHostSecretState").unwrap(),
         method: "$onDidChangePassword".to_owned(),
-        args: vec![Arg::Json(json!({ "extensionId": extension_id, "key": key }))],
+        args: vec![Arg::Json(
+            json!({ "extensionId": extension_id, "key": key }),
+        )],
     }
 }
 
@@ -554,19 +660,49 @@ fn change_request(extension_id: &str, key: &str) -> Seen {
 async fn fr_e1_secret_set_and_delete_notify_the_extension_host_of_the_change() {
     let (session, exthost) = connect_with_store(Arc::new(InMemorySecretStore::new())).await;
 
-    assert_eq!(exthost.set_password("ext.alpha", "token", "s3cr3t").await, ExtHostReply::Ok(Reply::Empty));
-    assert_eq!(exthost.next_seen().await, Seen::Reply("$setPassword".to_owned()));
-    assert_eq!(exthost.next_seen().await, change_request("ext.alpha", "token"));
+    assert_eq!(
+        exthost.set_password("ext.alpha", "token", "s3cr3t").await,
+        ExtHostReply::Ok(Reply::Empty)
+    );
+    assert_eq!(
+        exthost.next_seen().await,
+        Seen::Reply("$setPassword".to_owned())
+    );
+    assert_eq!(
+        exthost.next_seen().await,
+        change_request("ext.alpha", "token")
+    );
 
-    assert_eq!(exthost.delete_password("ext.alpha", "token").await, ExtHostReply::Ok(Reply::Empty));
-    assert_eq!(exthost.next_seen().await, Seen::Reply("$deletePassword".to_owned()));
-    assert_eq!(exthost.next_seen().await, change_request("ext.alpha", "token"));
+    assert_eq!(
+        exthost.delete_password("ext.alpha", "token").await,
+        ExtHostReply::Ok(Reply::Empty)
+    );
+    assert_eq!(
+        exthost.next_seen().await,
+        Seen::Reply("$deletePassword".to_owned())
+    );
+    assert_eq!(
+        exthost.next_seen().await,
+        change_request("ext.alpha", "token")
+    );
 
     // Reads never notify, and deleting what is not stored changes nothing, so it stays silent.
-    assert_eq!(exthost.get_password("ext.alpha", "token").await, ExtHostReply::Ok(Reply::Empty));
-    assert_eq!(exthost.next_seen().await, Seen::Reply("$getPassword".to_owned()));
-    assert_eq!(exthost.delete_password("ext.alpha", "token").await, ExtHostReply::Ok(Reply::Empty));
-    assert_eq!(exthost.next_seen().await, Seen::Reply("$deletePassword".to_owned()));
+    assert_eq!(
+        exthost.get_password("ext.alpha", "token").await,
+        ExtHostReply::Ok(Reply::Empty)
+    );
+    assert_eq!(
+        exthost.next_seen().await,
+        Seen::Reply("$getPassword".to_owned())
+    );
+    assert_eq!(
+        exthost.delete_password("ext.alpha", "token").await,
+        ExtHostReply::Ok(Reply::Empty)
+    );
+    assert_eq!(
+        exthost.next_seen().await,
+        Seen::Reply("$deletePassword".to_owned())
+    );
     assert!(exthost.nothing_more_seen().await);
 
     session.shutdown().await;
@@ -576,10 +712,22 @@ async fn fr_e1_secret_set_and_delete_notify_the_extension_host_of_the_change() {
 async fn fr_e1_failed_secret_write_does_not_notify() {
     let (session, exthost) = connect_with_store(Arc::new(FailingSecretStore)).await;
 
-    assert!(matches!(exthost.set_password("ext.alpha", "k", "v").await, ExtHostReply::Err(Some(_))));
-    assert_eq!(exthost.next_seen().await, Seen::Reply("$setPassword".to_owned()));
-    assert!(matches!(exthost.delete_password("ext.alpha", "k").await, ExtHostReply::Err(Some(_))));
-    assert_eq!(exthost.next_seen().await, Seen::Reply("$deletePassword".to_owned()));
+    assert!(matches!(
+        exthost.set_password("ext.alpha", "k", "v").await,
+        ExtHostReply::Err(Some(_))
+    ));
+    assert_eq!(
+        exthost.next_seen().await,
+        Seen::Reply("$setPassword".to_owned())
+    );
+    assert!(matches!(
+        exthost.delete_password("ext.alpha", "k").await,
+        ExtHostReply::Err(Some(_))
+    ));
+    assert_eq!(
+        exthost.next_seen().await,
+        Seen::Reply("$deletePassword".to_owned())
+    );
     assert!(exthost.nothing_more_seen().await);
 
     session.shutdown().await;

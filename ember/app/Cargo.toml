@@ -32,8 +32,8 @@ getrandom = "0.3"
 # TODO: 배포되면 버전 의존성으로 바꾼다 (dioxus-compose is not yet published, and it takes compose-rust by git, so this does too: one copy).
 # compose-rust develop after the builder flip (#906): widgets are call macros. dioxus-compose
 # chore/compose-rust-fr39-flip pins the same rev.
-compose-rust = { git = "https://github.com/DarkPyonix/compose-rust", rev = "e52fbd396681ceb3017513107edda5812dee4920", default-features = false }
-dioxus-compose = { git = "https://github.com/DarkPyonix/dioxus-compose", rev = "89fa099ced74cd3ee1bd31a3fda447960c4f92e4" }
+compose-rust = { git = "https://github.com/DarkPyonix/compose-rust", rev = "519ffede15b777733c64fc038fdeae5d7256d7d6", default-features = false }
+dioxus-compose = { git = "https://github.com/DarkPyonix/dioxus-compose", rev = "27d56dd1d9237ffb8f42ca585f88bc4636ae86a6" }
 
 # Everything below the UI: sync engine, state reducer, transcript, cache.
 # `tls`: the push and file watch sockets reach an https server over wss (FR-S11, #1048).

@@ -1148,3 +1148,13 @@ What trust does not protect. Under D37 agents and terminals run with the full au
 **Why.** The relay, the stream type and the device key exist and are tested on the desktop. What is new is a small gateway crate and one Android Activity.
 
 **Status.** Not built (#80, 1.0 work). SPEC `FR-W5a`–`FR-W5i`, `NFR-W5a`.
+
+### D54: The Ember 에디터 leaves the VS Code AI chat actors out (Q-E7)
+
+**Decision.** [user, 2026-11-23, Q-E7: "빼기 (권장)"] The Ember 에디터 does not bridge the AI and chat actors of the extension host protocol for now. The 19 actors `MainThreadLanguageModels`, `MainThreadEmbeddings`, `MainThreadChatAgents2`, `MainThreadCodeMapper`, `MainThreadLanguageModelTools`, `MainThreadAgentEditorComments`, `MainThreadSpeech`, `MainThreadMcp`, `MainThreadAiRelatedInformation`, `MainThreadAiEmbeddingVector`, `MainThreadChatStatus`, `MainThreadChatQuota`, `MainThreadChatInputNotification`, `MainThreadAiSettingsSearch`, `MainThreadDataChannels`, `MainThreadChatSessions`, `MainThreadChatOutputRenderer`, `MainThreadChatContext` and `MainThreadChatDebug` are `out` in `ember/editor-conn/coverage.toml` (`SPEC.md` FR-E9). Their calls get the fallback reply and are not recorded as gaps. This is an exception to D38 (the functions of Code-OSS).
+
+**Why.** Ember's own agents are the AI surface of the product; a second chat inside the editor window would need its own UI, accounts and model plumbing, and these actors change with almost every Code-OSS release.
+
+**Rejected.** Bridging them now (a large surface that duplicates Ember's agents); answering them with errors (extensions such as Copilot Chat register at startup and would fail activation instead of staying idle).
+
+**Status.** Ledger classification in the FR-E9 follow-up of #1043. Revisit when a regression-list extension needs one of these actors.

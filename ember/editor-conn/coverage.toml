@@ -5,7 +5,8 @@
 #   bridged  the session decodes the call and answers from its own state;
 #   acked    the empty answer is correct, confirmed by a person (name and date in the actor's `note`);
 #   out      out of scope; the actor's `note` says why and who decided;
-#   todo     not built yet: answered with the fallback reply and recorded with the calling extension.
+#   todo     not built yet: answered with the fallback reply; a call that returns a value is recorded
+#            (actor, method, count, and the extension when an argument names it).
 # `fr_e9_ledger_covers_generated_protocol` fails when the generated protocol has an actor or method
 # this file lacks, or this file names one the protocol does not have. A pin bump adds new methods
 # here as `todo` or `out` (docs/design/POST-1-0-EDITOR-CORE.md 4.4).
@@ -31,61 +32,66 @@
 "$tryApplyWorkspaceEdit" = "bridged"
 
 [MainThreadLanguageModels]
-"$registerLanguageModelProvider" = "todo"
-"$onLMProviderChange" = "todo"
-"$unregisterProvider" = "todo"
-"$tryStartChatRequest" = "todo"
-"$reportResponsePart" = "todo"
-"$reportResponseDone" = "todo"
-"$selectChatModels" = "todo"
-"$countTokens" = "todo"
-"$cancelLanguageModelChatRequest" = "todo"
-"$fileIsIgnored" = "todo"
-"$registerFileIgnoreProvider" = "todo"
-"$unregisterFileIgnoreProvider" = "todo"
+note = "owner, 2026-11-23 (Q-E7, INTENT D54): VS Code AI chat is not supported for now (exception to D38)."
+"$registerLanguageModelProvider" = "out"
+"$onLMProviderChange" = "out"
+"$unregisterProvider" = "out"
+"$tryStartChatRequest" = "out"
+"$reportResponsePart" = "out"
+"$reportResponseDone" = "out"
+"$selectChatModels" = "out"
+"$countTokens" = "out"
+"$cancelLanguageModelChatRequest" = "out"
+"$fileIsIgnored" = "out"
+"$registerFileIgnoreProvider" = "out"
+"$unregisterFileIgnoreProvider" = "out"
 
 [MainThreadEmbeddings]
-"$registerEmbeddingProvider" = "todo"
-"$unregisterEmbeddingProvider" = "todo"
-"$computeEmbeddings" = "todo"
+note = "owner, 2026-11-23 (Q-E7, INTENT D54): VS Code AI chat is not supported for now (exception to D38)."
+"$registerEmbeddingProvider" = "out"
+"$unregisterEmbeddingProvider" = "out"
+"$computeEmbeddings" = "out"
 
 [MainThreadChatAgents2]
-"$handleProgressChunk" = "todo"
-"$handleAnchorResolve" = "todo"
-"$registerAgent" = "todo"
-"$registerChatParticipantDetectionProvider" = "todo"
-"$unregisterChatParticipantDetectionProvider" = "todo"
-"$registerPromptFileProvider" = "todo"
-"$unregisterPromptFileProvider" = "todo"
-"$onDidChangePromptFiles" = "todo"
-"$registerChatSessionCustomizationProvider" = "todo"
-"$unregisterChatSessionCustomizationProvider" = "todo"
-"$onDidChangeCustomizations" = "todo"
-"$registerAgentCompletionsProvider" = "todo"
-"$unregisterAgentCompletionsProvider" = "todo"
-"$updateAgent" = "todo"
-"$unregisterAgent" = "todo"
-"$transferActiveChatSession" = "todo"
-"$provideCustomAgents" = "todo"
-"$provideInstructions" = "todo"
-"$provideSkills" = "todo"
-"$provideSlashCommands" = "todo"
-"$provideHooks" = "todo"
-"$providePlugins" = "todo"
+note = "owner, 2026-11-23 (Q-E7, INTENT D54): VS Code AI chat is not supported for now (exception to D38)."
+"$handleProgressChunk" = "out"
+"$handleAnchorResolve" = "out"
+"$registerAgent" = "out"
+"$registerChatParticipantDetectionProvider" = "out"
+"$unregisterChatParticipantDetectionProvider" = "out"
+"$registerPromptFileProvider" = "out"
+"$unregisterPromptFileProvider" = "out"
+"$onDidChangePromptFiles" = "out"
+"$registerChatSessionCustomizationProvider" = "out"
+"$unregisterChatSessionCustomizationProvider" = "out"
+"$onDidChangeCustomizations" = "out"
+"$registerAgentCompletionsProvider" = "out"
+"$unregisterAgentCompletionsProvider" = "out"
+"$updateAgent" = "out"
+"$unregisterAgent" = "out"
+"$transferActiveChatSession" = "out"
+"$provideCustomAgents" = "out"
+"$provideInstructions" = "out"
+"$provideSkills" = "out"
+"$provideSlashCommands" = "out"
+"$provideHooks" = "out"
+"$providePlugins" = "out"
 
 [MainThreadCodeMapper]
-"$registerCodeMapperProvider" = "todo"
-"$unregisterCodeMapperProvider" = "todo"
-"$handleProgress" = "todo"
+note = "owner, 2026-11-23 (Q-E7, INTENT D54): VS Code AI chat is not supported for now (exception to D38)."
+"$registerCodeMapperProvider" = "out"
+"$unregisterCodeMapperProvider" = "out"
+"$handleProgress" = "out"
 
 [MainThreadLanguageModelTools]
-"$getTools" = "todo"
-"$acceptToolProgress" = "todo"
-"$invokeTool" = "todo"
-"$countTokensForInvocation" = "todo"
-"$registerTool" = "todo"
-"$registerToolWithDefinition" = "todo"
-"$unregisterTool" = "todo"
+note = "owner, 2026-11-23 (Q-E7, INTENT D54): VS Code AI chat is not supported for now (exception to D38)."
+"$getTools" = "out"
+"$acceptToolProgress" = "out"
+"$invokeTool" = "out"
+"$countTokensForInvocation" = "out"
+"$registerTool" = "out"
+"$registerToolWithDefinition" = "out"
+"$unregisterTool" = "out"
 
 [MainThreadGitExtension]
 "$onDidChangeRepository" = "todo"
@@ -193,7 +199,8 @@
 "$closeGroup" = "todo"
 
 [MainThreadErrors]
-"$onUnexpectedError" = "todo"
+note = "leader, 2026-11-23 (Q2): Code-OSS only logs it; the session logs it as a warning (ember/editor/src/engine/actors.rs fallback_reply)."
+"$onUnexpectedError" = "acked"
 
 [MainThreadTreeViews]
 "$registerTreeViewDataProvider" = "todo"
@@ -295,10 +302,11 @@
 "$disposeSourceControlDiffInformation" = "todo"
 
 [MainThreadAgentEditorComments]
-"$createAgentEditorComments" = "todo"
-"$addComment" = "todo"
-"$deleteComment" = "todo"
-"$disposeAgentEditorComments" = "todo"
+note = "owner, 2026-11-23 (Q-E7, INTENT D54): VS Code AI chat is not supported for now (exception to D38)."
+"$createAgentEditorComments" = "out"
+"$addComment" = "out"
+"$deleteComment" = "out"
+"$disposeAgentEditorComments" = "out"
 
 [MainThreadDocumentDiff]
 "$computeDocumentDiff" = "todo"
@@ -327,15 +335,17 @@
 "$registerExtensionStorageKeysToSync" = "bridged"
 
 [MainThreadSpeech]
-"$registerProvider" = "todo"
-"$unregisterProvider" = "todo"
-"$emitSpeechToTextEvent" = "todo"
-"$emitTextToSpeechEvent" = "todo"
-"$emitKeywordRecognitionEvent" = "todo"
+note = "owner, 2026-11-23 (Q-E7, INTENT D54): VS Code AI chat is not supported for now (exception to D38)."
+"$registerProvider" = "out"
+"$unregisterProvider" = "out"
+"$emitSpeechToTextEvent" = "out"
+"$emitTextToSpeechEvent" = "out"
+"$emitKeywordRecognitionEvent" = "out"
 
 [MainThreadTelemetry]
-"$publicLog" = "todo"
-"$publicLog2" = "todo"
+note = "leader, 2026-11-23 (Q2): Ember sends no telemetry, so the empty answer is right."
+"$publicLog" = "acked"
+"$publicLog2" = "acked"
 
 [MainThreadMeteredConnection]
 
@@ -450,13 +460,14 @@
 "$unwatch" = "todo"
 
 [MainThreadExtensionService]
+note = "leader, 2026-11-23 (Q2): activation notices and timing marks have no visible effect in Ember; $onExtensionActivationError stays todo (Code-OSS shows it)."
 "$getExtension" = "todo"
 "$activateExtension" = "todo"
-"$onWillActivateExtension" = "todo"
-"$onDidActivateExtension" = "todo"
+"$onWillActivateExtension" = "acked"
+"$onDidActivateExtension" = "acked"
 "$onExtensionActivationError" = "todo"
 "$onExtensionRuntimeError" = "todo"
-"$setPerformanceMarks" = "todo"
+"$setPerformanceMarks" = "acked"
 "$asBrowserUri" = "todo"
 
 [MainThreadSCM]
@@ -622,83 +633,95 @@
 "$fetchBundleContents" = "todo"
 
 [MainThreadMcp]
-"$onDidChangeState" = "todo"
-"$onDidPublishLog" = "todo"
-"$onDidReceiveMessage" = "todo"
-"$upsertMcpCollection" = "todo"
-"$deleteMcpCollection" = "todo"
-"$getTokenFromServerMetadata" = "todo"
-"$getTokenForProviderId" = "todo"
-"$logMcpAuthSetup" = "todo"
-"$startMcpGateway" = "todo"
-"$disposeMcpGateway" = "todo"
+note = "owner, 2026-11-23 (Q-E7, INTENT D54): VS Code AI chat is not supported for now (exception to D38)."
+"$onDidChangeState" = "out"
+"$onDidPublishLog" = "out"
+"$onDidReceiveMessage" = "out"
+"$upsertMcpCollection" = "out"
+"$deleteMcpCollection" = "out"
+"$getTokenFromServerMetadata" = "out"
+"$getTokenForProviderId" = "out"
+"$logMcpAuthSetup" = "out"
+"$startMcpGateway" = "out"
+"$disposeMcpGateway" = "out"
 
 [MainThreadAiRelatedInformation]
-"$getAiRelatedInformation" = "todo"
-"$registerAiRelatedInformationProvider" = "todo"
-"$unregisterAiRelatedInformationProvider" = "todo"
+note = "owner, 2026-11-23 (Q-E7, INTENT D54): VS Code AI chat is not supported for now (exception to D38)."
+"$getAiRelatedInformation" = "out"
+"$registerAiRelatedInformationProvider" = "out"
+"$unregisterAiRelatedInformationProvider" = "out"
 
 [MainThreadAiEmbeddingVector]
-"$registerAiEmbeddingVectorProvider" = "todo"
-"$unregisterAiEmbeddingVectorProvider" = "todo"
+note = "owner, 2026-11-23 (Q-E7, INTENT D54): VS Code AI chat is not supported for now (exception to D38)."
+"$registerAiEmbeddingVectorProvider" = "out"
+"$unregisterAiEmbeddingVectorProvider" = "out"
 
 [MainThreadChatStatus]
-"$setEntry" = "todo"
-"$disposeEntry" = "todo"
+note = "owner, 2026-11-23 (Q-E7, INTENT D54): VS Code AI chat is not supported for now (exception to D38)."
+"$setEntry" = "out"
+"$disposeEntry" = "out"
 
 [MainThreadChatQuota]
-"$updateQuotas" = "todo"
+note = "owner, 2026-11-23 (Q-E7, INTENT D54): VS Code AI chat is not supported for now (exception to D38)."
+"$updateQuotas" = "out"
 
 [MainThreadChatInputNotification]
-"$setNotification" = "todo"
-"$disposeNotification" = "todo"
+note = "owner, 2026-11-23 (Q-E7, INTENT D54): VS Code AI chat is not supported for now (exception to D38)."
+"$setNotification" = "out"
+"$disposeNotification" = "out"
 
 [MainThreadAiSettingsSearch]
-"$registerAiSettingsSearchProvider" = "todo"
-"$unregisterAiSettingsSearchProvider" = "todo"
-"$handleSearchResult" = "todo"
+note = "owner, 2026-11-23 (Q-E7, INTENT D54): VS Code AI chat is not supported for now (exception to D38)."
+"$registerAiSettingsSearchProvider" = "out"
+"$unregisterAiSettingsSearchProvider" = "out"
+"$handleSearchResult" = "out"
 
 [MainThreadDataChannels]
-"$createLinkPresentationWatcher" = "todo"
-"$disposeLinkPresentationWatcher" = "todo"
-"$registerLinkPresentationProvider" = "todo"
-"$unregisterLinkPresentationProvider" = "todo"
-"$acceptLinkPresentationProviderData" = "todo"
+note = "owner, 2026-11-23 (Q-E7, INTENT D54): VS Code AI chat is not supported for now (exception to D38)."
+"$createLinkPresentationWatcher" = "out"
+"$disposeLinkPresentationWatcher" = "out"
+"$registerLinkPresentationProvider" = "out"
+"$unregisterLinkPresentationProvider" = "out"
+"$acceptLinkPresentationProviderData" = "out"
 
 [MainThreadChatSessions]
-"$registerChatSessionItemController" = "todo"
-"$updateChatSessionItemControllerCapabilities" = "todo"
-"$unregisterChatSessionItemController" = "todo"
-"$updateChatSessionItems" = "todo"
-"$addOrUpdateChatSessionItem" = "todo"
-"$onDidCommitChatSessionItem" = "todo"
-"$registerChatSessionContentProvider" = "todo"
-"$unregisterChatSessionContentProvider" = "todo"
-"$onDidChangeChatSessionOptions" = "todo"
-"$onDidChangeChatSessionProviderOptions" = "todo"
-"$updateChatSessionInputState" = "todo"
-"$handleProgressChunk" = "todo"
-"$handleAnchorResolve" = "todo"
-"$handleProgressComplete" = "todo"
+note = "owner, 2026-11-23 (Q-E7, INTENT D54): VS Code AI chat is not supported for now (exception to D38)."
+"$registerChatSessionItemController" = "out"
+"$updateChatSessionItemControllerCapabilities" = "out"
+"$unregisterChatSessionItemController" = "out"
+"$updateChatSessionItems" = "out"
+"$addOrUpdateChatSessionItem" = "out"
+"$onDidCommitChatSessionItem" = "out"
+"$registerChatSessionContentProvider" = "out"
+"$unregisterChatSessionContentProvider" = "out"
+"$onDidChangeChatSessionOptions" = "out"
+"$onDidChangeChatSessionProviderOptions" = "out"
+"$updateChatSessionInputState" = "out"
+"$handleProgressChunk" = "out"
+"$handleAnchorResolve" = "out"
+"$handleProgressComplete" = "out"
 
 [MainThreadChatOutputRenderer]
-"$registerChatOutputRenderer" = "todo"
-"$unregisterChatOutputRenderer" = "todo"
+note = "owner, 2026-11-23 (Q-E7, INTENT D54): VS Code AI chat is not supported for now (exception to D38)."
+"$registerChatOutputRenderer" = "out"
+"$unregisterChatOutputRenderer" = "out"
 
 [MainThreadChatContext]
-"$registerChatWorkspaceContextProvider" = "todo"
-"$registerChatExplicitContextProvider" = "todo"
-"$registerChatResourceContextProvider" = "todo"
-"$unregisterChatContextProvider" = "todo"
-"$updateWorkspaceContextItems" = "todo"
-"$executeChatContextItemCommand" = "todo"
+note = "owner, 2026-11-23 (Q-E7, INTENT D54): VS Code AI chat is not supported for now (exception to D38)."
+"$registerChatWorkspaceContextProvider" = "out"
+"$registerChatExplicitContextProvider" = "out"
+"$registerChatResourceContextProvider" = "out"
+"$unregisterChatContextProvider" = "out"
+"$updateWorkspaceContextItems" = "out"
+"$executeChatContextItemCommand" = "out"
 
 [MainThreadChatDebug]
-"$registerChatDebugLogProvider" = "todo"
-"$unregisterChatDebugLogProvider" = "todo"
-"$acceptChatDebugEvent" = "todo"
-"$subscribeToCoreDebugEvents" = "todo"
-"$unsubscribeFromCoreDebugEvents" = "todo"
+note = "owner, 2026-11-23 (Q-E7, INTENT D54): VS Code AI chat is not supported for now (exception to D38)."
+"$registerChatDebugLogProvider" = "out"
+"$unregisterChatDebugLogProvider" = "out"
+"$acceptChatDebugEvent" = "out"
+"$subscribeToCoreDebugEvents" = "out"
+"$unsubscribeFromCoreDebugEvents" = "out"
 
 [MainThreadBrowsers]
 "$openBrowserTab" = "todo"

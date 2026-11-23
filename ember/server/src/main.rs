@@ -645,7 +645,7 @@ async fn serve_main() -> anyhow::Result<()> {
         .merge(ember_server::api::git::router(sessions.clone(), computers.clone()))
         .merge(ember_server::api::integrations::router(sessions.clone(), computers.clone()))
         .merge(ember_server::api::ide::router_with_computers_and_ose(sessions.clone(), ide, computers.clone(), ose.clone()))
-        .merge(ember_server::api::ide_extensions::router(computers.clone(), ose))
+        .merge(ember_server::api::ide_extensions::router(computers.clone(), ose.clone()))
         .merge(ember_server::schedules::api::agent_router(scheduler.clone(), a2a.clone()))
         .merge(ember_server::schedules::api::router(scheduler))
         .merge(ember_server::mcp::api::router(mcp))
@@ -789,11 +789,14 @@ async fn serve_main() -> anyhow::Result<()> {
         }
         (t, _) => t,
     };
+    let shutdown_ose = ose.clone();
     let served = axum::serve(listener, local_app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            shutdown_ose.shutdown();
         })
         .await;
+    ose.shutdown();
     let _ = stop_tx.send(true);
     if let Some(mut task) = guest_task {
         if tokio::time::timeout(std::time::Duration::from_secs(5), &mut task).await.is_err() {
@@ -817,4 +820,21 @@ async fn serve_main() -> anyhow::Result<()> {
     // Unmount project directories served from other computers.
     computers.shutdown().await;
     Ok(())
+}
+
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+
+        if let Ok(mut terminate) = signal(SignalKind::terminate()) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {},
+                _ = terminate.recv() => {},
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }

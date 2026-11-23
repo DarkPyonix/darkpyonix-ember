@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use tokio::time::{self, MissedTickBehavior};
 
-use super::{strip_urls_in_text, ComputerStatus, Computers, LOCAL};
+use super::{ComputerStatus, Computers, LOCAL, strip_urls_in_text};
 use crate::session::{Push, Sessions};
 
 const PERIOD: Duration = Duration::from_secs(30);

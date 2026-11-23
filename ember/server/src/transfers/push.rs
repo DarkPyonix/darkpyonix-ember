@@ -17,7 +17,10 @@ pub(super) struct TransferPush {
 
 impl TransferPush {
     pub(super) fn new(sessions: Arc<Sessions>) -> Arc<Self> {
-        Arc::new(Self { sessions, pending: Mutex::new(HashMap::new()) })
+        Arc::new(Self {
+            sessions,
+            pending: Mutex::new(HashMap::new()),
+        })
     }
 
     pub(super) fn changed(self: &Arc<Self>, transfer: TransferUpdate) {
@@ -76,17 +79,32 @@ mod tests {
         sender.changed(update("one", 2));
         sender.changed(update("one", 3));
         sender.changed(update("two", 4));
-        let Push::TransferUpdated { transfer: TransferUpdate::Ended(first) } = received.try_recv().unwrap()
-            else { panic!("expected initial transfer record") };
-        let Push::TransferUpdated { transfer: TransferUpdate::Ended(other) } = received.try_recv().unwrap()
-            else { panic!("expected independent transfer record") };
+        let Push::TransferUpdated {
+            transfer: TransferUpdate::Ended(first),
+        } = received.try_recv().unwrap()
+        else {
+            panic!("expected initial transfer record")
+        };
+        let Push::TransferUpdated {
+            transfer: TransferUpdate::Ended(other),
+        } = received.try_recv().unwrap()
+        else {
+            panic!("expected independent transfer record")
+        };
         assert_eq!((first.id.as_str(), first.timestamp_ms), ("one", 1));
         assert_eq!((other.id.as_str(), other.timestamp_ms), ("two", 4));
         assert!(received.try_recv().is_err());
 
-        let trailing = tokio::time::timeout(Duration::from_secs(3), received.recv()).await.unwrap().unwrap();
-        let Push::TransferUpdated { transfer: TransferUpdate::Ended(trailing) } = trailing
-            else { panic!("expected coalesced transfer record") };
+        let trailing = tokio::time::timeout(Duration::from_secs(3), received.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let Push::TransferUpdated {
+            transfer: TransferUpdate::Ended(trailing),
+        } = trailing
+        else {
+            panic!("expected coalesced transfer record")
+        };
         assert_eq!((trailing.id.as_str(), trailing.timestamp_ms), ("one", 3));
         assert!(started.elapsed() >= UPDATE_INTERVAL);
     }

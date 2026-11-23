@@ -46,8 +46,6 @@ pub struct OwnerState {
     /// The hours the next allowance gets: a preset, or the valid custom value.
     hours: MutableState<u32>,
     custom: MutableState<String>,
-    /// Bumped to draw a fresh custom field.
-    custom_gen: MutableState<u64>,
     /// An action is in flight: the buttons wait, so one tap is one request.
     busy: MutableState<bool>,
     /// The last action's outcome sentence (a fixed text, never the server's).
@@ -167,7 +165,6 @@ impl OwnerState {
             load: mutable_state_of(if sample.is_some() { OwnerLoad::Ready } else { OwnerLoad::Idle }),
             hours: mutable_state_of(DEFAULT_TTL_HOURS),
             custom: mutable_state_of(String::new()),
-            custom_gen: mutable_state_of(0),
             busy: mutable_state_of(false),
             confirm: mutable_state_of(Confirm::None),
             armed_at: mutable_state_of(0),
@@ -185,7 +182,7 @@ impl OwnerState {
     }
 
     /// Drops what must not outlive the sheet: the link, the confirm, the armed create, the
-    /// custom hours text (the field is redrawn empty).
+    /// custom hours text.
     fn reset(&self) {
         if self.sample {
             return;
@@ -196,7 +193,6 @@ impl OwnerState {
         self.armed_at.set(0);
         self.create_armed.set(false);
         self.custom.set(String::new());
-        self.custom_gen.set(self.custom_gen.get_untracked() + 1);
     }
 
     /// Reads invites and guests; a failure keeps what is shown and says so.
@@ -526,21 +522,17 @@ fn GuestList(channel: &str, st: &OwnerState) {
     let hours = st.hours.clone();
     let st_c = st.clone();
     HourChips(&ALLOW_PRESETS, current, move |h| {
-        // A preset replaces a typed value: the field is redrawn empty (generation bump).
+        // A preset replaces a typed value: clearing `custom` empties the controlled field.
         st_c.confirm.set(Confirm::None);
         st_c.custom.set(String::new());
-        st_c.custom_gen.set(st_c.custom_gen.get_untracked() + 1);
         hours.set(h)
     });
     let custom = st.custom.get();
     { use ::compose_rust::ui::Row; Row!(space_role = SpaceRole::Sm, alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
-        // Read here so a generation bump redraws the field empty.
-        let _gen = st.custom_gen.get();
-        // v0.0.7: #374 fixed (`TextField::text`); workaround kept until checked on a display (a
-        // controlled value must not move the caret), so the field is uncontrolled.
         let (text, hours) = (st.custom.clone(), st.hours.clone());
         EmberField(FieldOptions {
             weight: Some(1.0),
+            text: Some(custom.clone()),
             placeholder: format!("직접 입력 ({MIN_HOURS}~{MAX_HOURS}시간)"),
             on_value_change: Some(Box::new(move |v| {
                 if let Some((h, _)) = clamp_hours(&v) {
@@ -700,6 +692,73 @@ mod tests {
         let text = text_of(open_sheet);
         assert!(text.contains("멤버/게스트") && text.contains("서버에 연결되어 있지 않아"), "{text}");
         assert!(!text.contains("허용 중"));
+    }
+
+    #[test]
+    fn fr_t14_custom_hours_field_emits_controlled_text() {
+        use compose_rust::protocol::{decode_batch, HostEvent, Mutation, PropertyValue};
+        use compose_rust::runtime::remember;
+        use compose_rust::{EventPayload, PropertyKind, WidgetKind};
+
+        let mut host = Host::new(|| {
+            Box::new(Recomposer::new(|| {
+                let st = OwnerState::new("c1");
+                remember(|| {
+                    st.load.set(OwnerLoad::Ready);
+                    st.custom.set("12".to_string());
+                });
+                GuestList("c1", &st);
+            }))
+        });
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let text_fields: Vec<u32> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::Create { node_id, widget: WidgetKind::TextField } => Some(*node_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text_fields.len(), 1, "expected one custom-hours TextField");
+        let field_id = text_fields[0];
+        let field_texts: Vec<&str> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) }
+                    if *node_id == field_id =>
+                {
+                    Some(*s)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(field_texts, vec!["12"], "custom-hours TextField must emit controlled PropertyKind::Text");
+
+        // Picking a preset clears the controlled field to "" without a generation reset workaround.
+        let (preset_node, preset_handler) = batch
+            .iter()
+            .find_map(|m| match m {
+                Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
+                    Some((*node_id, *h as u64))
+                }
+                _ => None,
+            })
+            .expect("expected a preset hour button with OnClick");
+        let (bytes, _) = host
+            .dispatch(HostEvent::new(preset_node, preset_handler, EventPayload::Clicked))
+            .expect("dispatch preset click");
+        let after = decode_batch(bytes).expect("decode after click");
+        let cleared: Vec<&str> = after
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) }
+                    if *node_id == field_id =>
+                {
+                    Some(*s)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cleared, vec![""], "preset click must clear the controlled custom-hours TextField");
     }
 }
 

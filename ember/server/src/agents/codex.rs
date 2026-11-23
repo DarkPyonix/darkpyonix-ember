@@ -647,6 +647,30 @@ impl AgentRun for CodexRun {
         }
     }
 
+    async fn steer(&mut self, text: &str) -> anyhow::Result<bool> {
+        let Some(expected_turn_id) = self.conn.mapper.lock().unwrap().turn_id.clone() else {
+            return Ok(false);
+        };
+        let steer = self
+            .conn
+            .request(
+                "turn/steer",
+                json!({
+                    "threadId": self.thread_id,
+                    "input": text_input(text),
+                    "expectedTurnId": expected_turn_id,
+                }),
+            )
+            .await;
+        match steer {
+            Ok(_) => Ok(true),
+            Err(e) => {
+                tracing::debug!(target: "codex", "turn/steer rejected: {e:#}");
+                Ok(false)
+            }
+        }
+    }
+
     async fn answer(
         &mut self,
         approval_id: &str,
@@ -1739,5 +1763,72 @@ mod tests {
         form["requestedSchema"]["properties"] = json!({ "x": { "type": "string" } });
         assert!(m.on_server_request(json!(10), "mcpServer/elicitation/request", &form).is_err());
         assert!(!CHANNEL_UNVERIFIED_NOTE.contains('\u{2014}'));
+    }
+
+    #[tokio::test]
+    async fn fr_t3_codex_steer_sends_turn_steer_only_when_turn_active() {
+        let (client_in, server_in) = tokio::io::duplex(4096);
+        let (mut server_out, client_out) = tokio::io::duplex(4096);
+        let conn = Arc::new(Conn {
+            stdin: tokio::sync::Mutex::new(Some(Box::new(client_in))),
+            pending: Mutex::new(HashMap::new()),
+            next_id: AtomicI64::new(1),
+            mapper: Mutex::new(Mapper::default()),
+            closing: AtomicBool::new(false),
+        });
+        let (ev_tx, _ev_rx) = mpsc::channel(16);
+        let reader = tokio::spawn(read_loop(conn.clone(), Box::new(client_out), ev_tx.clone()));
+        let mut run = CodexRun {
+            conn: conn.clone(),
+            child: None,
+            events: ev_tx,
+            thread_id: "thr-1".into(),
+            environments: None,
+        };
+
+        let mut server_lines = BufReader::new(server_in).lines();
+
+        // No active turn: returns Ok(false) without sending any JSON-RPC request.
+        assert!(!run.steer("idle message").await.unwrap());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), server_lines.next_line())
+                .await
+                .is_err(),
+            "no RPC should be written when turn_id is None"
+        );
+
+        // Active turn: sends turn/steer with expectedTurnId and returns Ok(true) on success.
+        conn.mapper.lock().unwrap().turn_id = Some("turn-42".into());
+        let server_task = tokio::spawn(async move {
+            let line = server_lines.next_line().await.unwrap().unwrap();
+            let msg: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(msg["method"], "turn/steer");
+            assert_eq!(msg["params"]["threadId"], "thr-1");
+            assert_eq!(msg["params"]["expectedTurnId"], "turn-42");
+            assert_eq!(msg["params"]["input"][0]["type"], "text");
+            assert_eq!(msg["params"]["input"][0]["text"], "mid-turn steer");
+            let reply = json!({ "id": msg["id"], "result": {} });
+            server_out.write_all(format!("{reply}\n").as_bytes()).await.unwrap();
+            server_out.flush().await.unwrap();
+
+            // Second steer: RPC returns an error (e.g. turn ended in the race).
+            let line = server_lines.next_line().await.unwrap().unwrap();
+            let msg: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(msg["method"], "turn/steer");
+            assert_eq!(msg["params"]["expectedTurnId"], "turn-42");
+            let err_reply = json!({
+                "id": msg["id"],
+                "error": { "code": -32000, "message": "turn already ended" }
+            });
+            server_out.write_all(format!("{err_reply}\n").as_bytes()).await.unwrap();
+            server_out.flush().await.unwrap();
+        });
+
+        assert!(run.steer("mid-turn steer").await.unwrap());
+        assert!(!run.steer("late steer").await.unwrap());
+        server_task.await.unwrap();
+        conn.closing.store(true, Ordering::Relaxed);
+        conn.stdin.lock().await.take();
+        let _ = reader.await;
     }
 }

@@ -413,3 +413,248 @@ async fn fr_t8_report_names_the_computer_and_account() {
         assert!(!second.contains(&id), "the account id leaked: {second}");
     }
 }
+
+#[derive(Clone, Default)]
+struct SteeringPuppet {
+    reqs: Arc<Mutex<HashMap<String, StartRequest>>>,
+    steer_enabled: Arc<std::sync::atomic::AtomicBool>,
+    steered: Arc<Mutex<Vec<String>>>,
+    fail_hang: Arc<Notify>,
+}
+
+struct SteeringRun {
+    steer_enabled: Arc<std::sync::atomic::AtomicBool>,
+    steered: Arc<Mutex<Vec<String>>>,
+    fail_hang: Arc<Notify>,
+    events: mpsc::Sender<AgentEvent>,
+    turn: u32,
+}
+
+#[async_trait]
+impl AgentAdapter for SteeringPuppet {
+    fn kind(&self) -> AgentKind {
+        AgentKind::Scripted
+    }
+    async fn detect(&self) -> Detected {
+        Detected {
+            kind: AgentKind::Scripted,
+            installed: true,
+            version: Some("steering-puppet".into()),
+        }
+    }
+    async fn start(
+        &self,
+        req: StartRequest,
+        events: mpsc::Sender<AgentEvent>,
+    ) -> anyhow::Result<Box<dyn AgentRun>> {
+        let id = req
+            .env
+            .iter()
+            .find(|(k, _)| k == "EMBER_SESSION_ID")
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default();
+        self.reqs.lock().unwrap().insert(id, req);
+        events
+            .send(AgentEvent::NativeSession {
+                native_id: uuid::Uuid::new_v4().to_string(),
+            })
+            .await?;
+        Ok(Box::new(SteeringRun {
+            steer_enabled: self.steer_enabled.clone(),
+            steered: self.steered.clone(),
+            fail_hang: self.fail_hang.clone(),
+            events,
+            turn: 0,
+        }))
+    }
+}
+
+impl SteeringPuppet {
+    fn token(&self, session: &str) -> Option<String> {
+        let seen = self.reqs.lock().unwrap();
+        seen.get(session)?
+            .env
+            .iter()
+            .find(|(k, _)| k == "EMBER_RUNTIME_TOKEN")
+            .map(|(_, v)| v.clone())
+    }
+}
+
+#[async_trait]
+impl AgentRun for SteeringRun {
+    async fn send(&mut self, text: &str) -> anyhow::Result<()> {
+        self.turn += 1;
+        let call = format!("call-{}", self.turn);
+        let last = text.lines().last().unwrap_or("").to_string();
+        let word = last.split_whitespace().next().unwrap_or("x").to_string();
+        if last.contains("hang") {
+            let ev = self.events.clone();
+            ev.send(AgentEvent::ToolCall {
+                call_id: call,
+                name: "Bash".into(),
+                input: json!({ "command": "sleep 1000" }),
+            })
+            .await?;
+            let fail = self.fail_hang.clone();
+            tokio::spawn(async move {
+                fail.notified().await;
+                let _ = ev
+                    .send(AgentEvent::TurnError {
+                        code: "boom".into(),
+                        message: "mid-turn crash".into(),
+                    })
+                    .await;
+                let _ = ev
+                    .send(AgentEvent::TurnEnded {
+                        outcome: TurnOutcome::Failed,
+                    })
+                    .await;
+            });
+        } else {
+            done_turn(&self.events, call, &word).await?;
+        }
+        Ok(())
+    }
+
+    async fn steer(&mut self, text: &str) -> anyhow::Result<bool> {
+        if !self.steer_enabled.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(false);
+        }
+        self.steered.lock().unwrap().push(text.to_string());
+        Ok(true)
+    }
+
+    async fn answer(&mut self, _approval_id: &str, _decision: ApprovalDecision) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn interrupt(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn shutdown(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+// FR-T8 (#997): when a busy leader's harness supports mid-turn steering, queued reports are
+// delivered batched mid-turn, marked delivered only after `steer` returns `Ok(true)`, and
+// preserved (appended) in `inflight` so a turn failure re-delivers every report from that turn.
+#[tokio::test]
+async fn fr_t8_reports_to_a_busy_leader_are_delivered_mid_turn_when_supported() {
+    let agents = SteeringPuppet::default();
+    let sessions = Sessions::new(
+        Arc::new(Store::open_in_memory().unwrap()),
+        vec![Arc::new(agents.clone()) as Arc<dyn AgentAdapter>],
+    );
+    let mut config = A2aConfig::new("http://127.0.0.1:1");
+    config.reports = ReportTimes {
+        settle: SETTLE,
+        batch: Duration::from_millis(150),
+        stall: Duration::from_millis(400),
+        stall_check: Duration::from_millis(50),
+    };
+    let a2a = A2a::new(sessions.clone(), A2aStore::open_in_memory().unwrap(), config);
+    a2a.install();
+    let app = ember_server::api::router(sessions.clone())
+        .merge(ember_server::a2a::api::router(a2a.clone()));
+
+    let lead = new_session(&sessions, "lead");
+    sessions.send(&lead, "start").await.unwrap();
+    wait_for("leader first turn", || {
+        sessions.store().session(&lead).unwrap().unwrap().status == SessionStatus::Finished
+    })
+    .await;
+
+    let spawn_with = |name: &str, prompt: &str| {
+        let app = app.clone();
+        let token = agents.token(&lead).unwrap();
+        let body = json!({ "name": name, "prompt": prompt });
+        async move {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/a2a/team/members")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap();
+            let res = app.oneshot(req).await.unwrap();
+            assert_eq!(res.status(), StatusCode::CREATED);
+            let bytes = res.into_body().collect().await.unwrap().to_bytes();
+            let v: Value = serde_json::from_slice(&bytes).unwrap();
+            v["member"]["session_id"].as_str().unwrap().to_string()
+        }
+    };
+
+    let a = spawn_with("a", "one").await;
+    let b = spawn_with("b", "two").await;
+    sessions.send(&lead, "hang here").await.unwrap();
+    wait_for("leader running", || {
+        sessions.store().session(&lead).unwrap().unwrap().status == SessionStatus::Running
+    })
+    .await;
+
+    // While steering is disabled (`Ok(false)`), both reports stay queued and undelivered.
+    wait_for("both reports queued", || {
+        a2a.store()
+            .pending_for(&lead)
+            .unwrap()
+            .iter()
+            .filter(|m| m.is_report())
+            .count()
+            == 2
+    })
+    .await;
+    assert!(agents.steered.lock().unwrap().is_empty());
+
+    // Enable steering: flush delivers both reports batched mid-turn and marks them delivered.
+    agents
+        .steer_enabled
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(a2a.flush(&lead).await.unwrap());
+    assert!(a2a.store().pending_for(&lead).unwrap().is_empty());
+    {
+        let steered = agents.steered.lock().unwrap();
+        assert_eq!(steered.len(), 1);
+        assert!(
+            steered[0].contains(&format!("from session {a}"))
+                && steered[0].contains(&format!("from session {b}")),
+            "{}",
+            steered[0]
+        );
+        assert_eq!(steered[0].matches("[ember a2a] Report ").count(), 2);
+    }
+
+    // A second mid-turn delivery in the same turn appends to `inflight` instead of overwriting it.
+    let c = spawn_with("c", "three").await;
+    wait_for("third report steered mid-turn", || {
+        agents.steered.lock().unwrap().len() == 2
+    })
+    .await;
+    assert!(a2a.store().pending_for(&lead).unwrap().is_empty());
+    assert!(agents.steered.lock().unwrap()[1].contains(&format!("from session {c}")));
+
+    // Failing the leader's turn re-queues and re-delivers all three in-flight reports together.
+    agents.fail_hang.notify_one();
+    let leader_msgs = || {
+        sessions
+            .store()
+            .events_after(&lead, 0)
+            .unwrap()
+            .into_iter()
+            .filter_map(|e| match e.event {
+                AgentEvent::UserMessage { text } => Some(text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    wait_for("all three reports re-delivered after turn failure", || {
+        leader_msgs().iter().any(|m| {
+            m.contains(&format!("from session {a}"))
+                && m.contains(&format!("from session {b}"))
+                && m.contains(&format!("from session {c}"))
+                && m.matches("[ember a2a] Report ").count() == 3
+        })
+    })
+    .await;
+}

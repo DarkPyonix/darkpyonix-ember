@@ -48,6 +48,7 @@ async fn fake_cli_turn_with_allow_always_and_deny() {
                 fork_from: None,
                 mem_limit_mb: None,
                 allowed_tools: Vec::new(),
+                claude_post_tool_hook: None,
             },
             tx,
         )
@@ -191,6 +192,7 @@ async fn real_claude_read_edit_run_then_resume() {
         fork_from: None,
         mem_limit_mb: None,
         allowed_tools: Vec::new(),
+        claude_post_tool_hook: None,
     };
 
     // Turn 1: read, edit (needs approval in the default permission mode), run a command.
@@ -272,6 +274,7 @@ fn start_req(cwd: &Path) -> StartRequest {
         fork_from: None,
         mem_limit_mb: None,
         allowed_tools: Vec::new(),
+        claude_post_tool_hook: None,
     }
 }
 

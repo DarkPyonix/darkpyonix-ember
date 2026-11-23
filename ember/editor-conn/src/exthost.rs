@@ -619,7 +619,21 @@ pub fn accept_documents_and_editors_delta(delta: &DocumentsAndEditorsDelta) -> C
 /// `ITextEditorConfiguration` defaults for `TextEditorAddData::options`.
 pub fn default_editor_options(tab_size: u32, insert_spaces: bool) -> Value {
     // TextEditorCursorStyle.Line = 1, RenderLineNumbersType.On = 1
-    json!({ "tabSize": tab_size, "indentSize": tab_size, "originalIndentSize": tab_size, "insertSpaces": insert_spaces, "cursorStyle": 1, "lineNumbers": 1 })
+    editor_options(tab_size, tab_size, insert_spaces)
+}
+
+/// The resolved options of an editor with its own tab size, indent size and `insertSpaces`
+/// (`IResolvedTextEditorConfiguration`).
+pub fn editor_options(tab_size: u32, indent_size: u32, insert_spaces: bool) -> Value {
+    json!({ "tabSize": tab_size, "indentSize": indent_size, "originalIndentSize": indent_size, "insertSpaces": insert_spaces, "cursorStyle": 1, "lineNumbers": 1 })
+}
+
+/// `ExtHostEditors.$acceptEditorPropertiesChanged(id, { options, selections: null, visibleRanges: null })`
+/// (extHost.protocol.ts L2437, L2448): the editor's options changed, as when the person picks another
+/// indentation.
+pub fn accept_editor_options_changed(editor_id: &str, options: Value) -> Call {
+    let data = json!({ "options": options, "selections": null, "visibleRanges": null });
+    Call::new(proxy::EXT_HOST_EDITORS, "$acceptEditorPropertiesChanged", vec![Arg::Json(editor_id.into()), Arg::Json(data)])
 }
 
 /// `ExtHostDocuments.$acceptModelChanged(uri, ISerializedModelContentChangedEvent, isDirty)`

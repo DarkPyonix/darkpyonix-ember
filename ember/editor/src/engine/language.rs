@@ -174,7 +174,7 @@ impl SessionCore {
     }
 
     /// Send `edits`, written against widget version `version`, to the document's widget.
-    fn lang_edit_widget(&mut self, uri: &UriComponents, version: u32, edits: &[TextEdit]) {
+    pub(super) fn lang_edit_widget(&mut self, uri: &UriComponents, version: u32, edits: &[TextEdit]) {
         for edit in widget_order(edits) {
             let request_id = self.edit_request_id();
             self.ui(SessionUpdate::Command {
@@ -452,7 +452,8 @@ impl SessionCore {
     // ---- formatting -----------------------------------------------------------------------------
 
     fn lang_format(&mut self, ctx: Ctx, range: Option<WidgetRange>) {
-        let (tab, spaces) = (self.opts.tab_width, self.opts.insert_spaces);
+        let own = self.docs.get(&ctx.key).map(|d| d.indentation());
+        let (tab, spaces) = own.map_or((self.opts.tab_width, self.opts.insert_spaces), |i| (i.tab_size, i.insert_spaces));
         let whole = self.lang_providers(KindTag::DocumentFormatting, &ctx).first().map(|(h, _)| *h);
         let ranged = self.lang_providers(KindTag::RangeFormatting, &ctx).first().map(|(h, _)| *h);
         let call = match (range, whole, ranged) {

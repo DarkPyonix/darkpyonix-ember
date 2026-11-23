@@ -147,6 +147,15 @@ pub struct LetifyConfig {
     /// `EMBER_LETIFY_UDP_PUNCH=off`; then it neither offers nor answers, and its sessions use TCP
     /// and the relay as before. Default true.
     pub udp_punch: bool,
+    /// Carry the punch exchange over letify's signalling Worker (`letify.darkpyonix.dev`) as an
+    /// auxiliary rendezvous (EM-11, #10, SPEC `FR-N2`; owner 2026-11-23, on by default). Only
+    /// for the short waits of one connect: the dialing side wakes the peer through Ember's own
+    /// rendezvous (the hub's pkarr mailbox) and the peer polls the Worker for one punch window.
+    /// A Worker failure falls back to the punch over Ember's own rendezvous and to the relay.
+    /// `EMBER_LETIFY_WORKER_RENDEZVOUS=0` (or `off`) turns it off. Default true.
+    pub worker_rendezvous: bool,
+    /// The Worker's base URL; `None` is letify's service. Tests point it at a fake.
+    pub worker_url: Option<String>,
 }
 
 impl Default for LetifyConfig {
@@ -170,13 +179,15 @@ impl Default for LetifyConfig {
             connect_timeout: Duration::from_secs(20),
             standing_requests: 48,
             udp_punch: true,
+            worker_rendezvous: true,
+            worker_url: None,
         }
     }
 }
 
 impl LetifyConfig {
     /// Reads `EMBER_LETIFY_RELAY_LISTEN`, `EMBER_LETIFY_QAD_LISTEN`, `EMBER_LETIFY_OBSERVER`,
-    /// `EMBER_LETIFY_UDP_PUNCH` (`on` or `off`) and `EMBER_LETIFY_ADVERTISE` (comma separated
+    /// `EMBER_LETIFY_UDP_PUNCH` and `EMBER_LETIFY_WORKER_RENDEZVOUS` (`on` or `off`, `1` or `0`) and `EMBER_LETIFY_ADVERTISE` (comma separated
     /// `ip:port`), and the polling intervals
     /// `EMBER_LETIFY_POLL_MS`, `EMBER_LETIFY_IDLE_POLL_MS` and `EMBER_LETIFY_FAST_WINDOW_MS`
     /// (milliseconds). Unusable values are logged and ignored.
@@ -216,6 +227,12 @@ impl LetifyConfig {
             match switch(&v) {
                 Some(on) => cfg.udp_punch = on,
                 None => tracing::warn!(value = %v, "EMBER_LETIFY_UDP_PUNCH is not on or off"),
+            }
+        }
+        if let Some(v) = var("EMBER_LETIFY_WORKER_RENDEZVOUS") {
+            match switch(&v) {
+                Some(on) => cfg.worker_rendezvous = on,
+                None => tracing::warn!(value = %v, "EMBER_LETIFY_WORKER_RENDEZVOUS is not on or off (1 or 0)"),
             }
         }
         if let Some(v) = var("EMBER_LETIFY_ADVERTISE") {
@@ -463,6 +480,18 @@ mod tests {
             assert_eq!(switch(on), Some(true), "{on:?}");
         }
         assert_eq!(switch("maybe"), None);
+    }
+
+    /// EM-11: the Worker rendezvous is on by default with letify's own service, and
+    /// `EMBER_LETIFY_WORKER_RENDEZVOUS=0` turns it off (the same parser as the other switches).
+    #[test]
+    fn em11_worker_rendezvous_is_on_by_default_and_0_turns_it_off() {
+        let cfg = LetifyConfig::default();
+        assert!(cfg.worker_rendezvous);
+        assert!(cfg.worker_url.is_none(), "letify's own service");
+        assert_eq!(switch("0"), Some(false));
+        assert_eq!(switch("off"), Some(false));
+        assert_eq!(switch("1"), Some(true));
     }
 
     #[test]

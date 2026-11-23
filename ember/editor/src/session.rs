@@ -815,6 +815,12 @@ impl EditorSession {
         self.send(Command::Input(Input::SetEol { uri, eol }))
     }
 
+    /// One choice of the indentation pick for an open document; answered with
+    /// [`SessionUpdate::Indentation`], and for a conversion the widget's edits.
+    pub fn set_indentation(&self, uri: UriComponents, action: crate::indentation::IndentationAction) -> Result<(), Error> {
+        self.send(Command::Input(Input::SetIndentation { uri, action }))
+    }
+
     /// Reopen or save an open document in `encoding` (FR-L31.7).
     pub fn set_encoding(
         &self,

@@ -4,6 +4,7 @@
 //! | ------ | ---- | ---------- |
 //! | GET    | `/api/computers/{id}/transfers` | `GET /transfers` |
 //! | POST   | `/api/computers/{id}/transfers/offers` | `POST /transfers/offers` (the server sets `owner`) |
+//! | POST   | `/api/computers/{id}/transfers/offers/{oid}/{accept,decline}` | the same |
 //! | POST   | `/api/computers/{id}/transfers/{tid}/chunks` | `POST /transfers/{tid}/chunks` |
 //! | GET    | `/api/computers/{id}/transfers/{tid}/resume-offset/{file}` | `GET /transfers/{tid}/resume-offset/{file}` |
 //! | POST   | `/api/computers/{id}/transfers/{tid}/{complete,pause,resume,cancel}` | the same |
@@ -23,8 +24,8 @@
 //!
 //! Every caller of this router is the owner (the owner API, `INTENT.md` D37), and every
 //! registered computer is one the owner enrolled, so a relayed offer is marked `owner: true` and
-//! the node accepts it on its own (`FR-F15`). Accepting or declining an offer for a computer is
-//! not relayed (403): answering for a node from another device is later work.
+//! the node accepts it in its default mode (`FR-F15`). In ask mode every offer waits. The
+//! owner can answer through the same authenticated relay.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -49,8 +50,8 @@ pub fn router(computers: Arc<Computers>) -> Router {
     Router::new()
         .route("/api/computers/{id}/transfers", get(snapshot))
         .route("/api/computers/{id}/transfers/offers", post(offer))
-        .route("/api/computers/{id}/transfers/offers/{oid}/accept", post(answer_refused))
-        .route("/api/computers/{id}/transfers/offers/{oid}/decline", post(answer_refused))
+        .route("/api/computers/{id}/transfers/offers/{oid}/accept", post(accept))
+        .route("/api/computers/{id}/transfers/offers/{oid}/decline", post(decline))
         .route("/api/computers/{id}/transfers/history", get(history).delete(clear_history))
         .route("/api/computers/{id}/transfers/{tid}/chunks", post(chunk))
         .route("/api/computers/{id}/transfers/{tid}/resume-offset/{file}", get(resume_offset))
@@ -132,11 +133,19 @@ async fn offer(State(c): State<Arc<Computers>>, Path(id): Path<String>, Json(v):
     forward(&c, &id, Method::POST, "/transfers/offers", Some(&body)).await
 }
 
-async fn answer_refused(Path((_id, _oid)): Path<(String, String)>) -> Response {
-    plain(
-        StatusCode::FORBIDDEN,
-        "answering an offer for a computer from another device is not built yet (#773)",
-    )
+async fn accept(State(c): State<Arc<Computers>>, Path((id, oid)): Path<(String, String)>) -> Response {
+    answer(&c, &id, &oid, "accept").await
+}
+
+async fn decline(State(c): State<Arc<Computers>>, Path((id, oid)): Path<(String, String)>) -> Response {
+    answer(&c, &id, &oid, "decline").await
+}
+
+async fn answer(c: &Computers, id: &str, oid: &str, action: &str) -> Response {
+    if let Err(r) = check_tid(oid) {
+        return r;
+    }
+    forward(c, id, Method::POST, &format!("/transfers/offers/{oid}/{action}"), None).await
 }
 
 async fn chunk(State(c): State<Arc<Computers>>, Path((id, tid)): Path<(String, String)>, Json(v): Json<Value>) -> Response {

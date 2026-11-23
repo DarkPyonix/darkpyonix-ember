@@ -144,6 +144,7 @@ fn click(dom: &mut HtmlDom, id: &str) {
     let node = dom.element_by_id(id).unwrap();
     let rect = dom.display_list().unwrap().get(node).unwrap().rect;
     dom.click(rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+    dom.render();
 }
 
 fn stopped_session() -> SessionInfo {

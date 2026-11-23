@@ -394,6 +394,7 @@ fn click(dom: &mut HtmlDom, id: &str) {
     dom.layout(1000.0, 800.0, 1.0);
     let node = dom.element_by_id(id).unwrap_or_else(|| panic!("no #{id}"));
     dom.click_node(node);
+    dom.render();
 }
 
 fn breakpoint(id: &str, line: u32, enabled: bool) -> SourceBreakpoint {

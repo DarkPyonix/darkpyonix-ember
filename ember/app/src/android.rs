@@ -10,6 +10,8 @@
 
 use std::path::PathBuf;
 
+use ember_transport::PowerState;
+
 use crate::config::AppConfig;
 
 /// The string extras a debuggable build accepts from the launching intent, each under the
@@ -22,6 +24,30 @@ pub const INTENT_SETTINGS: [&str; 4] =
 /// and the server URL is the intent's or the default. Pure, for tests.
 pub fn config_for(files_dir: &str, server_url: Option<String>) -> AppConfig {
     AppConfig::from_values(server_url, Some(PathBuf::from(files_dir)), None)
+}
+
+/// Maps Android foreground/background and OS power-save flags to the transport's [`PowerState`]
+/// (FR-N5, NFR-N1). Background takes precedence over power save; otherwise power save maps to
+/// [`PowerState::PowerSave`], and normal foreground maps to [`PowerState::Foreground`].
+pub fn power_state_for(background: bool, power_save: bool) -> PowerState {
+    if background {
+        PowerState::Background
+    } else if power_save {
+        PowerState::PowerSave
+    } else {
+        PowerState::Foreground
+    }
+}
+
+/// Applies an Android lifecycle and power-save transition to the sync client and its transport
+/// (FR-L36, FR-N5, NFR-N1).
+pub fn apply_lifecycle(client: &ember_client::Client, background: bool, power_save: bool) {
+    if background {
+        client.pause_push();
+    } else {
+        client.resume_push();
+    }
+    client.api().set_power_state(power_state_for(background, power_save));
 }
 
 #[cfg(target_os = "android")]
@@ -67,6 +93,20 @@ mod entry {
             None => 0,
         }
     }
+
+    /// `MainActivity.emberLifecycle(background, powerSave)`: forwards Android foreground/background
+    /// and OS power-save state to the client and transport (FR-L36, FR-N5, NFR-N1).
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_dev_dioxus_main_MainActivity_emberLifecycle(
+        _env: *mut std::ffi::c_void,
+        _this: *mut std::ffi::c_void,
+        background: u8,
+        power_save: u8,
+    ) {
+        if let Some(s) = crate::services::try_services() {
+            super::apply_lifecycle(&s.client, background != 0, power_save != 0);
+        }
+    }
 }
 
 compose_rust::android_application!({ crate::android::entry::builder() }, crate::android::entry::root);
@@ -101,5 +141,22 @@ mod tests {
         }
         assert!(activity.contains("\"EMBER_DATA_DIR\""));
         assert!(activity.contains("FLAG_DEBUGGABLE"), "intent settings are for debuggable builds only");
+    }
+
+    #[test]
+    fn fr_n5_power_state_for_maps_background_and_power_save() {
+        assert_eq!(power_state_for(false, false), PowerState::Foreground);
+        assert_eq!(power_state_for(false, true), PowerState::PowerSave);
+        assert_eq!(power_state_for(true, false), PowerState::Background);
+        assert_eq!(power_state_for(true, true), PowerState::Background);
+    }
+
+    #[test]
+    fn fr_l36_the_activity_wires_lifecycle_and_power_save_to_native() {
+        let activity = include_str!("../android/MainActivity.kt");
+        assert!(activity.contains("emberLifecycle"), "emberLifecycle is missing from MainActivity.kt");
+        assert!(activity.contains("onStart"), "onStart is missing from MainActivity.kt");
+        assert!(activity.contains("onStop"), "onStop is missing from MainActivity.kt");
+        assert!(activity.contains("isPowerSaveMode"), "isPowerSaveMode is missing from MainActivity.kt");
     }
 }

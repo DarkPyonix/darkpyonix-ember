@@ -15,9 +15,11 @@
 // (`dev.darkpyonix.ember`, from Dioxus.toml).
 package dev.dioxus.main
 
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.os.Bundle
+import android.os.PowerManager
 import android.system.Os
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
@@ -40,6 +42,9 @@ class MainActivity : ComponentActivity() {
 
     // One back step in the app (ember/app/src/ui/back.rs). False: the app did not handle it.
     private external fun emberBack(): Boolean
+
+    // App foreground/background and OS power-save state (FR-L36, FR-N5, NFR-N1).
+    private external fun emberLifecycle(background: Boolean, powerSave: Boolean)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         installSystemChrome(this)
@@ -93,12 +98,27 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun isPowerSaveMode(): Boolean {
+        return try {
+            val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+            pm?.isPowerSaveMode == true
+        } catch (e: SecurityException) {
+            false
+        }
+    }
+
     override fun onStart() {
         super.onStart()
         ComposeRustRuntime.start()
+        if (ComposeRustRuntime.isStarted) {
+            emberLifecycle(false, isPowerSaveMode())
+        }
     }
 
     override fun onStop() {
+        if (ComposeRustRuntime.isStarted) {
+            emberLifecycle(true, isPowerSaveMode())
+        }
         ComposeRustRuntime.stop()
         super.onStop()
     }

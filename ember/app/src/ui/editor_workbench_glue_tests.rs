@@ -1569,3 +1569,43 @@ fn tree_self_drop_and_unchanged_rename_do_not_send_noop_commands() {
         "changed rename sends Rename: {sent:?}"
     );
 }
+
+// FR-L31.6 (A3, window half): the editor pane tells the bridge about every mount of its code editor,
+// once per mount. A mount of a document the reader already typed in puts the widget's count back to 0,
+// so an edit the session queued for the widget is written against the widget's own numbering.
+#[test]
+fn fr_l31_6_a3_window_a_remount_is_reported_once_and_queued_edits_use_the_widget_numbering() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open();
+    page.click_row();
+    page.deliver(opened(7));
+    let shared = super::shared();
+    let other = UriComponents::remote("test", "/w/b.rs");
+    super::forget_mount();
+
+    // First mount, then one character typed: the widget is at version 1, and so is the session.
+    assert!(super::report_mount(&shared, &uri(), 7), "the first mount is reported");
+    let typed = shared.bridge.borrow_mut().on_code_changed(&uri(), 1, ember_editor::WidgetRange::empty(ember_editor::WidgetPos::new(0, 0)), "x".into());
+    assert!(matches!(typed, Some((_, 7, WidgetEvent::CodeChanged { version: 1, .. }))));
+    // A render without a remount does not report again.
+    assert!(!super::report_mount(&shared, &uri(), 7), "a re-render is not a mount");
+
+    // To b.rs and back: the editor is built again and counts from 0.
+    assert!(super::report_mount(&shared, &other, 8));
+    assert!(super::report_mount(&shared, &uri(), 7), "coming back is a new mount");
+    assert_eq!(shared.bridge.borrow().document(&uri()).unwrap().widget_version_of(1), 0);
+
+    // An edit the session wrote against its version 1 reaches the widget as version 0.
+    page.deliver(SessionUpdate::Command {
+        uri: uri(),
+        command: ember_editor::WidgetCommand::EditCode { request_id: 9, base_version: 1, range: ember_editor::WidgetRange::empty(ember_editor::WidgetPos::new(0, 0)), text: "y".into() },
+    });
+    let queued = shared.bridge.borrow_mut().take_pending_edits(&uri());
+    assert!(matches!(queued.as_slice(), [ember_editor::WidgetCommand::EditCode { base_version: 0, .. }]), "{queued:?}");
+
+    // The next character typed in the widget (its version 1) is the session's version 2: no gap.
+    let typed = shared.bridge.borrow_mut().on_code_changed(&uri(), 1, ember_editor::WidgetRange::empty(ember_editor::WidgetPos::new(0, 1)), "z".into());
+    assert!(matches!(typed, Some((_, 7, WidgetEvent::CodeChanged { version: 2, .. }))));
+    assert_eq!(shared.bridge.borrow().document(&uri()).unwrap().text, "xzfn main() {}\n");
+    super::forget_mount();
+}

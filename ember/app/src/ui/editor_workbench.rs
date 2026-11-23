@@ -1,7 +1,7 @@
 //! Remote editor workbench.
 use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
 use dioxus_compose::prelude::*;
-use ember_editor::{BridgeAction, WidgetBridge, WidgetPos, WidgetRange};
+use ember_editor::{BridgeAction, WidgetBridge, WidgetEvent, WidgetPos, WidgetRange};
 use ember_editor::widget::HoverPhase as EditorHoverPhase;
 use crate::editor_host::{EditorHost, HostCommand};
 use super::{editor::{EditorTarget, EditorTabs, Stripes, base_name, position_text}, keymap::Keymap, workbench};
@@ -122,6 +122,32 @@ thread_local! { static MODIFIER_CLICK: std::cell::Cell<bool> = const { std::cell
 /// The hover card's anchor (SPEC FR-E3, #32 phase A step 7): the hover it was asked for (document
 /// generation, line, column) and the rectangle the editor answered for that position, in the
 /// window's dp. Asked once per hover; the card is drawn only while the answer matches the hover.
+thread_local! {
+    /// The code editor the pane last drew, as (document key, generation): a draw of any other editor is a mount.
+    static MOUNTED: RefCell<Option<(String, u64)>> = const { RefCell::new(None) };
+}
+/// The pane drew the code editor of `uri` with node key `generation`. Tells the bridge once per mount:
+/// a new editor counts versions from 0 while the session keeps its own count. A re-render of the same
+/// editor is not a mount. Returns whether it was reported.
+fn report_mount(s: &Shared, uri: &ember_editor_conn::uri::UriComponents, generation: u64) -> bool {
+    let now = (uri.key(), generation);
+    if MOUNTED.with(|m| m.borrow().as_ref() == Some(&now)) {
+        return false;
+    }
+    MOUNTED.with(|m| *m.borrow_mut() = Some(now));
+    s.bridge.borrow_mut().on_widget_mounted(uri, generation);
+    true
+}
+/// The pane has no editor on screen, so the next one it draws is a mount.
+fn forget_mount() {
+    MOUNTED.with(|m| *m.borrow_mut() = None);
+}
+/// Held by the pane's scope: when the pane goes (a compare view or another kind of tab covers it) its
+/// editor goes with it, so the next one is a mount even for the same document.
+struct MountGuard;
+impl Drop for MountGuard {
+    fn drop(&mut self) { forget_mount(); }
+}
 thread_local! { static HOVER_ASKED: std::cell::Cell<Option<(u64, u32, u32)>> = const { std::cell::Cell::new(None) }; }
 thread_local! { static HOVER_RECT: std::cell::Cell<Option<((u64, u32, u32), compose_rust::code::CodeRect)>> = const { std::cell::Cell::new(None) }; }
 
@@ -307,11 +333,19 @@ fn editor_pane() -> Element {
     // The editor fills the box the page's layout gave this tree. Until the first layout the
     // box is empty, and a CodeEditor measured without a limit would abort the renderer.
     let (box_w, box_h) = dioxus_compose::use_widget_box();
+    let _mounts = use_hook(|| MountGuard);
     if box_w <= 0.0 || box_h <= 0.0 {
+        forget_mount();
         return rsx! {};
     }
     let _ = *s.revision.read();
     let _ = s.tabs.read();
+    let active = s.bridge.borrow().active_document().map(|d| (d.uri.clone(), d.generation));
+    match &active {
+        Some((uri, generation)) => { report_mount(&s, uri, *generation); }
+        None => forget_mount(),
+    }
+    // After the mount is reported, so the copy carries the widget's numbering.
     let doc = s.bridge.borrow().active_document().cloned();
     let Some(doc) = doc else { return rsx! {}; };
     let generation = doc.generation;
@@ -337,7 +371,8 @@ fn editor_pane() -> Element {
         let mut map = s.editor_versions.borrow_mut();
         let current = map.entry(generation).or_insert(doc.version);
         *current = (*current).max(doc.version);
-        *current
+        // The widget counts from its own base after a remount; every version handed to it is in that numbering.
+        doc.widget_version_of(*current)
     };
     if let Some(cmd) = s.find.cmd.read().clone() {
         let mut last_cmd = s.last_find_cmd.borrow_mut();
@@ -404,7 +439,7 @@ fn editor_pane() -> Element {
     let key_s = s.clone(); let pointer_s = s.clone(); let caret_s = s.clone();
     rsx! { CodeEditor {
         key: "{generation}", width: Some(box_w), height: Some(box_h), handle,
-        text: doc.text, decorations: compose_rust::code::Decorations::from_bytes(doc.decoration_bytes), syntax_spans: crate::ui::editor::syntax_spans(&doc.syntax), folds: crate::ui::editor::folds(&doc.folds), tab_width: Some(doc.tab_width),
+        text: doc.text, decorations: compose_rust::code::Decorations::from_bytes(doc.decoration_bytes), syntax_spans: crate::ui::editor::syntax_spans_at(&doc.syntax, doc.widget_version_of(doc.syntax.version)), folds: crate::ui::editor::folds_from(&doc.folds, doc.widget_base), tab_width: Some(doc.tab_width),
         gutter_decorations,
         // FR-L31.27: the mockup's code type, row pitch and line number column (`editor.css:2`, `:71`).
         font_size: Some(crate::ui::fonts::CODE_FONT_SIZE), line_height: Some(crate::ui::fonts::CODE_LINE_HEIGHT),
@@ -416,7 +451,7 @@ fn editor_pane() -> Element {
         pointer_kinds: Some(compose_rust::PointerKinds::DOWN),
         on_code_pointer: move |e: compose_rust::code::CodePointer| crate::ui::editor_language::view::code_pointer(&pointer_s, &e),
         on_caret_rect: move |e: compose_rust::code::CaretRect| crate::ui::editor_language::view::set_caret_rect(&caret_s, e.rect),
-        on_change: move |e: compose_rust::code::CodeChange| { keep_edited_tab(&change_s, &change_uri.path); change_s.editor_versions.borrow_mut().insert(generation, e.version); let event = change_s.bridge.borrow_mut().on_code_changed(&change_uri, e.version, WidgetRange::new(pos(e.range.start), pos(e.range.end)), e.text); send(&change_s, event); crate::ui::editor_states::view::edited(&change_s, &change_uri.path); },
+        on_change: move |e: compose_rust::code::CodeChange| { keep_edited_tab(&change_s, &change_uri.path); let event = change_s.bridge.borrow_mut().on_code_changed(&change_uri, e.version, WidgetRange::new(pos(e.range.start), pos(e.range.end)), e.text); if let Some((_, _, WidgetEvent::CodeChanged { version, .. })) = &event { change_s.editor_versions.borrow_mut().insert(generation, *version); } send(&change_s, event); crate::ui::editor_states::view::edited(&change_s, &change_uri.path); },
         on_save: move |e: compose_rust::code::SaveRequest| { if !crate::ui::editor_states::view::manual_save_allowed(&save_s, &save_uri.path) { return; } let event = save_s.bridge.borrow().on_save_requested(&save_uri, e.version); send(&save_s, event); save_s.scm.refresh(); },
         on_hover: move |e: compose_rust::code::CodeHover| { let phase = match e.phase { compose_rust::schema::HoverPhase::Rest => EditorHoverPhase::Rest, _ => EditorHoverPhase::Leave }; let event = hover_s.bridge.borrow().on_code_hovered(&hover_uri, e.decoration.unwrap_or(0), pos(e.position), phase); send(&hover_s, event); },
         on_decoration_click: move |id| { let event = click_s.bridge.borrow().on_decoration_activated(&click_uri, id); send(&click_s, event); },

@@ -189,17 +189,29 @@ pub fn colour_role(role: ember_editor::textmate::SyntaxRole) -> compose_rust::Co
 
 /// The `syntax_spans` prop for the coloured runs the session reported.
 pub fn syntax_spans(syntax: &ember_editor::SyntaxRuns) -> compose_rust::code::SyntaxSpans {
+    syntax_spans_at(syntax, syntax.version)
+}
+
+/// [`syntax_spans`] with the runs written against `version`, the widget's numbering of the session's
+/// `syntax.version` (`DocumentWidgetState::widget_version_of`).
+pub fn syntax_spans_at(syntax: &ember_editor::SyntaxRuns, version: u32) -> compose_rust::code::SyntaxSpans {
     use compose_rust::code::{CodeRange, SyntaxSpan, SyntaxSpans};
     SyntaxSpans::new(
-        syntax.runs.iter().map(|r| SyntaxSpan::role(syntax.version, CodeRange::of(r.line, r.start, r.line, r.end), colour_role(r.role))),
+        syntax.runs.iter().map(|r| SyntaxSpan::role(version, CodeRange::of(r.line, r.start, r.line, r.end), colour_role(r.role))),
     )
 }
 
 /// The `folds` prop for the foldable regions the session reported (FR-E6, #441).
 pub fn folds(regions: &[ember_editor::FoldRegion]) -> compose_rust::code::Folds {
+    folds_from(regions, 0)
+}
+
+/// [`folds`] with each version in the widget's numbering: the session's version minus the document's
+/// `widget_base`.
+pub fn folds_from(regions: &[ember_editor::FoldRegion], widget_base: u32) -> compose_rust::code::Folds {
     use compose_rust::code::{Fold, Folds};
     Folds::new(regions.iter().map(|f| Fold {
-        version: f.version,
+        version: f.version.saturating_sub(widget_base),
         start_line: f.start_line,
         end_line: f.end_line,
         collapsed: f.collapsed,
@@ -2249,6 +2261,17 @@ mod tests {
         assert_eq!(spans.len(), 2);
         assert!(spans.iter().all(|s| s.version == 7));
         assert!(syntax_spans(&ember_editor::SyntaxRuns::default()).is_empty());
+    }
+
+    #[test]
+    fn fr_l31_6_a3_window_syntax_runs_and_folds_are_written_in_the_widget_numbering() {
+        use ember_editor::textmate::{DocRun, SyntaxRole};
+        let syntax = ember_editor::SyntaxRuns { version: 12, runs: vec![DocRun { line: 0, start: 0, end: 2, role: SyntaxRole::Keyword }] };
+        // The session is at 12 and the widget was mounted again at 10: it knows this text as version 2.
+        assert!(syntax_spans_at(&syntax, 2).spans().iter().all(|s| s.version == 2));
+        let regions = [ember_editor::FoldRegion { version: 12, start_line: 1, end_line: 4, collapsed: false }];
+        assert_eq!(folds_from(&regions, 10).folds()[0].version, 2);
+        assert_eq!(folds_from(&regions, 0).folds()[0].version, 12, "a widget that never restarted keeps the session's numbers");
     }
 
     #[test]

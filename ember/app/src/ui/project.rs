@@ -913,6 +913,99 @@ pub fn mode_options() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
+/// The label shown on a `새 팀원 기본값` picker chip when no project default is set.
+pub const DEFAULT_UNSET_LABEL: &str = "기본(설정 없음)";
+
+/// One option of the compact model/harness picker chip in `새 팀원 기본값`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberDefaultModelChoice {
+    /// Server agent kind (`""` when unset).
+    pub agent: &'static str,
+    /// Model id (`""` when unset).
+    pub model: &'static str,
+    /// Display label on the chip and in the menu (e.g. `"Claude Code · Opus 5.5 · 높음"`).
+    pub label: String,
+    /// Optional description shown under the title in the popover.
+    pub description: Option<&'static str>,
+}
+
+/// Model/harness choices for the `새 팀원 기본값` picker chip: `"기본(설정 없음)"` followed by
+/// one entry per `(harness, model)` from [`crate::ui::home::model_catalog`] for harnesses the
+/// server supports (`claude-code`, `codex`).
+pub fn member_default_model_choices() -> Vec<MemberDefaultModelChoice> {
+    let supported = agent_options();
+    let mut out = vec![MemberDefaultModelChoice {
+        agent: "",
+        model: "",
+        label: DEFAULT_UNSET_LABEL.to_string(),
+        description: Some("새 팀원이 앱 기본값을 따릅니다"),
+    }];
+    let mut seen: Vec<(&'static str, &'static str)> = Vec::new();
+    for opt in crate::ui::home::model_catalog() {
+        let kind = opt.harness.kind();
+        if !supported.iter().any(|(k, _)| *k == kind) {
+            continue;
+        }
+        if seen.contains(&(kind, opt.model)) {
+            continue;
+        }
+        seen.push((kind, opt.model));
+        out.push(MemberDefaultModelChoice {
+            agent: kind,
+            model: opt.model,
+            label: opt.chip_label(),
+            description: None,
+        });
+    }
+    out
+}
+
+/// The text shown on the `새 팀원 기본값` model/harness chip for `(agent, model)`.
+pub fn member_default_model_label(agent: &str, model: &str) -> String {
+    let agent = agent.trim();
+    let model = model.trim();
+    if agent.is_empty() && model.is_empty() {
+        return DEFAULT_UNSET_LABEL.to_string();
+    }
+    let choices = member_default_model_choices();
+    if let Some(found) = choices.iter().find(|c| c.agent == agent && c.model == model) {
+        return found.label.clone();
+    }
+    let harness_label = crate::ui::home::Harness::from_kind(agent)
+        .map(|h| h.label())
+        .unwrap_or(agent);
+    if model.is_empty() {
+        harness_label.to_string()
+    } else if agent.is_empty() {
+        model.to_string()
+    } else {
+        format!("{harness_label} \u{00b7} {model}")
+    }
+}
+
+/// Permission mode choices for the `새 팀원 기본값` compact mode picker chip: `"기본(설정 없음)"`
+/// followed by the server's four permission modes.
+pub fn member_default_mode_choices() -> Vec<(&'static str, &'static str)> {
+    use crate::ui::home::PermMode;
+    vec![
+        ("", DEFAULT_UNSET_LABEL),
+        ("ask", PermMode::Ask.label()),
+        ("edits", PermMode::Edits.label()),
+        ("plan", PermMode::Plan.label()),
+        ("bypass", PermMode::Bypass.label()),
+    ]
+}
+
+/// The text shown on the `새 팀원 기본값` permission mode chip for `mode`.
+pub fn member_default_mode_label(mode: &str) -> &'static str {
+    let mode = mode.trim();
+    member_default_mode_choices()
+        .into_iter()
+        .find(|(k, _)| *k == mode)
+        .map(|(_, l)| l)
+        .unwrap_or(DEFAULT_UNSET_LABEL)
+}
+
 /// The sentence a failed save shows. Never the server's raw text.
 /// The server maps every bad value to `invalid_field`, so the account sentence is used only when
 /// the patch carried nothing but `profile_overrides`.
@@ -2606,5 +2699,29 @@ mod tests {
         let counted = project_links_from("ember", &routines, &rooms);
         assert_eq!(counted, ProjectLinks { routines: LinkCountLoad::Loaded(1), channels: LinkCountLoad::Loaded(2) });
         assert_eq!(counted.summary_line(), "루틴 1개 \u{00b7} 채널 2개");
+    }
+
+    #[test]
+    fn fr_l26_member_default_chip_choices_and_labels_match_catalog() {
+        let models = super::member_default_model_choices();
+        assert_eq!(models[0].agent, "");
+        assert_eq!(models[0].model, "");
+        assert_eq!(models[0].label, super::DEFAULT_UNSET_LABEL);
+        assert!(models.iter().any(|c| c.agent == "claude-code" && c.model == "opus" && c.label.contains("Opus 5.5")));
+        assert!(models.iter().any(|c| c.agent == "codex" && c.model == "gpt-5"));
+        assert!(!models.iter().any(|c| c.agent == "gemini"), "unsupported harness is omitted");
+
+        assert_eq!(super::member_default_model_label("", ""), super::DEFAULT_UNSET_LABEL);
+        assert!(super::member_default_model_label("claude-code", "opus").contains("Claude Code"));
+        assert_eq!(super::member_default_model_label("claude-code", ""), "Claude Code");
+        assert_eq!(super::member_default_model_label("claude-code", "custom"), "Claude Code \u{00b7} custom");
+
+        let modes = super::member_default_mode_choices();
+        assert_eq!(modes[0], ("", super::DEFAULT_UNSET_LABEL));
+        assert_eq!(super::member_default_mode_label(""), super::DEFAULT_UNSET_LABEL);
+        assert_eq!(super::member_default_mode_label("ask"), crate::ui::home::PermMode::Ask.label());
+        assert_eq!(super::member_default_mode_label("edits"), crate::ui::home::PermMode::Edits.label());
+        assert_eq!(super::member_default_mode_label("plan"), crate::ui::home::PermMode::Plan.label());
+        assert_eq!(super::member_default_mode_label("bypass"), crate::ui::home::PermMode::Bypass.label());
     }
 }

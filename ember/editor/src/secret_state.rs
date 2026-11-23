@@ -32,7 +32,10 @@ pub enum SecretOp {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SecretReply {
     Value(Option<String>),
+    /// A write succeeded and the entry changed.
     Unit,
+    /// A delete succeeded; `existed` says whether an entry was removed.
+    Deleted { existed: bool },
 }
 
 /// Storage backend for `MainThreadSecretState`.
@@ -53,7 +56,10 @@ pub fn execute_op(store: &dyn SecretStore, op: SecretOp) -> Result<SecretReply, 
     match op {
         SecretOp::Get { extension_id, key } => store.get(&extension_id, &key).map(SecretReply::Value),
         SecretOp::Set { extension_id, key, value } => store.set(&extension_id, &key, &value).map(|()| SecretReply::Unit),
-        SecretOp::Delete { extension_id, key } => store.delete(&extension_id, &key).map(|()| SecretReply::Unit),
+        SecretOp::Delete { extension_id, key } => {
+            let existed = store.get(&extension_id, &key)?.is_some();
+            store.delete(&extension_id, &key).map(|()| SecretReply::Deleted { existed })
+        }
     }
 }
 
@@ -229,7 +235,7 @@ mod tests {
         );
         assert_eq!(
             execute_op(&store, SecretOp::Delete { extension_id: "e".into(), key: "k".into() }).unwrap(),
-            SecretReply::Unit,
+            SecretReply::Deleted { existed: true },
         );
         assert_eq!(
             execute_op(&store, SecretOp::Get { extension_id: "e".into(), key: "k".into() }).unwrap(),

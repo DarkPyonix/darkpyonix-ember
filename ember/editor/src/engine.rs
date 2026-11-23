@@ -399,6 +399,8 @@ pub struct SessionCore {
     inline: HashMap<String, InlineDoc>,
     ids: DecorationIds,
     pending: HashMap<Token, Pending>,
+    /// `(extension_id, key)` of each secret write or delete awaiting its outcome, by request id.
+    pub(crate) secret_writes: HashMap<u32, (String, String)>,
     saves: HashMap<Token, (String, u64, Vec<u8>)>,
     /// The write in flight per document key: one at a time, so an older write cannot land after a newer one.
     saving: HashMap<String, Token>,
@@ -485,6 +487,7 @@ impl SessionCore {
             inline: HashMap::new(),
             ids: DecorationIds::new(),
             pending: HashMap::new(),
+            secret_writes: HashMap::new(),
             saves: HashMap::new(),
             saving: HashMap::new(),
             save_queued: HashSet::new(),
@@ -773,12 +776,21 @@ impl SessionCore {
     }
 
     fn on_secret_state_result(&mut self, req: u32, result: Result<crate::secret_state::SecretReply, String>) {
+        use crate::secret_state::SecretReply;
+        let write = self.secret_writes.remove(&req);
         match result {
-            Ok(crate::secret_state::SecretReply::Value(Some(value))) => {
+            Ok(SecretReply::Value(Some(value))) => {
                 self.respond(req, Ok(Reply::Json(Value::String(value))));
             }
-            Ok(crate::secret_state::SecretReply::Value(None)) | Ok(crate::secret_state::SecretReply::Unit) => {
+            Ok(SecretReply::Value(None)) => self.respond(req, Ok(Reply::Empty)),
+            Ok(reply @ (SecretReply::Unit | SecretReply::Deleted { .. })) => {
                 self.respond(req, Ok(Reply::Empty));
+                // The secret storage service raises a change only when a stored value changed,
+                // so deleting an entry that did not exist is silent.
+                let changed = !matches!(reply, SecretReply::Deleted { existed: false });
+                if let (true, Some((extension_id, key))) = (changed, write) {
+                    self.rpc(exthost::secret_changed(&extension_id, &key));
+                }
             }
             Err(err) => {
                 self.respond(req, Err(Some(js_error("Error", &err))));

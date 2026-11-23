@@ -189,11 +189,35 @@ struct OutboundCall {
     reply: oneshot::Sender<ExtHostReply>,
 }
 
+/// What the fake extension host saw on the wire, in arrival order.
+#[derive(Debug, PartialEq)]
+enum Seen {
+    /// The reply to a call the fake sent to Ember (`method` is the call's method).
+    Reply(String),
+    /// A request Ember sent to the extension host.
+    Request { rpc_id: u8, method: String, args: Vec<Arg> },
+}
+
 struct FakeExtHostHandle {
     tx: mpsc::UnboundedSender<OutboundCall>,
+    events: tokio::sync::Mutex<mpsc::UnboundedReceiver<Seen>>,
 }
 
 impl FakeExtHostHandle {
+    async fn next_seen(&self) -> Seen {
+        let mut events = self.events.lock().await;
+        tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("timed out waiting for the fake ext host to see a message")
+            .expect("fake ext host stopped")
+    }
+
+    /// Whether the fake saw nothing more within a short grace period.
+    async fn nothing_more_seen(&self) -> bool {
+        let mut events = self.events.lock().await;
+        tokio::time::timeout(Duration::from_millis(300), events.recv()).await.is_err()
+    }
+
     async fn call(&self, method: &str, args: Vec<Arg>) -> ExtHostReply {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
@@ -231,6 +255,7 @@ impl FakeExtHostHandle {
 async fn run_fake_exthost(
     mut server: DuplexStream,
     mut outbound_rx: mpsc::UnboundedReceiver<OutboundCall>,
+    events: mpsc::UnboundedSender<Seen>,
 ) {
     let (mut dec, ct) = accept_upgraded_handshake(&mut server).await;
     assert_eq!(ct["desiredConnectionType"], 2);
@@ -238,7 +263,7 @@ async fn run_fake_exthost(
     let mut srv_id = 0u32;
     let mut last_client_id = 0u32;
     let mut exthost_req_seq = 0u32;
-    let mut pending: HashMap<u32, oneshot::Sender<ExtHostReply>> = HashMap::new();
+    let mut pending: HashMap<u32, (String, oneshot::Sender<ExtHostReply>)> = HashMap::new();
 
     // 1. Send Ready
     srv_id += 1;
@@ -275,7 +300,7 @@ async fn run_fake_exthost(
             }
             let msg = RpcMessage::decode(&frame.data).expect("decode RPC message");
             match msg {
-                RpcMessage::Request { req, .. } => {
+                RpcMessage::Request { req, rpc_id: incoming_id, method, args, .. } => {
                     srv_id += 1;
                     let ack = RpcMessage::Acknowledged { req }.encode().unwrap();
                     server
@@ -289,15 +314,18 @@ async fn run_fake_exthost(
                         .write_all(&Frame::new(MessageType::Regular, srv_id, last_client_id, ok).encode())
                         .await
                         .unwrap();
+                    let _ = events.send(Seen::Request { rpc_id: incoming_id, method, args });
                 }
                 RpcMessage::Acknowledged { .. } => {}
                 RpcMessage::ReplyOk { req, reply } => {
-                    if let Some(tx) = pending.remove(&req) {
+                    if let Some((method, tx)) = pending.remove(&req) {
+                        let _ = events.send(Seen::Reply(method));
                         let _ = tx.send(ExtHostReply::Ok(reply));
                     }
                 }
                 RpcMessage::ReplyErr { req, error } => {
-                    if let Some(tx) = pending.remove(&req) {
+                    if let Some((method, tx)) = pending.remove(&req) {
+                        let _ = events.send(Seen::Reply(method));
                         let _ = tx.send(ExtHostReply::Err(error));
                     }
                 }
@@ -310,7 +338,7 @@ async fn run_fake_exthost(
                 let Some(call) = call else { break };
                 exthost_req_seq += 1;
                 let req = exthost_req_seq;
-                pending.insert(req, call.reply);
+                pending.insert(req, (call.method.clone(), call.reply));
                 let payload = RpcMessage::Request {
                     req,
                     rpc_id,
@@ -338,6 +366,7 @@ async fn run_fake_exthost(
 
 async fn connect_with_store(store: Arc<dyn SecretStore>) -> (EditorSession, FakeExtHostHandle) {
     let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
+    let (events_tx, events_rx) = mpsc::unbounded_channel();
     let outbound_rx = Arc::new(tokio::sync::Mutex::new(Some(outbound_rx)));
     let dials = Arc::new(AtomicUsize::new(0));
 
@@ -347,6 +376,7 @@ async fn connect_with_store(store: Arc<dyn SecretStore>) -> (EditorSession, Fake
     let (session, _updates) = EditorSession::connect(config, move || {
         let step = dials_cb.fetch_add(1, Ordering::SeqCst);
         let rx_holder = Arc::clone(&rx_cb);
+        let events_tx = events_tx.clone();
         async move {
             let (client, mut server) = tokio::io::duplex(128 * 1024);
             match step {
@@ -363,7 +393,7 @@ async fn connect_with_store(store: Arc<dyn SecretStore>) -> (EditorSession, Fake
                 }
                 2 => {
                     let rx = rx_holder.lock().await.take().expect("exthost dial once");
-                    tokio::spawn(run_fake_exthost(server, rx));
+                    tokio::spawn(run_fake_exthost(server, rx, events_tx));
                 }
                 other => panic!("unexpected dial #{other}"),
             }
@@ -373,7 +403,7 @@ async fn connect_with_store(store: Arc<dyn SecretStore>) -> (EditorSession, Fake
     .await
     .expect("EditorSession::connect should succeed");
 
-    (session, FakeExtHostHandle { tx: outbound_tx })
+    (session, FakeExtHostHandle { tx: outbound_tx, events: tokio::sync::Mutex::new(events_rx) })
 }
 
 #[tokio::test]
@@ -508,6 +538,49 @@ async fn secret_state_backend_error_returns_rpc_error() {
         }
         other => panic!("expected ReplyErr for delete, got {other:?}"),
     }
+
+    session.shutdown().await;
+}
+
+fn change_request(extension_id: &str, key: &str) -> Seen {
+    Seen::Request {
+        rpc_id: rpc_ids::id_of("ExtHostSecretState").unwrap(),
+        method: "$onDidChangePassword".to_owned(),
+        args: vec![Arg::Json(json!({ "extensionId": extension_id, "key": key }))],
+    }
+}
+
+#[tokio::test]
+async fn fr_e1_secret_set_and_delete_notify_the_extension_host_of_the_change() {
+    let (session, exthost) = connect_with_store(Arc::new(InMemorySecretStore::new())).await;
+
+    assert_eq!(exthost.set_password("ext.alpha", "token", "s3cr3t").await, ExtHostReply::Ok(Reply::Empty));
+    assert_eq!(exthost.next_seen().await, Seen::Reply("$setPassword".to_owned()));
+    assert_eq!(exthost.next_seen().await, change_request("ext.alpha", "token"));
+
+    assert_eq!(exthost.delete_password("ext.alpha", "token").await, ExtHostReply::Ok(Reply::Empty));
+    assert_eq!(exthost.next_seen().await, Seen::Reply("$deletePassword".to_owned()));
+    assert_eq!(exthost.next_seen().await, change_request("ext.alpha", "token"));
+
+    // Reads never notify, and deleting what is not stored changes nothing, so it stays silent.
+    assert_eq!(exthost.get_password("ext.alpha", "token").await, ExtHostReply::Ok(Reply::Empty));
+    assert_eq!(exthost.next_seen().await, Seen::Reply("$getPassword".to_owned()));
+    assert_eq!(exthost.delete_password("ext.alpha", "token").await, ExtHostReply::Ok(Reply::Empty));
+    assert_eq!(exthost.next_seen().await, Seen::Reply("$deletePassword".to_owned()));
+    assert!(exthost.nothing_more_seen().await);
+
+    session.shutdown().await;
+}
+
+#[tokio::test]
+async fn fr_e1_failed_secret_write_does_not_notify() {
+    let (session, exthost) = connect_with_store(Arc::new(FailingSecretStore)).await;
+
+    assert!(matches!(exthost.set_password("ext.alpha", "k", "v").await, ExtHostReply::Err(Some(_))));
+    assert_eq!(exthost.next_seen().await, Seen::Reply("$setPassword".to_owned()));
+    assert!(matches!(exthost.delete_password("ext.alpha", "k").await, ExtHostReply::Err(Some(_))));
+    assert_eq!(exthost.next_seen().await, Seen::Reply("$deletePassword".to_owned()));
+    assert!(exthost.nothing_more_seen().await);
 
     session.shutdown().await;
 }

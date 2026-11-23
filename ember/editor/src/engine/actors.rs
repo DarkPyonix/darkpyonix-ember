@@ -730,6 +730,7 @@ impl main_thread_secret_state::SecretState for SessionCore {
     }
 
     fn set_password(&mut self, cx: &Ctx, args: main_thread_secret_state::SetPasswordArgs) -> Outcome {
+        self.secret_writes.insert(cx.req, (args.extension_id.clone(), args.key.clone()));
         self.out.push(Effect::SecretState {
             req: cx.req,
             op: crate::secret_state::SecretOp::Set {
@@ -742,6 +743,7 @@ impl main_thread_secret_state::SecretState for SessionCore {
     }
 
     fn delete_password(&mut self, cx: &Ctx, args: main_thread_secret_state::DeletePasswordArgs) -> Outcome {
+        self.secret_writes.insert(cx.req, (args.extension_id.clone(), args.key.clone()));
         self.out.push(Effect::SecretState {
             req: cx.req,
             op: crate::secret_state::SecretOp::Delete {
@@ -897,7 +899,9 @@ mod tests {
             }]
         );
         let fx = core.handle(t0, Input::SecretState { req: 1, result: Ok(SecretReply::Unit) });
-        assert_eq!(fx, vec![Effect::Respond { req: 1, result: Ok(Reply::Empty) }]);
+        assert_eq!(fx.len(), 2);
+        assert_eq!(fx[0], Effect::Respond { req: 1, result: Ok(Reply::Empty) });
+        assert!(matches!(&fx[1], Effect::Rpc { token: None, call } if call.method == "$onDidChangePassword"));
 
         let fx = core.handle(t0, Input::ExtHostRequest(mk(2, "$getPassword", json!(["ext.a", "k"]))));
         assert_eq!(
@@ -929,8 +933,10 @@ mod tests {
                 op: SecretOp::Delete { extension_id: "ext.a".into(), key: "k".into() },
             }]
         );
-        let fx = core.handle(t0, Input::SecretState { req: 4, result: Ok(SecretReply::Unit) });
-        assert_eq!(fx, vec![Effect::Respond { req: 4, result: Ok(Reply::Empty) }]);
+        let fx = core.handle(t0, Input::SecretState { req: 4, result: Ok(SecretReply::Deleted { existed: true }) });
+        assert_eq!(fx.len(), 2);
+        assert_eq!(fx[0], Effect::Respond { req: 4, result: Ok(Reply::Empty) });
+        assert!(matches!(&fx[1], Effect::Rpc { token: None, call } if call.method == "$onDidChangePassword"));
 
         assert!(core.unimplemented_calls().is_empty());
     }

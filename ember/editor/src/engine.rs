@@ -138,6 +138,9 @@ pub enum Input {
     /// Reopen an open document in `encoding` (its unsaved edits are discarded) or save it in
     /// `encoding` (FR-L31.7).
     SetEncoding { uri: UriComponents, encoding: Encoding, mode: EncodingMode },
+    /// Change the indentation options of an open document, or its leading whitespace: one choice of
+    /// the status bar's indentation pick. Options belong to the document, not to the settings.
+    SetIndentation { uri: UriComponents, action: crate::indentation::IndentationAction },
     /// Put an open document under a language id; `None` detects it from the path again (FR-L31.7).
     SetLanguage { uri: UriComponents, language_id: Option<String> },
     /// The user's answer to the workspace trust prompt (FR-L31.18): `true` grants trust.
@@ -155,8 +158,16 @@ pub enum Input {
     Debug(crate::debugger::DebugRequest),
     /// Result of reading one persisted extension storage file (`MainThreadStorage`).
     StorageRead { shared: bool, extension_id: String, result: Result<Option<Vec<u8>>, String> },
+    /// Result of moving a corrupt extension storage file aside to `*.corrupt.<millis>-<seq>`.
+    StorageQuarantined { shared: bool, extension_id: String, result: Result<(), String> },
     /// Result of writing or deleting one persisted extension storage file (`MainThreadStorage`).
     StorageWritten { token: Token, result: Result<(), String> },
+    /// A `shared = true` (`globalState`) update broadcast from another session on the same hub.
+    SharedStorageChanged { extension_id: String, value: Option<String> },
+    /// Result of reloading a `shared = true` storage file after a watcher event or hub lag.
+    SharedStorageReloaded { extension_id: String, generation: u64, result: Result<Option<Vec<u8>>, String> },
+    /// Resync all cached `shared = true` keys from disk (e.g. after `StorageHub` broadcast lag).
+    ResyncSharedStorage,
     /// Nothing happened; run due timers.
     Tick,
 }
@@ -177,8 +188,16 @@ pub enum Effect {
     WriteFile { uri: UriComponents, bytes: Vec<u8>, token: Token, expect: Option<DiskBase> },
     /// Read one extension storage file; answered with [`Input::StorageRead`].
     ReadStorage { uri: UriComponents, shared: bool, extension_id: String },
+    /// Reload one `shared = true` storage file after a watcher event or hub lag; answered with
+    /// [`Input::SharedStorageReloaded`].
+    ReloadSharedStorage { uri: UriComponents, extension_id: String, generation: u64 },
+    /// Move a corrupt extension storage file aside (`*.corrupt.<millis>-<seq>`); answered with
+    /// [`Input::StorageQuarantined`].
+    QuarantineStorage { from: UriComponents, to: UriComponents, shared: bool, extension_id: String },
     /// Atomically write (`Some`) or delete (`None`) one extension storage file; answered with [`Input::StorageWritten`].
     WriteStorage { uri: UriComponents, bytes: Option<Vec<u8>>, token: Token },
+    /// Broadcast a `shared = true` (`globalState`) update to peer sessions on the same [`crate::storage::StorageHub`].
+    BroadcastStorage { extension_id: String, value: Option<String> },
     Watch { uri: UriComponents },
     Unwatch { uri: UriComponents },
     /// Work for the highlighting thread; its answer comes back as [`Input::Highlighted`].
@@ -274,6 +293,9 @@ pub enum SessionUpdate {
     /// The line ending, encoding and language of an open document (FR-L31.7): after it opens, is
     /// reloaded, or any of the three changes.
     Format { uri: UriComponents, format: DocumentFormat },
+    /// The indentation options of an open document: after it opens, or the person changes them. The
+    /// widget's tab width follows `tab_size`.
+    Indentation { uri: UriComponents, indentation: crate::indentation::Indentation },
     /// Reopening with an encoding failed; the document is unchanged (FR-L31.7).
     FormatFailed { uri: UriComponents, error: String },
     /// Something about a file went wrong that no user action caused: the window shows it.
@@ -286,6 +308,10 @@ pub enum SessionUpdate {
     Webview(crate::webview::WebviewUpdate),
     /// Debug sessions, call stacks, variables, console lines and breakpoints.
     Debug(crate::debugger::DebugUpdate),
+    /// A call to a `todo` method of the coverage ledger that returns a value got the fallback
+    /// reply (FR-E9). `count` is the number of such calls to `proxy.method` in this session so
+    /// far; `extension` is set only when an argument of this call names the extension.
+    ProtocolGap { proxy: String, method: String, extension: Option<String>, count: u32 },
 }
 
 #[derive(Debug, Clone)]
@@ -531,6 +557,7 @@ impl SessionCore {
             Input::Replace { id, request } => self.on_replace(id, request),
             Input::SetEol { uri, eol } => self.on_set_eol(&uri, eol),
             Input::SetEncoding { uri, encoding, mode } => self.on_set_encoding(&uri, encoding, mode),
+            Input::SetIndentation { uri, action } => self.on_set_indentation(&uri, action),
             Input::SetLanguage { uri, language_id } => self.on_set_language(&uri, language_id),
             Input::DecideWorkspaceTrust { trusted } => self.on_decide_trust(trusted),
             Input::ActiveOutputChannel { id } => self.active_output = id,
@@ -547,13 +574,56 @@ impl SessionCore {
             }
             Input::Debug(request) => self.on_debug_request(request),
             Input::StorageRead { shared, extension_id, result } => {
-                for (req, reply) in self.storage.on_read_done(shared, &extension_id, result) {
-                    self.respond(req, Ok(reply));
+                let next = self.next_token + 1;
+                let outcome = self.storage.on_read_done(self.now, shared, &extension_id, result, || next);
+                for (req, reply) in outcome.replies {
+                    self.respond(req, reply);
+                }
+                if let Some((from, to, key)) = outcome.quarantine {
+                    self.out.push(Effect::QuarantineStorage {
+                        from,
+                        to,
+                        shared: key.shared,
+                        extension_id: key.extension_id,
+                    });
+                }
+                if let Some(write) = outcome.write {
+                    self.next_token = write.token;
+                    self.out.push(Effect::WriteStorage { uri: write.uri, bytes: write.bytes, token: write.token });
+                }
+            }
+            Input::StorageQuarantined { shared, extension_id, result } => {
+                let next = self.next_token + 1;
+                let outcome = self.storage.on_quarantine_done(shared, &extension_id, result, || next);
+                for (req, reply) in outcome.replies {
+                    self.respond(req, reply);
+                }
+                if let Some(write) = outcome.write {
+                    self.next_token = write.token;
+                    self.out.push(Effect::WriteStorage { uri: write.uri, bytes: write.bytes, token: write.token });
                 }
             }
             Input::StorageWritten { token, result } => {
-                if let Some((req, reply)) = self.storage.on_write_done(token, result) {
-                    self.respond(req, reply);
+                let next = self.next_token + 1;
+                if let Some(write) = self.storage.on_write_done(self.now, token, result, || next) {
+                    self.next_token = write.token;
+                    self.out.push(Effect::WriteStorage { uri: write.uri, bytes: write.bytes, token: write.token });
+                }
+            }
+            Input::SharedStorageChanged { extension_id, value } => {
+                self.storage.on_external_shared_change(&extension_id, value.clone());
+                let raw = value.as_deref().unwrap_or("{}");
+                self.rpc(ember_editor_conn::exthost::accept_storage_value(true, &extension_id, raw));
+            }
+            Input::SharedStorageReloaded { extension_id, generation, result } => {
+                if let Some(value) = self.storage.on_shared_reload_done(&extension_id, generation, result) {
+                    let raw = value.as_deref().unwrap_or("{}");
+                    self.rpc(ember_editor_conn::exthost::accept_storage_value(true, &extension_id, raw));
+                }
+            }
+            Input::ResyncSharedStorage => {
+                for (uri, extension_id, generation) in self.storage.cached_shared_keys() {
+                    self.out.push(Effect::ReloadSharedStorage { uri, extension_id, generation });
                 }
             }
             Input::Tick => {}
@@ -572,14 +642,25 @@ impl SessionCore {
         self.highlights.set_catalog(catalog);
     }
 
-    /// When [`Input::Tick`] must be delivered next (earliest debounce deadline).
+    /// When [`Input::Tick`] must be delivered next (earliest debounce, log poll, debug, or storage retry deadline).
     pub fn next_wake(&self) -> Option<Instant> {
         let a = self.inline.values().filter_map(|s| s.debounce.deadline());
         let b = self.codelens_due.values().filter_map(|d| d.deadline());
         let c = self.folding_due.values().filter_map(|d| d.deadline());
         let d = self.semantic_due.values().filter_map(|d| d.deadline());
         let e = self.log_poll.deadline();
-        a.chain(b).chain(c).chain(d).chain(e).chain(self.debug.next_deadline()).min()
+        let f = self.storage.next_wake();
+        a.chain(b).chain(c).chain(d).chain(e).chain(f).chain(self.debug.next_deadline()).min()
+    }
+
+    /// Whether any extension storage write, retry, or quarantine is still pending.
+    pub fn has_pending_storage_writes(&self) -> bool {
+        self.storage.has_pending_writes()
+    }
+
+    /// Earliest deadline for a pending storage write retry.
+    pub fn storage_next_wake(&self) -> Option<Instant> {
+        self.storage.next_wake()
     }
 
     /// Every known language with its display name (FR-L31.7).
@@ -654,6 +735,13 @@ impl SessionCore {
         self.storage.set_roots(roots);
     }
 
+    /// Register known extension ids so global storage watch events can map filenames back to them.
+    pub fn register_storage_extensions(&mut self, ids: impl IntoIterator<Item = String>) {
+        for id in ids {
+            self.storage.register_shared_extension(&id);
+        }
+    }
+
     /// The extension storage state of this session.
     pub fn storage(&self) -> &crate::storage::ExtensionStorage {
         &self.storage
@@ -720,7 +808,7 @@ impl SessionCore {
     fn emit_folds(&mut self, key: &str) {
         let Some(doc) = self.docs.get(key) else { return };
         let (uri, generation, version) = (doc.uri.clone(), doc.generation(), doc.widget_version());
-        let tab_width = self.indent_for(&doc.language_id).0;
+        let tab_width = doc.indentation().tab_size;
         let folds = self
             .folds
             .entry(key.to_owned())
@@ -795,7 +883,7 @@ impl SessionCore {
                 generation: d.generation(),
                 text: d.widget_text(),
                 language_id: d.language_id.clone(),
-                tab_width: self.indent_for(&d.language_id).0,
+                tab_width: d.indentation().tab_size,
             };
             let dirty = SessionUpdate::Dirty { uri: d.uri.clone(), dirty: d.is_dirty() };
             self.ui(u);
@@ -803,6 +891,7 @@ impl SessionCore {
             // the buffer is unsaved so it never shows an unsaved buffer as saved.
             self.ui(dirty);
             self.emit_format(&key);
+            self.emit_indentation(&key);
             self.emit_folds(&key);
             if self.textmate_runs.contains_key(&key) || self.semantic.contains_key(&key) {
                 self.emit_syntax(&key);
@@ -862,6 +951,7 @@ impl SessionCore {
         });
         self.docs.insert(key.clone(), doc);
         self.emit_format(&key);
+        self.emit_indentation(&key);
         self.folds.insert(key.clone(), DocFolds::default());
         self.emit_folds(&key);
         self.highlight_open(&key);
@@ -1186,6 +1276,51 @@ impl SessionCore {
         };
         let uri = doc.uri.clone();
         self.ui(SessionUpdate::Format { uri, format });
+    }
+
+    fn emit_indentation(&mut self, key: &str) {
+        let Some(doc) = self.docs.get(key) else { return };
+        let (uri, indentation) = (doc.uri.clone(), doc.indentation());
+        self.ui(SessionUpdate::Indentation { uri, indentation });
+    }
+
+    /// One choice of the indentation pick (Code-OSS `indentation.ts`): the document's options change,
+    /// the extension host is told, and a conversion edits the widget's text like any other edit (the
+    /// widget answers with `CodeChanged`, which makes the document dirty and undoable).
+    fn on_set_indentation(&mut self, uri: &UriComponents, action: crate::indentation::IndentationAction) {
+        use crate::indentation::{convert_indentation_edits, guess_indentation, trim_trailing_whitespace_edits, Indentation, IndentationAction};
+        let key = uri.key();
+        let Some(doc) = self.docs.get(&key) else { return };
+        let current = doc.indentation();
+        let next = match action {
+            IndentationAction::IndentUsing { insert_spaces, size } => Indentation { tab_size: size, indent_size: size, insert_spaces },
+            IndentationAction::DisplaySize(size) => Indentation { tab_size: size, ..current },
+            IndentationAction::Detect => {
+                // The defaults are the ones a document of this language opens with.
+                let (default_size, default_spaces) = self.indent_for(&doc.language_id);
+                let (size, insert_spaces) = guess_indentation(doc.lines(), default_size, default_spaces);
+                Indentation::new(size, insert_spaces)
+            }
+            IndentationAction::Convert { to_spaces } => {
+                let edits = convert_indentation_edits(doc.lines(), current.tab_size, to_spaces);
+                let (uri, version) = (doc.uri.clone(), doc.widget_version());
+                self.lang_edit_widget(&uri, version, &edits);
+                Indentation { insert_spaces: to_spaces, ..current }
+            }
+            IndentationAction::TrimTrailingWhitespace => {
+                let edits = trim_trailing_whitespace_edits(doc.lines());
+                let (uri, version) = (doc.uri.clone(), doc.widget_version());
+                self.lang_edit_widget(&uri, version, &edits);
+                current
+            }
+        };
+        let Some(doc) = self.docs.get_mut(&key) else { return };
+        let Some(call) = doc.set_indentation(next) else { return };
+        self.rpc(call);
+        self.emit_indentation(&key);
+        if next.tab_size != current.tab_size {
+            self.emit_folds(&key);
+        }
     }
 
     /// Code-OSS `ChangeEOLAction`: `pushEOL` on the model, which the extension host gets as a
@@ -2304,7 +2439,14 @@ impl SessionCore {
     }
 
     fn on_files_changed(&mut self, changes: Vec<FileChange>) {
+        let mut reload_shared: HashSet<String> = HashSet::new();
         for c in changes {
+            if let Some((uri, extension_id, generation)) = self.storage.shared_extension_for_path(&c.resource.path) {
+                if reload_shared.insert(extension_id.clone()) {
+                    self.out.push(Effect::ReloadSharedStorage { uri, extension_id, generation });
+                }
+                continue;
+            }
             // Match by path: the server's URI transformer decides the authority it sends back.
             let Some(uri) = self.docs.values().find(|d| d.uri.path == c.resource.path).map(|d| d.uri.clone()) else { continue };
             match c.kind {
@@ -2405,6 +2547,22 @@ impl SessionCore {
             self.semantic_due.iter_mut().filter_map(|(k, d)| d.take_due(now).then(|| k.clone())).collect();
         for k in due_sem {
             self.fire_semantic(&k);
+        }
+        let mut next_tok = self.next_token;
+        let tick = self.storage.on_tick(now, || {
+            next_tok += 1;
+            next_tok
+        });
+        self.next_token = next_tok;
+        for write in tick.writes {
+            self.out.push(Effect::WriteStorage { uri: write.uri, bytes: write.bytes, token: write.token });
+        }
+        for read in tick.reads {
+            self.out.push(Effect::ReadStorage {
+                uri: read.uri,
+                shared: read.key.shared,
+                extension_id: read.key.extension_id,
+            });
         }
         self.debug_tick();
     }

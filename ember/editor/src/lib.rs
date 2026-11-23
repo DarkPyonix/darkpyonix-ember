@@ -54,6 +54,7 @@ pub mod document;
 pub mod highlight;
 pub mod hover;
 pub mod ids;
+pub mod indentation;
 pub mod inline;
 pub mod language;
 pub mod languages;
@@ -83,12 +84,13 @@ pub use crate::document::DiskBase;
 pub use crate::engine::{CoreOptions, Effect, ExternalChange, FileNoticeKind, Input, SessionCore, SessionUpdate};
 pub use crate::languages::LanguageInfo;
 pub use crate::text_format::{DocumentFormat, Encoding, EncodingMode, Eol};
+pub use crate::indentation::{convert_indentation, guess_indentation, Indentation, IndentationAction};
 pub use crate::coords::{WidgetPos, WidgetRange};
 pub use crate::debugger::{ConfigSelector, DebugRequest, DebugUpdate};
 pub use crate::language::{LanguageRequest, LanguageUpdate};
 pub use crate::session::{DirLister, EditorSession, ServerSettingsFile, SessionConfig};
 pub use crate::settings::{EditorSettings, SettingsLayer, SettingsScope, SettingsScopes};
-pub use crate::storage::StorageRoots;
+pub use crate::storage::{SharedStorageChange, StorageHub, StorageRoots};
 pub use crate::output::{ExtensionMessage, MessageAction, MessageSeverity, OutputChannel, MAX_OUTPUT_CHANNEL_BYTES};
 pub use crate::widget::{
     Decoration, DecorationId, DecorationKind, HoverPhase, Severity, WidgetCommand, WidgetEvent,

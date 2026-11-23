@@ -488,3 +488,71 @@ async fn fr_p1_terms_running_session_cap_refuses_one_more() {
     })
     .await;
 }
+
+/// The test finds its own keeper by the fixture's socket and shell PID, then waits for that
+/// keeper process to exit. Removing the temporary directory alone also removes the socket.
+#[cfg(unix)]
+#[tokio::test]
+async fn fr_p6_panicking_fixture_reaps_its_terminal_and_keeper() {
+    use std::ffi::OsStr;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+
+    let f = start().await;
+    let t = f.client.term_create(&req(&f.root, &["/bin/sh"])).await.unwrap().term;
+    let session = f.node.terms().get(&t.id).unwrap();
+    // Keep the red regression from leaking the shell or keeper when the fixture fails to stop them.
+    struct StopSession(std::sync::Arc<ember_node::term::session::Session>);
+    impl Drop for StopSession {
+        fn drop(&mut self) {
+            self.0.kill(Some(ember_node::exec::SIGKILL));
+        }
+    }
+    let cleanup = StopSession(session);
+    let socket = cleanup.0.record().keeper_socket.unwrap();
+    let shell = t.pid.unwrap();
+    let shell_arg = shell.to_string();
+    let mut processes = System::new();
+    processes.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+    );
+    let keeper = processes
+        .processes()
+        .iter()
+        .find(|(_, process)| {
+            process.parent() == Some(Pid::from_u32(std::process::id()))
+                && matches!(
+                    process.cmd(),
+                    [_, cmd, socket_flag, path, pid_flag, pid, fd_flag, _]
+                        if cmd == ember_node::term::pty::KEEPER_SUBCOMMAND
+                            && socket_flag == "--socket" && path == socket.as_os_str()
+                            && pid_flag == "--pid" && pid == OsStr::new(&shell_arg)
+                            && fd_flag == "--fd"
+                )
+        })
+        .map(|(pid, _)| pid.as_u32())
+        .expect("the fixture's keeper is running");
+
+    let panic = catch_unwind(AssertUnwindSafe(move || {
+        let _f = f;
+        panic!("simulate a test assertion failure");
+    }));
+    assert!(panic.is_err());
+
+    let wait_for_exit = || async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while ember_node::term::pty::alive(shell) || ember_node::term::pty::alive(keeper) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+    };
+    let reaped_by_fixture = wait_for_exit().await.is_ok();
+    drop(cleanup);
+    if !reaped_by_fixture {
+        wait_for_exit().await.expect("test fallback cleanup");
+    }
+    assert!(reaped_by_fixture, "unwinding left shell {shell} or keeper {keeper} alive");
+}

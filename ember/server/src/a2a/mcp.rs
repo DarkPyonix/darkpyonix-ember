@@ -144,7 +144,7 @@ pub fn non_loopback_host(url: &str) -> Option<String> {
 }
 
 /// The one startup warning line for `host`: only the host, never the token or the URL.
-fn non_loopback_warning(host: &str) -> String {
+pub(super) fn non_loopback_warning(host: &str) -> String {
     format!(
         "ember-a2a mcp: EMBER_URL names {host}, which is not this machine; the runtime token is sent to it over plain HTTP"
     )
@@ -208,7 +208,7 @@ pub fn serve<R: BufRead, W: Write>(mut input: R, mut output: W, poster: &dyn Cha
     }
 }
 
-enum Frame {
+pub(super) enum Frame {
     Eof,
     Line,
     TooLong,
@@ -216,7 +216,7 @@ enum Frame {
 
 /// Read one line into `out` without ever holding more than [`MAX_LINE_BYTES`]; a longer line is
 /// drained to its end and reported as `TooLong`.
-fn read_frame<R: BufRead>(r: &mut R, out: &mut Vec<u8>) -> io::Result<Frame> {
+pub(super) fn read_frame<R: BufRead>(r: &mut R, out: &mut Vec<u8>) -> io::Result<Frame> {
     out.clear();
     let mut too_long = false;
     let mut any = false;
@@ -254,22 +254,22 @@ fn read_frame<R: BufRead>(r: &mut R, out: &mut Vec<u8>) -> io::Result<Frame> {
 }
 
 /// The one place that writes to the output: a frame, a newline, a flush.
-fn write_frame<W: Write>(out: &mut W, frame: &Value) -> io::Result<()> {
+pub(super) fn write_frame<W: Write>(out: &mut W, frame: &Value) -> io::Result<()> {
     let mut bytes = serde_json::to_vec(frame).map_err(io::Error::other)?;
     bytes.push(b'\n');
     out.write_all(&bytes)?;
     out.flush()
 }
 
-fn ok_response(id: &Value, result: Value) -> Value {
+pub(super) fn ok_response(id: &Value, result: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "result": result })
 }
 
-fn error_response(id: &Value, code: i64, message: &str) -> Value {
+pub(super) fn error_response(id: &Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
-fn tool_result(text: &str, is_error: bool) -> Value {
+pub(super) fn tool_result(text: &str, is_error: bool) -> Value {
     let mut v = json!({ "content": [{ "type": "text", "text": text }] });
     if is_error {
         v["isError"] = json!(true);

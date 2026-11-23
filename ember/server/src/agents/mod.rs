@@ -234,6 +234,11 @@ pub struct McpServer {
     /// `--mcp-config` file, Codex from its own process environment through
     /// `mcp_servers.<name>.env_vars`, and `Debug` prints only the keys.
     pub env: Vec<(String, String)>,
+    /// Load the server's tools upfront instead of behind the agent's tool search (FR-T2). Only
+    /// Claude Code has such a key: `alwaysLoad` in the `--mcp-config` entry, "available on all
+    /// server types" (code.claude.com/docs/en/mcp, "Exempt a server from deferral", read
+    /// 2026-11-22). The other adapters ignore it.
+    pub always_load: bool,
 }
 
 impl std::fmt::Debug for McpServer {
@@ -244,6 +249,7 @@ impl std::fmt::Debug for McpServer {
             .field("args", &self.args)
             .field("startup_timeout_secs", &self.startup_timeout_secs)
             .field("env_keys", &self.env.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>())
+            .field("always_load", &self.always_load)
             .finish()
     }
 }

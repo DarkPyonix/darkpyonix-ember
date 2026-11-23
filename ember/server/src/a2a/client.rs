@@ -66,6 +66,9 @@ Channels (FR-T12):
       most). Use `-` (or no text) to read the text from stdin. `channel_post` is accepted too.
   ember-a2a mcp
       The stdio MCP server exposing the tool `channel_post`, started by the harness, not for people.
+  ember-a2a mcp agents
+      The stdio MCP server `ember` exposing `list_agents` and `send_message` (FR-T2), started by
+      the harness, not for people.
 
 Environment (set by Ember for every agent session):
   EMBER_URL, EMBER_RUNTIME_TOKEN";
@@ -456,11 +459,14 @@ fn dechunk(mut data: &[u8]) -> anyhow::Result<Vec<u8>> {
 pub fn run(args: &[String]) -> i32 {
     // `mcp` owns stdout for protocol frames, so it never goes through the `println!` below.
     if args.first().map(String::as_str) == Some("mcp") {
-        if args.len() > 1 {
-            eprintln!("ember-a2a: mcp takes no arguments\n\n{USAGE}");
-            return 2;
-        }
-        return super::mcp::run_stdio();
+        return match args.get(1..).unwrap_or_default() {
+            [] => super::mcp::run_stdio(),
+            [one] if one == "agents" => super::mcp_agents::run_stdio(),
+            _ => {
+                eprintln!("ember-a2a: mcp takes no arguments, or `agents`\n\n{USAGE}");
+                2
+            }
+        };
     }
     match run_inner(args) {
         Ok(out) => {
@@ -521,14 +527,7 @@ fn run_inner(args: &[String]) -> Result<String, CliError> {
             let text = text_or_stdin(words)?;
             let reply_to = a.flags.get("reply-to").map(String::as_str);
             let v = Client::from_env()?.send(to, &text, reply_to)?;
-            let id = v.get("id").and_then(Value::as_str).unwrap_or("?");
-            Ok(match v.get("status").and_then(Value::as_str) {
-                Some("delivered") => format!("Sent message {id} to {to}: delivered."),
-                _ => format!(
-                    "Sent message {id} to {to}: queued; it is delivered when that session's \
-                     current turn ends."
-                ),
-            })
+            Ok(receipt_text(to, &v))
         }
         "terminal" => run_terminal(&args[1..]),
         "team" => run_team(&args[1..]),
@@ -900,7 +899,21 @@ fn format_schedules(v: &Value) -> String {
         .join("\n")
 }
 
-fn format_targets(v: &Value) -> String {
+/// The line for a send's receipt `v` (`{id, status}`), shared by the command and the `ember`
+/// MCP server (FR-T2).
+pub(super) fn receipt_text(to: &str, v: &Value) -> String {
+    let id = v.get("id").and_then(Value::as_str).unwrap_or("?");
+    match v.get("status").and_then(Value::as_str) {
+        Some("delivered") => format!("Sent message {id} to {to}: delivered."),
+        _ => format!(
+            "Sent message {id} to {to}: queued; it is delivered when that session's \
+             current turn ends."
+        ),
+    }
+}
+
+/// One line per session the caller may message, shared by `list` and the `ember` MCP server.
+pub(super) fn format_targets(v: &Value) -> String {
     let rows = v.as_array().cloned().unwrap_or_default();
     if rows.is_empty() {
         return "No other sessions to message.".into();

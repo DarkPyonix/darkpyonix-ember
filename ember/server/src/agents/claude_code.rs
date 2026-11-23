@@ -280,7 +280,8 @@ fn mcp_timeout_env(req: &StartRequest) -> Option<(String, String)> {
     Some(("MCP_TIMEOUT".into(), (u64::from(secs) * 1000).to_string()))
 }
 
-/// The `--mcp-config` JSON for `servers` (`{"mcpServers": {name: {type, command, args, env?}}}`),
+/// The `--mcp-config` JSON for `servers` (`{"mcpServers": {name: {type, command, args, env?,
+/// alwaysLoad?}}}`),
 /// or `None` when there are none. With `env` it may hold secrets: write it to a
 /// [`PrivateConfigFile`], never onto the command line.
 pub fn mcp_config(servers: &[super::McpServer]) -> Option<String> {
@@ -296,6 +297,11 @@ pub fn mcp_config(servers: &[super::McpServer]) -> Option<String> {
                 let env: serde_json::Map<String, Value> =
                     s.env.iter().map(|(k, v)| (k.clone(), Value::String(v.clone()))).collect();
                 server["env"] = Value::Object(env);
+            }
+            // FR-T2: the tools load upfront, and startup waits for them (at most the 5-second
+            // connect timeout), so they are in the first prompt.
+            if s.always_load {
+                server["alwaysLoad"] = Value::Bool(true);
             }
             (s.name.clone(), server)
         })

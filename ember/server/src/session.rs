@@ -160,6 +160,14 @@ pub type StartHook = Arc<dyn Fn(&SessionRecord) -> Vec<(String, String)> + Send 
 /// the session's per-session resources; a later start calls the start hooks again.
 pub type EndHook = Arc<dyn Fn(&str) + Send + Sync>;
 
+/// Called with a session id when the session's agent run ends: it was stopped
+/// ([`Sessions::release`]: idle release, team end, computer switch, token rotation), its event
+/// channel closed, or its surviving turn was drained after a server restart. Never called for a
+/// server that stops, so an agent that outlives the server keeps what the hook would release
+/// (FR-S8). Runs while no new run of the session can start, so it never sees a newer run's state.
+/// Releases per-run resources: the A2A runtime token (FR-T2a).
+pub type RunEndHook = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// Observes every event after it is stored (e.g. rate-limit detection, FR-U3). Runs inline on
 /// the session's event pump, so it must be quick.
 pub type EventHook = Arc<dyn Fn(&StoredEvent) + Send + Sync>;
@@ -232,6 +240,7 @@ pub struct Sessions {
     store: Arc<Store>,
     start_hooks: std::sync::Mutex<Vec<StartHook>>,
     end_hooks: std::sync::Mutex<Vec<EndHook>>,
+    run_end_hooks: std::sync::Mutex<Vec<RunEndHook>>,
     event_hooks: std::sync::Mutex<Vec<EventHook>>,
     account_router: std::sync::Mutex<Option<AccountRouter>>,
     instructions_hooks: std::sync::Mutex<Vec<InstructionsHook>>,
@@ -267,6 +276,7 @@ impl Sessions {
             store,
             start_hooks: std::sync::Mutex::new(Vec::new()),
             end_hooks: std::sync::Mutex::new(Vec::new()),
+            run_end_hooks: std::sync::Mutex::new(Vec::new()),
             event_hooks: std::sync::Mutex::new(Vec::new()),
             account_router: std::sync::Mutex::new(None),
             instructions_hooks: std::sync::Mutex::new(Vec::new()),
@@ -402,6 +412,20 @@ impl Sessions {
     pub fn session_ended(&self, id: &str) {
         self.release_questions(id, None);
         let hooks: Vec<EndHook> = self.end_hooks.lock().unwrap().clone();
+        for hook in hooks {
+            hook(id);
+        }
+    }
+
+    /// Register a hook that runs when a session's agent run ends (see [`RunEndHook`]).
+    pub fn add_run_end_hook(&self, hook: RunEndHook) {
+        self.run_end_hooks.lock().unwrap().push(hook);
+    }
+
+    /// Run the run-end hooks for `id`. Called with the `live` lock held (or the session marked
+    /// as draining), so no new run of `id` starts meanwhile.
+    fn run_ended(&self, id: &str) {
+        let hooks: Vec<RunEndHook> = self.run_end_hooks.lock().unwrap().clone();
         for hook in hooks {
             hook(id);
         }
@@ -722,6 +746,8 @@ impl Sessions {
             let mut live = this.live.lock().await;
             if live.get(&sid).is_some_and(|l| l.generation == generation) {
                 live.remove(&sid);
+                // Still under the lock: a newer run cannot have started.
+                this.run_ended(&sid);
             }
         });
         Ok(run)
@@ -1054,9 +1080,14 @@ impl Sessions {
     }
 
     /// Stop an agent process (idle release, FR-S6). Its native state stays for resume.
+    /// The run-end hooks run once the agent is down, still under the `live` lock, so they
+    /// never touch a run started after this one (FR-T2a).
     pub async fn release(self: &Arc<Self>, id: &str) -> Result<(), SessionError> {
-        if let Some(live) = self.live.lock().await.remove(id) {
-            live.run.lock().await.shutdown().await?;
+        let mut live = self.live.lock().await;
+        if let Some(run) = live.remove(id) {
+            let stopped = run.run.lock().await.shutdown().await;
+            self.run_ended(id);
+            stopped?;
         }
         Ok(())
     }
@@ -1207,6 +1238,8 @@ impl Sessions {
                 let _ = self.store.reset_live_status(id);
             }
         }
+        // The surviving agent is stopped; still marked as draining, so no new run has started.
+        self.run_ended(id);
         self.draining.lock().unwrap().remove(id);
     }
 

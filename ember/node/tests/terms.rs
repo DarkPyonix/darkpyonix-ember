@@ -7,16 +7,19 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ember_node::api::{self, Node};
 use ember_node::client::{NodeClient, TermAttachment};
 use ember_node::config::NodeConfig;
 use ember_node::proto::*;
+
+#[path = "common/term_server.rs"]
+mod term_server;
+use term_server::TermServer;
 
 const TOKEN: &str = "test-token";
 
 struct Fixture {
     client: NodeClient,
-    node: Node,
+    node: TermServer,
     root: PathBuf,
     state: PathBuf,
     _dir: tempfile::TempDir,
@@ -30,14 +33,6 @@ fn config(root: &Path, state: &Path) -> NodeConfig {
     }
 }
 
-async fn serve(cfg: NodeConfig) -> (NodeClient, Node) {
-    let node = Node::new(cfg).unwrap();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    tokio::spawn(api::serve(listener, node.clone()));
-    (NodeClient::new(&base, TOKEN).unwrap(), node)
-}
-
 async fn start() -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let base = dir.path().canonicalize().unwrap();
@@ -45,7 +40,7 @@ async fn start() -> Fixture {
     // Short: keeper sockets live here and unix socket paths are limited to ~104 bytes.
     let state = base.join("s");
     std::fs::create_dir_all(&root).unwrap();
-    let (client, node) = serve(config(&root, &state)).await;
+    let (client, node) = TermServer::start(config(&root, &state), TOKEN).await;
     Fixture { client, node, root, state, _dir: dir }
 }
 
@@ -429,7 +424,7 @@ async fn a_new_node_readopts_running_sessions_and_reports_lost_ones() {
 
         // "Restart": a second node on the same state dir. (The first one still runs in this
         // process; only the second is used from here on.)
-        let (c2, _node2) = serve(config(&f.root, &f.state)).await;
+        let (c2, _node2) = TermServer::start(config(&f.root, &f.state), TOKEN).await;
         let t2 = c2.term(&t.id).await.unwrap();
         assert_eq!(t2.state, TermState::Running);
         assert!(t2.adopted);

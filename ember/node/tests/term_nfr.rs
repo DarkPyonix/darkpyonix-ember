@@ -11,10 +11,13 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use ember_node::api::{self, Node};
 use ember_node::client::NodeClient;
 use ember_node::config::NodeConfig;
 use ember_node::proto::*;
+
+#[path = "common/term_server.rs"]
+mod term_server;
+use term_server::TermServer;
 
 const TOKEN: &str = "test-token";
 const SESSIONS: usize = 50;
@@ -26,7 +29,7 @@ const IDLE_WAIT: Duration = Duration::from_secs(15);
 struct Fixture {
     client: NodeClient,
     root: PathBuf,
-    _node: Node,
+    _node: TermServer,
     _dir: tempfile::TempDir,
 }
 
@@ -41,11 +44,8 @@ async fn start() -> Fixture {
         pty_keeper: Some(PathBuf::from(env!("CARGO_BIN_EXE_ember-node"))),
         ..NodeConfig::new(TOKEN, vec![root.clone()])
     };
-    let node = Node::new(cfg).unwrap();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base_url = format!("http://{}", listener.local_addr().unwrap());
-    tokio::spawn(api::serve(listener, node.clone()));
-    Fixture { client: NodeClient::new(&base_url, TOKEN).unwrap(), root, _node: node, _dir: dir }
+    let (client, node) = TermServer::start(cfg, TOKEN).await;
+    Fixture { client, root, _node: node, _dir: dir }
 }
 
 fn req(root: &Path) -> TermCreateRequest {
@@ -92,13 +92,12 @@ fn rss_bytes() -> u64 {
 async fn fifty_idle_sessions_cost_under_2_mb_each() {
     let f = start().await;
     // Warm up allocators, the thread pool and the first shell so the delta is per session.
-    let warm = f.client.term_create(&req(&f.root)).await.unwrap().term;
+    f.client.term_create(&req(&f.root)).await.unwrap();
     tokio::time::sleep(Duration::from_secs(1)).await;
     let before = rss_bytes();
 
-    let mut ids = vec![warm.id];
     for _ in 0..SESSIONS {
-        ids.push(f.client.term_create(&req(&f.root)).await.unwrap().term.id);
+        f.client.term_create(&req(&f.root)).await.unwrap();
     }
     // Let every shell print its prompt, then go idle so `Screen::compact` runs.
     tokio::time::sleep(IDLE_WAIT).await;
@@ -107,9 +106,6 @@ async fn fifty_idle_sessions_cost_under_2_mb_each() {
     let delta = after.saturating_sub(before);
     let per = delta / SESSIONS as u64;
     println!("NFR-P1 memory: {SESSIONS} idle sessions, RSS delta {delta} B, {per} B per session (limit {BYTES_PER_SESSION_LIMIT} B)");
-    for id in ids {
-        let _ = f.client.term_kill(&id, None).await;
-    }
     assert!(per <= BYTES_PER_SESSION_LIMIT, "{per} B per idle session exceeds 2 MB");
 }
 
@@ -148,6 +144,5 @@ async fn attach_to_snapshot_is_under_500_ms_on_loopback() {
         b.tx.detach().await.unwrap();
     }
     println!("NFR-P1 attach (loopback only, not a LAN figure): worst of 10 = {worst:?} (limit {ATTACH_LIMIT:?})");
-    let _ = f.client.term_kill(&t.id, None).await;
     assert!(worst <= ATTACH_LIMIT, "attach to snapshot took {worst:?} on loopback");
 }

@@ -3634,6 +3634,14 @@ pub fn StatusView(
         }) };
 }
 
+fn view_name(v: SessionView) -> &'static str {
+    match v {
+        SessionView::Multi => super::a11y::VIEW_MULTI,
+        SessionView::Single => super::a11y::VIEW_SINGLE,
+        SessionView::Status => super::a11y::VIEW_STATUS,
+    }
+}
+
 fn view_icon_svg(v: SessionView) -> &'static str {
     match v {
         SessionView::Multi => ICON_GRID_SVG,
@@ -3675,7 +3683,8 @@ fn ViewSeg(
                 if full_width {
                     item_m = item_m.weight(1.0);
                 }
-                Clickable(
+                NamedClickable(
+                    view_name(v),
                     item_m,
                     Alignment::Center,
                     move || cb(v),
@@ -5372,6 +5381,25 @@ mod tests {
     fn host_ide_chevron_in_the_pill() {
         let open = remember(|| mutable_state_of(false));
         IdeChevron(open.clone(), true);
+    }
+
+    #[Composable]
+    fn host_view_seg_compact() {
+        ViewSeg(SessionView::Multi, true, true, |_| {});
+    }
+
+    #[test]
+    fn fr_l18_compact_view_buttons_have_an_accessible_name() {
+        let _guard = crate::services::test_guard();
+        let sent = PaneTabSent::of(host_view_seg_compact);
+        for v in SessionView::ALL {
+            assert!(!view_name(v).is_empty());
+            assert!(
+                sent.modifiers.iter().any(|(_, m)| m.contains("Semantics") && m.contains(view_name(v)) && m.contains("Button")),
+                "no named button for {v:?}: {:?}",
+                sent.modifiers
+            );
+        }
     }
 
     #[Composable]

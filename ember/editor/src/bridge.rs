@@ -54,11 +54,20 @@ pub struct DocumentWidgetState {
     /// Line ending, encoding and language for the status bar (FR-L31.7); `None` until the session
     /// reports it.
     pub format: Option<crate::text_format::DocumentFormat>,
+    /// The document's own indentation options; `None` until the session reports them, when the
+    /// document is indented with spaces `tab_width` wide.
+    pub indentation: Option<crate::indentation::Indentation>,
     /// The foldable regions of the document (FR-E6).
     pub folds: Vec<FoldRegion>,
 }
 
 impl DocumentWidgetState {
+    /// The document's indentation options: the session's report, or before it a document indented
+    /// with spaces `tab_width` wide.
+    pub fn effective_indentation(&self) -> crate::indentation::Indentation {
+        self.indentation.unwrap_or_else(|| crate::indentation::Indentation::new(self.tab_width.max(1), true))
+    }
+
     /// The widget counts from 0 again: the session's current version becomes the base.
     fn restart_widget_count(&mut self) {
         self.widget_base += self.widget_last;
@@ -252,6 +261,7 @@ impl WidgetBridge {
                         save_error: None,
                         syntax: SyntaxRuns::default(),
                         format: None,
+                        indentation: None,
                         folds,
                     },
                 );
@@ -394,6 +404,13 @@ impl WidgetBridge {
             SessionUpdate::Format { uri, format } => {
                 if let Some(doc) = self.docs.get_mut(&uri.key()) {
                     doc.format = Some(format);
+                }
+                BridgeAction::None
+            }
+            SessionUpdate::Indentation { uri, indentation } => {
+                if let Some(doc) = self.docs.get_mut(&uri.key()) {
+                    doc.tab_width = indentation.tab_size;
+                    doc.indentation = Some(indentation);
                 }
                 BridgeAction::None
             }

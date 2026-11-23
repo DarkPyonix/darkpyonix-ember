@@ -24,6 +24,7 @@ use ember_editor_conn::exthost::{
 use ember_editor_conn::uri::UriComponents;
 
 use crate::coords::{end_of_insert, WidgetPos, WidgetRange};
+use crate::indentation::Indentation;
 use crate::text_format::{decode_as, decode_reload, encode_as, Encoding, Eol};
 
 const BOM: &str = "\u{feff}";
@@ -93,8 +94,7 @@ pub struct OpenDocument {
     /// Where the user's cursor probably is: the end of the last change. FR-38 has no cursor event,
     /// so inline completions use this.
     cursor: Option<WidgetPos>,
-    tab_size: u32,
-    insert_spaces: bool,
+    indentation: Indentation,
 }
 
 impl OpenDocument {
@@ -129,8 +129,7 @@ impl OpenDocument {
             encoding,
             disk_encoding: encoding,
             cursor: None,
-            tab_size,
-            insert_spaces,
+            indentation: Indentation::new(tab_size, insert_spaces),
         };
         let calls = doc.add_calls();
         (doc, calls)
@@ -140,7 +139,7 @@ impl OpenDocument {
         let editor = TextEditorAddData {
             id: self.editor_id.clone(),
             document_uri: self.uri.clone(),
-            options: exthost::default_editor_options(self.tab_size, self.insert_spaces),
+            options: exthost::editor_options(self.indentation.tab_size, self.indentation.indent_size, self.indentation.insert_spaces),
             selections: vec![Selection {
                 selection_start_line_number: 1,
                 selection_start_column: 1,
@@ -216,6 +215,23 @@ impl OpenDocument {
     /// The document's line ending (FR-L31.7).
     pub fn eol(&self) -> Eol {
         Eol::from_sequence(self.mirror.eol())
+    }
+
+    /// The document's own indentation options: what it opened with, or what the person chose since.
+    pub fn indentation(&self) -> Indentation {
+        self.indentation
+    }
+
+    /// Take other indentation options (Code-OSS `model.updateOptions`); returns the
+    /// `$acceptEditorPropertiesChanged` call that tells the extension host, or `None` when nothing
+    /// changed. The text is not touched.
+    pub fn set_indentation(&mut self, indentation: Indentation) -> Option<Call> {
+        if self.indentation == indentation {
+            return None;
+        }
+        self.indentation = indentation;
+        let options = exthost::editor_options(indentation.tab_size, indentation.indent_size, indentation.insert_spaces);
+        Some(exthost::accept_editor_options_changed(&self.editor_id, options))
     }
 
     /// The document's file encoding (FR-L31.7).

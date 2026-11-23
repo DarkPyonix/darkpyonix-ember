@@ -439,6 +439,25 @@ pub fn ConversationActionsMenu(id: &str) {
     );
 }
 
+/// The computer menu's rows. The session's current computer is checked, as the IDE menu checks
+/// its current IDE. Before the session's computer is known (and in the demo, which never asks),
+/// the current one is the local computer, the same fallback the trigger label uses.
+pub(crate) fn computer_pop_rows(computers: &[ember_client::state::Computer], current_id: Option<&str>) -> Vec<PopRow> {
+    if computers.is_empty() {
+        return vec![PopRow { title: "등록된 컴퓨터가 없습니다".into(), ..Default::default() }];
+    }
+    let current = current_id.unwrap_or("local");
+    computers
+        .iter()
+        .map(|c| PopRow {
+            title: c.name.clone(),
+            description: Some(ko::reachability_label(c.reachability).to_string()),
+            chosen: c.id == current,
+            ..Default::default()
+        })
+        .collect()
+}
+
 /// Anchored popover menu for switching the session's computer.
 /// Uses a compact 32 dp icon trigger in the single-session topbar and a labelled button in
 /// standalone conversation headers.
@@ -495,22 +514,7 @@ pub fn SessionComputerMenu(id: &str, compact_trigger: bool) {
         .map(|c| c.computer.name.clone())
         .unwrap_or_else(|| "이 컴퓨터".into());
 
-    let comp_rows: Vec<PopRow> = if computers.is_empty() {
-        vec![PopRow {
-            title: "등록된 컴퓨터가 없습니다".into(),
-            ..Default::default()
-        }]
-    } else {
-        computers
-            .iter()
-            .map(|c| PopRow {
-                title: c.name.clone(),
-                description: Some(ko::reachability_label(c.reachability).to_string()),
-                chosen: current_computer_id.as_deref() == Some(c.id.as_str()),
-                ..Default::default()
-            })
-            .collect()
-    };
+    let comp_rows = computer_pop_rows(&computers, current_computer_id.as_deref());
 
     let open = computer_menu.get();
     let dismiss = computer_menu;
@@ -2689,6 +2693,15 @@ mod tests {
             assert!(mods.contains(&surface), "root box {mods:?} lacks {surface}");
             assert!(mods.iter().any(|m| m == "FillMaxWidth") && mods.iter().any(|m| m == "FillMaxHeight"), "{mods:?}");
         }
+    }
+
+    #[test]
+    fn fr_l10_4_computer_menu_checks_only_the_current_computer() {
+        let cs = crate::demo::computers();
+        let chosen = |rows: &[PopRow]| rows.iter().map(|r| r.chosen).collect::<Vec<_>>();
+        assert_eq!(chosen(&computer_pop_rows(&cs, Some("studio"))), [false, true]);
+        assert_eq!(chosen(&computer_pop_rows(&cs, Some("local"))), [true, false]);
+        assert_eq!(chosen(&computer_pop_rows(&cs, None)), [true, false], "unknown falls back to the local computer");
     }
 
     #[test]

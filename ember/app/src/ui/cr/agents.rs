@@ -2550,7 +2550,7 @@ fn ProfileCard(
                     },
                 );
 
-                if has_proxy {
+                if is_proxy && has_proxy {
                     let ed_purl = ed.clone();
                     { use ::compose_rust::ui::Row; Row!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), {
                         { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), {
@@ -4111,10 +4111,104 @@ mod tests {
     // ---- additions -----------------------------------------------------------------------
 
     #[test]
-    fn fr_u6_only_claude_code_takes_a_proxy_for_now() {
+    fn fr_u6_verified_harnesses_support_model_proxy() {
         assert!(proxy_supported(AgentHarness::ClaudeCode));
-        assert!(!proxy_supported(AgentHarness::Codex));
-        assert!(!proxy_supported(AgentHarness::Antigravity));
+        assert!(proxy_supported(AgentHarness::Codex));
+        assert!(proxy_supported(AgentHarness::Antigravity));
+        assert!(!proxy_supported(AgentHarness::Gemini));
+        assert!(!proxy_supported(AgentHarness::Acp));
+    }
+
+    #[test]
+    fn fr_u6_profile_card_enables_proxy_switch_for_supported_harnesses() {
+        use compose_rust::protocol::{decode_batch, Mutation};
+        let render_card = |h: AgentHarness| -> Vec<Node> {
+            let mut host = Host::new(move || {
+                Box::new(Recomposer::new(move || {
+                    let store = remember(|| mutable_state_of(LocalStore::default()));
+                    let p = profile_of("pf-1", h);
+                    let live = AgentsLive {
+                        accounts: vec![AccountInfo {
+                            id: "a".into(),
+                            label: "기본 계정".into(),
+                            harness: h,
+                            left_percent: None,
+                            limited: false,
+                        }],
+                        ..AgentsLive::default()
+                    };
+                    ProfileCard(p.clone(), vec![p], true, &live, &store, false);
+                }))
+            });
+            let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+            let mut nodes: Vec<Node> = Vec::new();
+            for m in batch.iter() {
+                match m {
+                    Mutation::Create { node_id, widget } => nodes.push(Node {
+                        id: *node_id,
+                        widget: format!("{widget:?}"),
+                        parent: None,
+                        mods: Vec::new(),
+                        props: Vec::new(),
+                    }),
+                    Mutation::Insert { parent_id, node_id, .. } => {
+                        if let Some(n) = nodes.iter_mut().find(|n| n.id == *node_id) {
+                            n.parent = Some(*parent_id);
+                        }
+                    }
+                    Mutation::SetModifier { node_id, modifier, .. } => {
+                        if let Some(n) = nodes.iter_mut().find(|n| n.id == *node_id) {
+                            n.mods.push(format!("{modifier:?}"));
+                        }
+                    }
+                    Mutation::SetProp { node_id, property, value } => {
+                        if let Some(n) = nodes.iter_mut().find(|n| n.id == *node_id) {
+                            n.props.push(format!("{property:?}={value:?}"));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            nodes
+        };
+
+        let proxy_name = format!("AccessibleName=String({:?})", "모델 프록시");
+        let unavailable_text = format!("Text=String({UNAVAILABLE:?})");
+
+        for h in [
+            AgentHarness::ClaudeCode,
+            AgentHarness::Codex,
+            AgentHarness::Antigravity,
+        ] {
+            let nodes = render_card(h);
+            let switch = nodes
+                .iter()
+                .find(|n| n.widget == "Switch" && n.props.contains(&proxy_name));
+            let switch = switch.unwrap_or_else(|| panic!("expected enabled proxy switch for {h:?}"));
+            assert!(
+                !switch.props.iter().any(|p| p == "Enabled=Bool(false)"),
+                "proxy switch should be enabled for {h:?}: {:?}",
+                switch.props
+            );
+            assert!(
+                !nodes.iter().any(|n| n.props.contains(&unavailable_text)),
+                "supported harness {h:?} should not show unavailable pill"
+            );
+        }
+
+        for h in [AgentHarness::Gemini, AgentHarness::Acp] {
+            let nodes = render_card(h);
+            assert!(
+                !nodes
+                    .iter()
+                    .any(|n| n.widget == "Switch" && n.props.contains(&proxy_name)),
+                "unsupported harness {h:?} should not render a proxy switch"
+            );
+            assert!(
+                nodes.iter().any(|n| n.props.contains(&unavailable_text)),
+                "unsupported harness {h:?} should show unavailable pill"
+            );
+        }
     }
 
     #[test]

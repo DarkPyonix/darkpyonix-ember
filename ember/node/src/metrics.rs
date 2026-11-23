@@ -2,9 +2,9 @@
 //!
 //! One call to [`sample`] returns the CPU per core, memory, disks, network counters,
 //! temperatures and the busiest processes, read through the `sysinfo` crate (macOS and Linux).
-//! A metric the OS does not expose is `None` or an empty list, never an estimate. The GPU is
-//! reported empty with a reason: no GPU API is verified on this node yet, and the node does
-//! not shell out to a tool on a guess.
+//! A metric the OS does not expose is `None` or an empty list. Linux reads the AMDGPU driver's
+//! sysfs counters when available. GPU and temperature reads run only while serving a sample
+//! request, which the monitor sends while it is open.
 //!
 //! The sampler keeps one `sysinfo` state between calls, because CPU percent is the change
 //! since the previous refresh. The first call primes it and waits the minimum interval.
@@ -161,7 +161,51 @@ pub fn rank_processes(mut all: Vec<ProcessMetrics>, top: usize) -> Vec<ProcessMe
 
 /// The GPU part of a sample.
 pub fn gpu_report() -> GpuReport {
-    GpuReport { devices: Vec::new(), reason: Some(GPU_UNAVAILABLE.into()) }
+    #[cfg(target_os = "linux")]
+    {
+        gpu_report_at(std::path::Path::new("/sys/class/drm"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        GpuReport { devices: Vec::new(), reason: Some(GPU_UNAVAILABLE.into()) }
+    }
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn gpu_report_at(drm: &std::path::Path) -> GpuReport {
+    let mut devices: Vec<_> = std::fs::read_dir(drm)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            // A connector such as card0-HDMI-A-1 belongs to a card, but is not a GPU.
+            let index = name.strip_prefix("card")?.parse::<u32>().ok()?;
+            let device = entry.path().join("device");
+            let read = |name| std::fs::read_to_string(device.join(name)).ok();
+            if read("vendor")?.trim() != "0x1002" {
+                return None;
+            }
+            let counter = |name| read(name)?.trim().parse::<u64>().ok();
+            // The driver documents this as a percent, and the two VRAM counters as bytes.
+            let utilization_percent = counter("gpu_busy_percent").filter(|n| *n <= 100).map(|n| n as f32);
+            let memory_total_bytes = counter("mem_info_vram_total");
+            let memory_used_bytes = counter("mem_info_vram_used");
+            if utilization_percent.is_none() && memory_total_bytes.is_none() && memory_used_bytes.is_none() {
+                return None;
+            }
+            Some((index, GpuMetrics {
+                name: format!("AMD GPU ({name})"),
+                utilization_percent,
+                memory_total_bytes,
+                memory_used_bytes,
+            }))
+        })
+        .collect();
+    devices.sort_by_key(|(index, _)| *index);
+    let reason = devices.is_empty().then(|| "no readable AMDGPU counters on this Linux node".into());
+    GpuReport { devices: devices.into_iter().map(|(_, device)| device).collect(), reason }
 }
 
 /// Why power is empty, `None` when some process has a value.
@@ -279,6 +323,46 @@ pub fn sample(top: usize) -> MetricsSample {
 mod tests {
     use super::*;
 
+    #[test]
+    fn fr_x7_a_metrics_sample_reads_current_amdgpu_counters() {
+        let drm = tempfile::tempdir().unwrap();
+        let device = drm.path().join("card1/device");
+        std::fs::create_dir_all(&device).unwrap();
+        std::fs::write(device.join("vendor"), "0x1002\n").unwrap();
+        std::fs::write(device.join("gpu_busy_percent"), "41\n").unwrap();
+        std::fs::write(device.join("mem_info_vram_total"), "8388608\n").unwrap();
+        std::fs::write(device.join("mem_info_vram_used"), "2097152\n").unwrap();
+
+        let report = gpu_report_at(drm.path());
+        assert!(report.reason.is_none());
+        assert_eq!(report.devices.len(), 1);
+        let gpu = &report.devices[0];
+        assert_eq!(gpu.utilization_percent, Some(41.0));
+        assert_eq!(gpu.memory_total_bytes, Some(8 * 1024 * 1024));
+        assert_eq!(gpu.memory_used_bytes, Some(2 * 1024 * 1024));
+
+        std::fs::write(device.join("gpu_busy_percent"), "55\n").unwrap();
+        assert_eq!(gpu_report_at(drm.path()).devices[0].utilization_percent, Some(55.0));
+    }
+
+    #[test]
+    fn fr_x7_unavailable_gpu_counters_remain_unknown() {
+        let drm = tempfile::tempdir().unwrap();
+        let device = drm.path().join("card0/device");
+        std::fs::create_dir_all(&device).unwrap();
+        std::fs::write(device.join("vendor"), "0x1002").unwrap();
+        std::fs::write(device.join("gpu_busy_percent"), "101").unwrap();
+        assert!(gpu_report_at(drm.path()).devices.is_empty());
+        assert!(gpu_report_at(drm.path()).reason.is_some());
+
+        std::fs::write(device.join("mem_info_vram_total"), "4096").unwrap();
+        let report = gpu_report_at(drm.path());
+        assert_eq!(report.devices.len(), 1);
+        assert_eq!(report.devices[0].utilization_percent, None);
+        assert_eq!(report.devices[0].memory_total_bytes, Some(4096));
+        assert_eq!(report.devices[0].memory_used_bytes, None);
+    }
+
     fn p(pid: u32, cpu: f32, mem: u64) -> ProcessMetrics {
         ProcessMetrics { pid, name: format!("p{pid}"), cpu_percent: cpu, memory_bytes: mem, power_watts: None }
     }
@@ -305,7 +389,8 @@ mod tests {
 
     #[test]
     fn fr_x7_gpu_is_empty_with_a_reason_never_invented() {
-        let g = gpu_report();
+        let empty_drm = tempfile::tempdir().unwrap();
+        let g = gpu_report_at(empty_drm.path());
         assert!(g.devices.is_empty());
         assert!(g.reason.as_deref().is_some_and(|r| !r.is_empty()));
     }

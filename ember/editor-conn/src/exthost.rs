@@ -46,6 +46,7 @@ pub mod proxy {
     pub const EXT_HOST_WORKSPACE: &str = "ExtHostWorkspace";
     pub const EXT_HOST_FILE_SYSTEM_INFO: &str = "ExtHostFileSystemInfo";
     pub const EXT_HOST_SEARCH: &str = "ExtHostSearch";
+    pub const EXT_HOST_STORAGE: &str = "ExtHostStorage";
 
     pub const MAIN_THREAD_COMMANDS: &str = "MainThreadCommands";
     pub const MAIN_THREAD_DIAGNOSTICS: &str = "MainThreadDiagnostics";
@@ -222,9 +223,15 @@ pub async fn initialize(conn: Connection, init: &Value) -> Result<(RpcPeer, mpsc
     Ok(RpcPeer::start(handle, events))
 }
 
-/// Ask the extension host to exit (`RemoteExtensionHost.disconnect`).
-pub fn terminate(peer_conn: &crate::connection::ConnectionHandle) {
+/// Send `MSG_TERMINATE` without closing the socket yet so the extension host can finish
+/// `deactivate()` (for example persisting storage updates) before disconnecting.
+pub fn send_terminate(peer_conn: &crate::connection::ConnectionHandle) {
     peer_conn.send(vec![MSG_TERMINATE]);
+}
+
+/// Ask the extension host to exit (`RemoteExtensionHost.disconnect`) and close the socket.
+pub fn terminate(peer_conn: &crate::connection::ConnectionHandle) {
+    send_terminate(peer_conn);
     peer_conn.close();
 }
 
@@ -506,6 +513,20 @@ pub fn accept_configuration_changed(data: &Value, keys: &[String], overrides: &[
         proxy::EXT_HOST_CONFIGURATION,
         "$acceptConfigurationChanged",
         vec![Arg::Json(data.clone()), Arg::Json(json!({ "keys": keys, "overrides": overrides }))],
+    )
+}
+
+/// `ExtHostStorageShape.$acceptValue(shared, extensionId, value)` (extHost.protocol.ts L3596).
+/// Pushes a storage update from another window/session into this extension host's memento cache.
+pub fn accept_storage_value(shared: bool, extension_id: &str, value: &str) -> Call {
+    Call::new(
+        proxy::EXT_HOST_STORAGE,
+        "$acceptValue",
+        vec![
+            Arg::Json(Value::Bool(shared)),
+            Arg::Json(Value::String(extension_id.to_owned())),
+            Arg::Json(Value::String(value.to_owned())),
+        ],
     )
 }
 

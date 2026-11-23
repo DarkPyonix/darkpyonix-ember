@@ -389,7 +389,8 @@ mod tests {
 
     #[test]
     fn fr_x7_gpu_is_empty_with_a_reason_never_invented() {
-        let g = gpu_report();
+        let empty_drm = tempfile::tempdir().unwrap();
+        let g = gpu_report_at(empty_drm.path());
         assert!(g.devices.is_empty());
         assert!(g.reason.as_deref().is_some_and(|r| !r.is_empty()));
     }

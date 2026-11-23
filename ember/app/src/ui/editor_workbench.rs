@@ -843,6 +843,8 @@ pub mod page {
             | crate::ui::palette::Payload::EncodingAction(_)
             | crate::ui::palette::Payload::SetEncoding { .. }
             | crate::ui::palette::Payload::SetLanguage(_)
+            | crate::ui::palette::Payload::IndentationSize(_)
+            | crate::ui::palette::Payload::SetIndentation(_)
             | crate::ui::palette::Payload::Cancel) => choose_format_item(s, payload),
         }
     }
@@ -868,6 +870,17 @@ pub mod page {
         let bridge = s.bridge.borrow();
         let doc = bridge.document(&uri)?;
         Some((path, doc.format.clone(), doc.dirty))
+    }
+
+    /// The active document's own indentation options and the tab size its settings give it, for the
+    /// indentation pick.
+    fn active_indentation(s: &Shared) -> Option<(ember_editor::Indentation, u32)> {
+        let path = s.tabs.read().current_path().map(str::to_owned)?;
+        let uri = s.uris.borrow().get(&path).cloned()?;
+        let current = s.bridge.borrow().document(&uri)?.effective_indentation();
+        let language = s.bridge.borrow().document(&uri).map(|d| d.language_id.clone());
+        let configured = s.host.state.lock().unwrap().settings.editor(language.as_deref()).tab_size;
+        Some((current, configured))
     }
 
     /// Open one of the status bar's pickers in the palette sheet, on the current item (FR-L31.7).
@@ -899,6 +912,8 @@ pub mod page {
             }
             Payload::SetEncoding { mode, encoding } => { s.host.send(HostCommand::SetEncoding { path, encoding, mode }); }
             Payload::SetLanguage(language_id) => { s.host.send(HostCommand::SetLanguage { path, language_id }); }
+            Payload::IndentationSize(kind) => open_picker(s, Mode::IndentationSize(kind)),
+            Payload::SetIndentation(action) => { s.host.send(HostCommand::SetIndentation { path, action }); }
             _ => {}
         }
     }
@@ -930,7 +945,12 @@ pub mod page {
             if crate::ui::editor_status::is_picker(mode) {
                 let format = active_format(s).and_then(|(_, f, _)| f);
                 let languages = s.host.state.lock().unwrap().languages.clone();
-                let items = crate::ui::editor_status::picker_items(mode, format.as_ref(), &languages);
+                let items = match active_indentation(s) {
+                    Some((current, configured)) if crate::ui::editor_status::is_indentation_pick(mode) => {
+                        crate::ui::editor_status::indentation_items(mode, current, configured)
+                    }
+                    _ => crate::ui::editor_status::picker_items(mode, format.as_ref(), &languages),
+                };
                 let ranked = rank(&effective_query, &items);
                 (std::borrow::Cow::Owned(items), ranked, None)
             } else {
@@ -950,7 +970,17 @@ pub mod page {
         let chosen = if picker {
             let format = active_format(s).and_then(|(_, f, _)| f);
             let languages = s.host.state.lock().unwrap().languages.clone();
-            crate::ui::editor_status::resolve_selection(*sel.read(), mode, format.as_ref(), &languages, shown.len())
+            match active_indentation(s) {
+                Some((current, _)) if crate::ui::editor_status::is_indentation_pick(mode) => {
+                    let row = if *sel.read() == crate::ui::editor_status::FOLLOW_CURRENT {
+                        crate::ui::editor_status::indentation_initial_selection(mode, current)
+                    } else {
+                        *sel.read()
+                    };
+                    row.min(shown.len().saturating_sub(1))
+                }
+                _ => crate::ui::editor_status::resolve_selection(*sel.read(), mode, format.as_ref(), &languages, shown.len()),
+            }
         } else {
             (*sel.read()).min(shown.len().saturating_sub(1))
         };
@@ -2443,6 +2473,7 @@ pub mod page {
                             event.stop_propagation();
                             match action {
                                 crate::ui::editor::TreeKeyOutcome::Select(p, is_dir) => {
+                                    focus_mount(&ROW_MOUNTS, &p);
                                     tree_multi_sel.set(vec![(p.clone(), is_dir)]);
                                     tree_sel.set(Some((p, is_dir)));
                                 }
@@ -2559,6 +2590,7 @@ pub mod page {
                             rsx! { div { key: "{row.path}", class, role: "treeitem", "aria-label": "{row_label}", "aria-selected": "{chosen}", tabindex: "{row_ti}", style: "{row_style}",
                                 "aria-expanded": if is_dir { "{row.open}" } else { "" },
                                 draggable: "true",
+                                onmounted: { let mount_path = row.path.clone(); move |event| remember_mount(&ROW_MOUNTS, mount_path.clone(), event.data()) },
                                 ondragstart: move |_| {
                                     tree_drag_src.set(Some(drag_path.clone()));
                                 },
@@ -2759,6 +2791,9 @@ pub mod page {
                         event.stop_propagation();
                         match action {
                             crate::ui::editor::TabKeyOutcome::Activate(path) => {
+                                if let Some(i) = crate::ui::editor::tab_key_focus(&paths_owned, &crate::ui::editor::TabKeyOutcome::Activate(path.clone())) {
+                                    focus_mount(&TAB_MOUNTS, &i.to_string());
+                                }
                                 scm.close_diff();
                                 tabs.write().activate(&path);
                                 if let Some(handle) = webview_handle_from_tab(&path) {
@@ -2831,6 +2866,7 @@ pub mod page {
                             ondoubleclick: move |_| {
                                 tabs.write().keep_open(&keep_path);
                             },
+                            onmounted: move |event| remember_mount(&TAB_MOUNTS, i.to_string(), event.data()),
                             oncontextmenu: move |event| {
                                 event.prevent_default();
                                 event.stop_propagation();
@@ -3024,6 +3060,30 @@ pub mod page {
             }
             {crate::ui::editor_language::view::symbol_crumbs(s, path)}
         } }
+    }
+
+    /// Mounted elements by name, kept to move keyboard focus to one.
+    type Mounts = std::cell::RefCell<std::collections::HashMap<String, std::rc::Rc<dioxus_elements::MountedData>>>;
+
+    thread_local! {
+        /// The project tree's rows, by path: focus follows the arrow keys' selection (#302).
+        static ROW_MOUNTS: Mounts = std::cell::RefCell::new(Default::default());
+        /// The tab strip's tabs, by position in the strip.
+        static TAB_MOUNTS: Mounts = std::cell::RefCell::new(Default::default());
+    }
+
+    /// An element's `onmounted`: kept under `name` for [`focus_mount`].
+    fn remember_mount(mounts: &'static std::thread::LocalKey<Mounts>, name: String, data: std::rc::Rc<dioxus_elements::MountedData>) {
+        mounts.with(|m| { m.borrow_mut().insert(name, data); });
+    }
+
+    /// Asks for keyboard focus on the element kept under `name`. The request is applied after the
+    /// next render, which the selection change that goes with it asks for.
+    fn focus_mount(mounts: &'static std::thread::LocalKey<Mounts>, name: &str) {
+        use futures_util::FutureExt;
+        if let Some(data) = mounts.with(|m| m.borrow().get(name).cloned()) {
+            let _ = data.set_focus(true).now_or_never();
+        }
     }
 
     thread_local! {
@@ -3595,14 +3655,14 @@ pub mod page {
         let agent = agent_status_text(agent_state);
         let dot = crate::ui::editor::agent_dot_class(agent_state);
         let position = position_text(line, col);
-        let tab_w = crate::ui::editor::tab_width_text(tab_width);
+        let tab_w = active_indentation(s).map_or_else(|| crate::ui::editor::tab_width_text(tab_width), |(i, _)| crate::ui::editor_status::indentation_text(i));
         let branch = branch.to_string();
         let has_file = current.is_some();
         // EOL, encoding and language of the active document (FR-L31.7).
         let format = active_format(s).and_then(|(_, f, _)| f);
         let crate::ui::editor_status::StatusTexts { eol: eol_t, encoding: enc_t, language: lang_t } =
             crate::ui::editor_status::status_texts(format.as_ref());
-        let (eol_s, enc_s, lang_s) = (s.clone(), s.clone(), s.clone());
+        let (eol_s, enc_s, lang_s, tab_s) = (s.clone(), s.clone(), s.clone(), s.clone());
         let goto_s = s.clone();
         let git_s = s.clone();
         // FR-L31.8: the cursor line's blame, as Code-OSS's git.blame.statusBarItem.
@@ -3621,7 +3681,8 @@ pub mod page {
                         onclick: move |_| open_picker(&eol_s, crate::ui::palette::Mode::Eol), "{eol_t}" }
                     button { class: "ed-sbi hide-md", title: "인코딩 선택", "aria-label": "인코딩 선택: {enc_t}",
                         onclick: move |_| open_picker(&enc_s, crate::ui::palette::Mode::EncodingAction), "{enc_t}" }
-                    span { class: "ed-sbi hide-md", "{tab_w}" }
+                    button { class: "ed-sbi hide-md", title: "들여쓰기 선택", "aria-label": "들여쓰기 선택: {tab_w}",
+                        onclick: move |_| open_picker(&tab_s, crate::ui::palette::Mode::Indentation), "{tab_w}" }
                     button { class: "ed-sbi hide-md", title: "언어 모드 선택", "aria-label": "언어 모드 선택: {lang_t}",
                         onclick: move |_| open_picker(&lang_s, crate::ui::palette::Mode::Language), "{lang_t}" }
                 }

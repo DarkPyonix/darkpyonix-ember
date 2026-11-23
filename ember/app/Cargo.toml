@@ -21,6 +21,8 @@ name = "ember-app"
 path = "src/main.rs"
 
 [dependencies]
+# The one-time token the shell hands its editor windows (SPEC FR-S12, #1042).
+getrandom = "0.3"
 # The UI toolkit. Base screens are written on compose-rust directly; IDE screens use
 # dioxus-compose (SPEC §L, INTENT D9). A git dependency rather than a path one so the manifest
 # does not depend on where this checkout sits relative to the toolkit checkout (a worktree is
@@ -34,7 +36,8 @@ compose-rust = { git = "https://github.com/DarkPyonix/compose-rust", rev = "e52f
 dioxus-compose = { git = "https://github.com/DarkPyonix/dioxus-compose", rev = "5b6f707c531246d71cc3a34cd41662b1375b1513" }
 
 # Everything below the UI: sync engine, state reducer, transcript, cache.
-ember-client = { path = "../client" }
+# `tls`: the push and file watch sockets reach an https server over wss (FR-S11, #1048).
+ember-client = { path = "../client", features = ["tls"] }
 ember-editor = { path = "../editor" }
 ember-editor-conn = { path = "../editor-conn" }
 # The peer-to-peer transport, so the app can join a server as a device (SPEC FR-N9, #856): its

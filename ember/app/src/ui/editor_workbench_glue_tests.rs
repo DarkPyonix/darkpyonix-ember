@@ -66,6 +66,8 @@ fn describe(command: &HostCommand) -> String {
             format!("save {} generation {generation} version {version}", uri.path)
         }
         HostCommand::Widget(uri, _, _) => format!("widget event {}", uri.path),
+        HostCommand::Restore { path, text } => format!("restore {path} text {text:?}"),
+        HostCommand::RestoreWithBase { path, text, base } => format!("restore {path} text {text:?} base {base:?}"),
         HostCommand::SetIndentation { path, action } => format!("set indentation {path} {action:?}"),
         HostCommand::CreateFile { parent, name } => format!("create file {parent} {name}"),
         HostCommand::Rename { path, new_name } => format!("rename {path} {new_name}"),
@@ -1608,4 +1610,60 @@ fn fr_l31_6_a3_window_a_remount_is_reported_once_and_queued_edits_use_the_widget
     assert!(matches!(typed, Some((_, 7, WidgetEvent::CodeChanged { version: 2, .. }))));
     assert_eq!(shared.bridge.borrow().document(&uri()).unwrap().text, "xzfn main() {}\n");
     super::forget_mount();
+}
+
+const OTHER: &str = "/w/b.rs";
+
+fn other_opened(generation: u64, text: &str) -> SessionUpdate {
+    SessionUpdate::Opened { uri: UriComponents::remote("test", OTHER), generation, text: text.into(), language_id: "rust".into(), tab_width: 4 }
+}
+
+impl Page {
+    /// a.rs (with one character typed, so it has unsaved edits) and b.rs (untouched) are open in tabs.
+    fn open_dirty_a_clean_b() -> Page {
+        let mut page = Page::open_two_files();
+        let shared = super::shared();
+        { let mut tabs = shared.tabs; let mut tabs = tabs.write(); tabs.open(FILE); tabs.open(OTHER); tabs.activate(FILE); }
+        page.deliver(opened(7));
+        page.deliver(other_opened(8, "fn other() {}\n"));
+        shared.bridge.borrow_mut().on_code_changed(&uri(), 1, ember_editor::WidgetRange::empty(ember_editor::WidgetPos::new(0, 0)), "x".into()).expect("a.rs is open");
+        page.sent();
+        page
+    }
+
+    /// The window's connection came back: the host counts one more reconnect.
+    fn reconnect(&mut self) {
+        self.host().state.lock().unwrap().reconnects += 1;
+        self.redraw();
+    }
+}
+
+// FR-L31.6 (A2, window half): after a reconnect the tab with unsaved edits is put back with the file
+// text it was based on, and the tab without is only opened again, so it shows the file as it is now.
+#[test]
+fn fr_l31_6_a2_window_a_reconnect_restores_only_the_dirty_tab_and_passes_its_disk_base() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_dirty_a_clean_b();
+    page.reconnect();
+    let sent = page.sent();
+    assert!(sent.contains(&format!("restore {FILE} text \"xfn main() {{}}\\n\" base Some(\"fn main() {{}}\\n\")")), "{sent:?}");
+    assert!(sent.contains(&format!("open {OTHER}")), "{sent:?}");
+    assert!(sent.iter().all(|c| !c.starts_with(&format!("restore {OTHER}"))), "a clean tab is not restored: {sent:?}");
+}
+
+// FR-L31.6 (A2, window half): a dirty tab over a file that changed while the connection was lost shows
+// the conflict bar, and a clean tab shows the new file text.
+#[test]
+fn fr_l31_6_a2_window_after_a_reconnect_a_dirty_tab_shows_the_conflict_and_a_clean_tab_the_new_disk_text() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_dirty_a_clean_b();
+    page.reconnect();
+    // The new session answers: b.rs as the file is now, and a.rs raised as changed under its edits.
+    page.deliver(other_opened(9, "fn other_new() {}\n"));
+    page.deliver(SessionUpdate::ExternalChange { uri: uri(), change: ember_editor::ExternalChange::ChangedWhileDirty });
+    let shared = super::shared();
+    let b = shared.bridge.borrow().document(&UriComponents::remote("test", OTHER)).cloned().expect("b.rs is open");
+    assert_eq!(b.text, "fn other_new() {}\n");
+    assert!(!b.dirty);
+    assert!(page.text().contains("a.rs 파일이 디스크에서 바뀌었습니다"), "{}", page.text());
 }

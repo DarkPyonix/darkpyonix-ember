@@ -59,6 +59,8 @@ pub enum HostCommand {
     Resync(UriComponents),
     /// Show `text` as the buffer of `path`, opening it if needed (FR-L31.6, after a reconnect).
     Restore { path: String, text: String },
+    /// [`HostCommand::Restore`] with the file text the buffer was based on: a file that changed since raises the conflict.
+    RestoreWithBase { path: String, text: String, base: Option<String> },
     /// Take the disk version of an open file even with unsaved edits (디스크 버전으로 되돌리기).
     Reload(String),
     /// Read the disk version of `path` for the compare view; the answer is [`HostState::compare`].
@@ -687,6 +689,7 @@ impl EditorHost {
                             Some(HostCommand::SetLanguage { path, language_id }) => { let _ = session.set_language(session.document_uri(&path), language_id); }
                             Some(HostCommand::SetIndentation { path, action }) => { let _ = session.set_indentation(session.document_uri(&path), action); }
                             Some(HostCommand::Restore { path, text }) => { let _ = session.restore(session.document_uri(&path), text); }
+                            Some(HostCommand::RestoreWithBase { path, text, base }) => { let _ = session.restore_with_base(session.document_uri(&path), text, base); }
                             Some(HostCommand::Reload(path)) => { let _ = session.reload(session.document_uri(&path)); }
                             Some(HostCommand::CompareWithDisk(path)) => {
                                 let result = session.read_file_text(&path).await.map_err(|e| e.to_string());

@@ -64,6 +64,49 @@ use super::theme::*;
 pub const ICON_SHIELD_SVG: &str = include_str!("../../../assets/nav/shield.svg");
 pub const ICON_TERMINAL_SVG: &str = include_str!("../../../assets/nav/terminal.svg");
 pub const ICON_SEND_SVG: &str = include_str!("../../../assets/nav/send.svg");
+/// The More menu's row icons, from the mockup's icon set (`icons.js` `star`, `arrow-up-tray`,
+/// `zap`; the fork row uses the nav `git` icon).
+const ICON_STAR_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11.48 3.499a.562.562 0 0 1 1.04 0l2.125 5.111a.563.563 0 0 0 .475.345l5.518.442c.499.04.701.663.321.988l-4.204 3.602a.563.563 0 0 0-.182.557l1.285 5.385a.562.562 0 0 1-.84.61l-4.725-2.885a.563.563 0 0 0-.586 0L6.982 20.54a.562.562 0 0 1-.84-.61l1.285-5.386a.562.562 0 0 0-.182-.557l-4.204-3.602a.562.562 0 0 1 .321-.988l5.518-.442a.563.563 0 0 0 .475-.345L11.48 3.5Z"/></svg>"#;
+const ICON_EXPORT_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5"/></svg>"#;
+const ICON_ZAP_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m3.75 13.5 10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75Z"/></svg>"#;
+const ICON_FORK_SVG: &str = include_str!("../../../assets/nav/git.svg");
+
+/// The rows of the conversation's More menu (대화 메뉴, #888): each has an icon and a line that
+/// says what it does, as the computer and IDE menus' rows do, so the rows are the menu's 55 dp
+/// drop rows with the title and description centred in them.
+pub(crate) fn more_pop_rows(pinned: bool, approve_all: bool) -> Vec<PopRow> {
+    vec![
+        PopRow {
+            icon: Some(ICON_STAR_SVG),
+            title: if pinned { "고정 해제" } else { "고정" }.into(),
+            description: Some(if pinned { "고정 목록에서 이 대화를 뺍니다" } else { "이 대화를 고정 목록에 둡니다" }.into()),
+            chosen: pinned,
+            ..Default::default()
+        },
+        PopRow {
+            icon: Some(ICON_EXPORT_SVG),
+            title: "내보내기".into(),
+            description: Some("대화를 JSON 파일로 데이터 폴더에 저장합니다".into()),
+            ..Default::default()
+        },
+        PopRow {
+            icon: Some(ICON_FORK_SVG),
+            title: ko::FORK_MENU_LABEL.into(),
+            description: Some("마지막으로 끝난 턴까지를 새 세션으로 엽니다".into()),
+            ..Default::default()
+        },
+        PopRow {
+            icon: Some(ICON_ZAP_SVG),
+            title: ko::approve_all_menu_label(approve_all).into(),
+            description: Some(
+                if approve_all { "도구를 실행하기 전에 다시 확인을 받습니다" } else { "이 세션의 도구 실행을 묻지 않고 승인합니다" }.into(),
+            ),
+            chosen: approve_all,
+            danger: !approve_all,
+            ..Default::default()
+        },
+    ]
+}
 
 /// The height of a transcript summary row (mockup `.cmd`: `padding:3px 0` around a 24 dp pill).
 pub const CMD_ROW_H: f32 = 30.0;
@@ -359,27 +402,7 @@ pub fn ConversationActionsMenu(id: &str) {
         return;
     };
 
-    let more_rows = vec![
-        PopRow {
-            title: if pinned { "고정 해제" } else { "고정" }.into(),
-            chosen: pinned,
-            ..Default::default()
-        },
-        PopRow {
-            title: "내보내기".into(),
-            ..Default::default()
-        },
-        PopRow {
-            title: ko::FORK_MENU_LABEL.into(),
-            ..Default::default()
-        },
-        PopRow {
-            title: ko::approve_all_menu_label(approve_all).into(),
-            chosen: approve_all,
-            danger: !approve_all,
-            ..Default::default()
-        },
-    ];
+    let more_rows = more_pop_rows(pinned, approve_all);
     let open = actions_menu.get();
     let dismiss = actions_menu;
     let toggle = actions_menu;
@@ -2702,6 +2725,23 @@ mod tests {
         assert_eq!(chosen(&computer_pop_rows(&cs, Some("studio"))), [false, true]);
         assert_eq!(chosen(&computer_pop_rows(&cs, Some("local"))), [true, false]);
         assert_eq!(chosen(&computer_pop_rows(&cs, None)), [true, false], "unknown falls back to the local computer");
+    }
+
+    /// #888: the More menu's rows carry an icon and a description like the other header menus,
+    /// so a row is not a lone title at the top of a 55 dp row.
+    #[test]
+    fn fr_l10_4_more_menu_rows_have_icon_and_description() {
+        for (pinned, approve_all) in [(false, false), (true, true)] {
+            let rows = more_pop_rows(pinned, approve_all);
+            assert_eq!(rows.len(), 4);
+            for r in &rows {
+                assert!(r.icon.is_some(), "{:?} has no icon", r.title);
+                assert!(r.description.as_deref().is_some_and(|d| !d.trim().is_empty()), "{:?} has no description", r.title);
+            }
+            assert_eq!(rows[0].chosen, pinned);
+            assert_eq!(rows[3].chosen, approve_all);
+            assert_eq!(rows[3].danger, !approve_all);
+        }
     }
 
     #[test]

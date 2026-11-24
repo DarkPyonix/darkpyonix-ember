@@ -223,6 +223,10 @@ pub struct IdeComputer {
     pub name: String,
     #[serde(default)]
     pub local: bool,
+    /// The registered computer's display name beside its id `name`, when the server routes the
+    /// IDE through its computer registry (`server/src/api/ide.rs` `computer_name`).
+    #[serde(default)]
+    pub computer_name: Option<String>,
 }
 
 /// `GET /api/sessions/{id}/ide`.
@@ -316,7 +320,7 @@ mod editor_connection_tests {
             session: "s".into(),
             project: "p".into(),
             folder: "/w".into(),
-            computer: IdeComputer { name: "c".into(), local: true },
+            computer: IdeComputer { name: "c".into(), local: true, computer_name: None },
             targets: vec![IdeTarget {
                 kind: "ember".into(),
                 available: true,

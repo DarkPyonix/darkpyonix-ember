@@ -102,6 +102,7 @@ pub fn ide_launch_with(
         computer: IdeComputer {
             name: "이 컴퓨터".to_string(),
             local: true,
+            computer_name: None,
         },
         targets: vec![
             target("ember", true),

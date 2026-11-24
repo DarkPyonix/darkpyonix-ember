@@ -975,6 +975,18 @@ pub fn ide_menu_folder(cwd: &str) -> String {
 /// the session's computer and its folder. Without a computer name (not read yet) the folder
 /// alone; without a folder nothing. Review r8 found the raw folder
 /// (`/Volumes/macMini/darkpyonix/darkpyonix-ember/.scrat...`) there.
+/// The computer the IDE chooser's head names: the computer the server routes this session's IDE
+/// to (the IDE answer's `computer_name`, e.g. a node), once that answer has arrived; before that,
+/// the session's own computer. A session with no computer of its own runs on the server, but its
+/// IDE may go to the default computer, so the session's name ("this server") would be wrong.
+pub fn ide_menu_computer(launch: Option<&Result<crate::server::IdeLaunch, String>>, session_computer: Option<&str>) -> Option<String> {
+    let routed = launch.and_then(|r| r.as_ref().ok()).and_then(|l| {
+        let c = &l.computer;
+        c.computer_name.as_deref().map(str::trim).filter(|n| !n.is_empty()).map(str::to_string)
+    });
+    routed.or_else(|| session_computer.map(str::to_string))
+}
+
 pub fn ide_menu_subtitle(computer: Option<&str>, cwd: &str) -> Option<String> {
     let folder = ide_menu_folder(cwd);
     if folder.is_empty() {
@@ -2224,11 +2236,27 @@ mod tests {
         assert_eq!(ide_menu_subtitle(None, "/Users/brew/ember").as_deref(), Some("~/ember"));
         assert_eq!(ide_menu_subtitle(Some(" "), "/Users/brew/ember").as_deref(), Some("~/ember"));
         assert_eq!(ide_menu_subtitle(Some("mac-mini"), ""), None);
+        // #1064: the head names the computer the IDE is routed to (a node), not the session's
+        // "this server", once the IDE answer is in; before it, the session's computer.
+        let launch = |computer_name: Option<&str>| {
+            Ok(crate::server::IdeLaunch {
+                session: "s".into(),
+                project: "p".into(),
+                folder: "/w/demo".into(),
+                computer: crate::server::IdeComputer { name: "3759f352".into(), local: false, computer_name: computer_name.map(str::to_string) },
+                targets: vec![],
+            })
+        };
+        assert_eq!(ide_menu_computer(Some(&launch(Some("mac-node"))), Some("this server")).as_deref(), Some("mac-node"));
+        assert_eq!(ide_menu_computer(Some(&launch(None)), Some("this server")).as_deref(), Some("this server"));
+        assert_eq!(ide_menu_computer(None, Some("this server")).as_deref(), Some("this server"));
+        assert_eq!(ide_menu_computer(Some(&Err("down".into())), None), None);
         for (file, src) in [("cr/session.rs", include_str!("cr/session.rs")), ("cr/project.rs", include_str!("cr/project.rs"))] {
             let production = src.split("#[cfg(test)]").next().unwrap();
             assert!(production.contains("sub: ide_sub.as_deref(),"), "{file}");
             assert!(!production.contains("sub: (!cwd.is_empty()).then_some(cwd.as_str()),"), "{file}: the raw folder");
             assert!(production.contains("load_session_computer("), "{file}");
+            assert!(production.contains("ide_menu_computer(ide.get().as_ref(), computer.get().as_deref())"), "{file}");
         }
     }
 

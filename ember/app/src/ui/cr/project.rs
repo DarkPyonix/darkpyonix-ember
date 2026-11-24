@@ -1048,7 +1048,7 @@ fn IdeMenu(b: &ProjectBox, ui: &SharedUi, compact: bool) {
         .and_then(|sid| services().client.read(|s| s.session(sid).map(|v| v.record.cwd.clone())))
         .unwrap_or_default();
     // `computer:~/project` (mockup `ideMenu`), not the raw folder (review r8).
-    let ide_sub = crate::ui::session::ide_menu_subtitle(computer.get().as_deref(), &cwd);
+    let ide_sub = crate::ui::session::ide_menu_subtitle(crate::ui::session::ide_menu_computer(ide.get().as_ref(), computer.get().as_deref()).as_deref(), &cwd);
     let rows = crate::ui::cr::session::ide_pop_rows(&choices, remembered);
     let rows = crate::ui::cr::session::with_ember_notice(rows, &choices, ide.get().as_ref());
     let (close, ui2, ide2) = (open.clone(), ui.clone(), ide.clone());

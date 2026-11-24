@@ -7,7 +7,8 @@
 //!   `ember-app --vscode-window` helper process ([`run_vscode_window`]): it runs the loopback
 //!   gateway of `FR-W5b` with the app's own reach (HTTP with the server token, or the transport
 //!   with the device key, so a `peer:` server works too) and spawns the standalone
-//!   `ember-ide-webview --url <gateway> --vscode` window, which holds no server credential. The
+//!   `ember-ide-webview --vscode` window (its first page in `EMBER_IDE_WEBVIEW_URL`, not argv),
+//!   which holds no server credential. The
 //!   relay reaches the DarkPyonix manager, which serves the editor server under the launch's
 //!   `path` and authorises it by the launch's ticket: the window's first page is
 //!   `<gateway>/ide/ose/?folder=<enc>&dpx-ticket=<ticket>&egw=<gateway token>`. The helper lives
@@ -57,6 +58,17 @@ impl IdeKind {
     pub fn from_key(k: &str) -> Option<IdeKind> {
         IdeKind::ALL.into_iter().find(|i| i.key() == k)
     }
+}
+
+/// The computer's effective `default_ide` (FR-W7, FR-W7b, INTENT D56): the server's editor
+/// settings, unless the node of `computer` overrides it. A project with no pick of its own launches
+/// this one; `None` opens the chooser.
+///
+/// TODO(FR-W7, D56): the editor settings record (`default_ide` on the server, inherited and
+/// overridden per node) is not built yet, so there is no default to read and this is `None`.
+pub fn effective_default_ide(project: &str, computer: Option<&str>) -> Option<IdeKind> {
+    let _ = (project, computer);
+    None
 }
 
 /// What choosing a target does.
@@ -491,11 +503,21 @@ pub fn vscode_page_url(addr: std::net::SocketAddr, gateway_token: &str, args: &V
     )
 }
 
-/// The `(executable, args)` pair the helper spawns: the IDE window on its first page
-/// ([`vscode_page_url`]) with `--vscode`, which injects tab detach and the `dragToOpenWindow`
-/// default (no proxy on the desktop, INTENT D55).
-pub fn vscode_webview_command(bin: &Path, page_url: &str) -> (PathBuf, Vec<String>) {
-    (bin.to_path_buf(), vec!["--url".to_string(), page_url.to_string(), "--vscode".to_string()])
+/// The variable `ember-ide-webview` reads its page URL from instead of `--url` (its
+/// `cli::URL_ENV`; this crate does not link the window crate, so the name is repeated here).
+pub const IDE_WEBVIEW_URL_ENV: &str = "EMBER_IDE_WEBVIEW_URL";
+
+/// What the helper spawns: the IDE window on its first page ([`vscode_page_url`]) with
+/// `--vscode`, which injects tab detach and the `dragToOpenWindow` default (no proxy on the
+/// desktop, INTENT D55). The page URL carries the manager's ticket and the gateway's token, so it
+/// goes in [`IDE_WEBVIEW_URL_ENV`], never argv (any process on the machine can read argv,
+/// #1064); the window reads it once and removes it from its environment.
+pub fn vscode_webview_command(bin: &Path, page_url: &str) -> (PathBuf, Vec<String>, Vec<(&'static str, String)>) {
+    (
+        bin.to_path_buf(),
+        vec!["--vscode".to_string()],
+        vec![(IDE_WEBVIEW_URL_ENV, page_url.to_string())],
+    )
 }
 
 /// Spawn the `--vscode-window` helper (`current_exe`) for `relay` on `server_url`. The window
@@ -564,7 +586,7 @@ pub fn open_ide_relay(relay: &IdeRelay) -> Result<(), String> {
 /// The `--vscode-window` helper (INTENT D55, `FR-W5b`): runs in this process after the app's
 /// services are prepared (the same server token and device key as the `--editor` process).
 /// Starts the gateway on the app's runtime with the app's reach for `args.server_url`, spawns
-/// `ember-ide-webview --url <gateway> --vscode` and waits for it; when the window exits, the
+/// `ember-ide-webview --vscode` with the gateway page in `EMBER_IDE_WEBVIEW_URL` and waits for it; when the window exits, the
 /// gateway stops with this process. Creates no webview itself (NFR-L2).
 pub fn run_vscode_window(args: &VsCodeWindowArgs) -> Result<(), String> {
     let s = crate::services::services();
@@ -581,11 +603,14 @@ pub fn run_vscode_window(args: &VsCodeWindowArgs) -> Result<(), String> {
     let Some(bin) = resolve_ide_webview_bin(env_override.as_deref(), current_exe.as_deref(), path_var.as_deref()) else {
         return Err(missing_ide_webview_error(env_override.as_deref(), current_exe.as_deref(), path_var.as_deref()));
     };
-    let (program, argv) = vscode_webview_command(&bin, &vscode_page_url(gateway.addr(), gateway.token(), args));
+    let (program, argv, envs) = vscode_webview_command(&bin, &vscode_page_url(gateway.addr(), gateway.token(), args));
     let mut cmd = Command::new(&program);
     cmd.args(&argv);
     for name in CREDENTIAL_ENVS {
         cmd.env_remove(name);
+    }
+    for (name, value) in envs {
+        cmd.env(name, value);
     }
     let status = cmd
         .status()
@@ -1247,9 +1272,10 @@ mod tests {
     fn fr_l7_helper_spawns_the_window_on_the_gateway_url_with_the_vscode_flag() {
         let addr: std::net::SocketAddr = "127.0.0.1:41234".parse().unwrap();
         let page = vscode_page_url(addr, "0123abcd", &window_args("/work/ember app"));
-        let (prog, args) = vscode_webview_command(Path::new("/opt/ember/ember-ide-webview"), &page);
+        let (prog, args, envs) = vscode_webview_command(Path::new("/opt/ember/ember-ide-webview"), &page);
         assert_eq!(prog, PathBuf::from("/opt/ember/ember-ide-webview"));
-        assert_eq!(args, vec!["--url", page.as_str(), "--vscode"]);
+        assert_eq!(args, vec!["--vscode"]);
+        assert_eq!(envs, vec![(IDE_WEBVIEW_URL_ENV, page.clone())]);
         assert!(!args.iter().any(|a| a.contains("/ide/relay/") || a.contains("--relay-path")));
         for name in ["EMBER_SERVER_TOKEN", EDITOR_TICKET_ENV, EDITOR_VSCODE_TICKET_ENV, VSCODE_WINDOW_TICKET_ENV] {
             assert!(CREDENTIAL_ENVS.contains(&name), "{name}");
@@ -1257,6 +1283,30 @@ mod tests {
         // The helper itself never builds a webview: this crate links no browser engine.
         let manifest = include_str!("../Cargo.toml");
         assert!(manifest.contains("ember-gateway") && !manifest.contains("wry") && !manifest.contains("tao ="));
+    }
+
+    /// SPEC FR-L7, INTENT D55 (#1064): the window's first page carries the manager's ticket
+    /// (`dpx-ticket`) and the gateway's token (`egw`), so the helper hands it to `ember-ide-webview`
+    /// in `EMBER_IDE_WEBVIEW_URL` and keeps argv free of both, and of `--url`.
+    #[test]
+    fn fr_l7_helper_spawns_the_window_with_the_url_in_the_environment() {
+        let addr: std::net::SocketAddr = "127.0.0.1:41234".parse().unwrap();
+        let page = vscode_page_url(addr, "0123abcd", &window_args("/work/repo"));
+        assert!(page.contains("dpx-ticket=tk-v1") && page.contains("egw=0123abcd"));
+        let (_, args, envs) = vscode_webview_command(Path::new("/opt/ember/ember-ide-webview"), &page);
+        for a in &args {
+            assert!(!a.contains("dpx-ticket") && !a.contains("egw") && !a.contains("tk-v1") && !a.contains("0123abcd"), "{a}");
+        }
+        assert!(!args.iter().any(|a| a == "--url"));
+        assert_eq!(IDE_WEBVIEW_URL_ENV, "EMBER_IDE_WEBVIEW_URL");
+        assert_eq!(envs.iter().find(|(n, _)| *n == IDE_WEBVIEW_URL_ENV).map(|(_, v)| v.as_str()), Some(page.as_str()));
+        // The spawn sets them: `run_vscode_window` applies every pair to the child.
+        let src = include_str!("ide.rs");
+        let run = src.split("pub fn run_vscode_window(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(run.contains("let (program, argv, envs) = vscode_webview_command(") && run.contains("cmd.env(name, value)"));
+        // The window crate reads the same name.
+        let cli = include_str!("../../ide-webview/src/cli.rs");
+        assert!(cli.contains("pub const URL_ENV: &str = \"EMBER_IDE_WEBVIEW_URL\";"));
     }
 
     /// SPEC FR-L7 (VS Code target): a relay launch already in the listing (a server between D55

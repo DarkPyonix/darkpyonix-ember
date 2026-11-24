@@ -522,6 +522,23 @@ pub fn ComposerChips(session: &str) {
         }) };
 }
 
+/// The project of session `sid` (the key of its remembered IDE, FR-W7b); empty when unknown.
+pub fn session_project(sid: &str) -> String {
+    services()
+        .client
+        .read(|s| s.session(sid).map(|v| v.record.project.clone()))
+        .unwrap_or_default()
+}
+
+/// A pick in any header's chooser becomes `project`'s remembered IDE (FR-W7b, INTENT D56), for
+/// this user on this device.
+pub fn record_ide_pick(ui: &SharedUi, project: &str, kind: IdeKind) {
+    if ui.prefs.get_untracked().picked_ide(project) != Some(kind) {
+        let project = project.to_string();
+        ui.update_prefs(move |p| p.set_ide_target(&project, kind));
+    }
+}
+
 /// What the main part of an "IDE 열기" button does (FR-L7): launch the remembered IDE directly,
 /// or open the chooser when none is remembered yet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -724,12 +741,9 @@ pub fn IdeMenu(session: &str) {
         });
     }
 
-    let remembered = ui
-        .prefs
-        .get()
-        .ide_target
-        .as_deref()
-        .and_then(IdeKind::from_key);
+    // The session's project's pick, else its computer's default (FR-W7b, D56).
+    let project = session_project(&sid);
+    let remembered = ui.prefs.get().ide_for(&project, computer.get().as_deref());
     let choices = ide_choices(remembered);
     let cur_label = remembered.map(ide_label);
 
@@ -759,6 +773,7 @@ pub fn IdeMenu(session: &str) {
         move || o_d.set(false),
         move |idx| {
             if let Some(c) = choices_c.get(idx) {
+                record_ide_pick(&ui_c, &project, c.kind);
                 launch_ide_shared(&ui_c, c.kind, launch_now.clone());
             }
         },
@@ -5399,6 +5414,37 @@ mod tests {
         ide_main_click(None, &open, |k| launched.push(k));
         assert!(launched.is_empty(), "nothing is launched without a default");
         assert!(open.get_untracked(), "an unset default opens the chooser");
+    }
+
+    /// SPEC FR-W7b, FR-L7, INTENT D56: every header (session and phone, project, conversation)
+    /// launches its session's project's pick (else the computer's default), and a pick in its
+    /// chooser is recorded for that project; nothing reads a device-wide IDE any more.
+    #[test]
+    fn fr_w7b_every_header_reads_and_records_the_projects_ide() {
+        let _guard = crate::services::test_guard();
+        let ui = crate::ui::coexist::shared_ui().clone();
+        let before = ui.prefs.get_untracked();
+        record_ide_pick(&ui, "proj-a", IdeKind::Gateway);
+        let p = ui.prefs.get_untracked();
+        assert_eq!(p.picked_ide("proj-a"), Some(IdeKind::Gateway));
+        assert_eq!(ide_click(p.ide_for("proj-a", None)), IdeClick::Launch(IdeKind::Gateway));
+        assert_eq!(ide_click(p.ide_for("proj-b", None)), IdeClick::Choose);
+        ui.update_prefs(move |p| *p = before);
+
+        let strip = |src: &'static str| src.split("#[cfg(test)]").next().unwrap();
+        let session = strip(include_str!("session.rs"));
+        let project = strip(include_str!("project.rs"));
+        let conversation = strip(include_str!("conversation.rs"));
+        assert!(session.contains("ui.prefs.get().ide_for(&project, computer.get().as_deref())"));
+        assert!(session.contains("record_ide_pick(&ui_c, &project, c.kind);"));
+        assert!(project.contains("let project = b.id.clone();"));
+        assert!(project.contains("ui.prefs.get().ide_for(&project, computer.get().as_deref())"));
+        assert!(project.contains("record_ide_pick(&ui2, &project, c.kind);"));
+        assert!(conversation.contains("ide_prefs.ide_for("));
+        assert!(conversation.contains("record_ide_pick(&ui_ide, &pick_project, kind);"));
+        for (name, src) in [("session", session), ("project", project), ("conversation", conversation)] {
+            assert!(!src.contains(".ide_target"), "{name} reads no device-wide IDE");
+        }
     }
 
     #[Composable]

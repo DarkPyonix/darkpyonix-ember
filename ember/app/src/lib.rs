@@ -407,7 +407,7 @@ mod shutdown_tests {
         let path = dir.path().join("prefs.json");
         let mut prefs = crate::prefs::Prefs::default();
         prefs.keymap = crate::ui::keymap::Keymap::JetBrains;
-        prefs.ide_target = Some("vscode".into());
+        prefs.set_ide_target("ember", crate::ide::IdeKind::VsCode);
         let mut cache_flushed = false;
         let code = super::flush_before_exit(Some(&path), &prefs, || {
             assert_eq!(crate::prefs::load(&path), prefs);

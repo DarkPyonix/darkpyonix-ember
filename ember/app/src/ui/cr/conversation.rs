@@ -670,12 +670,15 @@ pub fn ConversationView(id: &str, embedded: bool) {
     };
 
     // ---- IDE entries ---------------------------------------------------------------------------
-    let remembered = ui
-        .prefs
-        .get()
-        .ide_target
-        .as_deref()
-        .and_then(IdeKind::from_key);
+    // The session's project's pick, else its computer's default (FR-W7b, D56). "최근 사용"
+    // marks a pick only, not a default the user never chose.
+    let ide_project = super::session::session_project(&sid);
+    let ide_prefs = ui.prefs.get();
+    let picked = ide_prefs.picked_ide(&ide_project);
+    let remembered = ide_prefs.ide_for(
+        &ide_project,
+        computer.get().as_ref().map(|c| c.computer.id.as_str()),
+    );
     let mut ide_order: Vec<IdeKind> = IdeKind::ALL.to_vec();
     if let Some(k) = remembered {
         ide_order.retain(|x| *x != k);
@@ -686,7 +689,7 @@ pub fn ConversationView(id: &str, embedded: bool) {
         .iter()
         .map(|k| {
             let mut label = k.label().to_string();
-            if Some(*k) == remembered {
+            if Some(*k) == picked {
                 label.push_str(" (최근 사용)");
             }
             if let Some(Ok(l)) = &ide_now {
@@ -1314,6 +1317,7 @@ pub fn ConversationView(id: &str, embedded: bool) {
                 let ide_dismiss = ide_menu.clone();
                 let ui_ide = ui.clone();
                 let launch_res = ide.get();
+                let pick_project = ide_project.clone();
                 OptionSheet(
                     ide_menu.get(),
                     &ide_labels,
@@ -1324,6 +1328,7 @@ pub fn ConversationView(id: &str, embedded: bool) {
                         let Some(&kind) = ide_kinds.get(idx) else {
                             return;
                         };
+                        super::session::record_ide_pick(&ui_ide, &pick_project, kind);
                         super::session::launch_ide_shared(&ui_ide, kind, launch_res.clone());
                     },
                 );

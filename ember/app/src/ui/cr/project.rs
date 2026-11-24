@@ -1064,7 +1064,9 @@ fn IdeMenu(b: &ProjectBox, ui: &SharedUi, compact: bool) {
             );
         }
     }
-    let remembered = ui.prefs.get().ide_target.as_deref().and_then(IdeKind::from_key);
+    // This project's pick, else its session's computer's default (FR-W7b, D56).
+    let project = b.id.clone();
+    let remembered = ui.prefs.get().ide_for(&project, computer.get().as_deref());
     let choices = crate::ui::session::ide_choices(remembered);
     let has_session = session.is_some();
     let cwd = session
@@ -1090,6 +1092,7 @@ fn IdeMenu(b: &ProjectBox, ui: &SharedUi, compact: bool) {
         move || close.set(false),
         move |i| {
             if let Some(c) = choices.get(i) {
+                crate::ui::cr::session::record_ide_pick(&ui2, &project, c.kind);
                 launch_ide(&ui2, c.kind, ide2.get_untracked());
             }
         },

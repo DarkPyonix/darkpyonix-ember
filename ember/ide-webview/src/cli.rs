@@ -8,6 +8,12 @@ use ember_bridge::OpenWindow;
 pub const DEFAULT_TITLE: &str = "Ember IDE";
 pub const SMOKE_ENV: &str = "EMBER_IDE_WEBVIEW_SMOKE";
 pub const DATA_DIR_ENV: &str = "EMBER_IDE_WEBVIEW_DATA_DIR";
+/// The page URL, given in the environment instead of `--url` (`FR-L7`, INTENT D55, #1064). The
+/// `ember-app --vscode-window` helper passes it here because the first page carries the manager's
+/// ticket (`dpx-ticket`) and the gateway's token (`egw`), and argv is readable by every process on
+/// the machine (`ps`). Read once at start and removed from this process's environment
+/// ([`take_url_env`]), so nothing this window starts inherits it.
+pub const URL_ENV: &str = "EMBER_IDE_WEBVIEW_URL";
 const DEFAULT_SMOKE_EXIT_MS: u64 = 500;
 
 /// Default desktop window dimensions in logical pixels.
@@ -73,10 +79,10 @@ pub enum CliAction {
 
 pub fn usage() -> String {
     format!(
-        "Usage: ember-ide-webview --url <url> [--vscode] [--title <title>] [--window-id <id>] [--data-dir <dir>] [--native-chrome] [--smoke | --smoke-exit-ms <ms>]\n\
+        "Usage: ember-ide-webview (--url <url> | {URL_ENV}=<url>) [--vscode] [--title <title>] [--window-id <id>] [--data-dir <dir>] [--native-chrome] [--smoke | --smoke-exit-ms <ms>]\n\
          \n\
          Options:\n\
-           --url <url>             VS Code Web URL (http:// or https://)\n\
+           --url <url>             VS Code Web URL (http:// or https://), for manual use; a URL with a secret goes in {URL_ENV} instead (not both)\n\
            --vscode                The page is the VS Code target with no proxy: inject tab detach and the workbench defaults\n\
            --title <title>         Initial window title (default: derived from folder or {DEFAULT_TITLE})\n\
            --window-id <id>        Initial logical window id (default: win-1)\n\
@@ -272,7 +278,18 @@ pub fn resolve_detached_url(origin: &str, request: &OpenWindow) -> Option<String
     Some(format!("{base}{path}"))
 }
 
-pub fn parse_args<I, S>(args: I, env_smoke: Option<&str>) -> Result<CliAction, String>
+/// Read [`URL_ENV`] and remove it from this process's environment. Called once at the start of
+/// `main`, before any thread or child process exists, so the removal races nothing.
+pub fn take_url_env() -> Option<String> {
+    let value = std::env::var(URL_ENV).ok();
+    if value.is_some() {
+        std::env::remove_var(URL_ENV);
+    }
+    value
+}
+
+/// `env_url` is the value [`take_url_env`] took from [`URL_ENV`].
+pub fn parse_args<I, S>(args: I, env_smoke: Option<&str>, env_url: Option<&str>) -> Result<CliAction, String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
@@ -281,8 +298,9 @@ where
     let home_dir = std::env::var("HOME").ok();
     let xdg_cache = std::env::var("XDG_CACHE_HOME").ok();
     let local_app_data = std::env::var("LOCALAPPDATA").ok();
-    parse_args_with_env(
+    parse_args_with_url_env(
         args,
+        env_url,
         env_smoke,
         env_data_dir.as_deref(),
         home_dir.as_deref(),
@@ -293,6 +311,25 @@ where
 
 pub fn parse_args_with_env<I, S>(
     args: I,
+    env_smoke: Option<&str>,
+    env_data_dir: Option<&str>,
+    home_dir: Option<&str>,
+    xdg_cache_home: Option<&str>,
+    local_app_data: Option<&str>,
+) -> Result<CliAction, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    parse_args_with_url_env(args, None, env_smoke, env_data_dir, home_dir, xdg_cache_home, local_app_data)
+}
+
+/// [`parse_args_with_env`] with the page URL from [`URL_ENV`] (`env_url`). The URL comes from
+/// exactly one place: `--url` and [`URL_ENV`] together are an error, so a stale variable never
+/// silently replaces the page a user typed, and a typed `--url` never silently drops the helper's.
+pub fn parse_args_with_url_env<I, S>(
+    args: I,
+    env_url: Option<&str>,
     env_smoke: Option<&str>,
     env_data_dir: Option<&str>,
     home_dir: Option<&str>,
@@ -370,7 +407,17 @@ where
         }
     }
 
-    let raw_url = url.ok_or_else(|| format!("missing required --url argument\n\n{}", usage()))?;
+    let env_url = env_url.filter(|v| !v.trim().is_empty());
+    let raw_url = match (url, env_url) {
+        (Some(_), Some(_)) => {
+            return Err(format!("the URL comes from --url or {URL_ENV}, not both\n\n{}", usage()));
+        }
+        (Some(u), None) => u,
+        (None, Some(u)) => u.to_owned(),
+        (None, None) => {
+            return Err(format!("missing required --url argument (or {URL_ENV})\n\n{}", usage()));
+        }
+    };
     let origin = validate_and_derive_origin(&raw_url)?;
     let trimmed_url = raw_url.trim().to_owned();
 
@@ -485,15 +532,16 @@ mod tests {
     #[test]
     fn fr_l7_cli_help_version_and_smoke_flag() {
         assert!(matches!(
-            parse_args(["ember-ide-webview", "--help"], None).unwrap(),
+            parse_args(["ember-ide-webview", "--help"], None, None).unwrap(),
             CliAction::Help(text) if text.contains("--url") && text.contains("--data-dir")
         ));
         assert!(matches!(
-            parse_args(["ember-ide-webview", "--version"], None).unwrap(),
+            parse_args(["ember-ide-webview", "--version"], None, None).unwrap(),
             CliAction::Version(text) if text.starts_with("ember-ide-webview ")
         ));
         let smoke = parse_args(
             ["ember-ide-webview", "--url", "http://localhost:8890", "--smoke"],
+            None,
             None,
         )
         .unwrap();
@@ -542,6 +590,57 @@ mod tests {
         // After the gateway's 302 (no `egw`) the title is still the folder's.
         assert_eq!(window_title_for_page("http://127.0.0.1:41234/?folder=%2Fwork%2Frepo", "x"), "repo - Ember IDE");
         assert_eq!(classify_navigation("http://127.0.0.1:41234", "http://127.0.0.1:8890/"), NavigationDecision::OpenExternal);
+    }
+
+    /// SPEC FR-L7, INTENT D55 (#1064): the helper's page URL (with `dpx-ticket` and `egw`) comes in
+    /// `EMBER_IDE_WEBVIEW_URL`, never argv. `--url` keeps working for manual use; both together
+    /// are an error, so neither silently replaces the other.
+    #[test]
+    fn fr_l7_url_from_the_environment() {
+        let url = "http://127.0.0.1:41234/ide/ose/?folder=%2Fwork%2Frepo&dpx-ticket=tk&egw=0123abcd";
+        let parse = |args: &[&str], env_url: Option<&str>| {
+            parse_args_with_url_env(
+                std::iter::once("ember-ide-webview").chain(args.iter().copied()),
+                env_url,
+                None,
+                Some("/env/cache"),
+                None,
+                None,
+                None,
+            )
+        };
+        let expected = |u: &str| {
+            CliAction::Run(Config {
+                url: u.into(),
+                origin: "http://127.0.0.1:41234".into(),
+                title: "repo - Ember IDE".into(),
+                window_id: "win-1".into(),
+                data_dir: Some(PathBuf::from("/env/cache")),
+                chrome_mode: ChromeMode::Integrated,
+                smoke_exit_ms: None,
+                validate_only: false,
+                vscode: true,
+            })
+        };
+        // From the environment alone.
+        assert_eq!(parse(&["--vscode"], Some(url)).unwrap(), expected(url));
+        // `--url` alone still works.
+        assert_eq!(parse(&["--url", url, "--vscode"], None).unwrap(), expected(url));
+        // Both: an error naming both sources.
+        let both = parse(&["--url", "http://127.0.0.1:9/", "--vscode"], Some(url)).unwrap_err();
+        assert!(both.contains("--url") && both.contains(URL_ENV), "{both}");
+        // An empty variable is no URL.
+        assert!(parse(&["--vscode"], Some("  ")).unwrap_err().contains("missing required --url"));
+        // The URL in the environment is validated like `--url`.
+        assert!(parse(&[], Some("file:///etc/passwd")).is_err());
+        assert_eq!(URL_ENV, "EMBER_IDE_WEBVIEW_URL");
+        assert!(usage().contains(URL_ENV));
+        // `main` takes it before anything else and removes it from the environment.
+        let main_src = include_str!("main.rs");
+        let main_body = main_src.split("fn main()").nth(1).unwrap();
+        assert!(main_body.find("cli::take_url_env()").unwrap() < main_body.find("tracing_subscriber").unwrap());
+        let take = include_str!("cli.rs").split("pub fn take_url_env()").nth(1).unwrap();
+        assert!(take.split("\n}").next().unwrap().contains("remove_var(URL_ENV)"));
     }
 
     #[test]

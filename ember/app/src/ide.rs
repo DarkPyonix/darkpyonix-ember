@@ -1,8 +1,11 @@
 //! "Open IDE": what each target does once the server has said how to reach it
 //! (`GET /api/sessions/{id}/ide`).
 //!
-//! - **VS Code**: the wrapped VS Code Web URL, opened strictly in the standalone
-//!   `ember-ide-webview` child process (never falling back to an external browser).
+//! - **VS Code**: opened strictly in the standalone `ember-ide-webview` child process (never
+//!   falling back to an external browser). With a launch that carries the server's relay route
+//!   (`launch.ose.relay`, `FR-W4c` (1b), INTENT D55) the window runs in its relay mode: it starts
+//!   the loopback gateway of `FR-W5b` and loads the workbench through the relay, with the server
+//!   token in its environment. An older server's target with a `url` still opens that URL.
 //!   This launcher process never embeds a browser engine directly.
 //! - **Gateway**: the `jetbrains-gateway://` link, handed to the OS URL handler, which starts
 //!   JetBrains Gateway on this machine.
@@ -54,12 +57,36 @@ impl IdeKind {
 pub enum IdeAction {
     /// Launch the standalone IDE window binary (`ember-ide-webview`) at this URL.
     OpenIdeWindow(String),
+    /// Launch the standalone IDE window binary in its relay mode (`FR-W5b`, INTENT D55).
+    OpenIdeRelay(IdeRelay),
     /// Hand this URL to the OS.
     OpenUrl(String),
     /// Open the Ember editor screen (its code area waits for the editor core, M8).
     EmberPlaceholder,
     /// Why it cannot be opened.
     Unavailable(String),
+}
+
+/// The VS Code target's relay launch: what `ember-ide-webview --relay-path` needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdeRelay {
+    /// The server's relay route to the computer's OSE, `/api/computers/{id}/ide/relay/{launch}`.
+    pub relay: String,
+    /// The folder the workbench opens.
+    pub folder: String,
+    /// The server's base URL from the launch; empty means the app's own server.
+    pub server_url: String,
+}
+
+/// The relay launch of a VS Code target, when the server sent one.
+fn relay_launch(t: &IdeTarget) -> Option<IdeRelay> {
+    let launch = t.launch.as_ref()?;
+    let relay = launch.ose.as_ref()?.relay.clone().filter(|r| !r.trim().is_empty())?;
+    Some(IdeRelay {
+        relay,
+        folder: launch.folder.clone(),
+        server_url: launch.server_url.clone().unwrap_or_default(),
+    })
 }
 
 pub fn plan(kind: IdeKind, target: Option<&IdeTarget>) -> IdeAction {
@@ -72,6 +99,17 @@ pub fn plan(kind: IdeKind, target: Option<&IdeTarget>) -> IdeAction {
     };
     if !t.available {
         return IdeAction::Unavailable(t.reason.clone().unwrap_or_else(|| format!("{} is not available", kind.label())));
+    }
+    if kind == IdeKind::VsCode {
+        if let Some(relay) = relay_launch(t) {
+            if !relay.relay.starts_with("/api/") {
+                return IdeAction::Unavailable(format!("refusing relay path {:?}", relay.relay));
+            }
+            if relay.folder.trim().is_empty() {
+                return IdeAction::Unavailable("the server gave no folder for VS Code".into());
+            }
+            return IdeAction::OpenIdeRelay(relay);
+        }
     }
     match t.url.as_deref() {
         Some(url) if allowed_url(kind, url) => match kind {
@@ -157,6 +195,86 @@ pub fn ide_window_command(bin: &Path, url: &str) -> (PathBuf, Vec<String>) {
     (
         bin.to_path_buf(),
         vec!["--url".to_string(), url.to_string()],
+    )
+}
+
+/// The environment variable that carries the server token to the IDE window's relay mode, never
+/// argv (`ember/ide-webview/src/cli.rs` `SERVER_TOKEN_ENV`).
+pub const IDE_SERVER_TOKEN_ENV: &str = "EMBER_SERVER_TOKEN";
+
+/// The `(executable, args)` pair that launches the IDE window in its relay mode.
+pub fn ide_relay_command(bin: &Path, server_url: &str, relay: &IdeRelay) -> (PathBuf, Vec<String>) {
+    (
+        bin.to_path_buf(),
+        vec![
+            "--relay-path".to_string(),
+            relay.relay.clone(),
+            "--server-url".to_string(),
+            server_url.to_string(),
+            "--folder".to_string(),
+            relay.folder.clone(),
+        ],
+    )
+}
+
+/// Resolve and spawn `ember-ide-webview --relay-path <relay> --server-url <url> --folder <dir>`,
+/// with `token` handed to `spawn` for the child's environment. Never falls back to a browser.
+pub fn open_ide_relay_with(
+    env_override: Option<&str>,
+    current_exe: Option<&Path>,
+    path_var: Option<&std::ffi::OsStr>,
+    server_url: &str,
+    relay: &IdeRelay,
+    token: Option<&str>,
+    spawn: impl FnOnce(&Path, &[String], Option<&str>) -> std::io::Result<()>,
+) -> Result<(), String> {
+    let Some(exe) = resolve_ide_webview_bin(env_override, current_exe, path_var) else {
+        let msg = missing_ide_webview_error(env_override, current_exe, path_var);
+        tracing::warn!(relay = %relay.relay, "{msg}");
+        return Err(msg);
+    };
+    let (program, args) = ide_relay_command(&exe, server_url, relay);
+    spawn(&program, &args, token).map_err(|e| {
+        let msg = format!("failed to launch {} ({}): {e}", IDE_WEBVIEW_BIN_NAME, program.display());
+        tracing::warn!(relay = %relay.relay, "{msg}");
+        msg
+    })
+}
+
+/// Open the VS Code target's relay launch in `ember-ide-webview`'s relay mode. The server is the
+/// launch's, else the app's own. The window dials the relay over `ws(s)` with the server token
+/// under the terminal relay's rules (`FR-S11`, `FR-L31.19`); a server reached over the device
+/// link (`peer:<id>`) is not supported by the window yet.
+pub fn open_ide_relay(relay: &IdeRelay) -> Result<(), String> {
+    let server_url = if relay.server_url.trim().is_empty() {
+        crate::services::try_services().map(|s| s.config.server_url.clone()).unwrap_or_default()
+    } else {
+        relay.server_url.clone()
+    };
+    if crate::terminal_stream::is_peer_base(&server_url) {
+        return Err("기기 연결로 접속한 서버에서는 아직 VS Code 창을 열 수 없습니다".to_owned());
+    }
+    crate::terminal_stream::relay_allowed(&server_url)?;
+    let token = crate::terminal_stream::server_token(&server_url);
+    let env_override = std::env::var(IDE_WEBVIEW_BIN_ENV).ok();
+    let current_exe = std::env::current_exe().ok();
+    let path_var = std::env::var_os("PATH");
+    open_ide_relay_with(
+        env_override.as_deref(),
+        current_exe.as_deref(),
+        path_var.as_deref(),
+        &server_url,
+        relay,
+        token.as_deref(),
+        |program, args, token| {
+            let mut cmd = Command::new(program);
+            cmd.args(args);
+            match token {
+                Some(t) => cmd.env(IDE_SERVER_TOKEN_ENV, t),
+                None => cmd.env_remove(IDE_SERVER_TOKEN_ENV),
+            };
+            cmd.spawn().map(|_| ())
+        },
     )
 }
 
@@ -394,6 +512,77 @@ mod tests {
         ));
         assert_eq!(IdeKind::from_key("gateway"), Some(IdeKind::Gateway));
         assert_eq!(open_command("u").last().map(String::as_str), Some("u"));
+    }
+
+    /// SPEC FR-L7 (VS Code target), FR-W4c (1b), INTENT D55 (#1064): a VS Code target whose
+    /// launch carries the relay route (and no `url`) opens the IDE window in its relay mode, with
+    /// the server token in the child's environment and never in argv.
+    #[test]
+    fn fr_l7_vscode_target_with_relay_spawns_the_window_in_relay_mode() {
+        let t: IdeTarget = serde_json::from_value(serde_json::json!({
+            "kind": "vscode", "available": true,
+            "launch": {
+                "session": "s", "project": "p", "computer": "node-a", "computer_name": "studio",
+                "folder": "/work/repo", "server_url": "http://127.0.0.1:8740",
+                "ose": { "relay": "/api/computers/node-a/ide/relay/l1" }
+            }
+        }))
+        .unwrap();
+        let relay = IdeRelay {
+            relay: "/api/computers/node-a/ide/relay/l1".into(),
+            folder: "/work/repo".into(),
+            server_url: "http://127.0.0.1:8740".into(),
+        };
+        assert_eq!(plan(IdeKind::VsCode, Some(&t)), IdeAction::OpenIdeRelay(relay.clone()));
+
+        let mut captured: Option<(PathBuf, Vec<String>, Option<String>)> = None;
+        open_ide_relay_with(
+            Some("/custom/ember-ide-webview"),
+            None,
+            None,
+            "http://127.0.0.1:8740",
+            &relay,
+            Some("srv-secret"),
+            |prog, args, token| {
+                captured = Some((prog.to_path_buf(), args.to_vec(), token.map(str::to_owned)));
+                Ok(())
+            },
+        )
+        .expect("spawn");
+        let (prog, args, token) = captured.unwrap();
+        assert_eq!(prog, PathBuf::from("/custom/ember-ide-webview"));
+        assert_eq!(
+            args,
+            vec![
+                "--relay-path",
+                "/api/computers/node-a/ide/relay/l1",
+                "--server-url",
+                "http://127.0.0.1:8740",
+                "--folder",
+                "/work/repo",
+            ]
+        );
+        assert!(!args.iter().any(|a| a.contains("srv-secret")), "the token is never in argv");
+        assert!(!args.iter().any(|a| a == "--url"));
+        assert_eq!(token.as_deref(), Some("srv-secret"), "the token goes to the child's environment");
+        assert_eq!(IDE_SERVER_TOKEN_ENV, "EMBER_SERVER_TOKEN");
+
+        // An older server's target with a url keeps the url path; a relay target with no folder
+        // or a relay path outside /api is not opened.
+        let mut old = t.clone();
+        old.launch = None;
+        old.url = Some("http://h:8890/?folder=%2Fw".into());
+        assert_eq!(plan(IdeKind::VsCode, Some(&old)), IdeAction::OpenIdeWindow("http://h:8890/?folder=%2Fw".into()));
+        let mut no_folder = t.clone();
+        no_folder.launch.as_mut().unwrap().folder = String::new();
+        assert!(matches!(plan(IdeKind::VsCode, Some(&no_folder)), IdeAction::Unavailable(_)));
+        let mut bad = t.clone();
+        bad.launch.as_mut().unwrap().ose.as_mut().unwrap().relay = Some("/other/x".into());
+        assert!(matches!(plan(IdeKind::VsCode, Some(&bad)), IdeAction::Unavailable(_)));
+        // The Ember target's relay is not the VS Code window's.
+        let mut ember = t.clone();
+        ember.kind = "ember".into();
+        assert_eq!(plan(IdeKind::Ember, Some(&ember)), IdeAction::EmberPlaceholder);
     }
 
     #[test]

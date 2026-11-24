@@ -1081,7 +1081,7 @@ pub enum TermTarget {
 }
 
 /// True for the `peer:<id>` base the app keeps while a peer is set.
-fn is_peer_base(base: &str) -> bool {
+pub(crate) fn is_peer_base(base: &str) -> bool {
     base.starts_with("peer:")
 }
 

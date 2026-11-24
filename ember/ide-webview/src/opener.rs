@@ -176,6 +176,71 @@ pub fn bridge_init_script(window_id: &str, chrome_mode: ChromeMode) -> String {
     )
 }
 
+/// Tab detach (SPEC FR-B1, FR-B2, FR-B4), a copy of `ember/proxy/static/detach.js`. The desktop
+/// VS Code target has no proxy in front of the workbench (INTENT D55), so the window injects it.
+/// The proxy keeps its own copy for `--url` pages; a test keeps the two the same.
+pub const DETACH_JS: &str = include_str!("../assets/detach.js");
+
+/// The workbench settings defaults the relay mode adds: VS Code's own drag-a-tab-out-of-the-window
+/// gesture would open a second window for the same gesture as tab detach (the proxy's
+/// `DETACH_CONFIGURATION_DEFAULTS`). `detach.js` also guards at run time when a user turns it on.
+pub const WORKBENCH_DEFAULTS_JSON: &str = r#"{"workbench.editor.dragToOpenWindow":false}"#;
+
+/// Merges [`WORKBENCH_DEFAULTS_JSON`] into the `configurationDefaults` of the workbench web
+/// configuration (`<meta id="vscode-workbench-web-configuration" data-settings="...">`) as the
+/// parser inserts it, before the workbench reads it. Keys already there are kept, and these are
+/// defaults, so a user's own setting still wins. Anything unexpected leaves the meta unchanged.
+pub fn workbench_defaults_script() -> String {
+    format!(
+        "(function () {{\n\
+           if (typeof document === 'undefined') return;\n\
+           var DEFAULTS = {WORKBENCH_DEFAULTS_JSON};\n\
+           var ID = 'vscode-workbench-web-configuration';\n\
+           function patch(meta) {{\n\
+             if (!meta || meta.__emberDefaults) return;\n\
+             meta.__emberDefaults = true;\n\
+             try {{\n\
+               var raw = meta.getAttribute('data-settings');\n\
+               if (!raw) return;\n\
+               var cfg = JSON.parse(raw);\n\
+               if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) return;\n\
+               var cur = cfg.configurationDefaults;\n\
+               if (cur === undefined || cur === null) cur = {{}};\n\
+               if (typeof cur !== 'object' || Array.isArray(cur)) return;\n\
+               var changed = false;\n\
+               for (var k in DEFAULTS) {{\n\
+                 if (!Object.prototype.hasOwnProperty.call(cur, k)) {{ cur[k] = DEFAULTS[k]; changed = true; }}\n\
+               }}\n\
+               if (!changed) return;\n\
+               cfg.configurationDefaults = cur;\n\
+               meta.setAttribute('data-settings', JSON.stringify(cfg));\n\
+             }} catch (e) {{}}\n\
+           }}\n\
+           function find() {{\n\
+             var meta = document.getElementById(ID);\n\
+             if (meta) {{ patch(meta); return true; }}\n\
+             return false;\n\
+           }}\n\
+           if (find()) return;\n\
+           var observer = new MutationObserver(function () {{ if (find()) observer.disconnect(); }});\n\
+           observer.observe(document, {{ childList: true, subtree: true }});\n\
+           document.addEventListener('DOMContentLoaded', function () {{ find(); observer.disconnect(); }});\n\
+         }})();"
+    )
+}
+
+/// The relay mode's initialization script: the bridge shim of [`bridge_init_script`], the
+/// workbench defaults, then tab detach. Nothing that changes VS Code's own UI shapes: the VS Code
+/// target takes Ember's design only as its colour theme extension (INTENT D55).
+pub fn relay_init_script(window_id: &str, chrome_mode: ChromeMode) -> String {
+    format!(
+        "{}\n;{}\n;{}\n",
+        bridge_init_script(window_id, chrome_mode),
+        workbench_defaults_script(),
+        DETACH_JS
+    )
+}
+
 /// JavaScript snippet that delivers a native-to-webview JSON payload to `detach.js`.
 pub fn receive_eval_script(payload: &str) -> String {
     let arg_json = serde_json::to_string(payload).expect("payload serializes as JSON");
@@ -292,6 +357,38 @@ mod tests {
         let again = reg.close("win-2");
         assert!(!again.removed);
         assert_eq!(again.remaining, 2);
+    }
+
+    /// INTENT D55 (#1064): with no proxy on the desktop, the relay mode's window injects tab
+    /// detach and the `dragToOpenWindow` default itself, and nothing of the proxy's overlay.
+    #[test]
+    fn fr_l7_relay_init_script_carries_detach_and_the_drag_default_and_no_overlay() {
+        let script = relay_init_script("win-1", ChromeMode::Integrated);
+        assert!(script.contains(DETACH_JS), "detach.js is injected whole");
+        assert!(script.contains("tab_detach") && script.contains("__emberBridge"));
+        assert!(script.contains(HANDLER_NAME), "the bridge shim comes first");
+        assert!(script.find("window.ipc.postMessage") < script.find("tab_detach"));
+        assert!(script.contains("\"workbench.editor.dragToOpenWindow\":false"));
+        assert!(script.contains("vscode-workbench-web-configuration"));
+        assert!(script.contains("configurationDefaults"));
+        assert!(script.contains("hasOwnProperty.call(cur, k)"), "a default already given is kept");
+        assert!(script.contains("MutationObserver"), "the meta is patched as the parser inserts it");
+        // No proxy overlay: neither its files nor its CSS hooks nor any stylesheet.
+        for overlay in ["__overlay", "overlay.css", "data-xmo", "xmo-", "insertRule", "createElement('style')", "<link", "<style"] {
+            assert!(!script.contains(overlay), "the relay init script must not carry {overlay:?}");
+        }
+        let proxy_css = include_str!("../../proxy/static/overlay.css");
+        let first_rule = proxy_css.lines().find(|l| l.contains('{')).expect("overlay.css has a rule");
+        assert!(!script.contains(first_rule.trim()));
+        // The `--url` mode (behind the proxy) does not inject them a second time.
+        let plain = bridge_init_script("win-1", ChromeMode::Integrated);
+        assert!(!plain.contains("tab_detach") && !plain.contains("dragToOpenWindow"));
+    }
+
+    /// The window's copy of detach.js is the proxy's, byte for byte.
+    #[test]
+    fn fr_b1_detach_js_copy_matches_the_proxy() {
+        assert_eq!(DETACH_JS, include_str!("../../proxy/static/detach.js"));
     }
 
     #[test]

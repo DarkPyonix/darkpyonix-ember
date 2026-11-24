@@ -1,0 +1,23 @@
+[package]
+name = "ember-gateway"
+version = "0.1.0"
+edition = "2021"
+description = "Loopback gateway that joins each TCP connection to one stream of the server's OSE relay (SPEC FR-W5b)"
+license = "Apache-2.0"
+publish = false
+
+# One crate for the desktop IDE window (`ember-ide-webview`, INTENT D55) and later the phone
+# (D53). It names no transport backend type (FR-N5): a relay stream is any WebSocket a `Dial`
+# opens, and the built-in dialer is plain `ws(s)://` with the server token, the way the Ember
+# editor reaches the same route over HTTP (`ember/app/src/editor_reach.rs`, FR-N9.1).
+
+[dependencies]
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+# The per-launch token.
+getrandom = "0.3"
+# rustls is listed only to install the ring provider, as in ember/app.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time"] }
+# The same WebSocket client and TLS roots as the editor's relay in ember/app.
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+tracing = "0.1"

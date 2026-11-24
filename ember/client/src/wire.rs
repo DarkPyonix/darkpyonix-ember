@@ -9,12 +9,17 @@ use serde::{Deserialize, Serialize};
 /// OSE connection details delivered with an Ember editor launch.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EmberOseConnection {
+    /// The OSE's address on its computer. Empty for the VS Code target, whose OSE listens on a
+    /// socket and is reached only through `relay` (`FR-W4c` (1b), INTENT D55).
+    #[serde(default)]
     pub endpoint: String,
     /// The server's relay route to this OSE (`/api/computers/{computer}/ide/relay/{launch_id}`,
     /// FR-W4), below the server's base URL. The editor reaches the OSE through it when it is set
     /// (FR-N9.1); an older server or the demo leaves it out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay: Option<String>,
+    /// Empty for the VS Code target, whose OSE has no connection token (`FR-W4a`, INTENT D55).
+    #[serde(default)]
     pub connection_token: String,
     /// The Code-OSS commit of the OSE build, when the server reports it (SPEC FR-E10, #32); the
     /// editor compares it with the commits it supports before connecting.
@@ -93,6 +98,22 @@ mod ide_launch_tests {
         .unwrap();
         assert_eq!(older.ose.as_ref().unwrap().relay, None);
         assert!(serde_json::to_value(&older).unwrap()["ose"].get("relay").is_none());
+    }
+
+    /// SPEC FR-W4c (1b), INTENT D55 (#1064): the VS Code target's launch carries only the relay
+    /// route, with no endpoint and no connection token, and still decodes.
+    #[test]
+    fn fr_l7_vscode_launch_with_only_a_relay_decodes() {
+        let launch: EmberLaunch = serde_json::from_value(serde_json::json!({
+            "session": "s", "project": "p", "computer": "node-a", "computer_name": "studio",
+            "folder": "/w", "server_url": "http://127.0.0.1:8740",
+            "ose": { "relay": "/api/computers/node-a/ide/relay/l1" }
+        }))
+        .unwrap();
+        let ose = launch.ose.as_ref().unwrap();
+        assert_eq!(ose.relay.as_deref(), Some("/api/computers/node-a/ide/relay/l1"));
+        assert_eq!(ose.endpoint, "");
+        assert_eq!(ose.connection_token, "");
     }
 }
 

@@ -2313,7 +2313,10 @@ pub mod diff_editor_view {
     use ember_editor::{WidgetPos, WidgetRange};
 
     use crate::editor_host::HostCommand;
-    use crate::ui::editor_workbench::{shared, Shared};
+    use crate::ui::editor_workbench::{forget_view_mount, report_view_mount, shared, MountGuard, Shared};
+
+    /// This view's name in the mount record it shares with the tab's pane.
+    const DIFF_VIEW: &str = "diff";
 
     fn pos(p: compose_rust::code::Position) -> WidgetPos {
         WidgetPos::new(p.line, p.column)
@@ -2329,23 +2332,29 @@ pub mod diff_editor_view {
         let s = shared();
         let (box_w, box_h) = dioxus_compose::use_widget_box();
         let handle = dioxus_compose::use_code_editor();
+        let _mounts = use_hook(|| std::rc::Rc::new(MountGuard(DIFF_VIEW)));
         if box_w <= 0.0 || box_h <= 0.0 {
+            forget_view_mount(DIFF_VIEW);
             return rsx! {};
         }
         let _ = *s.revision.read();
-        let Some(rel) = s.scm.working_diff_path() else { return rsx! {} };
+        let Some(rel) = s.scm.working_diff_path() else { forget_view_mount(DIFF_VIEW); return rsx! {} };
         let abs = s.scm.editor_path(&s.folder, &rel);
         let uri = s.uris.borrow().get(&abs).cloned();
-        let Some(uri) = uri else { return rsx! {} };
+        let Some(uri) = uri else { forget_view_mount(DIFF_VIEW); return rsx! {} };
+        let generation = s.bridge.borrow().document(&uri).map(|d| d.generation);
+        let Some(generation) = generation else { forget_view_mount(DIFF_VIEW); return rsx! {} };
+        // This editor is a widget of its own: it counts versions from 0, so the bridge hears of each mount.
+        report_view_mount(&s, &uri, generation, DIFF_VIEW);
+        // After the mount is reported, so the copy carries the widget's numbering.
         let doc = s.bridge.borrow().document(&uri).cloned();
         let Some(doc) = doc else { return rsx! {} };
-        let generation = doc.generation;
-        // The tab and the diff share the document, so they share its widget version too.
+        // The tab and the diff share the document and its session version; the widget gets it in its own numbering.
         let version = {
             let mut map = s.editor_versions.borrow_mut();
             let current = map.entry(generation).or_insert(doc.version);
             *current = (*current).max(doc.version);
-            *current
+            doc.widget_version_of(*current)
         };
         // compose-rust#542: the added and changed lines are tinted with `Decoration::line_background`
         // beside their gutter bars.
@@ -2378,15 +2387,18 @@ pub mod diff_editor_view {
         let metrics_s = s.clone();
         rsx! { CodeEditor {
             key: "diff-{generation}", width: Some(box_w), height: Some(box_h), handle,
-            text: doc.text, decorations, syntax_spans: crate::ui::editor::syntax_spans(&doc.syntax), tab_width: Some(doc.tab_width),
+            text: doc.text, decorations, syntax_spans: crate::ui::editor::syntax_spans_at(&doc.syntax, doc.widget_version_of(doc.syntax.version)), tab_width: Some(doc.tab_width),
             gutter_decorations, view_zones,
             // FR-L31.27: the same code type, row pitch and line number column as the file's editor.
             font_size: Some(crate::ui::fonts::CODE_FONT_SIZE), line_height: Some(crate::ui::fonts::CODE_LINE_HEIGHT),
             gutter_min_width: Some(crate::ui::fonts::CODE_GUTTER_MIN_WIDTH), gutter_padding: Some(crate::ui::fonts::CODE_GUTTER_PADDING), text_inset: Some(crate::ui::fonts::CODE_TEXT_INSET),
             colors: crate::ui::fonts::CODE_EDITOR_COLORS,
             on_change: move |e: compose_rust::code::CodeChange| {
-                change_s.editor_versions.borrow_mut().insert(generation, e.version);
                 let event = change_s.bridge.borrow_mut().on_code_changed(&change_uri, e.version, WidgetRange::new(pos(e.range.start), pos(e.range.end)), e.text);
+                // The map keeps session versions, as the pane does.
+                if let Some((_, _, ember_editor::WidgetEvent::CodeChanged { version, .. })) = &event {
+                    change_s.editor_versions.borrow_mut().insert(generation, *version);
+                }
                 send(&change_s, event);
             },
             on_save: move |e: compose_rust::code::SaveRequest| {

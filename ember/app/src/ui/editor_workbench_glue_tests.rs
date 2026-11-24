@@ -1612,6 +1612,40 @@ fn fr_l31_6_a3_window_a_remount_is_reported_once_and_queued_edits_use_the_widget
     super::forget_mount();
 }
 
+// FR-L31.6 (A3, compare view): the compare view's editable side is a code editor of its own over the same
+// document. Opening it is a mount; going back to the tab's pane is another; and the compare view going
+// away while the pane is on screen does not make the pane's next render count as a mount, which would
+// reset the version count under a widget that kept its own.
+#[test]
+fn fr_l31_6_a3_window_the_compare_view_editor_is_its_own_mount() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open();
+    page.click_row();
+    page.deliver(opened(7));
+    let shared = super::shared();
+    super::forget_mount();
+    super::forget_view_mount("diff");
+
+    assert!(super::report_mount(&shared, &uri(), 7), "the pane's first mount is reported");
+    let typed = shared.bridge.borrow_mut().on_code_changed(&uri(), 1, ember_editor::WidgetRange::empty(ember_editor::WidgetPos::new(0, 0)), "x".into());
+    assert!(matches!(typed, Some((_, 7, WidgetEvent::CodeChanged { version: 1, .. }))));
+
+    // The compare view opens over the same document and generation: a new widget, counted from 0.
+    assert!(super::report_view_mount(&shared, &uri(), 7, "diff"), "the compare view's editor is a mount");
+    assert!(!super::report_view_mount(&shared, &uri(), 7, "diff"), "a re-render of it is not");
+    assert_eq!(shared.bridge.borrow().document(&uri()).unwrap().widget_version_of(1), 0);
+    let typed = shared.bridge.borrow_mut().on_code_changed(&uri(), 1, ember_editor::WidgetRange::empty(ember_editor::WidgetPos::new(0, 1)), "y".into());
+    assert!(matches!(typed, Some((_, 7, WidgetEvent::CodeChanged { version: 2, .. }))), "{typed:?}");
+
+    // Back to the tab: the pane's editor is built again, so that is a mount too.
+    assert!(super::report_mount(&shared, &uri(), 7), "the pane after the compare view is a mount");
+    // The compare view's scope ends after the pane drew: the pane's record stays.
+    drop(super::MountGuard("diff"));
+    assert!(!super::report_mount(&shared, &uri(), 7), "the pane's re-render is still not a mount");
+    assert_eq!(shared.bridge.borrow().document(&uri()).unwrap().text, "xyfn main() {}\n");
+    super::forget_mount();
+}
+
 const OTHER: &str = "/w/b.rs";
 
 fn other_opened(generation: u64, text: &str) -> SessionUpdate {

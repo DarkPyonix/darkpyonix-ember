@@ -123,14 +123,22 @@ thread_local! { static MODIFIER_CLICK: std::cell::Cell<bool> = const { std::cell
 /// generation, line, column) and the rectangle the editor answered for that position, in the
 /// window's dp. Asked once per hover; the card is drawn only while the answer matches the hover.
 thread_local! {
-    /// The code editor the pane last drew, as (document key, generation): a draw of any other editor is a mount.
-    static MOUNTED: RefCell<Option<(String, u64)>> = const { RefCell::new(None) };
+    /// The code editor last drawn, as (view, document key, generation): a draw of any other editor is a mount.
+    /// The view tells the tab's pane from the compare view's editable side: both key their editor by the
+    /// document's generation, but each is its own widget with its own version count.
+    static MOUNTED: RefCell<Option<(&'static str, String, u64)>> = const { RefCell::new(None) };
 }
+/// The editor pane's name in `MOUNTED`.
+const PANE_VIEW: &str = "pane";
 /// The pane drew the code editor of `uri` with node key `generation`. Tells the bridge once per mount:
 /// a new editor counts versions from 0 while the session keeps its own count. A re-render of the same
 /// editor is not a mount. Returns whether it was reported.
 fn report_mount(s: &Shared, uri: &ember_editor_conn::uri::UriComponents, generation: u64) -> bool {
-    let now = (uri.key(), generation);
+    report_view_mount(s, uri, generation, PANE_VIEW)
+}
+/// `report_mount` for the editor of `view` (the pane, or the compare view's editable side).
+pub(crate) fn report_view_mount(s: &Shared, uri: &ember_editor_conn::uri::UriComponents, generation: u64, view: &'static str) -> bool {
+    let now = (view, uri.key(), generation);
     if MOUNTED.with(|m| m.borrow().as_ref() == Some(&now)) {
         return false;
     }
@@ -140,13 +148,23 @@ fn report_mount(s: &Shared, uri: &ember_editor_conn::uri::UriComponents, generat
 }
 /// The pane has no editor on screen, so the next one it draws is a mount.
 fn forget_mount() {
-    MOUNTED.with(|m| *m.borrow_mut() = None);
+    forget_view_mount(PANE_VIEW);
 }
-/// Held by the pane's scope: when the pane goes (a compare view or another kind of tab covers it) its
+/// `view` has no editor on screen. Another view's mount stays recorded: that editor is still the one on
+/// screen, and reporting it again would reset its version count under it.
+pub(crate) fn forget_view_mount(view: &'static str) {
+    MOUNTED.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.as_ref().is_some_and(|(v, _, _)| *v == view) {
+            *m = None;
+        }
+    });
+}
+/// Held by a view's scope: when the view goes (a compare view or another kind of tab covers the pane) its
 /// editor goes with it, so the next one is a mount even for the same document.
-struct MountGuard;
+pub(crate) struct MountGuard(pub(crate) &'static str);
 impl Drop for MountGuard {
-    fn drop(&mut self) { forget_mount(); }
+    fn drop(&mut self) { forget_view_mount(self.0); }
 }
 thread_local! { static HOVER_ASKED: std::cell::Cell<Option<(u64, u32, u32)>> = const { std::cell::Cell::new(None) }; }
 thread_local! { static HOVER_RECT: std::cell::Cell<Option<((u64, u32, u32), compose_rust::code::CodeRect)>> = const { std::cell::Cell::new(None) }; }
@@ -333,7 +351,7 @@ fn editor_pane() -> Element {
     // The editor fills the box the page's layout gave this tree. Until the first layout the
     // box is empty, and a CodeEditor measured without a limit would abort the renderer.
     let (box_w, box_h) = dioxus_compose::use_widget_box();
-    let _mounts = use_hook(|| std::rc::Rc::new(MountGuard));
+    let _mounts = use_hook(|| std::rc::Rc::new(MountGuard(PANE_VIEW)));
     if box_w <= 0.0 || box_h <= 0.0 {
         forget_mount();
         return rsx! {};

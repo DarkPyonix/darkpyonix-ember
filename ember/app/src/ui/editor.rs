@@ -10,8 +10,14 @@ pub struct EditorTarget {
     pub project: String,
     /// The project's folder on its computer, when the server said (`IdeLaunch.folder`).
     pub folder: String,
+    /// The demo's direct `host:port` for the OSE, dialed only without [`Self::relay`].
     pub endpoint: String,
-    pub token: String,
+    /// The editor server's base path at the DarkPyonix manager (`ose.path`, `/ide/ose/`, FR-W4c
+    /// (1), INTENT D55). Empty means the root (the demo's direct OSE).
+    pub ose_path: String,
+    /// The manager's ticket (`ose.ticket`), sent as `Cookie: dpx-editor=<ticket>`. A credential:
+    /// it travels in the editor process's environment and never reaches a log.
+    pub ticket: String,
     /// The ember server's base URL, for the node terminal relay. Empty when unknown.
     pub server_url: String,
     /// The id of the computer the project lives on. Empty when unknown.
@@ -27,6 +33,10 @@ pub struct EditorTarget {
     /// fallback opens in the `--vscode-window` helper on [`Self::server_url`]
     /// (`crate::ide::VsCodeFallback`). Empty when the server sent no relay launch.
     pub vscode_relay: String,
+    /// The manager's path of the VS Code target's relay launch (`launch.ose.path`).
+    pub vscode_path: String,
+    /// The manager's ticket of the VS Code target's relay launch (`launch.ose.ticket`). A credential.
+    pub vscode_ticket: String,
     /// The folder the VS Code target's relay launch opens (`launch.folder`).
     pub vscode_folder: String,
     /// The session whose VS Code launch the fallback asks for (`POST /api/sessions/{id}/ide/vscode`,
@@ -35,18 +45,21 @@ pub struct EditorTarget {
 }
 
 impl std::fmt::Debug for EditorTarget {
-    // The token authorizes the editor connection, so it never reaches logs.
+    // The tickets authorize the editor connection and the VS Code window, so they never reach logs.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EditorTarget")
             .field("project", &self.project)
             .field("folder", &self.folder)
             .field("endpoint", &self.endpoint)
-            .field("token", &"[REDACTED]")
+            .field("ose_path", &self.ose_path)
+            .field("ticket", &"[REDACTED]")
             .field("server_url", &self.server_url)
             .field("computer", &self.computer)
             .field("relay", &self.relay)
             .field("vscode_url", &self.vscode_url)
             .field("vscode_relay", &self.vscode_relay)
+            .field("vscode_path", &self.vscode_path)
+            .field("vscode_ticket", &"[REDACTED]")
             .field("vscode_folder", &self.vscode_folder)
             .field("vscode_session", &self.vscode_session)
             .finish()
@@ -2446,23 +2459,26 @@ mod tests {
     }
 
     #[test]
-    fn fr_l31_editor_target_debug_redacts_the_token() {
+    fn fr_l31_editor_target_debug_redacts_the_tickets() {
         let target = EditorTarget {
             project: "p".into(),
             folder: "/f".into(),
             endpoint: "127.0.0.1:9000".into(),
-            token: "s3cret-token".into(),
+            ose_path: "/ide/ose/".into(),
+            ticket: "s3cret-token".into(),
             server_url: "http://srv:1".into(),
             computer: "node-a".into(),
             relay: "/api/computers/node-a/ide/relay/l1".into(),
             vscode_url: String::new(),
             vscode_relay: String::new(),
+            vscode_path: String::new(),
+            vscode_ticket: "vs-s3cret".into(),
             vscode_folder: String::new(),
             vscode_session: String::new(),
         };
         let text = format!("{target:?}");
         assert!(text.contains("/api/computers/node-a/ide/relay/l1"), "{text}");
-        assert!(!text.contains("s3cret-token"), "{text}");
+        assert!(!text.contains("s3cret-token") && !text.contains("vs-s3cret"), "{text}");
         assert!(text.contains("[REDACTED]"));
         assert!(text.contains("127.0.0.1:9000"));
         assert!(text.contains("http://srv:1") && text.contains("node-a"));

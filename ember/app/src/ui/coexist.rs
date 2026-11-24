@@ -237,44 +237,38 @@ impl SharedUi {
     /// shell is a Compose root and the editor an HTML page, and an HTML view inside a Compose root
     /// aborts the real renderer (#161).
     pub fn open_editor(&self, project: String, folder: String) {
-        self.open_editor_connection(project, folder, None, None, None, None, None, None);
+        self.open_editor_connection(crate::server::EditorConnection { project, folder, ..Default::default() });
     }
 
-    /// Open an editor with the remote connection when one is available.
-    #[allow(clippy::too_many_arguments)]
-    pub fn open_editor_connection(
-        &self,
-        project: String,
-        folder: String,
-        endpoint: Option<String>,
-        token: Option<String>,
-        server_url: Option<String>,
-        computer: Option<String>,
-        relay: Option<String>,
-        vscode: Option<crate::ide::VsCodeFallback>,
-    ) {
-        // The VS Code target travels as its relay launch (path and folder; the server is the
-        // editor's own), an old server's URL, or the session whose launch the button asks for
-        // (SPEC FR-E10, FR-W4c (1c)).
-        let (vscode_url, vscode_relay, vscode_folder, vscode_session) = match vscode {
-            Some(crate::ide::VsCodeFallback::Relay(r)) => (String::new(), r.relay, r.folder, String::new()),
-            Some(crate::ide::VsCodeFallback::Url(u)) => (u, String::new(), String::new(), String::new()),
-            Some(crate::ide::VsCodeFallback::Start { session }) => (String::new(), String::new(), String::new(), session),
-            None => (String::new(), String::new(), String::new(), String::new()),
+    /// Open an editor with the remote connection when one is available: the relay route, the
+    /// DarkPyonix manager's path and ticket (FR-W4c (1), INTENT D55), or the demo's endpoint.
+    pub fn open_editor_connection(&self, c: crate::server::EditorConnection) {
+        // The VS Code target travels as its relay launch (route, manager's path and ticket, and
+        // folder; the server is the editor's own), an old server's URL, or the session whose
+        // launch the button asks for (SPEC FR-E10, FR-W4c (1c)).
+        let mut target = EditorTarget {
+            project: c.project.clone(),
+            folder: c.folder.clone(),
+            endpoint: c.endpoint.unwrap_or_default(),
+            ose_path: c.ose_path.unwrap_or_default(),
+            ticket: c.ticket.unwrap_or_default(),
+            server_url: c.server_url.unwrap_or_default(),
+            computer: c.computer.unwrap_or_default(),
+            relay: c.relay.unwrap_or_default(),
+            ..Default::default()
         };
-        let target = EditorTarget {
-            project: project.clone(),
-            folder: folder.clone(),
-            endpoint: endpoint.unwrap_or_default(),
-            token: token.unwrap_or_default(),
-            server_url: server_url.unwrap_or_default(),
-            computer: computer.unwrap_or_default(),
-            relay: relay.unwrap_or_default(),
-            vscode_url,
-            vscode_relay,
-            vscode_folder,
-            vscode_session,
-        };
+        match c.vscode {
+            Some(crate::ide::VsCodeFallback::Relay(r)) => {
+                target.vscode_relay = r.relay;
+                target.vscode_path = r.path;
+                target.vscode_ticket = r.ticket;
+                target.vscode_folder = r.folder;
+            }
+            Some(crate::ide::VsCodeFallback::Url(u)) => target.vscode_url = u,
+            Some(crate::ide::VsCodeFallback::Start { session }) => target.vscode_session = session,
+            None => {}
+        }
+        let (project, folder) = (c.project, c.folder);
         #[cfg(not(test))]
         let spawn_target = target.clone();
         self.editor.set(Some(target));
@@ -384,28 +378,32 @@ mod tests {
     #[test]
     fn editor_connection_is_retained_in_target() {
         let ui = SharedUi::new(Prefs::default());
-        ui.open_editor_connection(
-            "project".into(),
-            "/work".into(),
-            Some("localhost:8000".into()),
-            Some("secret".into()),
-            Some("http://srv:1".into()),
-            Some("node-a".into()),
-            Some("/api/computers/node-a/ide/relay/l1".into()),
-            Some(crate::ide::VsCodeFallback::Relay(crate::ide::IdeRelay {
+        ui.open_editor_connection(crate::server::EditorConnection {
+            project: "project".into(),
+            folder: "/work".into(),
+            endpoint: None,
+            ose_path: Some("/ide/ose/".into()),
+            ticket: Some("secret".into()),
+            server_url: Some("http://srv:1".into()),
+            computer: Some("node-a".into()),
+            relay: Some("/api/computers/node-a/ide/relay/l1".into()),
+            vscode: Some(crate::ide::VsCodeFallback::Relay(crate::ide::IdeRelay {
                 relay: "/api/computers/node-a/ide/relay/v1".into(),
+                path: "/ide/ose/".into(),
+                ticket: "tk-v1".into(),
                 folder: "/work".into(),
                 server_url: "http://srv:1".into(),
             })),
-        );
+        });
         let target = ui.editor.get_untracked().unwrap();
         assert_eq!(target.vscode_relay, "/api/computers/node-a/ide/relay/v1");
         assert_eq!(target.vscode_folder, "/work");
         assert_eq!(target.vscode_url, "");
         assert_eq!(target.relay, "/api/computers/node-a/ide/relay/l1");
         assert_eq!((target.server_url.as_str(), target.computer.as_str()), ("http://srv:1", "node-a"));
-        assert_eq!(target.endpoint, "localhost:8000");
-        assert_eq!(target.token, "secret");
+        assert_eq!((target.vscode_path.as_str(), target.vscode_ticket.as_str()), ("/ide/ose/", "tk-v1"));
+        assert_eq!(target.endpoint, "");
+        assert_eq!((target.ose_path.as_str(), target.ticket.as_str()), ("/ide/ose/", "secret"));
     }
 
     #[test]

@@ -45,6 +45,12 @@ pub(crate) fn session_config_for(target: &EditorTarget, hubs: &StorageHubPool) -
     // The endpoint names the OSE's host in its requests; through the relay without one, `localhost`.
     let host = if target.endpoint.trim().is_empty() { "localhost".to_owned() } else { target.endpoint.clone() };
     let mut config = SessionConfig::new(host, target.folder.clone());
+    // Behind the DarkPyonix manager every request goes below its path with its ticket as the
+    // `dpx-editor` cookie; the editor server has no connection token (FR-W4c (1), INTENT D55).
+    if !target.ose_path.trim().is_empty() {
+        config.path = target.ose_path.trim().to_owned();
+    }
+    config.ticket = ember_editor_conn::handshake::Ticket::new(target.ticket.clone());
     config.storage_hub = Some(hubs.hub_for(target));
     config
 }
@@ -405,7 +411,6 @@ impl EditorHost {
             loop {
                 attempt += 1;
                 let mut config = session_config_for(&target, storage_hubs());
-                config.connection_token = (!target.token.is_empty()).then(|| target.token.clone());
                 config.app_language = "ko".into();
                 // The answer given since the window opened holds across a reconnect (FR-L31.18, FR-L31.6).
                 config.workspace_trusted = shared.lock().unwrap().trust.trusted;
@@ -875,6 +880,31 @@ mod tests {
         assert_eq!(state.error.as_deref(), Some("서버에 연결할 수 없습니다: refused"));
     }
 
+    /// SPEC FR-W4c (1), FR-N9.1, INTENT D55: the editor window's session goes below the
+    /// manager's path with its ticket; the demo's direct OSE stays at the root with no cookie.
+    #[test]
+    fn fr_w4c_editor_session_takes_the_manager_path_and_ticket() {
+        let pool = StorageHubPool::default();
+        let relayed = EditorTarget {
+            project: "p".into(),
+            folder: "/work".into(),
+            ose_path: "/ide/ose/".into(),
+            ticket: "tk-ember".into(),
+            relay: "/api/computers/local/ide/relay/e1".into(),
+            ..Default::default()
+        };
+        let config = session_config_for(&relayed, &pool);
+        let opts = ember_editor::session::connect_options(&config);
+        assert_eq!(opts.path, "/ide/ose/");
+        assert_eq!(opts.ticket.as_ref().map(|t| t.as_str()), Some("tk-ember"));
+        assert_eq!(opts.host, "localhost");
+        assert!(ember_editor_conn::handshake::upgrade_request(&opts, false).starts_with("GET /ide/ose/?reconnectionToken="));
+
+        let demo = EditorTarget { project: "p".into(), folder: "/work".into(), endpoint: "127.0.0.1:18765".into(), ..Default::default() };
+        let opts = ember_editor::session::connect_options(&session_config_for(&demo, &pool));
+        assert_eq!((opts.path.as_str(), opts.ticket.is_none(), opts.host.as_str()), ("/", true, "127.0.0.1:18765"));
+    }
+
     #[test]
     fn storage_hub_pool_shares_per_canonical_server_and_isolates_distinct_servers() {
         let pool = StorageHubPool::default();
@@ -882,12 +912,15 @@ mod tests {
             project: "p".into(),
             folder: folder.into(),
             endpoint: endpoint.into(),
-            token: String::new(),
+            ose_path: String::new(),
+            ticket: String::new(),
             server_url: String::new(),
             computer: String::new(),
             relay: String::new(),
             vscode_url: String::new(),
             vscode_relay: String::new(),
+            vscode_path: String::new(),
+            vscode_ticket: String::new(),
             vscode_folder: String::new(),
             vscode_session: String::new(),
         };
@@ -914,12 +947,15 @@ mod tests {
             project: "p".into(),
             folder: folder.into(),
             endpoint: String::new(),
-            token: String::new(),
+            ose_path: "/ide/ose/".into(),
+            ticket: "tk".into(),
             server_url: "https://Ember.Example.com/".into(),
             computer: computer.into(),
             relay: format!("/api/computers/{computer}/ide/relay/1"),
             vscode_url: String::new(),
             vscode_relay: String::new(),
+            vscode_path: String::new(),
+            vscode_ticket: String::new(),
             vscode_folder: String::new(),
             vscode_session: String::new(),
         };

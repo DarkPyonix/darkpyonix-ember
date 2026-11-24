@@ -2,12 +2,12 @@
 //! #879).
 //!
 //! The server hands out `ose.relay` (`/api/computers/{computer}/ide/relay/{launch_id}`, `FR-W4`)
-//! and a placeholder connection token. The relay is a WebSocket that carries the OSE's TCP bytes
-//! as binary messages, and it puts the real token in place of the placeholder only inside one
-//! client message. [`RelayStream`] is the editor's `AsyncRead + AsyncWrite` over that socket:
-//! every `poll_write` buffer goes out as exactly one binary message, never split or merged, and
-//! `ember-editor-conn` writes the upgrade request, the `auth` message and each batch of frames
-//! with one `write_all` of one buffer, so the placeholder never straddles two messages.
+//! with the DarkPyonix manager's `ose.path` and `ose.ticket` (`FR-W4c` (1), INTENT D55). The relay
+//! is a WebSocket that carries the bytes to the manager as binary messages, unchanged; the manager
+//! serves the editor server under its path and authorises each request by the ticket, which
+//! `ember-editor-conn` sends as `Cookie: dpx-editor=<ticket>`. There is no connection token.
+//! [`RelayStream`] is the editor's `AsyncRead + AsyncWrite` over that socket: every `poll_write`
+//! buffer goes out as exactly one binary message, never split or merged.
 //!
 //! The route is reached the way the terminal relay is ([`TermReach`]): over the transport
 //! through [`Api::open_peer_socket`](ember_client::api::Api::open_peer_socket), with the device

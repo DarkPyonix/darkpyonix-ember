@@ -230,8 +230,9 @@ fn available_when_absent() -> bool {
 }
 
 /// `POST /api/sessions/{id}/ide/vscode` (SPEC `FR-W4c` (1c), INTENT D55): the VS Code target's
-/// launch, made when VS Code is picked. No `url`, no `endpoint`, no connection token: the OSE
-/// behind the relay has none (`FR-W4a`).
+/// launch, made when VS Code is picked. No `url`, no `endpoint`, no connection token: the relay
+/// reaches the DarkPyonix manager, which serves the editor server under `ose.path` and
+/// authorises requests by `ose.ticket`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct VsCodeLaunch {
     pub session: String,
@@ -248,13 +249,28 @@ pub struct VsCodeLaunch {
     pub ose: VsCodeOse,
 }
 
-/// The relay of a [`VsCodeLaunch`].
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+/// The relay of a [`VsCodeLaunch`]: the route, the manager's path and its ticket.
+#[derive(Clone, PartialEq, Eq, Deserialize)]
 pub struct VsCodeOse {
     /// `/api/computers/{id}/ide/relay/{launch_id}`.
     pub relay: String,
+    /// The editor server's base path at the manager (`/ide/ose/`).
+    pub path: String,
+    /// The manager's ticket: `?dpx-ticket=` on the window's first page. A credential.
+    pub ticket: String,
     #[serde(default)]
     pub ose_commit: Option<String>,
+}
+
+impl std::fmt::Debug for VsCodeOse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VsCodeOse")
+            .field("relay", &self.relay)
+            .field("path", &self.path)
+            .field("ticket", &"[REDACTED]")
+            .field("ose_commit", &self.ose_commit)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -291,8 +307,8 @@ impl IdeLaunch {
             .unwrap_or_default()
     }
 
-    /// What the Ember editor window needs to connect: project, folder and the OSE runtime's
-    /// `host:port` and connection token when the server started one for the folder.
+    /// What the Ember editor window needs to connect: project, folder, the relay route, the
+    /// manager's path and ticket (`FR-W4c` (1), INTENT D55), and the demo's direct `host:port`.
     pub fn editor_connection(launch: Option<&Result<IdeLaunch, String>>) -> EditorConnection {
         let Some(Ok(l)) = launch else {
             return EditorConnection::default();
@@ -302,8 +318,9 @@ impl IdeLaunch {
         EditorConnection {
             project: l.project.clone(),
             folder: l.folder.clone(),
-            endpoint: ose.map(|o| host_port(&o.endpoint)),
-            token: ose.map(|o| o.connection_token.clone()),
+            endpoint: ose.map(|o| host_port(&o.endpoint)).filter(|e| !e.is_empty()),
+            ose_path: ose.map(|o| o.path.clone()).filter(|p| !p.is_empty()),
+            ticket: ose.map(|o| o.ticket.clone()).filter(|t| !t.is_empty()),
             relay: ose.and_then(|o| o.relay.clone()).filter(|r| !r.is_empty()),
             // The relay path takes the computer's registry id. The display name (`l.computer.name`) is not
             // an id, and writing it into `/api/computers/{id}/terminal` asked for a computer that does not exist.
@@ -318,12 +335,16 @@ impl IdeLaunch {
 }
 
 /// The editor window's connection data (`endpoint` is `host:port`).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct EditorConnection {
     pub project: String,
     pub folder: String,
+    /// The demo's direct `host:port`, dialed only without a relay route.
     pub endpoint: Option<String>,
-    pub token: Option<String>,
+    /// The editor server's base path at the DarkPyonix manager (`/ide/ose/`, `FR-W4c` (1)).
+    pub ose_path: Option<String>,
+    /// The manager's ticket, sent as `Cookie: dpx-editor=<ticket>` (D55). A credential.
+    pub ticket: Option<String>,
     /// The server's relay route to the OSE (`/api/computers/{id}/ide/relay/{launch}`, FR-W4),
     /// which the editor dials instead of `endpoint` when it is set (FR-N9.1).
     pub relay: Option<String>,
@@ -337,6 +358,23 @@ pub struct EditorConnection {
     pub vscode: Option<crate::ide::VsCodeFallback>,
 }
 
+impl std::fmt::Debug for EditorConnection {
+    // The ticket authorises the editor connection, so it never reaches logs.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EditorConnection")
+            .field("project", &self.project)
+            .field("folder", &self.folder)
+            .field("endpoint", &self.endpoint)
+            .field("ose_path", &self.ose_path)
+            .field("ticket", &self.ticket.as_ref().map(|_| "[REDACTED]"))
+            .field("relay", &self.relay)
+            .field("computer", &self.computer)
+            .field("server_url", &self.server_url)
+            .field("vscode", &self.vscode)
+            .finish()
+    }
+}
+
 /// `http://127.0.0.1:9000/` becomes `127.0.0.1:9000`; a bare `host:port` is kept.
 pub fn host_port(endpoint: &str) -> String {
     let rest = endpoint.split_once("://").map_or(endpoint, |(_, r)| r);
@@ -347,6 +385,7 @@ pub fn host_port(endpoint: &str) -> String {
 mod editor_connection_tests {
     use super::*;
 
+    /// `ose` is `(endpoint, ticket)`; the path is the manager's when there is a ticket.
     fn launch(ose: Option<(&str, &str)>) -> Result<IdeLaunch, String> {
         launch_with_relay(ose, None)
     }
@@ -371,7 +410,8 @@ mod editor_connection_tests {
                     ose: ose.map(|(e, t)| ember_client::wire::EmberOseConnection {
                         endpoint: e.into(),
                         relay: relay.map(str::to_owned),
-                        connection_token: t.into(),
+                        path: if t.is_empty() { String::new() } else { "/ide/ose/".into() },
+                        ticket: t.into(),
                         ose_commit: None,
                     }),
                 }),
@@ -392,7 +432,7 @@ mod editor_connection_tests {
                 "launch": {
                     "session": "s", "project": "p", "computer": "c", "folder": "/w",
                     "server_url": "http://srv:7",
-                    "ose": { "relay": "/api/computers/c/ide/relay/v1" }
+                    "ose": { "relay": "/api/computers/c/ide/relay/v1", "path": "/ide/ose/", "ticket": "tk-v1" }
                 }
             }))
             .unwrap()
@@ -404,6 +444,8 @@ mod editor_connection_tests {
             IdeLaunch::editor_connection(Some(&Ok(l.clone()))).vscode,
             Some(VsCodeFallback::Relay(IdeRelay {
                 relay: "/api/computers/c/ide/relay/v1".into(),
+                path: "/ide/ose/".into(),
+                ticket: "tk-v1".into(),
                 folder: "/w".into(),
                 server_url: "http://srv:7".into(),
             }))
@@ -438,10 +480,11 @@ mod editor_connection_tests {
     }
 
     #[test]
-    fn fr_l31_editor_connection_strips_scheme_and_carries_token() {
+    fn fr_l31_editor_connection_strips_scheme_and_carries_the_ticket() {
         let c = IdeLaunch::editor_connection(Some(&launch(Some(("http://127.0.0.1:9000/", "tok")))));
         assert_eq!(c.endpoint.as_deref(), Some("127.0.0.1:9000"));
-        assert_eq!(c.token.as_deref(), Some("tok"));
+        assert_eq!(c.ticket.as_deref(), Some("tok"));
+        assert!(!format!("{c:?}").contains("tok\""), "{c:?}");
         assert_eq!((c.project.as_str(), c.folder.as_str()), ("p", "/w"));
         assert_eq!(c.computer.as_deref(), Some("c"));
         assert_eq!(c.server_url.as_deref(), Some("http://srv:7"));
@@ -450,10 +493,11 @@ mod editor_connection_tests {
     #[test]
     fn fr_n9_editor_connection_carries_the_relay_path() {
         let relay = "/api/computers/local/ide/relay/abc";
-        let c = IdeLaunch::editor_connection(Some(&launch_with_relay(Some(("http://127.0.0.1:9000/", "ph")), Some(relay))));
+        let c = IdeLaunch::editor_connection(Some(&launch_with_relay(Some(("", "tk")), Some(relay))));
         assert_eq!(c.relay.as_deref(), Some(relay));
-        assert_eq!(c.endpoint.as_deref(), Some("127.0.0.1:9000"));
-        assert_eq!(c.token.as_deref(), Some("ph"));
+        assert_eq!(c.endpoint, None, "the server's launch has no endpoint");
+        assert_eq!(c.ose_path.as_deref(), Some("/ide/ose/"));
+        assert_eq!(c.ticket.as_deref(), Some("tk"));
         // An older server sends no relay; an empty one is no relay either.
         assert_eq!(IdeLaunch::editor_connection(Some(&launch(Some(("http://127.0.0.1:9000/", "t"))))).relay, None);
         let empty = IdeLaunch::editor_connection(Some(&launch_with_relay(Some(("http://127.0.0.1:9000/", "t")), Some(""))));
@@ -1198,6 +1242,8 @@ mod tests {
         assert!(matches!(status_error(500, "boom".into()), ServerError::Status { status: 500, .. }));
     }
 
+    /// SPEC FR-W4c (1), INTENT D55: the Ember target's launch carries the relay, the manager's
+    /// path and the ticket, and the editor connection takes them as they are.
     #[test]
     fn fr_l7_fr_l31_fr_w4_decodes_editor_connection() {
         let ide: IdeLaunch = serde_json::from_value(json!({
@@ -1206,12 +1252,35 @@ mod tests {
             "targets": [{ "kind": "ember", "available": true, "launch": {
                 "session": "s", "project": "p", "computer": "local", "folder": "/w",
                 "server_url": "http://localhost:8740",
-                "ose": { "endpoint": "http://localhost:9000", "connection_token": "secret" }
+                "ose": { "relay": "/api/computers/local/ide/relay/l1", "path": "/ide/ose/", "ticket": "secret" }
             }}]
         })).unwrap();
         let connection = ide.target("ember").unwrap().launch.as_ref().unwrap().ose.as_ref().unwrap();
-        assert_eq!(connection.endpoint, "http://localhost:9000");
-        assert_eq!(connection.connection_token, "secret");
+        assert_eq!(connection.endpoint, "");
+        assert_eq!((connection.path.as_str(), connection.ticket.as_str()), ("/ide/ose/", "secret"));
+        let c = IdeLaunch::editor_connection(Some(&Ok(ide)));
+        assert_eq!(c.relay.as_deref(), Some("/api/computers/local/ide/relay/l1"));
+        assert_eq!((c.ose_path.as_deref(), c.ticket.as_deref(), c.endpoint.as_deref()), (Some("/ide/ose/"), Some("secret"), None));
+    }
+
+    /// SPEC FR-W4c (1c), INTENT D55: the on-pick launch needs the path and the ticket, and never
+    /// prints the ticket.
+    #[test]
+    fn fr_w4c_vscode_launch_carries_the_manager_path_and_ticket() {
+        let launch: VsCodeLaunch = serde_json::from_value(json!({
+            "session": "s1", "project": "p", "computer": "node-a", "folder": "/work/repo",
+            "server_url": "http://127.0.0.1:8740",
+            "ose": { "relay": "/api/computers/node-a/ide/relay/v1", "path": "/ide/ose/", "ticket": "tk-secret" }
+        }))
+        .unwrap();
+        assert_eq!((launch.ose.path.as_str(), launch.ose.ticket.as_str()), ("/ide/ose/", "tk-secret"));
+        assert!(!format!("{launch:?}").contains("tk-secret"));
+        // A launch without them (a server older than the manager's endpoint) does not decode.
+        assert!(serde_json::from_value::<VsCodeLaunch>(json!({
+            "session": "s1", "project": "p", "computer": "node-a", "folder": "/work/repo",
+            "ose": { "relay": "/api/computers/node-a/ide/relay/v1" }
+        }))
+        .is_err());
     }
 
     #[test]

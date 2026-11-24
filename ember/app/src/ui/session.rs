@@ -2184,7 +2184,8 @@ mod tests {
             Some(ember_client::wire::EmberOseConnection {
                 endpoint: "http://127.0.0.1:9000".into(),
                 relay: None,
-                connection_token: String::new(),
+                path: String::new(),
+                ticket: String::new(),
                 ose_commit: commit.map(String::from),
             }),
         )

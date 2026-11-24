@@ -55,7 +55,7 @@ pub fn ide_launch(session: &str, project: &str, cwd: &str) -> crate::server::Ide
     ide_launch_with(session, project, cwd, demo_ose_from_env())
 }
 
-/// Env var that names a running OSE server (`host:port`, started without a connection token)
+/// Env var that names a running OSE server (`host:port`, at the root, started without a connection token)
 /// for the demo's Ember 에디터 to connect to, since the demo has no node to start one.
 pub const DEMO_OSE_ENV: &str = "EMBER_DEMO_OSE";
 
@@ -66,7 +66,8 @@ fn demo_ose_from_env() -> Option<ember_client::wire::EmberOseConnection> {
         endpoint: format!("http://{raw}"),
         // The demo's OSE is dialed directly: there is no server relay in demo mode.
         relay: None,
-        connection_token: String::new(),
+        path: String::new(),
+        ticket: String::new(),
         ose_commit: None,
     })
 }
@@ -2301,7 +2302,8 @@ mod tests {
         let ose = ember_client::wire::EmberOseConnection {
             endpoint: "http://127.0.0.1:18765".into(),
             relay: None,
-            connection_token: String::new(),
+            path: String::new(),
+            ticket: String::new(),
             ose_commit: None,
         };
         let l = ide_launch_with("s", "p", "/w", Some(ose));

@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use ember_editor_conn::exthost::{self, InitDataParams, WorkspaceData, WorkspaceFolder};
-use ember_editor_conn::handshake::{self, ConnectOptions, ConnectionType, ExtensionHostStartParams};
+use ember_editor_conn::handshake::{self, ConnectOptions, ConnectionType, ExtensionHostStartParams, Ticket};
 use ember_editor_conn::ipc::{IpcClient, IpcLifecycle};
 use ember_editor_conn::management::{self, RemoteAgentConnectionContext};
 use ember_editor_conn::remote_fs::{RemoteFs, WatchEvent, WatchOptions, WriteOptions};
@@ -57,8 +57,12 @@ pub struct SessionConfig {
     /// The remote authority the server's URI transformers key on. Every file URI is
     /// `vscode-remote://<remote_authority><path>`. Usually equal to `host`.
     pub remote_authority: String,
-    /// The server's `--connection-token`, if any.
-    pub connection_token: Option<String>,
+    /// The editor server's base path (`ose.path`, `/ide/ose/` behind the DarkPyonix manager; `/`
+    /// for a server at the root, the demo's). Every request goes below it (`FR-W4c` (1c), D55).
+    pub path: String,
+    /// The manager's ticket (`ose.ticket`), sent as `Cookie: dpx-editor=<ticket>` on every
+    /// request. The editor server has no connection token, so there is no token here.
+    pub ticket: Option<Ticket>,
     /// Absolute path of the workspace folder on the server.
     pub workspace_path: String,
     pub workspace_name: String,
@@ -107,7 +111,8 @@ impl SessionConfig {
         Self {
             remote_authority: host.clone(),
             host,
-            connection_token: None,
+            path: "/".into(),
+            ticket: None,
             workspace_path,
             workspace_name,
             app_language: "en".into(),
@@ -236,6 +241,15 @@ pub struct EditorSession {
     user_files: Vec<std::path::PathBuf>,
 }
 
+/// The handshake options every socket of a session starts from: the host, the editor server's
+/// path and the manager's ticket (`FR-W4c` (1c), INTENT D55).
+pub fn connect_options(config: &SessionConfig) -> ConnectOptions {
+    let mut base = ConnectOptions::new(config.host.clone());
+    base.path = if config.path.trim().is_empty() { "/".into() } else { config.path.clone() };
+    base.ticket = config.ticket.clone();
+    base
+}
+
 fn parent_of_path(path: &str) -> String {
     match path.trim_end_matches('/').rsplit_once('/') {
         Some(("", _)) | None => "/".to_string(),
@@ -306,8 +320,7 @@ impl EditorSession {
     {
         let authority = config.remote_authority.clone();
         let workspace_path = config.workspace_path.clone();
-        let mut base = ConnectOptions::new(config.host.clone());
-        base.connection_token = config.connection_token.clone();
+        let base = connect_options(&config);
 
         // 1. version gate
         let commit = handshake::verify_server(dial().await?, &base).await?;

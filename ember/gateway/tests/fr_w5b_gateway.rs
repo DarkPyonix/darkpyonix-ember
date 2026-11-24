@@ -133,6 +133,28 @@ async fn fr_w5b_with_the_cookie_head_and_body_reach_the_relay_and_the_answer_com
     assert_eq!(upgrades, vec![(RELAY.to_owned(), Some("Bearer srv-token".to_owned()))]);
 }
 
+/// SPEC FR-W5b, FR-W4c (1c), INTENT D55: the gateway rewrites nothing in a joined connection,
+/// so the manager's ticket cookie reaches the relay and the manager's `Set-Cookie` (here, bytes
+/// the fake relay echoes) reaches the window unchanged.
+#[tokio::test]
+async fn fr_w5b_the_managers_cookies_pass_through_unchanged() {
+    let (base, seen) = fake_relay().await;
+    let gw = gateway(&base).await;
+    let mut tcp = TcpStream::connect(gw.addr()).await.unwrap();
+    let body = "HTTP/1.1 302 Found\r\nLocation: /ide/ose/?folder=%2Fw\r\nSet-Cookie: dpx-editor=tk; HttpOnly; Path=/ide/ose/\r\n\r\n";
+    let request = format!(
+        "POST /ide/ose/?folder=%2Fw&dpx-ticket=tk HTTP/1.1\r\nHost: {}\r\nCookie: dpx-editor=tk; {COOKIE_NAME}={}\r\nContent-Length: {}\r\n\r\n{body}",
+        gw.addr(),
+        gw.token(),
+        body.len()
+    );
+    tcp.write_all(request.as_bytes()).await.unwrap();
+    let mut back = vec![0u8; request.len()];
+    tokio::time::timeout(Duration::from_secs(5), tcp.read_exact(&mut back)).await.expect("the echo comes back").unwrap();
+    assert_eq!(String::from_utf8_lossy(&back), request, "Set-Cookie and the ticket come back as they went");
+    assert_eq!(seen.bytes.lock().unwrap()[0], request.as_bytes(), "the manager gets the ticket and its cookie unchanged");
+}
+
 #[tokio::test]
 async fn fr_w5b_one_tcp_connection_is_one_relay_stream() {
     let (base, seen) = fake_relay().await;

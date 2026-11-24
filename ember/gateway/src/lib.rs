@@ -14,14 +14,19 @@
 //!   later request (resources, WebSockets) carries the cookie. Anything else is a 403 and the
 //!   connection is closed. Why: any local process can reach a loopback port; the token keeps them
 //!   off the relay, which carries this user's credential.
+//!   The 302 keeps every other query parameter in its order, so a parameter meant for the server
+//!   behind the relay (the DarkPyonix manager's `dpx-ticket`) reaches it on the next request.
 //! - An accepted connection opens one relay stream, the buffered head (and whatever body bytes
 //!   came with it) is written to it, and bytes are then copied both ways until either side ends.
 //!   Each read from the TCP side goes out as one binary WebSocket message.
 //!
-//! The OSE behind the VS Code target has no connection token (`FR-W4a`, D55), so nothing in the
-//! byte stream is rewritten. The gateway names no transport backend type (`FR-N5`): a relay
-//! stream is whatever [`Dial`] opens, and [`RelayTarget`] dials `ws(s)://<server><relay>` with the
-//! server token, as the Ember editor does over HTTP (`ember/app/src/editor_reach.rs`).
+//! The relay reaches the DarkPyonix manager, which serves the editor server under its path and
+//! authorises it by its own ticket and cookie (`dpx-editor`, `FR-W4c` (1c), D55). The editor
+//! server has no connection token, so nothing in the byte stream is rewritten: the manager's
+//! `Set-Cookie` and every other header pass both ways unchanged. The gateway names no transport
+//! backend type (`FR-N5`): a relay stream is whatever [`Dial`] opens, and [`RelayTarget`] dials
+//! `ws(s)://<server><relay>` with the server token, as the Ember editor does over HTTP
+//! (`ember/app/src/editor_reach.rs`).
 
 use std::fmt;
 use std::future::Future;
@@ -422,7 +427,23 @@ pub fn encode_query_value(value: &str) -> String {
 
 /// `http://127.0.0.1:<port>/?folder=<folder>&egw=<token>`, the first page the window loads.
 pub fn page_url(addr: SocketAddr, token: &str, folder: &str) -> String {
-    format!("http://{addr}/?folder={}&{QUERY_NAME}={token}", encode_query_value(folder))
+    page_url_at(addr, token, "/", &[("folder", folder)])
+}
+
+/// `http://127.0.0.1:<port><path>?<k>=<v>&...&egw=<token>`: a first page under `path`, with each
+/// value percent-encoded and the gateway's token last (its 302 drops only `egw`).
+pub fn page_url_at(addr: SocketAddr, token: &str, path: &str, query: &[(&str, &str)]) -> String {
+    let mut url = format!("http://{addr}{path}?");
+    for (key, value) in query {
+        url.push_str(key);
+        url.push('=');
+        url.push_str(&encode_query_value(value));
+        url.push('&');
+    }
+    url.push_str(QUERY_NAME);
+    url.push('=');
+    url.push_str(token);
+    url
 }
 
 /// A running gateway on the caller's tokio runtime. Dropping it stops accepting connections.
@@ -548,6 +569,30 @@ mod tests {
         assert_eq!(access(b"GET /x HTTP/1.1\r\ncookie: ember-gw=abc12\r\n\r\n", T), Access::Refused);
         assert_eq!(access(b"GET http://evil/ HTTP/1.1\r\nCookie: ember-gw=abc123\r\n\r\n", T), Access::Refused);
         assert_eq!(access(b"garbage\r\n\r\n", T), Access::Refused);
+    }
+
+    /// SPEC FR-W5b, FR-W4c (1c), INTENT D55: the 302 for `egw` keeps the manager's `dpx-ticket`
+    /// and every other parameter, in order, under the manager's path.
+    #[test]
+    fn fr_w5b_the_egw_redirect_keeps_the_managers_ticket() {
+        assert_eq!(
+            access(b"GET /ide/ose/?folder=%2Fw&dpx-ticket=tk&egw=abc123 HTTP/1.1\r\nHost: x\r\n\r\n", T),
+            Access::Redirect("/ide/ose/?folder=%2Fw&dpx-ticket=tk".into())
+        );
+        assert_eq!(
+            access(b"GET /ide/ose/?egw=abc123&dpx-ticket=tk HTTP/1.1\r\n\r\n", T),
+            Access::Redirect("/ide/ose/?dpx-ticket=tk".into())
+        );
+        // After it, the manager's own cookie rides beside the gateway's and the request joins.
+        assert_eq!(
+            access(b"GET /ide/ose/?folder=%2Fw HTTP/1.1\r\nCookie: dpx-editor=tk; ember-gw=abc123\r\n\r\n", T),
+            Access::Join
+        );
+        let addr: SocketAddr = "127.0.0.1:4100".parse().unwrap();
+        assert_eq!(
+            page_url_at(addr, T, "/ide/ose/", &[("folder", "/work/my repo"), ("dpx-ticket", "a+b/c")]),
+            "http://127.0.0.1:4100/ide/ose/?folder=%2Fwork%2Fmy%20repo&dpx-ticket=a%2Bb%2Fc&egw=abc123"
+        );
     }
 
     #[test]

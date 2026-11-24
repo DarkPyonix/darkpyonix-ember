@@ -6,21 +6,29 @@
 
 use serde::{Deserialize, Serialize};
 
-/// OSE connection details delivered with an Ember editor launch.
+/// How the editor reaches an OSE (`FR-W4c` (1), (1c), INTENT D55): through the server's relay
+/// route to the DarkPyonix manager, which serves the editor server under `path` and authorises
+/// each request by `ticket` (the cookie `dpx-editor=<ticket>`, or `?dpx-ticket=<ticket>` on a
+/// browser's first page). The editor server has no connection token, so the launch carries none.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EmberOseConnection {
-    /// The OSE's address on its computer. Empty for the VS Code target, whose OSE listens on a
-    /// socket and is reached only through `relay` (`FR-W4c` (1b), INTENT D55).
-    #[serde(default)]
+    /// A direct `host:port` for the editor server, used only without `relay` (the demo's local
+    /// OSE). The server's launches leave it out.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub endpoint: String,
     /// The server's relay route to this OSE (`/api/computers/{computer}/ide/relay/{launch_id}`,
     /// FR-W4), below the server's base URL. The editor reaches the OSE through it when it is set
-    /// (FR-N9.1); an older server or the demo leaves it out.
+    /// (FR-N9.1); the demo leaves it out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay: Option<String>,
-    /// Empty for the VS Code target, whose OSE has no connection token (`FR-W4a`, INTENT D55).
-    #[serde(default)]
-    pub connection_token: String,
+    /// The editor server's base path at the manager (`/ide/ose/`). Every request goes below it.
+    /// Empty from the demo, whose OSE is at the root.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub path: String,
+    /// The manager's ticket for this launch. A credential: `Debug` prints `[REDACTED]`. Empty from
+    /// the demo, whose OSE has no manager in front of it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ticket: String,
     /// The Code-OSS commit of the OSE build, when the server reports it (SPEC FR-E10, #32); the
     /// editor compares it with the commits it supports before connecting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -29,8 +37,13 @@ pub struct EmberOseConnection {
 
 impl std::fmt::Debug for EmberOseConnection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EmberOseConnection").field("endpoint", &self.endpoint).field("relay", &self.relay)
-            .field("connection_token", &"[REDACTED]").finish()
+        f.debug_struct("EmberOseConnection")
+            .field("endpoint", &self.endpoint)
+            .field("relay", &self.relay)
+            .field("path", &self.path)
+            .field("ticket", &"[REDACTED]")
+            .field("ose_commit", &self.ose_commit)
+            .finish()
     }
 }
 
@@ -54,17 +67,41 @@ pub struct EmberLaunch {
 mod ide_launch_tests {
     use super::*;
 
+    /// SPEC FR-W4c (1), (1c), INTENT D55: the launch carries the relay, the manager's path and
+    /// the ticket, round-trips, and never prints the ticket.
     #[test]
-    fn fr_l7_fr_l31_fr_w4_connection_round_trip() {
+    fn fr_w4c_connection_carries_the_manager_path_and_ticket() {
         let value = serde_json::json!({
             "session": "s", "project": "p", "computer": "local", "folder": "/w",
             "server_url": null,
-            "ose": { "endpoint": "http://localhost:9000", "connection_token": "secret" }
+            "ose": {
+                "relay": "/api/computers/local/ide/relay/l1",
+                "path": "/ide/ose/",
+                "ticket": "tk-secret",
+                "ose_commit": "abc"
+            }
         });
         let launch: EmberLaunch = serde_json::from_value(value.clone()).unwrap();
-        assert_eq!(launch.ose.as_ref().unwrap().connection_token, "secret");
-        assert!(!format!("{launch:?}").contains("secret"));
+        let ose = launch.ose.as_ref().unwrap();
+        assert_eq!((ose.path.as_str(), ose.ticket.as_str()), ("/ide/ose/", "tk-secret"));
+        assert_eq!(ose.endpoint, "");
+        assert!(!format!("{launch:?}").contains("tk-secret"));
         assert_eq!(serde_json::to_value(launch).unwrap(), value);
+    }
+
+    /// SPEC FR-W4c (1), INTENT D55: the launch has no connection token any more. One an older
+    /// server still sends is not kept, so it is never sent anywhere.
+    #[test]
+    fn fr_w4c_an_older_launch_token_is_not_kept() {
+        let launch: EmberLaunch = serde_json::from_value(serde_json::json!({
+            "session": "s",
+            "ose": { "endpoint": "http://127.0.0.1:9000", "relay": "/api/computers/local/ide/relay/a", "connection_token": "placeholder" }
+        }))
+        .unwrap();
+        let back = serde_json::to_value(&launch).unwrap();
+        assert!(back["ose"].get("connection_token").is_none(), "{back}");
+        assert!(!back.to_string().contains("placeholder"));
+        assert_eq!(launch.ose.unwrap().ticket, "");
     }
 
     #[test]
@@ -79,29 +116,28 @@ mod ide_launch_tests {
         let value = serde_json::json!({
             "session": "s",
             "ose": {
-                "endpoint": "http://127.0.0.1:9000",
                 "relay": "/api/computers/local/ide/relay/abc",
-                "connection_token": "placeholder"
+                "path": "/ide/ose/",
+                "ticket": "tk"
             }
         });
         let launch: EmberLaunch = serde_json::from_value(value.clone()).unwrap();
         let ose = launch.ose.as_ref().unwrap();
         assert_eq!(ose.relay.as_deref(), Some("/api/computers/local/ide/relay/abc"));
         assert!(format!("{ose:?}").contains("/api/computers/local/ide/relay/abc"));
-        assert!(!format!("{ose:?}").contains("placeholder"));
         assert_eq!(serde_json::to_value(&launch).unwrap()["ose"]["relay"], "/api/computers/local/ide/relay/abc");
 
-        // Without it (an older server, the demo) the field is absent and stays absent.
+        // Without it (the demo's direct OSE) the field is absent and stays absent.
         let older: EmberLaunch = serde_json::from_value(serde_json::json!({
-            "session": "s", "ose": { "endpoint": "http://127.0.0.1:9000", "connection_token": "t" }
+            "session": "s", "ose": { "endpoint": "127.0.0.1:9000" }
         }))
         .unwrap();
         assert_eq!(older.ose.as_ref().unwrap().relay, None);
         assert!(serde_json::to_value(&older).unwrap()["ose"].get("relay").is_none());
     }
 
-    /// SPEC FR-W4c (1b), INTENT D55 (#1064): the VS Code target's launch carries only the relay
-    /// route, with no endpoint and no connection token, and still decodes.
+    /// SPEC FR-W4c (1b), INTENT D55 (#1064): a launch with only the relay route still decodes,
+    /// with an empty path and ticket.
     #[test]
     fn fr_l7_vscode_launch_with_only_a_relay_decodes() {
         let launch: EmberLaunch = serde_json::from_value(serde_json::json!({
@@ -113,7 +149,7 @@ mod ide_launch_tests {
         let ose = launch.ose.as_ref().unwrap();
         assert_eq!(ose.relay.as_deref(), Some("/api/computers/node-a/ide/relay/l1"));
         assert_eq!(ose.endpoint, "");
-        assert_eq!(ose.connection_token, "");
+        assert_eq!((ose.path.as_str(), ose.ticket.as_str()), ("", ""));
     }
 }
 

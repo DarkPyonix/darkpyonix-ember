@@ -47,6 +47,7 @@ pub mod proxy {
     pub const EXT_HOST_FILE_SYSTEM_INFO: &str = "ExtHostFileSystemInfo";
     pub const EXT_HOST_SEARCH: &str = "ExtHostSearch";
     pub const EXT_HOST_STORAGE: &str = "ExtHostStorage";
+    pub const EXT_HOST_SECRET_STATE: &str = "ExtHostSecretState";
 
     pub const MAIN_THREAD_COMMANDS: &str = "MainThreadCommands";
     pub const MAIN_THREAD_DIAGNOSTICS: &str = "MainThreadDiagnostics";
@@ -527,6 +528,16 @@ pub fn accept_storage_value(shared: bool, extension_id: &str, value: &str) -> Ca
             Arg::Json(Value::String(extension_id.to_owned())),
             Arg::Json(Value::String(value.to_owned())),
         ],
+    )
+}
+
+/// `ExtHostSecretStateShape.$onDidChangePassword({ extensionId, key })` (extHost.protocol.ts L2589).
+/// Tells the extension host that a secret changed, which fires `context.secrets.onDidChange`.
+pub fn secret_changed(extension_id: &str, key: &str) -> Call {
+    Call::new(
+        proxy::EXT_HOST_SECRET_STATE,
+        "$onDidChangePassword",
+        vec![Arg::Json(json!({ "extensionId": extension_id, "key": key }))],
     )
 }
 

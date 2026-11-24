@@ -34,7 +34,11 @@ use serde_json::json;
 
 use crate::computers::{self, Computers};
 use crate::devices::Devices;
+use crate::session::Sessions;
 use crate::store::now_ms;
+
+mod push;
+use push::TransferPush;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -100,6 +104,25 @@ pub struct TransfersSnapshot {
     pub settings: TransferSettingsView,
 }
 
+/// An offer, active transfer or history record from the receiver snapshot.
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum TransferUpdate {
+    Offered(PendingOfferItem),
+    Active(TransferItem),
+    Ended(HistoryRecord),
+}
+
+impl TransferUpdate {
+    fn id(&self) -> &str {
+        match self {
+            Self::Offered(offer) => &offer.id,
+            Self::Active(transfer) => &transfer.id,
+            Self::Ended(record) => &record.id,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum TransferApiError {
     #[error("{0}")]
@@ -145,6 +168,7 @@ struct Inner {
     writers: HashMap<String, ReceiveWriter>,
     received: Vec<StoredFile>,
     history: Vec<HistoryRecord>,
+    push: Option<Arc<TransferPush>>,
 }
 
 impl PendingOfferItem {
@@ -162,15 +186,24 @@ impl PendingOfferItem {
 }
 
 impl Inner {
+    fn publish(&self, update: TransferUpdate) {
+        if let Some(push) = &self.push {
+            push.changed(update);
+        }
+    }
+
     fn expire_pending(&mut self, now: i64) {
         let cutoff = now.saturating_sub(OFFER_TTL_MS);
-        let mut changed = false;
+        let mut expired = 0;
         for offer in self.pending_offers.extract_if(.., |offer| offer.created_at <= cutoff) {
             self.history.insert(0, offer.ended(TransferResult::Expired, now));
-            changed = true;
+            expired += 1;
         }
-        if changed {
+        if expired != 0 {
             self.save_history();
+            for record in self.history[..expired].iter().rev() {
+                self.publish(TransferUpdate::Ended(record.clone()));
+            }
         }
     }
 
@@ -225,10 +258,16 @@ impl TransferManager {
                 writers: HashMap::new(),
                 received: Vec::new(),
                 history,
+                push: None,
             }),
             devices,
             computers,
         })
+    }
+
+    /// Connect the receiver's state changes to the server push socket.
+    pub fn publish_updates_to(&self, sessions: Arc<Sessions>) {
+        self.inner.lock().unwrap().push = Some(TransferPush::new(sessions));
     }
 
     fn is_peer_registered(&self, peer_id: &str) -> bool {
@@ -399,6 +438,9 @@ impl TransferManager {
         };
         g.expire_pending(offer.created_at);
         g.pending_offers.push(offer.clone());
+        if !auto_accept {
+            g.publish(TransferUpdate::Offered(offer.clone()));
+        }
         drop(g);
 
         if auto_accept {
@@ -446,6 +488,7 @@ impl TransferManager {
             files: offer.files,
         };
         g.transfers.insert(0, item.clone());
+        g.publish(TransferUpdate::Active(item.clone()));
         Ok(item)
     }
 
@@ -463,6 +506,7 @@ impl TransferManager {
         let rec = offer.ended(TransferResult::Declined, now);
         g.history.insert(0, rec.clone());
         g.save_history();
+        g.publish(TransferUpdate::Ended(rec.clone()));
         Ok(rec)
     }
 
@@ -543,8 +587,13 @@ impl TransferManager {
             })?;
         let tr = g.transfers.iter_mut().find(|t| t.id == id).unwrap();
         tr.state = ActiveStatus::Sending;
+        let changed = tr.done != done;
         tr.done = done;
-        Ok(tr.clone())
+        let transfer = tr.clone();
+        if changed {
+            g.publish(TransferUpdate::Active(transfer.clone()));
+        }
+        Ok(transfer)
     }
 
     /// Finalizes a transfer, verifying final SHA-256 hashes and moving files to `received_dir`
@@ -558,6 +607,8 @@ impl TransferManager {
         let stored = writer.finalize().map_err(|e| {
             if let Some(tr) = g.transfers.iter_mut().find(|t| t.id == id) {
                 tr.state = ActiveStatus::Failed;
+                let transfer = tr.clone();
+                g.publish(TransferUpdate::Active(transfer));
             }
             TransferApiError::BadRequest(e.to_string())
         })?;
@@ -581,6 +632,9 @@ impl TransferManager {
                 );
             }
             g.save_history();
+            if !stored.is_empty() {
+                g.publish(TransferUpdate::Ended(g.history[0].clone()));
+            }
         }
         Ok(stored)
     }
@@ -599,7 +653,9 @@ impl TransferManager {
             )));
         }
         tr.state = ActiveStatus::Paused;
-        Ok(tr.clone())
+        let transfer = tr.clone();
+        g.publish(TransferUpdate::Active(transfer.clone()));
+        Ok(transfer)
     }
 
     pub fn resume_transfer(&self, id: &str) -> Result<TransferItem, TransferApiError> {
@@ -616,7 +672,9 @@ impl TransferManager {
             )));
         }
         tr.state = ActiveStatus::Sending;
-        Ok(tr.clone())
+        let transfer = tr.clone();
+        g.publish(TransferUpdate::Active(transfer.clone()));
+        Ok(transfer)
     }
 
     /// Cancels a pending offer or active transfer and removes partial files (`FR-F4`).
@@ -632,6 +690,7 @@ impl TransferManager {
             let rec = offer.ended(TransferResult::Cancelled, now);
             g.history.insert(0, rec.clone());
             g.save_history();
+            g.publish(TransferUpdate::Ended(rec.clone()));
             return Ok(rec);
         }
         let pos = g
@@ -651,6 +710,7 @@ impl TransferManager {
         };
         g.history.insert(0, rec.clone());
         g.save_history();
+        g.publish(TransferUpdate::Ended(rec.clone()));
         Ok(rec)
     }
 

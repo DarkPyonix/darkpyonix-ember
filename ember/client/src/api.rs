@@ -1773,11 +1773,19 @@ impl Api {
     }
 
     pub async fn accept_transfer_offer(&self, id: &str) -> ApiResult<crate::transfers::TransferItem> {
-        Self::decode(self.post(&format!("/transfers/offers/{}/accept", seg(id)), json!({})).await?)
+        self.accept_transfer_offer_at(&TransferTarget::Server, id).await
+    }
+
+    pub async fn accept_transfer_offer_at(&self, target: &TransferTarget, id: &str) -> ApiResult<crate::transfers::TransferItem> {
+        Self::decode(self.post(&format!("{}/offers/{}/accept", target.prefix(), seg(id)), json!({})).await?)
     }
 
     pub async fn decline_transfer_offer(&self, id: &str) -> ApiResult<crate::transfers::HistoryRecord> {
-        Self::decode(self.post(&format!("/transfers/offers/{}/decline", seg(id)), json!({})).await?)
+        self.decline_transfer_offer_at(&TransferTarget::Server, id).await
+    }
+
+    pub async fn decline_transfer_offer_at(&self, target: &TransferTarget, id: &str) -> ApiResult<crate::transfers::HistoryRecord> {
+        Self::decode(self.post(&format!("{}/offers/{}/decline", target.prefix(), seg(id)), json!({})).await?)
     }
 
     /// Appends `data` to file `file` of transfer `id` at `offset`. `sha256` is the chunk's hash

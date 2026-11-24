@@ -262,6 +262,8 @@ jobs:
         run: cargo build --locked --manifest-path ember/node/Cargo.toml --bins
       - name: cargo build (ember-server bins)
         run: cargo build --locked --manifest-path ember/server/Cargo.toml --bins
+      - name: cargo test (OSE process tree, node)
+        run: cargo test --locked --manifest-path ember/node/Cargo.toml --lib fr_w4_windows_ose_kills_the_tree
       # FR-S12 on Windows (#815): the claim door is a named pipe there. The door tests are the
       # unix ones run against the pipe, plus the Windows twins (access list, a taken name, the
       # process snapshot); the client test claims a key over the real pipe.

@@ -65,6 +65,8 @@ pub enum ErrorCode {
     TooLarge,
     /// The file receiver (FR-F16): not enough free space for an offer (507).
     NoSpace,
+    /// The file receiver: the offer expired before an answer (410).
+    Expired,
     /// The file receiver: the receive mode refuses the offer (403).
     Forbidden,
 }

@@ -1158,3 +1158,13 @@ What trust does not protect. Under D37 agents and terminals run with the full au
 **Rejected.** Bridging them now (a large surface that duplicates Ember's agents); answering them with errors (extensions such as Copilot Chat register at startup and would fail activation instead of staying idle).
 
 **Status.** Ledger classification in the FR-E9 follow-up of #1043. Revisit when a regression-list extension needs one of these actors.
+
+### D55: The VS Code target reaches the computer's OSE through the relay, with no pre-set address
+
+**Decision.** [user, 2026-11-25, on the VS Code target of #1064: "서버에 웹 주소가 왜 미리 지정이 되어 있지? 아닌데? 개도 릴레인데?"] On the desktop, "Open IDE → VS Code" opens the session's folder on the OSE that the session's computer runs (`FR-W4a`), reached through the server's relay route (`FR-W4c`), the same path the Ember 에디터 uses (D42) and the phone uses (D53). The server hands the client a launch for the VS Code target as it does for the Ember target, not a web address. The IDE window (`ember-ide-webview`) loads the workbench from a loopback gateway in its own process that joins each connection to one relay stream: the gateway of `FR-W5b` (`ember/gateway`), one crate for the desktop window and the phone [leader, 2026-11-25]. The real connection token stays on the computer, and the device key (D37) is the only credential on the way.
+
+**Pending the owner** [leader's proposal, 2026-11-25, provisional until the owner answers]: on the desktop the proxy layer of D11 leaves the path. Its login is dropped, because the relay's device key replaces it. Its CSS and DOM injection and the tab detach move into `ember-ide-webview`, which owns the page: the window injects the overlay and `detach.js` with its initialization script, `detach.js` already reaches the native window through the `emberBridge` message handler, and the window already opens detached sibling windows (`ember/ide-webview/src/opener.rs`). The `workbench.editor.dragToOpenWindow: false` default that the proxy writes into the workbench HTML is set by the window's script instead, with `detach.js`'s run-time guard behind it. Until the owner answers, the proxy features are kept.
+
+**Rejected** *[provisional]*. A pre-set `ide_url` per computer from `EMBER_IDE_COMPUTERS` or `EMBER_IDE_URL` (SPEC "IDE computers", #454): the address must be configured on the server for each computer, it bypasses the relay and the device key, the proxy's own login is a second credential, and a phone cannot reach it (D53). `EMBER_IDE_COMPUTERS` keeps only what has no relay, the Gateway SSH host.
+
+**Status.** Draft, #1064. Not built: the gateway (`FR-W5b`), the VS Code launch on the server and the window's use of it.

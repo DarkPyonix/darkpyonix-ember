@@ -66,6 +66,7 @@ pub mod ports;
 pub mod relay;
 pub mod schema;
 pub mod shim;
+pub mod status_push;
 pub mod terms;
 pub mod transfers;
 

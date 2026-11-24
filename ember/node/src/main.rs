@@ -190,19 +190,22 @@ async fn serve() -> anyhow::Result<()> {
         bound = Some(t);
     }
 
-    let terms = node.terms().clone();
-    tokio::select! {
-        (r, _, _) = futures::future::select_all(servers) => r?,
-        _ = shutdown_signal() => {
-            // Graceful stop: save every running terminal's screen so a re-adopting node (the
-            // PTY keepers hold the processes) restores scrollback and screen.
-            tracing::info!("shutting down; saving terminal snapshots");
-            tokio::task::spawn_blocking(move || terms.shutdown()).await?;
-        }
+    let served = tokio::select! {
+        (result, _, _) = futures::future::select_all(servers) => Some(result),
+        _ = shutdown_signal() => None,
+    };
+    node.ose().shutdown();
+    if served.is_none() {
+        // Graceful stop: save every running terminal's screen so a re-adopting node (the
+        // PTY keepers hold the processes) restores scrollback and screen.
+        tracing::info!("shutting down; saving terminal snapshots");
+        let terms = node.terms().clone();
+        tokio::task::spawn_blocking(move || terms.shutdown()).await?;
     }
     if let Some(t) = bound {
         t.close().await;
     }
+    served.unwrap_or(Ok(()))?;
     Ok(())
 }
 

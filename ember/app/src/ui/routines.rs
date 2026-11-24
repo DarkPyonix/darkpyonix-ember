@@ -13,6 +13,8 @@
 //! every routine while the server cannot be reached, in memory for this app run; it starts
 //! empty and nothing here is sample data.
 
+use chrono::{DateTime, Utc};
+use chrono_tz::Tz;
 use ember_client::wire::{
     self, EventOn, NewSchedule, Schedule, SchedulePatch, ScheduleKind, ScheduleRun, ScheduleTarget,
 };
@@ -26,7 +28,7 @@ use super::shell::NavMenu;
 /// Minutes since 1970-01-01 00:00 UTC. Local time is this plus the offset the caller passes.
 pub type Minutes = i64;
 
-/// TODO(server): no time-zone source in the app yet; the server evaluates cron in UTC by default.
+/// Offset for the dashboard and run history, which display UTC.
 pub const LOCAL_OFFSET_MIN: i64 = 0;
 
 // ---------------------------------------------------------------------------------------------
@@ -253,6 +255,31 @@ pub fn next_run(expr: &str, after: Minutes) -> Option<Minutes> {
     None
 }
 
+/// The next cron trigger as UTC minutes, using the saved IANA time zone.
+fn next_zoned_run(expr: &str, tz: Tz, after: Minutes) -> Option<Minutes> {
+    let cron = croner::Cron::new(expr).parse().ok()?;
+    let mut from = DateTime::<Utc>::from_timestamp(after.checked_mul(60)?, 0)?.with_timezone(&tz);
+    let previous_local = from.naive_local();
+    // The scheduler skips the repeated wall time when clocks go back.
+    for _ in 0..4 {
+        let next = cron.find_next_occurrence(&from, false).ok()?;
+        if next.naive_local() != previous_local {
+            return Some(next.timestamp().div_euclid(60));
+        }
+        from = next;
+    }
+    None
+}
+
+fn zone_minutes(utc: Minutes, tz: Tz) -> Option<Minutes> {
+    let time = DateTime::<Utc>::from_timestamp(utc.checked_mul(60)?, 0)?.with_timezone(&tz);
+    Some(time.naive_local().and_utc().timestamp().div_euclid(60))
+}
+
+fn format_zoned_next(next: Minutes, now: Minutes, tz: Tz) -> Option<String> {
+    Some(format_next(zone_minutes(next, tz)?, zone_minutes(now, tz)?))
+}
+
 /// "오늘 09:00", "내일 09:00" or "10월 28일 09:00", both times in local minutes.
 pub fn format_next(next: Minutes, now: Minutes) -> String {
     let rem = next.rem_euclid(1440);
@@ -314,6 +341,8 @@ pub struct Routine {
     pub trigger: Trigger,
     /// A cron expression for [`Trigger::Time`], the event description for [`Trigger::Event`].
     pub cron: String,
+    /// IANA time zone for a cron routine. Intervals, one-offs and events have no zone.
+    pub time_zone: Option<String>,
     pub prompt: String,
     pub enabled: bool,
     /// Project, model and effort, mode and computer, the same choices as the Home composer.
@@ -402,14 +431,37 @@ pub struct Entry {
     pub next_at: Option<Minutes>,
 }
 
-/// The schedule sentence: "매일 오전 9시", or the event text.
-pub fn schedule_line(r: &Routine) -> String {
-    match r.trigger {
-        // An interval or one-off schedule keeps its own sentence in `cron`.
-        Trigger::Time if !cron_valid(&r.cron) => r.cron.clone(),
-        Trigger::Time => describe_cron(&r.cron),
-        Trigger::Event => r.cron.clone(),
+pub(crate) fn entry_next_run(entry: &Entry, now: Minutes) -> Option<Minutes> {
+    entry.next_at.filter(|t| *t >= now).or_else(|| {
+        let tz = entry.routine.time_zone.as_deref()?.parse().ok()?;
+        next_zoned_run(&entry.routine.cron, tz, now)
+    })
+}
+
+/// The next trigger in the routine's own wall time. Other triggers display in UTC.
+pub(crate) fn entry_next_text(entry: &Entry, now: Minutes) -> Option<String> {
+    let next = entry_next_run(entry, now)?;
+    match entry.routine.time_zone.as_deref() {
+        Some(tz) => format_zoned_next(next, now, tz.parse().ok()?),
+        None => Some(format_next(next, now)),
     }
+}
+
+/// The schedule sentence: "매일 오전 9시", with the zone for non-UTC cron, or the event text.
+pub fn schedule_line(r: &Routine) -> String {
+    let mut line = match r.trigger {
+        Trigger::Time if cron_valid(&r.cron) => describe_cron(&r.cron),
+        _ => r.cron.clone(),
+    };
+    if let Some(tz) = r
+        .time_zone
+        .as_deref()
+        .filter(|tz| r.trigger == Trigger::Time && *tz != DEFAULT_TIME_ZONE)
+    {
+        line.push_str(" · ");
+        line.push_str(tz);
+    }
+    line
 }
 
 /// "실행 기록 없음", or "완료 · 3시간 전" from the newest run.
@@ -524,6 +576,7 @@ pub fn form_rows(two_columns: bool) -> Vec<Vec<FormField>> {
         vec![FormField::Name],
         vec![FormField::Project, FormField::Trigger],
         vec![FormField::ScheduleDescription, FormField::Schedule],
+        vec![FormField::TimeZone],
         vec![FormField::Model, FormField::Mode],
         vec![FormField::Computer],
         vec![FormField::Prompt],
@@ -599,6 +652,7 @@ pub enum FormField {
     /// A read-only line derived from the schedule: the server stores no description text.
     ScheduleDescription,
     Schedule,
+    TimeZone,
     /// One picker for harness, model and effort.
     Model,
     Mode,
@@ -606,12 +660,13 @@ pub enum FormField {
     Prompt,
 }
 
-pub const FORM_FIELDS: [FormField; 9] = [
+pub const FORM_FIELDS: [FormField; 10] = [
     FormField::Name,
     FormField::Project,
     FormField::Trigger,
     FormField::ScheduleDescription,
     FormField::Schedule,
+    FormField::TimeZone,
     FormField::Model,
     FormField::Mode,
     FormField::Computer,
@@ -620,12 +675,20 @@ pub const FORM_FIELDS: [FormField; 9] = [
 
 /// The 일정 설명 line: the cron in words and the next run for a time routine, a fixed sentence
 /// for an event routine. It is computed from the schedule, never stored or typed.
-pub fn schedule_description(trigger: Trigger, cron: &str, now: Minutes) -> String {
+pub fn schedule_description(trigger: Trigger, cron: &str, time_zone: &str, now: Minutes) -> String {
     match trigger {
         Trigger::Time => {
-            let words = describe_cron(cron.trim());
-            match next_run(cron.trim(), now) {
-                Some(t) => format!("{words} · 다음 실행 {}", format_next(t, now)),
+            let cron = cron.trim();
+            let words = describe_cron(cron);
+            if !cron_valid(cron) {
+                return words;
+            }
+            let next = time_zone.trim().parse::<Tz>().ok().and_then(|tz| {
+                let next = next_zoned_run(cron, tz, now)?;
+                format_zoned_next(next, now, tz)
+            });
+            match next {
+                Some(t) => format!("{words} · 다음 실행 {t}"),
                 None => words,
             }
         }
@@ -668,6 +731,7 @@ pub fn when_big_max_lines(trigger: Trigger) -> u32 {
 // ---------------------------------------------------------------------------------------------
 
 const DEFAULT_CRON: &str = "0 9 * * *";
+pub(crate) const DEFAULT_TIME_ZONE: &str = "UTC";
 
 /// Parses an event-routine input (`owner/name`, `owner/name#branch`, or a pasted
 /// `github.com/owner/name(.git)` URL with optional `#branch`) into `(repository, branch)`.
@@ -732,6 +796,7 @@ pub struct FormDraft {
     pub name: String,
     pub trigger: Trigger,
     pub cron: String,
+    pub time_zone: String,
     pub prompt: String,
     pub sel: Selection,
 }
@@ -740,6 +805,7 @@ pub struct FormDraft {
 pub enum FormError {
     NameEmpty,
     ScheduleInvalid,
+    TimeZoneInvalid,
     EventEmpty,
     EventInvalid,
     PromptEmpty,
@@ -750,6 +816,7 @@ impl FormError {
         match self {
             FormError::NameEmpty => "이름을 입력하셔야 합니다",
             FormError::ScheduleInvalid => "일정이 올바른 cron 형식이 아닙니다",
+            FormError::TimeZoneInvalid => "UTC 또는 Asia/Seoul 같은 시간대를 입력하셔야 합니다",
             FormError::EventEmpty => "이벤트 설명을 입력하셔야 합니다",
             FormError::EventInvalid => {
                 "저장소는 owner/name 또는 owner/name#branch 형식으로 입력하셔야 합니다"
@@ -769,6 +836,7 @@ impl FormDraft {
             name: String::new(),
             trigger: Trigger::Time,
             cron: DEFAULT_CRON.into(),
+            time_zone: DEFAULT_TIME_ZONE.into(),
             prompt: String::new(),
             sel: Selection {
                 project: project.into(),
@@ -785,6 +853,7 @@ impl FormDraft {
                 Trigger::Time => r.cron.clone(),
                 Trigger::Event => event_field_text(&r.cron),
             },
+            time_zone: r.time_zone.as_deref().unwrap_or(DEFAULT_TIME_ZONE).into(),
             prompt: r.prompt.clone(),
             sel: r.sel.clone(),
         }
@@ -824,7 +893,14 @@ impl FormDraft {
                 && i.cron.trim() == self.cron.trim()
         });
         match self.trigger {
-            Trigger::Time if !cron_valid(self.cron.trim()) => out.push(FormError::ScheduleInvalid),
+            Trigger::Time => {
+                if !cron_valid(self.cron.trim()) {
+                    out.push(FormError::ScheduleInvalid);
+                }
+                if self.time_zone.trim().parse::<Tz>().is_err() {
+                    out.push(FormError::TimeZoneInvalid);
+                }
+            }
             Trigger::Event if self.cron.trim().is_empty() => out.push(FormError::EventEmpty),
             Trigger::Event if !unchanged_event && parse_ci_event(&self.cron).is_none() => {
                 out.push(FormError::EventInvalid)
@@ -855,6 +931,7 @@ impl FormDraft {
             name: self.name.trim().into(),
             trigger: self.trigger,
             cron,
+            time_zone: (self.trigger == Trigger::Time).then(|| self.time_zone.trim().into()),
             prompt: self.prompt.trim().into(),
             enabled,
             sel: self.sel.clone(),
@@ -907,7 +984,7 @@ pub fn kpis(entries: &[Entry], now: Minutes, offset: i64) -> [RoutineKpi; 4] {
     let next = entries
         .iter()
         .filter(|e| e.routine.enabled && e.routine.trigger == Trigger::Time)
-        .filter_map(|e| next_run(&e.routine.cron, now).map(|t| (t, &e.routine.name)))
+        .filter_map(|e| entry_next_run(e, now - offset).map(|t| (t + offset, &e.routine.name)))
         .min_by_key(|(t, _)| *t);
     [
         RoutineKpi {
@@ -1132,6 +1209,10 @@ pub fn schedule_to_routine(s: &Schedule) -> Routine {
             _ => Trigger::Time,
         },
         cron: kind_text(&s.kind),
+        time_zone: match &s.kind {
+            ScheduleKind::Cron { tz, .. } => Some(tz.clone()),
+            _ => None,
+        },
         prompt: s.prompt.clone(),
         enabled: !s.paused,
         sel: Selection {
@@ -1153,13 +1234,13 @@ pub fn schedule_to_entry(s: &Schedule, runs: &[ScheduleRun]) -> Entry {
     }
 }
 
-/// Builds the server `ScheduleKind` from a form draft (cron in UTC for [`Trigger::Time`], or
+/// Builds the server `ScheduleKind` from a form draft (zoned cron for [`Trigger::Time`], or
 /// `ci_failed` for [`Trigger::Event`]).
 pub fn draft_schedule_kind(d: &FormDraft) -> ScheduleKind {
     match d.trigger {
         Trigger::Time => ScheduleKind::Cron {
             expr: d.cron.trim().to_string(),
-            tz: "UTC".to_string(),
+            tz: d.time_zone.trim().into(),
         },
         Trigger::Event => {
             let (repository, branch) =
@@ -1173,8 +1254,8 @@ pub fn draft_schedule_kind(d: &FormDraft) -> ScheduleKind {
     }
 }
 
-/// The create body for a routine. Cron is read in UTC (no time-zone source yet); event routines
-/// watch `ci_failed` on the parsed repository and optional branch; each run starts a session
+/// The create body for a routine. Cron uses the selected zone. Event routines watch
+/// `ci_failed` on the parsed repository and optional branch. Each run starts a session
 /// titled with the routine's name, in `cwd`.
 pub fn new_schedule(d: &FormDraft, cwd: &str) -> NewSchedule {
     NewSchedule {
@@ -1234,9 +1315,11 @@ pub fn changed_patch(d: &FormDraft, old: &Routine) -> SchedulePatch {
     let name = d.name.trim();
     let prompt = d.prompt.trim();
     let kind = draft_schedule_kind(d);
-    let initial_cron = FormDraft::from_routine(old).cron;
+    let initial = FormDraft::from_routine(old);
     let schedule_changed = d.trigger != old.trigger
-        || (d.cron.trim() != initial_cron.trim() && kind_text(&kind) != old.cron.trim());
+        || (d.cron.trim() != initial.cron.trim() && kind_text(&kind) != old.cron.trim())
+        || (d.trigger == Trigger::Time && old.time_zone.is_some()
+            && d.time_zone.trim() != initial.time_zone);
     let cont = old.continue_session.is_some();
     SchedulePatch {
         project: (!cont && d.sel.project != old.sel.project).then(|| d.sel.project.clone()),
@@ -1473,6 +1556,7 @@ mod tests {
             name: name.into(),
             trigger: Trigger::Time,
             cron: cron.into(),
+            time_zone: Some(DEFAULT_TIME_ZONE.into()),
             prompt: "CI 실패를 요약합니다".into(),
             enabled: true,
             sel: Selection {
@@ -2027,6 +2111,103 @@ mod tests {
             expr: expr.into(),
             tz: "UTC".into(),
         }
+    }
+
+    #[test]
+    fn fr_a8_editing_cron_keeps_its_saved_time_zone() {
+        let old = schedule_to_routine(&schedule(
+            ScheduleKind::Cron {
+                expr: "0 9 * * *".into(),
+                tz: "Europe/Berlin".into(),
+            },
+            false,
+        ));
+        let mut draft = FormDraft::from_routine(&old);
+        draft.cron = "15 9 * * *".into();
+        assert_eq!(
+            changed_patch(&draft, &old).kind,
+            Some(ScheduleKind::Cron {
+                expr: "15 9 * * *".into(),
+                tz: "Europe/Berlin".into(),
+            }),
+        );
+    }
+
+    #[test]
+    fn fr_a8_dashboard_compares_cron_triggers_in_absolute_time() {
+        let entry = |name: &str, tz: &str| {
+            let mut s = schedule(
+                ScheduleKind::Cron {
+                    expr: "0 9 * * *".into(),
+                    tz: tz.into(),
+                },
+                false,
+            );
+            s.target = ScheduleTarget::New { title: Some(name.into()) };
+            s.next_run_at = None;
+            schedule_to_entry(&s, &[])
+        };
+        let entries = [entry("UTC routine", "UTC"), entry("Seoul routine", "Asia/Seoul")];
+        let next = &kpis(&entries, at(2026, 6, 1, 23, 0), 0)[3];
+        assert_eq!(next.value, "내일 00:00");
+        assert_eq!(next.note.as_deref(), Some("Seoul routine"));
+    }
+
+    #[test]
+    fn fr_a8_cron_create_and_zone_only_patch_round_trip() {
+        let mut draft = FormDraft::new("ember");
+        draft.name = "Daily routine".into();
+        draft.prompt = "Summarize".into();
+        draft.time_zone = " Europe/Berlin ".into();
+        assert!(draft.errors().is_empty());
+        let body = new_schedule(&draft, "/work");
+        assert_eq!(
+            body.kind,
+            ScheduleKind::Cron { expr: "0 9 * * *".into(), tz: "Europe/Berlin".into() },
+        );
+
+        let old = schedule_to_routine(&schedule(body.kind, false));
+        let loaded = FormDraft::from_routine(&old);
+        assert_eq!(loaded.time_zone, "Europe/Berlin");
+        assert!(patch_is_empty(&changed_patch(&loaded, &old)));
+
+        let mut edited = loaded;
+        edited.time_zone = "Asia/Seoul".into();
+        let patch = changed_patch(&edited, &old);
+        assert_eq!(patch.kind, Some(ScheduleKind::Cron {
+            expr: draft.cron,
+            tz: "Asia/Seoul".into(),
+        }));
+        assert!(patch.prompt.is_none());
+    }
+
+    #[test]
+    fn fr_a8_unknown_time_zones_only_block_cron_forms() {
+        let mut draft = FormDraft::new("ember");
+        draft.name = "Daily routine".into();
+        draft.prompt = "Summarize".into();
+        for tz in ["", "Mars/Olympus"] {
+            draft.time_zone = tz.into();
+            assert_eq!(draft.errors(), [FormError::TimeZoneInvalid]);
+        }
+        let mut event = draft.with_trigger(Trigger::Event);
+        event.cron = "owner/repository".into();
+        assert!(event.errors().is_empty());
+        assert!(matches!(draft_schedule_kind(&event), ScheduleKind::Event { .. }));
+        assert!(event.into_routine("event", true).time_zone.is_none());
+    }
+
+    #[test]
+    fn fr_a8_preview_uses_daylight_saving_in_the_selected_zone() {
+        let zone: Tz = "Europe/Berlin".parse().unwrap();
+        let december = at(2026, 12, 1, 7, 30);
+        let june = at(2026, 6, 1, 7, 30);
+        assert_eq!(next_zoned_run("0 9 * * *", zone, december), Some(at(2026, 12, 1, 8, 0)));
+        assert_eq!(next_zoned_run("0 9 * * *", zone, june), Some(at(2026, 6, 2, 7, 0)));
+        assert_eq!(
+            schedule_description(Trigger::Time, "0 9 * * *", "Europe/Berlin", june),
+            "매일 오전 9시 · 다음 실행 내일 09:00",
+        );
     }
 
     #[test]

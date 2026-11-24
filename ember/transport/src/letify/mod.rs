@@ -43,6 +43,7 @@
 mod link;
 mod pkarr;
 mod punching;
+mod worker;
 mod relay_guard;
 mod relay_url;
 
@@ -58,6 +59,7 @@ use letify_link::observe::{AddressObserver, ObserveFuture, QadObserver, QadRespo
 use letify_link::record::{self, AddressRecord};
 use letify_link::relay::{new_token, Relay, RelayConfig as LinkRelayConfig, RelayDialer, RelayHandle, RelayPairing};
 use letify_link::rendezvous::{self, Message, Rendezvous};
+use letify_link::signal::SignalRendezvous;
 use letify_link::{
     Accepted, Acceptor, Candidate, Config, Identity, ManagerConfig, NodeId, PathEvent, PathKind, PathManager,
     PeerPolicy,
@@ -71,6 +73,9 @@ pub use pkarr::HttpPkarrStore;
 use link::{run_demux, run_path_watch, Cmd, OpenError, PeerLink};
 use pkarr::PkarrNode;
 use punching::Puncher;
+
+/// The punch runner of this backend: Ember's own rendezvous and letify's signalling Worker.
+type BackendPuncher = Puncher<SignalAdapter, SignalRendezvous>;
 pub use pkarr::{direct_addresses_from_txt, is_record_label};
 use relay_url::{parse_relay_url, RelayTarget};
 
@@ -95,6 +100,8 @@ const PUNCH_OBSERVE_WAIT: Duration = Duration::from_secs(1);
 /// defaults: the relay and the observer share port 7443). With no observer configured, a punch
 /// asks the relay host on this port (EM-11).
 const DEFAULT_OBSERVER_PORT: u16 = 7443;
+/// The time one request to the signalling Worker may take beyond its long poll's own wait.
+const WORKER_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The pairing token of a standing request (SPEC `FR-N9`, #898): the main server waits at its own
 /// relay for each allowed device under this token, and a device with no rendezvous asks the relay
@@ -315,7 +322,7 @@ struct Inner {
     signal: Mutex<Option<Arc<SignalAdapter>>>,
     /// The UDP punch driver, set with the rendezvous when punching is on and an address
     /// observer is configured (EM-11).
-    punch: Mutex<Option<Arc<Puncher<SignalAdapter>>>>,
+    punch: Mutex<Option<Arc<BackendPuncher>>>,
     /// Devices admitted through an attached gate (canonical ids); `None` until a gate attaches.
     admitted: Mutex<Option<std::collections::HashSet<NodeId>>>,
     pkarr: Mutex<Option<Arc<PkarrNode>>>,
@@ -535,7 +542,7 @@ impl Inner {
         self.pkarr.lock().unwrap().clone()
     }
 
-    fn punch(&self) -> Option<Arc<Puncher<SignalAdapter>>> {
+    fn punch(&self) -> Option<Arc<BackendPuncher>> {
         self.punch.lock().unwrap().clone()
     }
 
@@ -646,7 +653,15 @@ impl Inner {
                 Some(obs) => vec![Arc::new(QadObserver::new(obs.addr, obs.node.map(node_of)).wait(PUNCH_OBSERVE_WAIT))],
                 None => vec![Arc::new(RelayHostObserver { inner: Arc::downgrade(self) })],
             };
-            *self.punch.lock().unwrap() = Some(Puncher::new(adapter.clone(), observers));
+            // letify's signalling Worker as an auxiliary rendezvous (owner, 2026-11-23), configured
+            // before any clone: letify-link's builder methods panic after one.
+            let worker = self.cfg.worker_rendezvous.then(|| {
+                let url = self.cfg.worker_url.as_deref().unwrap_or(letify_link::signal::DEFAULT_URL);
+                SignalRendezvous::new(url, self.identity.clone())
+                    .user_agent(&format!("ember/{}", env!("CARGO_PKG_VERSION")))
+                    .request_timeout(WORKER_REQUEST_TIMEOUT)
+            });
+            *self.punch.lock().unwrap() = Some(Puncher::new(adapter.clone(), observers, worker));
         }
         let weak = Arc::downgrade(self);
         let pairing = RelayPairing::new(adapter.clone(), self.identity.clone(), self.acceptor.clone(), move |sender, relay, _address| {
@@ -775,10 +790,32 @@ impl Inner {
             tracing::debug!(peer = %from, "ignoring a punch offer from a peer that is not admitted");
             return;
         }
+        puncher.answer(from, &msg, self.punched_path_handler(from));
+    }
+
+    /// A wake-up on Ember's own rendezvous: `from` punches to us through the signalling Worker
+    /// (EM-11). Only an admitted peer's wake-up is honoured (a pull-based rendezvous such as the
+    /// hub's pkarr mailbox delivers only the peers this endpoint watches); then the Worker is
+    /// polled for that one punch.
+    fn on_wake_up(self: &Arc<Self>, from: NodeId, nonce: [u8; 16]) {
+        let Some(puncher) = self.punch() else { return };
+        if !self.admits(&from) || self.closed.load(Ordering::SeqCst) {
+            tracing::debug!(peer = %from, "ignoring a Worker wake-up from a peer that is not admitted");
+            return;
+        }
+        puncher.answer_woken(from, nonce, self.punched_path_handler(from));
+    }
+
+    /// What the answering side does with each punched path: the acceptor routes it to a new
+    /// session or to the live one, as a TCP connection.
+    fn punched_path_handler(
+        self: &Arc<Self>,
+        from: NodeId,
+    ) -> impl Fn(letify_link::driver::PunchedPath) -> futures::future::BoxFuture<'static, ()> + Clone + Send + 'static {
         let inner = self.clone();
-        puncher.answer(from, &msg, move |path: letify_link::driver::PunchedPath| {
+        move |path: letify_link::driver::PunchedPath| {
             let inner = inner.clone();
-            async move {
+            Box::pin(async move {
                 if inner.closed.load(Ordering::SeqCst) {
                     return;
                 }
@@ -786,8 +823,8 @@ impl Inner {
                     Ok(accepted) => inner.on_accepted(accepted, Via::Direct),
                     Err(e) => tracing::debug!(peer = %from, error = %e, "a punched path was refused"),
                 }
-            }
-        });
+            })
+        }
     }
 
     /// The session an initiating `PathManager` established.
@@ -1365,7 +1402,19 @@ async fn manage(mut pm: PathManager, mut cmds: mpsc::UnboundedReceiver<Cmd>) {
 /// driver (EM-11).
 async fn signal_loop(inner: Arc<Inner>, signal: Arc<SignalAdapter>, pairing: RelayPairing<SignalAdapter>) {
     loop {
-        match rendezvous::recv_message(&*signal).await {
+        let received = match signal.recv().await {
+            // A wake-up for a punch through the signalling Worker is Ember's own message, not a
+            // letify-link rendezvous message (EM-11).
+            Ok((from, bytes)) => match worker::parse_wake_up(&bytes) {
+                Some(nonce) => {
+                    inner.on_wake_up(from, nonce);
+                    continue;
+                }
+                None => decode_rendezvous(from, &bytes),
+            },
+            Err(e) => Err(e),
+        };
+        match received {
             Ok((from, Message::RelayOffer { token, relay, address })) => {
                 let Ok(permit) = inner.meetings.clone().try_acquire_owned() else {
                     tracing::debug!("too many relay meetings in progress; dropping an offer");
@@ -1389,6 +1438,18 @@ async fn signal_loop(inner: Arc<Inner>, signal: Arc<SignalAdapter>, pairing: Rel
             }
         }
     }
+}
+
+/// A rendezvous message as `rendezvous::recv_message` reads it: decoded, and a `Hello` whose key
+/// is not the sender's refused.
+fn decode_rendezvous(from: NodeId, bytes: &[u8]) -> io::Result<(NodeId, Message)> {
+    let msg = Message::decode(bytes)?;
+    if let Message::Hello { key, .. } = &msg {
+        if key != from.as_bytes() {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "rendezvous: hello key differs from the sender"));
+        }
+    }
+    Ok((from, msg))
 }
 
 /// Asks the address observer for our public address now and every few minutes.

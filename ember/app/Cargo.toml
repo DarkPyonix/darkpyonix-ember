@@ -36,7 +36,8 @@ compose-rust = { git = "https://github.com/DarkPyonix/compose-rust", rev = "e52f
 dioxus-compose = { git = "https://github.com/DarkPyonix/dioxus-compose", rev = "5b6f707c531246d71cc3a34cd41662b1375b1513" }
 
 # Everything below the UI: sync engine, state reducer, transcript, cache.
-ember-client = { path = "../client" }
+# `tls`: the push and file watch sockets reach an https server over wss (FR-S11, #1048).
+ember-client = { path = "../client", features = ["tls"] }
 ember-editor = { path = "../editor" }
 ember-editor-conn = { path = "../editor-conn" }
 # The peer-to-peer transport, so the app can join a server as a device (SPEC FR-N9, #856): its
@@ -45,6 +46,10 @@ ember-editor-conn = { path = "../editor-conn" }
 ember-transport = { path = "../transport", default-features = false, features = ["http", "letify"] }
 alacritty_terminal = { version = "0.26", default-features = false }
 base64 = "0.22"
+# The routine form validates and previews cron in the scheduler's IANA time zones.
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+chrono-tz = "0.10"
+croner = "2"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 # TLS for the terminal relay (FR-L31.19, #333): wss verified against the webpki roots, the same
 # rustls stack reqwest uses below. rustls itself is listed only to install the ring provider.

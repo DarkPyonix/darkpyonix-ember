@@ -216,6 +216,18 @@ pub fn launch_ide_shared(
                 Err(e) => notice::post(format!("{label}: 열지 못했습니다: {e}")),
             },
         ),
+        // VS Code is always offered (FR-W4c (1b)): picking it asks the server for the launch,
+        // whose error is the only VS Code failure shown (FR-W4c (1c), INTENT D55).
+        IdeAction::StartVsCode => {
+            let session = match &launch {
+                Some(Ok(l)) => l.session.clone(),
+                _ => String::new(),
+            };
+            run_shared(crate::ide::start_vscode(session, None), move |r| match r {
+                Ok(()) => notice::post(format!("{label}: 여는 중입니다")),
+                Err(e) => notice::post(format!("{label}: 열지 못했습니다: {e}")),
+            })
+        }
         IdeAction::OpenUrl(url) => run_shared(
             async move {
                 tokio::task::spawn_blocking(move || open_external(&url))

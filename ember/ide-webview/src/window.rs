@@ -17,7 +17,7 @@ use crate::cli::{
     MIN_WINDOW_WIDTH,
 };
 use crate::opener::{
-    bridge_init_script, receive_eval_script, relay_init_script, OpenWindowCommand, QueuedWindowOpener, WindowRegistry,
+    init_script, receive_eval_script, OpenWindowCommand, QueuedWindowOpener, WindowRegistry,
 };
 
 #[derive(Debug)]
@@ -75,7 +75,7 @@ fn spawn_window(
     web_context: &mut WebContext,
     session_origin: &str,
     chrome_mode: ChromeMode,
-    relay_mode: bool,
+    vscode: bool,
     cmd: &OpenWindowCommand,
 ) -> Result<(WindowId, ManagedWindow), String> {
     let mut wb = WindowBuilder::new()
@@ -110,13 +110,9 @@ fn spawn_window(
     let title_proxy = proxy;
     let nav_origin = session_origin.to_owned();
     let popup_origin = session_origin.to_owned();
-    // The relay mode has no proxy in front of the workbench (INTENT D55), so the window injects
-    // tab detach and the workbench defaults itself; behind the proxy (`--url`) the proxy does.
-    let init_js = if relay_mode {
-        relay_init_script(&cmd.window_id, chrome_mode)
-    } else {
-        bridge_init_script(&cmd.window_id, chrome_mode)
-    };
+    // The VS Code target (`--vscode`) has no proxy in front of the workbench (INTENT D55), so the
+    // window injects tab detach and the workbench defaults itself; behind the proxy the proxy does.
+    let init_js = init_script(&cmd.window_id, chrome_mode, vscode);
 
     let builder = WebViewBuilder::with_web_context(web_context)
         .with_url(&cmd.url)
@@ -196,47 +192,14 @@ fn spawn_window(
     ))
 }
 
-/// Starts the relay mode's gateway (`FR-W5b`) on its own thread and points `config` at it: the
-/// page is the gateway's first-load URL and the navigation origin is the gateway's.
-fn start_gateway(
-    config: &mut Config,
-    server_token: Option<String>,
-) -> Result<Option<ember_gateway::ThreadGateway>, String> {
-    let Some(relay) = config.relay.clone() else {
-        return Ok(None);
-    };
-    let target = ember_gateway::RelayTarget {
-        server_url: relay.server_url.clone(),
-        relay_path: relay.relay_path.clone(),
-        token: server_token.filter(|t| !t.is_empty()),
-    };
-    let gateway = ember_gateway::ThreadGateway::start(target)
-        .map_err(|e| format!("failed to start the IDE gateway: {e}"))?;
-    config.url = crate::cli::relay_page_url(gateway.addr(), gateway.token(), &relay.folder);
-    config.origin = gateway.origin();
-    tracing::info!(origin = %config.origin, relay = %relay.relay_path, "IDE gateway started");
-    Ok(Some(gateway))
-}
-
-pub fn run(mut config: Config, server_token: Option<String>) -> Result<(), String> {
+pub fn run(config: Config) -> Result<(), String> {
     if config.validate_only {
-        if let Some(relay) = &config.relay {
-            println!(
-                "ember-ide-webview ok: window_id={} relay={} server={} folder={} token={} chrome={:?}",
-                config.window_id,
-                relay.relay_path,
-                relay.server_url,
-                relay.folder,
-                if server_token.as_deref().is_some_and(|t| !t.is_empty()) { "set" } else { "unset" },
-                config.chrome_mode,
-            );
-            return Ok(());
-        }
         println!(
-            "ember-ide-webview ok: window_id={} origin={} url={} chrome={:?} data_dir={}",
+            "ember-ide-webview ok: window_id={} origin={} url={} vscode={} chrome={:?} data_dir={}",
             config.window_id,
             config.origin,
             config.url,
+            config.vscode,
             config.chrome_mode,
             config
                 .data_dir
@@ -257,9 +220,7 @@ pub fn run(mut config: Config, server_token: Option<String>) -> Result<(), Strin
         }
     }
 
-    // Kept alive for the life of the event loop below, which never returns.
-    let gateway = start_gateway(&mut config, server_token)?;
-    let relay_mode = gateway.is_some();
+    let vscode = config.vscode;
 
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
@@ -283,7 +244,7 @@ pub fn run(mut config: Config, server_token: Option<String>) -> Result<(), Strin
         &mut web_context,
         &session_origin,
         chrome_mode,
-        relay_mode,
+        vscode,
         &initial,
     )?;
     tao_to_logical.insert(first_tao_id, first_win.logical_id.clone());
@@ -302,7 +263,6 @@ pub fn run(mut config: Config, server_token: Option<String>) -> Result<(), Strin
 
     event_loop.run(move |event, target, control_flow| {
         *control_flow = ControlFlow::Wait;
-        let _ = &gateway;
 
         match event {
             Event::UserEvent(UserEvent::SmokeExit) => {
@@ -359,7 +319,7 @@ pub fn run(mut config: Config, server_token: Option<String>) -> Result<(), Strin
                         &mut web_context,
                         &session_origin,
                         chrome_mode,
-                        relay_mode,
+                        vscode,
                         &cmd,
                     ) {
                         Ok((tao_id, managed)) => {

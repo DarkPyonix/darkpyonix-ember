@@ -26,16 +26,10 @@ use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 
 use crate::terminal_stream::{ClientError, TermReach};
 
-/// A WebSocket the relay stream runs on: the plain HTTP socket or the one over the transport.
-pub trait RelaySocket:
-    Sink<Message, Error = WsError> + Stream<Item = Result<Message, WsError>> + Send + Unpin
-{
-}
-
-impl<T> RelaySocket for T where
-    T: Sink<Message, Error = WsError> + Stream<Item = Result<Message, WsError>> + Send + Unpin
-{
-}
+/// A WebSocket the relay stream runs on: the plain HTTP socket or the one over the transport. The
+/// gateway's trait (the same bounds), so a socket this module opens is also a stream of the VS
+/// Code window's gateway ([`ReachDial`], SPEC `FR-W5b`, INTENT D55).
+pub use ember_gateway::RelaySocket;
 
 /// The OSE's byte stream over the relay WebSocket.
 pub struct RelayStream {
@@ -164,6 +158,11 @@ fn client_io(e: ClientError) -> io::Error {
 /// `Authorization: Bearer` when given. A `peer:<id>` base is never dialed as a URL, and plain
 /// `http` goes only where the terminal relay may go (`FR-L31.19`).
 pub async fn dial_http(base: &str, relay: &str, token: Option<&str>) -> io::Result<RelayStream> {
+    Ok(RelayStream { ws: dial_http_socket(base, relay, token).await?, pending: Vec::new(), pos: 0, eof: false })
+}
+
+/// [`dial_http`] before the byte stream: the relay WebSocket itself.
+pub async fn dial_http_socket(base: &str, relay: &str, token: Option<&str>) -> io::Result<Box<dyn RelaySocket>> {
     crate::terminal_stream::refuse_peer_base(base).map_err(client_io)?;
     crate::terminal_stream::check_relay(base).map_err(client_io)?;
     crate::terminal_stream::ensure_tls_provider();
@@ -174,7 +173,7 @@ pub async fn dial_http(base: &str, relay: &str, token: Option<&str>) -> io::Resu
         upgrade.headers_mut().insert("Authorization", value);
     }
     match tokio_tungstenite::connect_async(upgrade).await {
-        Ok((ws, _)) => Ok(RelayStream::new(ws)),
+        Ok((ws, _)) => Ok(Box::new(ws)),
         Err(WsError::Http(resp)) => {
             let status = resp.status();
             tracing::warn!("the OSE relay upgrade was answered with {status}");
@@ -192,9 +191,14 @@ pub async fn dial_http(base: &str, relay: &str, token: Option<&str>) -> io::Resu
 /// Opens the relay over the transport through `api`, on its own stream. A refused device reads
 /// as the device sentence (`FR-N9`), a 403 `scope_denied` as the `FR-N8` sentence.
 pub async fn dial_peer(api: &ember_client::api::Api, relay: &str) -> io::Result<RelayStream> {
+    Ok(RelayStream { ws: dial_peer_socket(api, relay).await?, pending: Vec::new(), pos: 0, eof: false })
+}
+
+/// [`dial_peer`] before the byte stream: the relay WebSocket itself.
+pub async fn dial_peer_socket(api: &ember_client::api::Api, relay: &str) -> io::Result<Box<dyn RelaySocket>> {
     let path = peer_path(relay)?;
     match api.open_peer_socket(&path).await {
-        Ok(ws) => Ok(RelayStream::new(ws)),
+        Ok(ws) => Ok(Box::new(ws)),
         Err(e) => match crate::device_link::refusal_text(&e) {
             Some(sentence) => {
                 tracing::warn!("the OSE relay over the transport was refused: {e}");
@@ -209,12 +213,41 @@ pub async fn dial_peer(api: &ember_client::api::Api, relay: &str) -> io::Result<
 /// socket (`GET /version`, management, extension host). Over HTTP the server token goes only to
 /// a server this machine may trust with it (`FR-S11`).
 pub async fn dial(reach: &TermReach, relay: &str) -> io::Result<RelayStream> {
+    Ok(RelayStream { ws: dial_socket(reach, relay).await?, pending: Vec::new(), pos: 0, eof: false })
+}
+
+/// [`dial`] before the byte stream: the relay WebSocket on `reach`, over HTTP with the server
+/// token under the terminal relay's rules, or over the transport with the device key.
+pub async fn dial_socket(reach: &TermReach, relay: &str) -> io::Result<Box<dyn RelaySocket>> {
     match reach {
         TermReach::Http(base) => {
             let token = crate::terminal_stream::server_token(base);
-            dial_http(base, relay, token.as_deref()).await
+            dial_http_socket(base, relay, token.as_deref()).await
         }
-        TermReach::Peer(api) => dial_peer(api, relay).await,
+        TermReach::Peer(api) => dial_peer_socket(api, relay).await,
+    }
+}
+
+/// The VS Code window's relay streams (SPEC `FR-W5b`, INTENT D55, #1064): the
+/// `ember-app --vscode-window` helper's gateway opens one per accepted connection on the app's own
+/// reach, so an HTTP server and a `peer:` server both work, and the window holds no credential.
+#[derive(Clone, Debug)]
+pub struct ReachDial {
+    pub reach: TermReach,
+    /// The server's relay route, `/api/computers/{id}/ide/relay/{launch_id}`.
+    pub relay: String,
+}
+
+impl ReachDial {
+    pub fn new(reach: TermReach, relay: impl Into<String>) -> ReachDial {
+        ReachDial { reach, relay: relay.into() }
+    }
+}
+
+impl ember_gateway::Dial for ReachDial {
+    fn dial(&self) -> ember_gateway::DialFuture {
+        let (reach, relay) = (self.reach.clone(), self.relay.clone());
+        Box::pin(async move { dial_socket(&reach, &relay).await })
     }
 }
 

@@ -202,10 +202,16 @@ pub struct SwitchOutcome {
 }
 
 /// One "Open IDE" target (`ember/server/src/api/ide.rs` `Target`).
+///
+/// The VS Code target comes as `{kind: "vscode"}` with no `available`, no `reason` and no launch
+/// (SPEC `FR-W4c` (1b), INTENT D55): VS Code is always offered, its OSE starts when it is picked
+/// ([`ServerApi::ide_vscode`]), and a failure shows only as that call's error. A target without
+/// `available` therefore reads as available.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct IdeTarget {
     /// `ember`, `vscode` or `gateway`.
     pub kind: String,
+    #[serde(default = "available_when_absent")]
     pub available: bool,
     #[serde(default)]
     pub url: Option<String>,
@@ -216,6 +222,39 @@ pub struct IdeTarget {
     pub launch: Option<ember_client::wire::EmberLaunch>,
     #[serde(default)]
     pub reason: Option<String>,
+}
+
+/// `available` of a target that leaves it out: the VS Code target always does (`FR-W4c` (1b)).
+fn available_when_absent() -> bool {
+    true
+}
+
+/// `POST /api/sessions/{id}/ide/vscode` (SPEC `FR-W4c` (1c), INTENT D55): the VS Code target's
+/// launch, made when VS Code is picked. No `url`, no `endpoint`, no connection token: the OSE
+/// behind the relay has none (`FR-W4a`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct VsCodeLaunch {
+    pub session: String,
+    pub project: String,
+    /// The computer's registry id.
+    pub computer: String,
+    #[serde(default)]
+    pub computer_name: Option<String>,
+    /// The absolute folder the workbench opens.
+    pub folder: String,
+    /// The server's base URL; empty or absent means the app's own server.
+    #[serde(default)]
+    pub server_url: Option<String>,
+    pub ose: VsCodeOse,
+}
+
+/// The relay of a [`VsCodeLaunch`].
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct VsCodeOse {
+    /// `/api/computers/{id}/ide/relay/{launch_id}`.
+    pub relay: String,
+    #[serde(default)]
+    pub ose_commit: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -273,7 +312,7 @@ impl IdeLaunch {
                 .and_then(|e| e.server_url.clone())
                 .filter(|u| !u.is_empty())
                 .or_else(|| crate::services::try_services().map(|s| s.config.server_url.clone()).filter(|u| !u.is_empty())),
-            vscode: crate::ide::VsCodeFallback::of_target(l.target("vscode")),
+            vscode: crate::ide::VsCodeFallback::of_target(l.target("vscode"), &l.session),
         }
     }
 }
@@ -341,9 +380,9 @@ mod editor_connection_tests {
         })
     }
 
-    /// SPEC FR-E10 (#32), FR-W4c, INTENT D55: the editor connection carries the available VS Code
-    /// target, which the window offers on a fallback: its relay launch from a current server, its
-    /// `url` from an old one; an unavailable one is not offered.
+    /// SPEC FR-E10 (#32), FR-W4c, INTENT D55: the editor connection carries the VS Code target,
+    /// which the window offers on a fallback: a relay launch in the listing, an old server's
+    /// `url`, or (the current server) the session whose launch the button asks for.
     #[test]
     fn fr_e10_editor_connection_carries_the_vscode_target() {
         use crate::ide::{IdeRelay, VsCodeFallback};
@@ -369,9 +408,18 @@ mod editor_connection_tests {
                 server_url: "http://srv:7".into(),
             }))
         );
+        // VS Code is always offered (FR-W4c (1b)): `available` is not read.
         l.targets.pop();
         l.targets.push(relay_target(false));
-        assert_eq!(IdeLaunch::editor_connection(Some(&Ok(l.clone()))).vscode, None);
+        assert!(matches!(IdeLaunch::editor_connection(Some(&Ok(l.clone()))).vscode, Some(VsCodeFallback::Relay(_))));
+
+        // The current server lists `{kind: "vscode"}` alone: the button asks for the session's launch.
+        l.targets.pop();
+        l.targets.push(serde_json::from_value(serde_json::json!({ "kind": "vscode" })).unwrap());
+        assert_eq!(
+            IdeLaunch::editor_connection(Some(&Ok(l.clone()))).vscode,
+            Some(VsCodeFallback::Start { session: "s".into() })
+        );
 
         // An old server's target with `url` and no relay launch still offers the URL.
         l.targets.pop();
@@ -729,6 +777,14 @@ impl ServerApi {
         self.json(reqwest::Method::GET, &ide_targets_path(id, computer), None, false).await
     }
 
+    /// `POST /api/sessions/{id}/ide/vscode[?computer=]`: starts or reuses the folder's VS Code OSE
+    /// and answers its relay launch (SPEC `FR-W4c` (1c), INTENT D55). Called when VS Code is
+    /// picked; a 502, 503 or 404 carries the server's `{code, error}`, whose `error` is the
+    /// message.
+    pub async fn ide_vscode(&self, id: &str, computer: Option<&str>) -> ServerResult<VsCodeLaunch> {
+        self.json(reqwest::Method::POST, &ide_vscode_path(id, computer), None, false).await
+    }
+
     pub async fn create_session(&self, body: &CreateSession) -> ServerResult<SessionRecord> {
         let body = serde_json::to_value(body).map_err(|e| ServerError::Client(e.to_string()))?;
         self.json(reqwest::Method::POST, "/sessions", Some(body), false).await
@@ -763,6 +819,14 @@ fn ide_targets_path(id: &str, computer: Option<&str>) -> String {
     match computer {
         Some(c) => format!("/sessions/{}/ide?computer={}", seg(id), seg(c)),
         None => format!("/sessions/{}/ide", seg(id)),
+    }
+}
+
+/// `POST /api/sessions/{id}/ide/vscode`, with `?computer=` when one is named.
+fn ide_vscode_path(id: &str, computer: Option<&str>) -> String {
+    match computer {
+        Some(c) => format!("/sessions/{}/ide/vscode?computer={}", seg(id), seg(c)),
+        None => format!("/sessions/{}/ide/vscode", seg(id)),
     }
 }
 
@@ -1077,6 +1141,8 @@ mod tests {
         assert!(!ServerApi::with_token("http://127.0.0.1:1", None).unwrap().is_over_transport());
         assert_eq!(ide_targets_path("s 1", Some("a/b")), "/sessions/s%201/ide?computer=a%2Fb");
         assert_eq!(ide_targets_path("s", None), "/sessions/s/ide");
+        assert_eq!(ide_vscode_path("s 1", Some("a/b")), "/sessions/s%201/ide/vscode?computer=a%2Fb");
+        assert_eq!(ide_vscode_path("s", None), "/sessions/s/ide/vscode");
     }
 
     /// A rotated token is read again after a 401 and the call retried once; an unchanged token

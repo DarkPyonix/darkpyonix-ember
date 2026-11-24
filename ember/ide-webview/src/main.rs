@@ -14,11 +14,6 @@ fn main() -> ExitCode {
         )
         .init();
 
-    // The relay mode's server token (FR-W5b): read once, then removed from the environment so
-    // the processes this window spawns (the OS URL handler) do not inherit it. No other thread
-    // runs yet.
-    let server_token = std::env::var(cli::SERVER_TOKEN_ENV).ok();
-    std::env::remove_var(cli::SERVER_TOKEN_ENV);
     let env_smoke = std::env::var(cli::SMOKE_ENV).ok();
     match cli::parse_args(std::env::args(), env_smoke.as_deref()) {
         Ok(cli::CliAction::Help(text)) => {
@@ -29,7 +24,7 @@ fn main() -> ExitCode {
             println!("{text}");
             ExitCode::SUCCESS
         }
-        Ok(cli::CliAction::Run(config)) => match window::run(config, server_token) {
+        Ok(cli::CliAction::Run(config)) => match window::run(config) {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
                 eprintln!("ember-ide-webview: {err}");

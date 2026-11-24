@@ -1389,6 +1389,7 @@ dependencies = [
  "ember-client",
  "ember-editor",
  "ember-editor-conn",
+ "ember-gateway",
  "ember-server",
  "ember-transport",
  "futures-util",
@@ -1455,6 +1456,18 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "ember-gateway"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "getrandom 0.3.4",
+ "rustls",
+ "tokio",
+ "tokio-tungstenite 0.28.0",
+ "tracing",
 ]
 
 [[package]]

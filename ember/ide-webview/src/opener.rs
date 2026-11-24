@@ -181,7 +181,7 @@ pub fn bridge_init_script(window_id: &str, chrome_mode: ChromeMode) -> String {
 /// The proxy keeps its own copy for `--url` pages; a test keeps the two the same.
 pub const DETACH_JS: &str = include_str!("../assets/detach.js");
 
-/// The workbench settings defaults the relay mode adds: VS Code's own drag-a-tab-out-of-the-window
+/// The workbench settings defaults the `--vscode` window adds: VS Code's own drag-a-tab-out-of-the-window
 /// gesture would open a second window for the same gesture as tab detach (the proxy's
 /// `DETACH_CONFIGURATION_DEFAULTS`). `detach.js` also guards at run time when a user turns it on.
 pub const WORKBENCH_DEFAULTS_JSON: &str = r#"{"workbench.editor.dragToOpenWindow":false}"#;
@@ -229,16 +229,26 @@ pub fn workbench_defaults_script() -> String {
     )
 }
 
-/// The relay mode's initialization script: the bridge shim of [`bridge_init_script`], the
+/// The `--vscode` window's initialization script: the bridge shim of [`bridge_init_script`], the
 /// workbench defaults, then tab detach. Nothing that changes VS Code's own UI shapes: the VS Code
 /// target takes Ember's design only as its colour theme extension (INTENT D55).
-pub fn relay_init_script(window_id: &str, chrome_mode: ChromeMode) -> String {
+pub fn vscode_init_script(window_id: &str, chrome_mode: ChromeMode) -> String {
     format!(
         "{}\n;{}\n;{}\n",
         bridge_init_script(window_id, chrome_mode),
         workbench_defaults_script(),
         DETACH_JS
     )
+}
+
+/// The initialization script of a window: [`vscode_init_script`] with `--vscode` (no proxy in
+/// front of the page, INTENT D55), else [`bridge_init_script`] (the proxy injects detach itself).
+pub fn init_script(window_id: &str, chrome_mode: ChromeMode, vscode: bool) -> String {
+    if vscode {
+        vscode_init_script(window_id, chrome_mode)
+    } else {
+        bridge_init_script(window_id, chrome_mode)
+    }
 }
 
 /// JavaScript snippet that delivers a native-to-webview JSON payload to `detach.js`.
@@ -359,11 +369,25 @@ mod tests {
         assert_eq!(again.remaining, 2);
     }
 
-    /// INTENT D55 (#1064): with no proxy on the desktop, the relay mode's window injects tab
-    /// detach and the `dragToOpenWindow` default itself, and nothing of the proxy's overlay.
+    /// SPEC FR-L7, INTENT D55 (#1064): with no proxy on the desktop, a window opened with
+    /// `--vscode` injects tab detach and the `dragToOpenWindow` default itself, and nothing of the
+    /// proxy's overlay; without the flag (behind the proxy) it injects neither.
     #[test]
-    fn fr_l7_relay_init_script_carries_detach_and_the_drag_default_and_no_overlay() {
-        let script = relay_init_script("win-1", ChromeMode::Integrated);
+    fn fr_l7_vscode_flag_injects_detach_and_the_drag_default() {
+        let crate::cli::CliAction::Run(cfg) = crate::cli::parse_args_with_env(
+            ["ember-ide-webview", "--url", "http://127.0.0.1:41234/?folder=%2Fw&egw=t", "--vscode"],
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("parse") else {
+            panic!("expected Run");
+        };
+        assert!(cfg.vscode);
+        let script = init_script(&cfg.window_id, cfg.chrome_mode, cfg.vscode);
+        assert_eq!(script, vscode_init_script("win-1", ChromeMode::Integrated));
         assert!(script.contains(DETACH_JS), "detach.js is injected whole");
         assert!(script.contains("tab_detach") && script.contains("__emberBridge"));
         assert!(script.contains(HANDLER_NAME), "the bridge shim comes first");
@@ -375,13 +399,14 @@ mod tests {
         assert!(script.contains("MutationObserver"), "the meta is patched as the parser inserts it");
         // No proxy overlay: neither its files nor its CSS hooks nor any stylesheet.
         for overlay in ["__overlay", "overlay.css", "data-xmo", "xmo-", "insertRule", "createElement('style')", "<link", "<style"] {
-            assert!(!script.contains(overlay), "the relay init script must not carry {overlay:?}");
+            assert!(!script.contains(overlay), "the --vscode init script must not carry {overlay:?}");
         }
         let proxy_css = include_str!("../../proxy/static/overlay.css");
         let first_rule = proxy_css.lines().find(|l| l.contains('{')).expect("overlay.css has a rule");
         assert!(!script.contains(first_rule.trim()));
         // The `--url` mode (behind the proxy) does not inject them a second time.
-        let plain = bridge_init_script("win-1", ChromeMode::Integrated);
+        let plain = init_script("win-1", ChromeMode::Integrated, false);
+        assert_eq!(plain, bridge_init_script("win-1", ChromeMode::Integrated));
         assert!(!plain.contains("tab_detach") && !plain.contains("dragToOpenWindow"));
     }
 

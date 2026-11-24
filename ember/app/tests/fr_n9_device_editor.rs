@@ -199,3 +199,56 @@ async fn fr_n9_the_editor_stream_reaches_the_ose_through_the_relay_over_http_wit
     let peer = tokio::time::timeout(WAIT, editor_reach::dial(&TermReach::Http("peer:abc".into()), &l.relay)).await.unwrap();
     assert_eq!(peer.err().map(|e| e.to_string()).as_deref(), Some(UNREACHABLE));
 }
+
+/// SPEC FR-L7, FR-W5b, INTENT D55 (#1064): the `ember-app --vscode-window` helper's gateway works
+/// on a server reached over the transport (`peer:`). Its dial is the app's own reach
+/// ([`editor_reach::ReachDial`] on [`TermReach::Peer`]), so a connection the window opens to the
+/// gateway's loopback port, with the per-launch cookie, reaches the OSE through the relay with the
+/// device key and no server token; the first-load URL answers 302 with the cookie, and a request
+/// without the token is refused before any relay is opened.
+#[tokio::test(flavor = "multi_thread")]
+async fn fr_l7_vscode_window_works_on_a_peer_server() {
+    let l = launch().await;
+    let net = MemNetwork::new();
+    let (server_t, device_t): (Transport, Transport) = (net.transport(), net.transport());
+    let devices = Devices::open(l.store.clone()).unwrap();
+    tokio::spawn(ember_server::transport::serve_scoped(&server_t, l.app.clone(), devices.clone()).unwrap());
+    devices.add(device_t.peer_id(), "laptop").unwrap();
+    let api = DeviceLink::new(device_t.clone(), PeerAddr::new(server_t.peer_id())).api();
+
+    // The helper's reach for a `peer:` server is the app's `Api` over the transport.
+    assert!(api.base_url().starts_with("peer:"), "{}", api.base_url());
+    let reach = TermReach::select(api.base_url(), &api);
+    assert!(reach.is_peer(), "{reach:?}");
+    let gateway = ember_gateway::Gateway::start_with(editor_reach::ReachDial::new(reach, l.relay.clone())).await.unwrap();
+    let token = gateway.token().to_owned();
+
+    // No token: 403, and the OSE sees nothing.
+    let mut tcp = tokio::net::TcpStream::connect(gateway.addr()).await.unwrap();
+    tcp.write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").await.unwrap();
+    let mut answer = Vec::new();
+    tokio::time::timeout(WAIT, tcp.read_to_end(&mut answer)).await.unwrap().unwrap();
+    assert!(answer.starts_with(b"HTTP/1.1 403"), "{}", String::from_utf8_lossy(&answer));
+    assert!(l.log.lock().unwrap().is_empty());
+
+    // The first-load URL: 302 with the cookie.
+    let page = gateway.page_url("/work/repo");
+    let path = page.strip_prefix(&gateway.origin()).unwrap().to_owned();
+    let mut tcp = tokio::net::TcpStream::connect(gateway.addr()).await.unwrap();
+    tcp.write_all(format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").as_bytes()).await.unwrap();
+    let mut answer = Vec::new();
+    tokio::time::timeout(WAIT, tcp.read_to_end(&mut answer)).await.unwrap().unwrap();
+    let answer = String::from_utf8_lossy(&answer).into_owned();
+    assert!(answer.starts_with("HTTP/1.1 302"), "{answer}");
+    assert!(answer.contains(&ember_gateway::set_cookie(&token)), "{answer}");
+
+    // With the cookie the request goes through the relay to the OSE (the fake echoes it).
+    let head = format!("GET /?folder=%2Fwork%2Frepo HTTP/1.1\r\nHost: 127.0.0.1\r\nCookie: ember-gw={token}\r\n\r\n");
+    let mut tcp = tokio::net::TcpStream::connect(gateway.addr()).await.unwrap();
+    tcp.write_all(head.as_bytes()).await.unwrap();
+    let mut echo = vec![0u8; head.len()];
+    tokio::time::timeout(WAIT, tcp.read_exact(&mut echo)).await.expect("the echo came back in time").unwrap();
+    assert_eq!(String::from_utf8_lossy(&echo), head);
+    let seen = String::from_utf8(l.log.lock().unwrap().clone()).unwrap();
+    assert_eq!(seen, head, "the OSE got the request as the window sent it");
+}

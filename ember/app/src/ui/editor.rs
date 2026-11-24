@@ -24,11 +24,14 @@ pub struct EditorTarget {
     /// FR-E10, #32). Empty when the target has a relay launch or the server offered none.
     pub vscode_url: String,
     /// The VS Code target's relay path (`launch.ose.relay`, FR-W4c, INTENT D55), which the
-    /// fallback opens with `ember-ide-webview --relay-path` on [`Self::server_url`]
+    /// fallback opens in the `--vscode-window` helper on [`Self::server_url`]
     /// (`crate::ide::VsCodeFallback`). Empty when the server sent no relay launch.
     pub vscode_relay: String,
     /// The folder the VS Code target's relay launch opens (`launch.folder`).
     pub vscode_folder: String,
+    /// The session whose VS Code launch the fallback asks for (`POST /api/sessions/{id}/ide/vscode`,
+    /// FR-W4c (1c)) when VS Code was offered with no launch. Empty otherwise.
+    pub vscode_session: String,
 }
 
 impl std::fmt::Debug for EditorTarget {
@@ -45,6 +48,7 @@ impl std::fmt::Debug for EditorTarget {
             .field("vscode_url", &self.vscode_url)
             .field("vscode_relay", &self.vscode_relay)
             .field("vscode_folder", &self.vscode_folder)
+            .field("vscode_session", &self.vscode_session)
             .finish()
     }
 }
@@ -2454,6 +2458,7 @@ mod tests {
             vscode_url: String::new(),
             vscode_relay: String::new(),
             vscode_folder: String::new(),
+            vscode_session: String::new(),
         };
         let text = format!("{target:?}");
         assert!(text.contains("/api/computers/node-a/ide/relay/l1"), "{text}");

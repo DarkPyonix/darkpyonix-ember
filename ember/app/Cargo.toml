@@ -40,6 +40,10 @@ dioxus-compose = { git = "https://github.com/DarkPyonix/dioxus-compose", rev = "
 ember-client = { path = "../client", features = ["tls"] }
 ember-editor = { path = "../editor" }
 ember-editor-conn = { path = "../editor-conn" }
+# The loopback gateway of the VS Code window (SPEC FR-W5b, INTENT D55, #1064): the
+# `ember-app --vscode-window` helper runs it with the app's own reach (HTTP or the transport),
+# so `ember-ide-webview` holds no server credential and links no transport.
+ember-gateway = { path = "../gateway" }
 # The peer-to-peer transport, so the app can join a server as a device (SPEC FR-N9, #856): its
 # device key, the bind, and the dialer `Api::over_transport` takes. The same features the client
 # tests and the server use: the default backend (`letify`) and HTTP over streams.

@@ -8,10 +8,6 @@ use ember_bridge::OpenWindow;
 pub const DEFAULT_TITLE: &str = "Ember IDE";
 pub const SMOKE_ENV: &str = "EMBER_IDE_WEBVIEW_SMOKE";
 pub const DATA_DIR_ENV: &str = "EMBER_IDE_WEBVIEW_DATA_DIR";
-/// The server token for the relay mode's gateway (`FR-W5b`). It comes in the environment, never
-/// in argv, and `main` removes it from the environment before anything else starts, so the
-/// processes this window spawns (the OS URL handler) do not inherit it.
-pub const SERVER_TOKEN_ENV: &str = "EMBER_SERVER_TOKEN";
 const DEFAULT_SMOKE_EXIT_MS: u64 = 500;
 
 /// Default desktop window dimensions in logical pixels.
@@ -49,25 +45,11 @@ pub enum NavigationDecision {
     Block,
 }
 
-/// The relay mode (`FR-L7` VS Code target, `FR-W5b`, INTENT D55): the window loads the workbench
-/// from a loopback gateway in this process that joins each connection to one stream of the
-/// server's relay route.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RelayArgs {
-    /// The server's base URL, `http(s)://host:port`.
-    pub server_url: String,
-    /// The server's relay route, `/api/computers/{id}/ide/relay/{launch_id}`.
-    pub relay_path: String,
-    /// The absolute folder the workbench opens.
-    pub folder: String,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
-    /// The page the window loads. Empty in the relay mode until the gateway has started.
+    /// The page the window loads.
     pub url: String,
-    /// The origin the navigation policy keeps the window on. Empty in the relay mode until the
-    /// gateway has started; then the gateway's `http://127.0.0.1:<port>`.
+    /// The origin the navigation policy keeps the window on.
     pub origin: String,
     pub title: String,
     pub window_id: String,
@@ -75,9 +57,11 @@ pub struct Config {
     pub chrome_mode: ChromeMode,
     pub smoke_exit_ms: Option<u64>,
     pub validate_only: bool,
-    /// Set in the relay mode (`--relay-path`), which also injects tab detach and the workbench
-    /// defaults the proxy used to write (INTENT D55: no proxy on the desktop).
-    pub relay: Option<RelayArgs>,
+    /// `--vscode`: the page is the VS Code target behind the `ember-app --vscode-window` helper's
+    /// loopback gateway (`FR-L7`, `FR-W5b`, INTENT D55), with no proxy in front of it, so the
+    /// window injects tab detach and the `dragToOpenWindow` default itself. The window holds no
+    /// server credential: the helper owns the gateway and the relay.
+    pub vscode: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,13 +73,11 @@ pub enum CliAction {
 
 pub fn usage() -> String {
     format!(
-        "Usage: ember-ide-webview (--url <url> | --relay-path <path> --server-url <url> --folder <dir>) [--title <title>] [--window-id <id>] [--data-dir <dir>] [--native-chrome] [--smoke | --smoke-exit-ms <ms>]\n\
+        "Usage: ember-ide-webview --url <url> [--vscode] [--title <title>] [--window-id <id>] [--data-dir <dir>] [--native-chrome] [--smoke | --smoke-exit-ms <ms>]\n\
          \n\
          Options:\n\
            --url <url>             VS Code Web URL (http:// or https://)\n\
-           --relay-path <path>     Server relay route to the computer's OSE (/api/computers/<id>/ide/relay/<launch>)\n\
-           --server-url <url>      Ember server base URL for --relay-path (token in {SERVER_TOKEN_ENV})\n\
-           --folder <dir>          Absolute folder the workbench opens, with --relay-path\n\
+           --vscode                The page is the VS Code target with no proxy: inject tab detach and the workbench defaults\n\
            --title <title>         Initial window title (default: derived from folder or {DEFAULT_TITLE})\n\
            --window-id <id>        Initial logical window id (default: win-1)\n\
            --data-dir <dir>        Persistent webview cache/data directory\n\
@@ -290,49 +272,6 @@ pub fn resolve_detached_url(origin: &str, request: &OpenWindow) -> Option<String
     Some(format!("{base}{path}"))
 }
 
-/// Checks a relay route as the server gives it: under `/api/`, an `/ide/relay/` path, with no
-/// scheme, query, fragment or whitespace.
-pub fn validate_relay_path(path: &str) -> Result<String, String> {
-    let p = path.trim();
-    let ok = p.starts_with("/api/")
-        && p.contains("/ide/relay/")
-        && !p.contains("://")
-        && !p.contains(['?', '#'])
-        && !p.chars().any(|c| c.is_whitespace() || c.is_control());
-    if ok {
-        Ok(p.to_owned())
-    } else {
-        Err(format!("not a server relay path: {path:?}"))
-    }
-}
-
-/// Checks that `folder` is absolute (`/...`, or `C:\...` / `C:/...` on Windows).
-pub fn validate_folder(folder: &str) -> Result<String, String> {
-    let f = folder.trim();
-    if f.chars().any(char::is_control) {
-        return Err(format!("folder must not contain control characters: {folder:?}"));
-    }
-    let b = f.as_bytes();
-    let windows_abs = b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/');
-    if f.starts_with('/') || windows_abs {
-        Ok(f.to_owned())
-    } else {
-        Err(format!("folder must be an absolute path: {folder:?}"))
-    }
-}
-
-/// The first page of the relay mode: the gateway's `/?folder=<folder>&egw=<token>`. The gateway
-/// answers it with a 302 to `/?folder=<folder>` and the `ember-gw` cookie (`FR-W5b`).
-pub fn relay_page_url(addr: std::net::SocketAddr, token: &str, folder: &str) -> String {
-    ember_gateway::page_url(addr, token, folder)
-}
-
-/// `<folder name> - Ember IDE` for an absolute folder, else `Ember IDE`.
-pub fn title_for_folder(explicit: Option<&str>, folder: &str) -> String {
-    let as_url = format!("http://127.0.0.1/?folder={}", ember_gateway::encode_query_value(folder));
-    derive_window_title(explicit, &as_url)
-}
-
 pub fn parse_args<I, S>(args: I, env_smoke: Option<&str>) -> Result<CliAction, String>
 where
     I: IntoIterator<Item = S>,
@@ -369,9 +308,7 @@ where
     let _ = iter.next();
 
     let mut url: Option<String> = None;
-    let mut relay_path: Option<String> = None;
-    let mut server_url: Option<String> = None;
-    let mut folder: Option<String> = None;
+    let mut vscode = false;
     let mut title: Option<String> = None;
     let mut window_id: Option<String> = None;
     let mut data_dir: Option<String> = None;
@@ -390,23 +327,8 @@ where
                     .ok_or_else(|| "--url requires a value".to_owned())?;
                 url = Some(value.as_ref().to_owned());
             }
-            "--relay-path" => {
-                let value = iter
-                    .next()
-                    .ok_or_else(|| "--relay-path requires a value".to_owned())?;
-                relay_path = Some(value.as_ref().to_owned());
-            }
-            "--server-url" => {
-                let value = iter
-                    .next()
-                    .ok_or_else(|| "--server-url requires a value".to_owned())?;
-                server_url = Some(value.as_ref().to_owned());
-            }
-            "--folder" => {
-                let value = iter
-                    .next()
-                    .ok_or_else(|| "--folder requires a value".to_owned())?;
-                folder = Some(value.as_ref().to_owned());
+            "--vscode" => {
+                vscode = true;
             }
             "--title" => {
                 let value = iter
@@ -448,31 +370,9 @@ where
         }
     }
 
-    let any_relay = relay_path.is_some() || server_url.is_some() || folder.is_some();
-    let (trimmed_url, origin, relay) = match (url, any_relay) {
-        (Some(_), true) => {
-            return Err(format!(
-                "--url cannot be combined with --relay-path, --server-url or --folder\n\n{}",
-                usage()
-            ))
-        }
-        (Some(raw_url), false) => {
-            let origin = validate_and_derive_origin(&raw_url)?;
-            (raw_url.trim().to_owned(), origin, None)
-        }
-        (None, true) => {
-            let missing = |name: &str| format!("{name} is required with --relay-path\n\n{}", usage());
-            let relay_path = validate_relay_path(&relay_path.ok_or_else(|| missing("--relay-path"))?)?;
-            let server_url = server_url.ok_or_else(|| missing("--server-url"))?;
-            validate_and_derive_origin(&server_url)?;
-            let folder = validate_folder(&folder.ok_or_else(|| missing("--folder"))?)?;
-            let server_url = server_url.trim().trim_end_matches('/').to_owned();
-            (String::new(), String::new(), Some(RelayArgs { server_url, relay_path, folder }))
-        }
-        (None, false) => {
-            return Err(format!("missing required --url or --relay-path argument\n\n{}", usage()))
-        }
-    };
+    let raw_url = url.ok_or_else(|| format!("missing required --url argument\n\n{}", usage()))?;
+    let origin = validate_and_derive_origin(&raw_url)?;
+    let trimmed_url = raw_url.trim().to_owned();
 
     if !validate_only
         && smoke_exit_ms.is_none()
@@ -481,10 +381,7 @@ where
         smoke_exit_ms = Some(DEFAULT_SMOKE_EXIT_MS);
     }
 
-    let resolved_title = match &relay {
-        Some(r) => title_for_folder(title.as_deref(), &r.folder),
-        None => derive_window_title(title.as_deref(), &trimmed_url),
-    };
+    let resolved_title = derive_window_title(title.as_deref(), &trimmed_url);
     let resolved_id = window_id
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "win-1".to_owned());
@@ -505,7 +402,7 @@ where
         chrome_mode,
         smoke_exit_ms,
         validate_only,
-        relay,
+        vscode,
     }))
 }
 
@@ -549,7 +446,7 @@ mod tests {
                 chrome_mode: ChromeMode::Native,
                 smoke_exit_ms: Some(250),
                 validate_only: false,
-                relay: None,
+                vscode: false,
             })
         );
     }
@@ -580,7 +477,7 @@ mod tests {
                 chrome_mode: ChromeMode::Integrated,
                 smoke_exit_ms: Some(DEFAULT_SMOKE_EXIT_MS),
                 validate_only: false,
-                relay: None,
+                vscode: false,
             })
         );
     }
@@ -603,104 +500,48 @@ mod tests {
         assert!(matches!(smoke, CliAction::Run(cfg) if cfg.validate_only));
     }
 
-    /// SPEC FR-L7 (VS Code target), FR-W5b, INTENT D55 (#1064): the relay mode's arguments.
+    /// SPEC FR-L7 (VS Code target), FR-W5b, INTENT D55 (#1064): the `ember-app --vscode-window`
+    /// helper opens the window on its gateway's loopback URL with `--vscode`. The window keeps the
+    /// gateway's origin and the `<folder> - Ember IDE` title, and takes no relay or server argument.
     #[test]
-    fn fr_l7_cli_parses_the_relay_mode() {
+    fn fr_l7_cli_parses_the_vscode_flag() {
+        let url = "http://127.0.0.1:41234/?folder=%2Fwork%2Fember%20app&egw=0123abcd";
         let action = parse_args_with_env(
-            [
-                "ember-ide-webview",
-                "--relay-path",
-                "/api/computers/node-a/ide/relay/launch-1",
-                "--server-url",
-                "https://srv.example:8740/",
-                "--folder",
-                "/work/ember app",
-                "--window-id",
-                "main-1",
-            ],
+            ["ember-ide-webview", "--url", url, "--vscode", "--window-id", "main-1"],
             None,
             Some("/env/cache"),
             None,
             None,
             None,
         )
-        .expect("parse relay args");
+        .expect("parse --vscode");
         assert_eq!(
             action,
             CliAction::Run(Config {
-                url: String::new(),
-                origin: String::new(),
+                url: url.into(),
+                origin: "http://127.0.0.1:41234".into(),
                 title: "ember app - Ember IDE".into(),
                 window_id: "main-1".into(),
                 data_dir: Some(PathBuf::from("/env/cache")),
                 chrome_mode: ChromeMode::Integrated,
                 smoke_exit_ms: None,
                 validate_only: false,
-                relay: Some(RelayArgs {
-                    server_url: "https://srv.example:8740".into(),
-                    relay_path: "/api/computers/node-a/ide/relay/launch-1".into(),
-                    folder: "/work/ember app".into(),
-                }),
+                vscode: true,
             })
         );
-        assert!(usage().contains("--relay-path") && usage().contains(SERVER_TOKEN_ENV));
-        assert_eq!(SERVER_TOKEN_ENV, "EMBER_SERVER_TOKEN");
-    }
-
-    #[test]
-    fn fr_l7_cli_relay_mode_refuses_bad_or_mixed_arguments() {
+        assert!(usage().contains("--vscode"));
+        // The relay mode is gone: the window takes no relay path, server or token.
         let parse = |args: &[&str]| {
-            parse_args_with_env(
-                std::iter::once("ember-ide-webview").chain(args.iter().copied()),
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
+            parse_args_with_env(std::iter::once("ember-ide-webview").chain(args.iter().copied()), None, None, None, None, None)
         };
-        let good = ["--relay-path", "/api/computers/c/ide/relay/l", "--server-url", "http://127.0.0.1:8740", "--folder", "/w"];
-        assert!(parse(&good).is_ok());
-        // --url and the relay mode are exclusive.
-        let mut mixed = good.to_vec();
-        mixed.extend(["--url", "http://127.0.0.1:8890/"]);
-        assert!(parse(&mixed).unwrap_err().contains("cannot be combined"));
-        // Each relay argument is required.
-        assert!(parse(&good[..4]).unwrap_err().contains("--folder"));
-        assert!(parse(&good[2..]).unwrap_err().contains("--relay-path"));
-        // Bad values.
-        for (i, bad) in [
-            (1, "/other/path"),
-            (1, "/api/computers/c/ide/relay/l?x=1"),
-            (1, "http://evil/api/computers/c/ide/relay/l"),
-            (3, "file:///srv"),
-            (3, "peer:abc"),
-            (5, "relative/dir"),
-        ] {
-            let mut args = good.to_vec();
-            args[i] = bad;
-            assert!(parse(&args).is_err(), "{bad:?} must be refused");
+        for gone in ["--relay-path", "--server-url", "--folder"] {
+            assert!(parse(&["--url", url, gone, "x"]).unwrap_err().contains("unknown argument"), "{gone}");
+            assert!(!usage().contains(gone), "{gone}");
         }
-        assert_eq!(validate_folder("C:\\work").unwrap(), "C:\\work");
-        assert!(parse(&[]).unwrap_err().contains("--url or --relay-path"));
-    }
-
-    /// The first page of the relay mode is the gateway's loopback origin with the folder and the
-    /// per-launch token; the origin the navigation policy keeps is the gateway's, and the title
-    /// after the 302 (no `egw`) is still `<folder> - Ember IDE`.
-    #[test]
-    fn fr_l7_relay_mode_page_url_shape() {
-        let addr: std::net::SocketAddr = "127.0.0.1:41234".parse().unwrap();
-        let url = relay_page_url(addr, "0123abcd", "/work/repo");
-        assert_eq!(url, "http://127.0.0.1:41234/?folder=%2Fwork%2Frepo&egw=0123abcd");
-        let origin = validate_and_derive_origin(&url).unwrap();
-        assert_eq!(origin, "http://127.0.0.1:41234");
-        assert_eq!(classify_navigation(&origin, "http://127.0.0.1:41234/?folder=%2Fwork%2Frepo"), NavigationDecision::Allow);
-        assert_eq!(classify_navigation(&origin, "http://127.0.0.1:8890/"), NavigationDecision::OpenExternal);
-        assert_eq!(window_title_for_page(&url, "x"), "repo - Ember IDE");
+        assert!(parse(&["--vscode"]).unwrap_err().contains("--url"));
+        // After the gateway's 302 (no `egw`) the title is still the folder's.
         assert_eq!(window_title_for_page("http://127.0.0.1:41234/?folder=%2Fwork%2Frepo", "x"), "repo - Ember IDE");
-        assert_eq!(title_for_folder(None, "/work/repo/"), "repo - Ember IDE");
-        assert_eq!(title_for_folder(Some("Mine"), "/work/repo"), "Mine");
+        assert_eq!(classify_navigation("http://127.0.0.1:41234", "http://127.0.0.1:8890/"), NavigationDecision::OpenExternal);
     }
 
     #[test]

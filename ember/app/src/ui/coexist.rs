@@ -254,11 +254,13 @@ impl SharedUi {
         vscode: Option<crate::ide::VsCodeFallback>,
     ) {
         // The VS Code target travels as its relay launch (path and folder; the server is the
-        // editor's own) or an old server's URL (SPEC FR-E10, FR-W4c).
-        let (vscode_url, vscode_relay, vscode_folder) = match vscode {
-            Some(crate::ide::VsCodeFallback::Relay(r)) => (String::new(), r.relay, r.folder),
-            Some(crate::ide::VsCodeFallback::Url(u)) => (u, String::new(), String::new()),
-            None => (String::new(), String::new(), String::new()),
+        // editor's own), an old server's URL, or the session whose launch the button asks for
+        // (SPEC FR-E10, FR-W4c (1c)).
+        let (vscode_url, vscode_relay, vscode_folder, vscode_session) = match vscode {
+            Some(crate::ide::VsCodeFallback::Relay(r)) => (String::new(), r.relay, r.folder, String::new()),
+            Some(crate::ide::VsCodeFallback::Url(u)) => (u, String::new(), String::new(), String::new()),
+            Some(crate::ide::VsCodeFallback::Start { session }) => (String::new(), String::new(), String::new(), session),
+            None => (String::new(), String::new(), String::new(), String::new()),
         };
         let target = EditorTarget {
             project: project.clone(),
@@ -271,6 +273,7 @@ impl SharedUi {
             vscode_url,
             vscode_relay,
             vscode_folder,
+            vscode_session,
         };
         #[cfg(not(test))]
         let spawn_target = target.clone();

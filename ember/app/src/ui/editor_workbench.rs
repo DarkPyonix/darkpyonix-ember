@@ -1398,7 +1398,7 @@ pub mod page {
         // instead of the editor; the user chooses, nothing switches by itself.
         let fallback_text_for = |has_vscode: bool| fallback.as_ref().map(|f| crate::ui::editor::fallback_sentence(&f.fallback, has_vscode));
         // The VS Code target's relay launch (FR-W4c, INTENT D55), else an old server's http(s) URL,
-        // checked as `crate::ide::plan` checks the VS Code target (`VsCodeFallback::for_editor`).
+        // else the session whose launch the button asks for (FR-W4c (1c)), checked as `crate::ide::plan` checks the VS Code target (`VsCodeFallback::for_editor`).
         let fallback_vscode = fallback.as_ref().and(s.vscode.clone());
         let fallback_button = crate::ui::editor::FALLBACK_BUTTON;
         let fallback_text = fallback_text_for(fallback_vscode.is_some());
@@ -1638,8 +1638,9 @@ pub mod page {
                         if let Some(vscode) = fallback_vscode {
                             button {
                                 onclick: move |_| {
-                                    // Relay mode spawns `ember-ide-webview --relay-path` with the server token in
-                                    // its environment, never argv (`crate::ide::open_ide_relay`).
+                                    // A relay launch starts the `ember-app --vscode-window` helper with no
+                                    // credential in argv (`crate::ide::open_ide_relay`); a target with no launch
+                                    // asks the server for one first (`crate::ide::start_vscode`).
                                     if let Err(e) = vscode.open() {
                                         tracing::warn!("could not open the VS Code target: {e}");
                                         notice(format!("VS Code: 열지 못했습니다: {e}"));

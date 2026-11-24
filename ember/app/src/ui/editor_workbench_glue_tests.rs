@@ -43,6 +43,7 @@ fn target() -> EditorTarget {
         vscode_url: String::new(),
         vscode_relay: String::new(),
         vscode_folder: String::new(),
+        vscode_session: String::new(),
     }
 }
 

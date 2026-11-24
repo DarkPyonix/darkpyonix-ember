@@ -1,12 +1,16 @@
 //! "Open IDE": what each target does once the server has said how to reach it
 //! (`GET /api/sessions/{id}/ide`).
 //!
-//! - **VS Code**: opened strictly in the standalone `ember-ide-webview` child process (never
-//!   falling back to an external browser). With a launch that carries the server's relay route
-//!   (`launch.ose.relay`, `FR-W4c` (1b), INTENT D55) the window runs in its relay mode: it starts
-//!   the loopback gateway of `FR-W5b` and loads the workbench through the relay, with the server
-//!   token in its environment. An older server's target with a `url` still opens that URL.
-//!   This launcher process never embeds a browser engine directly.
+//! - **VS Code**: always offered (`FR-W4c` (1b), INTENT D55). Picking it calls
+//!   `POST /api/sessions/{id}/ide/vscode` ([`start_vscode`]), which starts the folder's OSE and
+//!   answers its relay launch; a failure shows only as that call's error. The launch opens in an
+//!   `ember-app --vscode-window` helper process ([`run_vscode_window`]): it runs the loopback
+//!   gateway of `FR-W5b` with the app's own reach (HTTP with the server token, or the transport
+//!   with the device key, so a `peer:` server works too) and spawns the standalone
+//!   `ember-ide-webview --url <gateway> --vscode` window, which holds no server credential. The
+//!   helper lives as long as that window. An older server's target with a `url` still opens that
+//!   URL in the window directly. Neither this launcher process nor the helper creates a webview
+//!   (NFR-L2); only `ember-ide-webview` does.
 //! - **Gateway**: the `jetbrains-gateway://` link, handed to the OS URL handler, which starts
 //!   JetBrains Gateway on this machine.
 //! - **Ember**: the editor screen.
@@ -57,8 +61,12 @@ impl IdeKind {
 pub enum IdeAction {
     /// Launch the standalone IDE window binary (`ember-ide-webview`) at this URL.
     OpenIdeWindow(String),
-    /// Launch the standalone IDE window binary in its relay mode (`FR-W5b`, INTENT D55).
+    /// Open a relay launch the target already carries in the `--vscode-window` helper (a server
+    /// between D55 and the on-pick route sent one in the listing).
     OpenIdeRelay(IdeRelay),
+    /// VS Code was picked: ask the server for its launch (`POST /api/sessions/{id}/ide/vscode`,
+    /// [`start_vscode`]), then open it in the `--vscode-window` helper.
+    StartVsCode,
     /// Hand this URL to the OS.
     OpenUrl(String),
     /// Open the Ember editor screen (its code area waits for the editor core, M8).
@@ -67,7 +75,7 @@ pub enum IdeAction {
     Unavailable(String),
 }
 
-/// The VS Code target's relay launch: what `ember-ide-webview --relay-path` needs.
+/// The VS Code target's relay launch: what the `ember-app --vscode-window` helper needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdeRelay {
     /// The server's relay route to the computer's OSE, `/api/computers/{id}/ide/relay/{launch}`.
@@ -94,22 +102,14 @@ pub fn plan(kind: IdeKind, target: Option<&IdeTarget>) -> IdeAction {
         // The caller opens the editor screen from the launch data (project, folder).
         return IdeAction::EmberPlaceholder;
     }
+    if kind == IdeKind::VsCode {
+        return plan_vscode(target);
+    }
     let Some(t) = target else {
         return IdeAction::Unavailable(format!("the server offers no {} target", kind.label()));
     };
     if !t.available {
         return IdeAction::Unavailable(t.reason.clone().unwrap_or_else(|| format!("{} is not available", kind.label())));
-    }
-    if kind == IdeKind::VsCode {
-        if let Some(relay) = relay_launch(t) {
-            if !relay.relay.starts_with("/api/") {
-                return IdeAction::Unavailable(format!("refusing relay path {:?}", relay.relay));
-            }
-            if relay.folder.trim().is_empty() {
-                return IdeAction::Unavailable("the server gave no folder for VS Code".into());
-            }
-            return IdeAction::OpenIdeRelay(relay);
-        }
     }
     match t.url.as_deref() {
         Some(url) if allowed_url(kind, url) => match kind {
@@ -120,6 +120,91 @@ pub fn plan(kind: IdeKind, target: Option<&IdeTarget>) -> IdeAction {
         Some(url) => IdeAction::Unavailable(format!("refusing to open {url:?}: unexpected scheme")),
         None => IdeAction::Unavailable(format!("the server gave no URL for {}", kind.label())),
     }
+}
+
+/// VS Code is always offered (`FR-W4c` (1b), INTENT D55): with no relay launch and no `url` in
+/// the listing (the current server sends `{kind: "vscode"}` only), picking it starts the launch on
+/// the server, and `available`/`reason` are not read. A relay launch already in the listing, or an
+/// old server's `url`, still opens as before.
+fn plan_vscode(target: Option<&IdeTarget>) -> IdeAction {
+    let Some(t) = target else {
+        return IdeAction::StartVsCode;
+    };
+    if let Some(relay) = relay_launch(t) {
+        return match checked_relay(relay) {
+            Ok(relay) => IdeAction::OpenIdeRelay(relay),
+            Err(why) => IdeAction::Unavailable(why),
+        };
+    }
+    match t.url.as_deref().filter(|u| !u.trim().is_empty()) {
+        Some(url) if allowed_url(IdeKind::VsCode, url) => IdeAction::OpenIdeWindow(url.to_string()),
+        Some(url) => IdeAction::Unavailable(format!("refusing to open {url:?}: unexpected scheme")),
+        None => IdeAction::StartVsCode,
+    }
+}
+
+/// A relay launch the helper may open: a relay path under `/api/` and a folder.
+fn checked_relay(relay: IdeRelay) -> Result<IdeRelay, String> {
+    if !relay.relay.starts_with("/api/") {
+        return Err(format!("refusing relay path {:?}", relay.relay));
+    }
+    if relay.folder.trim().is_empty() {
+        return Err("the server gave no folder for VS Code".into());
+    }
+    Ok(relay)
+}
+
+/// The relay launch of the on-pick route's answer, checked as [`plan`] checks one.
+pub fn relay_of_launch(launch: &crate::server::VsCodeLaunch) -> Result<IdeRelay, String> {
+    checked_relay(IdeRelay {
+        relay: launch.ose.relay.clone(),
+        folder: launch.folder.clone(),
+        server_url: launch.server_url.clone().unwrap_or_default(),
+    })
+}
+
+/// Picking VS Code (`FR-W4c` (1c)): `start(session, computer)` is the on-pick route, and `open`
+/// opens its launch (the `--vscode-window` helper). The route's error is the only place a VS Code
+/// failure shows, as its text.
+pub async fn pick_vscode<S, F>(
+    session: &str,
+    computer: Option<&str>,
+    start: S,
+    open: impl FnOnce(IdeRelay) -> Result<(), String>,
+) -> Result<(), String>
+where
+    S: FnOnce(String, Option<String>) -> F,
+    F: std::future::Future<Output = Result<crate::server::VsCodeLaunch, String>>,
+{
+    let launch = start(session.to_owned(), computer.map(str::to_owned)).await?;
+    open(relay_of_launch(&launch)?)
+}
+
+/// The text of a failed on-pick call: the server's `error` for an answered status, else the
+/// error as it reads.
+fn start_error_text(e: crate::server::ServerError) -> String {
+    match e {
+        crate::server::ServerError::Status { message, .. } => message,
+        other => other.to_string(),
+    }
+}
+
+/// VS Code was picked for `session`: call `POST /api/sessions/{session}/ide/vscode` on the app's
+/// server, then spawn the `--vscode-window` helper on the launch. The demo has no server.
+pub async fn start_vscode(session: String, computer: Option<String>) -> Result<(), String> {
+    let s = crate::services::services();
+    if s.demo.is_some() {
+        return Err(crate::demo::UNAVAILABLE.to_owned());
+    }
+    pick_vscode(
+        &session,
+        computer.as_deref(),
+        |sid, computer| async move {
+            s.server.ide_vscode(&sid, computer.as_deref()).await.map_err(start_error_text)
+        },
+        |relay| open_ide_relay(&relay),
+    )
+    .await
 }
 
 fn allowed_url(kind: IdeKind, url: &str) -> bool {
@@ -198,15 +283,92 @@ pub fn ide_window_command(bin: &Path, url: &str) -> (PathBuf, Vec<String>) {
     )
 }
 
-/// The environment variable that carries the server token to the IDE window's relay mode, never
-/// argv (`ember/ide-webview/src/cli.rs` `SERVER_TOKEN_ENV`).
-pub const IDE_SERVER_TOKEN_ENV: &str = "EMBER_SERVER_TOKEN";
+/// Environment variables that carry a server credential, which the IDE window never inherits
+/// (INTENT D55: the window holds no server credential).
+pub const CREDENTIAL_ENVS: [&str; 2] = ["EMBER_SERVER_TOKEN", EDITOR_TOKEN_ENV];
 
-/// The `(executable, args)` pair that launches the IDE window in its relay mode.
-pub fn ide_relay_command(bin: &Path, server_url: &str, relay: &IdeRelay) -> (PathBuf, Vec<String>) {
+/// CLI flag that starts this binary as the VS Code window's helper (INTENT D55, `FR-W5b`): the
+/// loopback gateway and the `ember-ide-webview` window it opens. No webview in this process.
+pub const VSCODE_WINDOW_ARG: &str = "--vscode-window";
+
+/// The `--vscode-window` helper's arguments. No credential: the helper reads the server token
+/// and the device key from the app's own sources, as the `--editor` process does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VsCodeWindowArgs {
+    /// The server's relay route, `/api/computers/{id}/ide/relay/{launch_id}`.
+    pub relay_path: String,
+    /// The server the launch came from (`http(s)://...`, or the app's `peer:<id>`).
+    pub server_url: String,
+    /// The absolute folder the workbench opens.
+    pub folder: String,
+}
+
+/// A relay route as the server gives it: under `/api/`, an `/ide/relay/` path, with no scheme,
+/// query, fragment or whitespace.
+fn valid_relay_path(path: &str) -> bool {
+    path.starts_with("/api/")
+        && path.contains("/ide/relay/")
+        && !path.contains("://")
+        && !path.contains(['?', '#'])
+        && !path.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
+/// An absolute folder (`/...`, or `C:\...` / `C:/...` on Windows) with no control characters.
+fn valid_folder(folder: &str) -> bool {
+    let b = folder.as_bytes();
+    let windows_abs = b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/');
+    !folder.chars().any(char::is_control) && (folder.starts_with('/') || windows_abs)
+}
+
+/// Parse `--vscode-window --relay-path <p> --server-url <u> --folder <abs>` from an argument
+/// list (`std::env::args()`). `None` when the flag is absent; an error names a missing or bad
+/// argument.
+pub fn parse_vscode_window_args<I, S>(args: I) -> Option<Result<VsCodeWindowArgs, String>>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let args: Vec<String> = args.into_iter().map(|a| a.as_ref().to_owned()).collect();
+    let at = args.iter().position(|a| a == VSCODE_WINDOW_ARG)?;
+    let (mut relay_path, mut server_url, mut folder) = (None, None, None);
+    let mut it = args[at + 1..].iter();
+    while let Some(flag) = it.next() {
+        let slot = match flag.as_str() {
+            "--relay-path" => &mut relay_path,
+            "--server-url" => &mut server_url,
+            "--folder" => &mut folder,
+            other => return Some(Err(format!("{VSCODE_WINDOW_ARG}: unknown argument {other:?}"))),
+        };
+        let Some(value) = it.next() else {
+            return Some(Err(format!("{VSCODE_WINDOW_ARG}: {flag} requires a value")));
+        };
+        *slot = Some(value.clone());
+    }
+    let need = |v: Option<String>, name: &str| v.ok_or_else(|| format!("{VSCODE_WINDOW_ARG}: {name} is required"));
+    Some((|| {
+        let relay_path = need(relay_path, "--relay-path")?;
+        let server_url = need(server_url, "--server-url")?;
+        let folder = need(folder, "--folder")?;
+        if !valid_relay_path(&relay_path) {
+            return Err(format!("{VSCODE_WINDOW_ARG}: not a server relay path: {relay_path:?}"));
+        }
+        if !valid_folder(&folder) {
+            return Err(format!("{VSCODE_WINDOW_ARG}: the folder must be an absolute path: {folder:?}"));
+        }
+        if server_url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return Err(format!("{VSCODE_WINDOW_ARG}: bad server address: {server_url:?}"));
+        }
+        Ok(VsCodeWindowArgs { relay_path, server_url, folder })
+    })())
+}
+
+/// The `(executable, args)` pair that starts the `--vscode-window` helper (this same binary) on
+/// `relay`, against `server_url`.
+pub fn vscode_window_command(exe: &Path, server_url: &str, relay: &IdeRelay) -> (PathBuf, Vec<String>) {
     (
-        bin.to_path_buf(),
+        exe.to_path_buf(),
         vec![
+            VSCODE_WINDOW_ARG.to_string(),
             "--relay-path".to_string(),
             relay.relay.clone(),
             "--server-url".to_string(),
@@ -217,45 +379,56 @@ pub fn ide_relay_command(bin: &Path, server_url: &str, relay: &IdeRelay) -> (Pat
     )
 }
 
-/// Resolve and spawn `ember-ide-webview --relay-path <relay> --server-url <url> --folder <dir>`,
-/// with `token` handed to `spawn` for the child's environment. Never falls back to a browser.
+/// The `(executable, args)` pair the helper spawns: the IDE window on the gateway's first-load URL
+/// (`http://127.0.0.1:<port>/?folder=<enc>&egw=<token>`) with `--vscode`, which injects tab detach
+/// and the `dragToOpenWindow` default (no proxy on the desktop, INTENT D55).
+pub fn vscode_webview_command(bin: &Path, page_url: &str) -> (PathBuf, Vec<String>) {
+    (bin.to_path_buf(), vec!["--url".to_string(), page_url.to_string(), "--vscode".to_string()])
+}
+
+/// Spawn the `--vscode-window` helper (`current_exe`) for `relay` on `server_url`. The window
+/// binary is looked up first, so a missing `ember-ide-webview` is reported here, where the user
+/// sees it, and never falls back to a browser. No credential goes to the helper: it reads them
+/// itself.
 pub fn open_ide_relay_with(
     env_override: Option<&str>,
     current_exe: Option<&Path>,
     path_var: Option<&std::ffi::OsStr>,
     server_url: &str,
     relay: &IdeRelay,
-    token: Option<&str>,
-    spawn: impl FnOnce(&Path, &[String], Option<&str>) -> std::io::Result<()>,
+    spawn: impl FnOnce(&Path, &[String]) -> std::io::Result<()>,
 ) -> Result<(), String> {
-    let Some(exe) = resolve_ide_webview_bin(env_override, current_exe, path_var) else {
+    if resolve_ide_webview_bin(env_override, current_exe, path_var).is_none() {
         let msg = missing_ide_webview_error(env_override, current_exe, path_var);
         tracing::warn!(relay = %relay.relay, "{msg}");
         return Err(msg);
+    }
+    let Some(exe) = current_exe else {
+        return Err("the path of this program is unknown, so the VS Code window cannot start".to_owned());
     };
-    let (program, args) = ide_relay_command(&exe, server_url, relay);
-    spawn(&program, &args, token).map_err(|e| {
-        let msg = format!("failed to launch {} ({}): {e}", IDE_WEBVIEW_BIN_NAME, program.display());
+    let (program, args) = vscode_window_command(exe, server_url, relay);
+    spawn(&program, &args).map_err(|e| {
+        let msg = format!("failed to start the VS Code window helper ({}): {e}", program.display());
         tracing::warn!(relay = %relay.relay, "{msg}");
         msg
     })
 }
 
-/// Open the VS Code target's relay launch in `ember-ide-webview`'s relay mode. The server is the
-/// launch's, else the app's own. The window dials the relay over `ws(s)` with the server token
-/// under the terminal relay's rules (`FR-S11`, `FR-L31.19`); a server reached over the device
-/// link (`peer:<id>`) is not supported by the window yet.
+/// Open the VS Code target's relay launch in the `--vscode-window` helper. The server is the
+/// launch's, else the app's own. Over HTTP the server token goes only where the terminal relay
+/// may send it (`FR-S11`, `FR-L31.19`), checked here so the refusal shows; a server reached over
+/// the transport (`peer:<id>`) is dialed with the device key by the helper.
 pub fn open_ide_relay(relay: &IdeRelay) -> Result<(), String> {
+    let services = crate::services::try_services();
     let server_url = if relay.server_url.trim().is_empty() {
-        crate::services::try_services().map(|s| s.config.server_url.clone()).unwrap_or_default()
+        services.map(|s| s.config.server_url.clone()).unwrap_or_default()
     } else {
         relay.server_url.clone()
     };
-    if crate::terminal_stream::is_peer_base(&server_url) {
-        return Err("기기 연결로 접속한 서버에서는 아직 VS Code 창을 열 수 없습니다".to_owned());
+    let over_peer = services.is_some_and(|s| s.client.api().peer().is_some());
+    if !over_peer {
+        crate::terminal_stream::relay_allowed(&server_url)?;
     }
-    crate::terminal_stream::relay_allowed(&server_url)?;
-    let token = crate::terminal_stream::server_token(&server_url);
     let env_override = std::env::var(IDE_WEBVIEW_BIN_ENV).ok();
     let current_exe = std::env::current_exe().ok();
     let path_var = std::env::var_os("PATH");
@@ -265,17 +438,49 @@ pub fn open_ide_relay(relay: &IdeRelay) -> Result<(), String> {
         path_var.as_deref(),
         &server_url,
         relay,
-        token.as_deref(),
-        |program, args, token| {
+        |program, args| {
             let mut cmd = Command::new(program);
             cmd.args(args);
-            match token {
-                Some(t) => cmd.env(IDE_SERVER_TOKEN_ENV, t),
-                None => cmd.env_remove(IDE_SERVER_TOKEN_ENV),
-            };
             cmd.spawn().map(|_| ())
         },
     )
+}
+
+/// The `--vscode-window` helper (INTENT D55, `FR-W5b`): runs in this process after the app's
+/// services are prepared (the same server token and device key as the `--editor` process).
+/// Starts the gateway on the app's runtime with the app's reach for `args.server_url`, spawns
+/// `ember-ide-webview --url <gateway> --vscode` and waits for it; when the window exits, the
+/// gateway stops with this process. Creates no webview itself (NFR-L2).
+pub fn run_vscode_window(args: &VsCodeWindowArgs) -> Result<(), String> {
+    let s = crate::services::services();
+    let reach = crate::editor_reach::reach_for(&args.server_url);
+    let dial = crate::editor_reach::ReachDial::new(reach, args.relay_path.clone());
+    let gateway = s
+        .rt
+        .block_on(ember_gateway::Gateway::start_with(dial))
+        .map_err(|e| format!("failed to start the IDE gateway: {e}"))?;
+    tracing::info!(origin = %gateway.origin(), relay = %args.relay_path, "IDE gateway started");
+    let env_override = std::env::var(IDE_WEBVIEW_BIN_ENV).ok();
+    let current_exe = std::env::current_exe().ok();
+    let path_var = std::env::var_os("PATH");
+    let Some(bin) = resolve_ide_webview_bin(env_override.as_deref(), current_exe.as_deref(), path_var.as_deref()) else {
+        return Err(missing_ide_webview_error(env_override.as_deref(), current_exe.as_deref(), path_var.as_deref()));
+    };
+    let (program, argv) = vscode_webview_command(&bin, &gateway.page_url(&args.folder));
+    let mut cmd = Command::new(&program);
+    cmd.args(&argv);
+    for name in CREDENTIAL_ENVS {
+        cmd.env_remove(name);
+    }
+    let status = cmd
+        .status()
+        .map_err(|e| format!("failed to launch {} ({}): {e}", IDE_WEBVIEW_BIN_NAME, program.display()))?;
+    drop(gateway);
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{IDE_WEBVIEW_BIN_NAME} exited with {status}"))
+    }
 }
 
 /// Format a clear error naming the missing standalone IDE window binary and every
@@ -367,7 +572,12 @@ where
         var(EDITOR_SERVER_ENV),
         var(EDITOR_COMPUTER_ENV),
         var(EDITOR_RELAY_ENV),
-        VsCodeEnv { url: var(EDITOR_VSCODE_ENV), relay: var(EDITOR_VSCODE_RELAY_ENV), folder: var(EDITOR_VSCODE_FOLDER_ENV) },
+        VsCodeEnv {
+            url: var(EDITOR_VSCODE_ENV),
+            relay: var(EDITOR_VSCODE_RELAY_ENV),
+            folder: var(EDITOR_VSCODE_FOLDER_ENV),
+            session: var(EDITOR_VSCODE_SESSION_ENV),
+        },
     )
 }
 
@@ -385,13 +595,17 @@ pub const EDITOR_RELAY_ENV: &str = "EMBER_EDITOR_RELAY";
 /// when the target has a relay launch.
 pub const EDITOR_VSCODE_ENV: &str = "EMBER_EDITOR_VSCODE";
 /// Environment variable carrying the VS Code target's relay path (`launch.ose.relay`,
-/// `/api/computers/{id}/ide/relay/{launch}`, FR-W4c, INTENT D55), which the editor window's
-/// fallback opens with `ember-ide-webview --relay-path` against the editor's own server
-/// (`EMBER_EDITOR_SERVER`) and server token (SPEC FR-E10).
+/// `/api/computers/{id}/ide/relay/{launch}`, FR-W4c, INTENT D55) when the listing carried one,
+/// which the editor window's fallback opens in the `--vscode-window` helper against the editor's
+/// own server (`EMBER_EDITOR_SERVER`) (SPEC FR-E10).
 pub const EDITOR_VSCODE_RELAY_ENV: &str = "EMBER_EDITOR_VSCODE_RELAY";
 /// Environment variable carrying the folder the VS Code target's relay launch opens
 /// (`launch.folder`), beside [`EDITOR_VSCODE_RELAY_ENV`].
 pub const EDITOR_VSCODE_FOLDER_ENV: &str = "EMBER_EDITOR_VSCODE_FOLDER";
+/// Environment variable carrying the session whose VS Code launch the editor window's fallback
+/// asks for (`POST /api/sessions/{id}/ide/vscode`, FR-W4c (1c)) when the listing offered VS Code
+/// with no launch, as the current server always does.
+pub const EDITOR_VSCODE_SESSION_ENV: &str = "EMBER_EDITOR_VSCODE_SESSION";
 
 /// The VS Code target the editor window's fallback opens, as it travels in the environment.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -399,27 +613,35 @@ struct VsCodeEnv {
     url: String,
     relay: String,
     folder: String,
+    session: String,
 }
 
 /// What the Ember editor window's `VS Code에서 열기` opens when the server is a Code-OSS commit
 /// the editor does not support (SPEC FR-E10, #32).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VsCodeFallback {
-    /// The VS Code target's relay launch (FR-W4c, INTENT D55): the IDE window's relay mode.
+    /// The VS Code target's relay launch (FR-W4c, INTENT D55): the `--vscode-window` helper.
     Relay(IdeRelay),
     /// An old server's VS Code target URL: the IDE window's URL mode.
     Url(String),
+    /// VS Code is offered with no launch (FR-W4c (1b)): the button asks the server for the
+    /// session's launch ([`start_vscode`]) and opens it in the helper.
+    Start { session: String },
 }
 
 impl VsCodeFallback {
-    /// The VS Code target of an IDE launch, when it is available: its relay launch, else an old
-    /// server's `url`.
-    pub fn of_target(target: Option<&IdeTarget>) -> Option<VsCodeFallback> {
-        let t = target.filter(|t| t.available)?;
+    /// The VS Code target of an IDE launch for `session`: its relay launch, else an old server's
+    /// `url`, else the on-pick launch. VS Code is always offered (FR-W4c (1b)), so `available` is
+    /// not read; with no target at all there is nothing to offer.
+    pub fn of_target(target: Option<&IdeTarget>, session: &str) -> Option<VsCodeFallback> {
+        let t = target?;
         if let Some(relay) = relay_launch(t) {
             return Some(VsCodeFallback::Relay(relay));
         }
-        t.url.clone().filter(|u| !u.trim().is_empty()).map(VsCodeFallback::Url)
+        if let Some(url) = t.url.clone().filter(|u| !u.trim().is_empty()) {
+            return Some(VsCodeFallback::Url(url));
+        }
+        (!session.trim().is_empty()).then(|| VsCodeFallback::Start { session: session.to_owned() })
     }
 
     /// The fallback of an editor window's target, checked as [`plan`] checks the VS Code target:
@@ -438,15 +660,32 @@ impl VsCodeFallback {
             }));
         }
         let url = target.vscode_url.trim();
-        allowed_url(IdeKind::VsCode, url).then(|| VsCodeFallback::Url(url.to_owned()))
+        if !url.is_empty() {
+            return allowed_url(IdeKind::VsCode, url).then(|| VsCodeFallback::Url(url.to_owned()));
+        }
+        let session = target.vscode_session.trim();
+        (!session.is_empty()).then(|| VsCodeFallback::Start { session: session.to_owned() })
     }
 
-    /// Spawn the IDE window for this fallback: relay mode with the server token in its
-    /// environment ([`open_ide_relay`]), or URL mode ([`open_ide_window`]).
+    /// Open the IDE window for this fallback: the `--vscode-window` helper on a relay launch
+    /// ([`open_ide_relay`]), URL mode ([`open_ide_window`]), or the on-pick route first
+    /// ([`start_vscode`], on the app's runtime; its error is posted as the notice, the only place
+    /// a VS Code failure shows).
     pub fn open(&self) -> Result<(), String> {
         match self {
             VsCodeFallback::Relay(relay) => open_ide_relay(relay),
             VsCodeFallback::Url(url) => open_ide_window(url),
+            VsCodeFallback::Start { session } => {
+                let session = session.clone();
+                let s = crate::services::try_services().ok_or_else(|| "the app is not ready".to_owned())?;
+                s.rt.spawn(async move {
+                    if let Err(e) = start_vscode(session, None).await {
+                        tracing::warn!("could not open the VS Code target: {e}");
+                        crate::ui::cr::notice::post(format!("VS Code: 열지 못했습니다: {e}"));
+                    }
+                });
+                Ok(())
+            }
         }
     }
 }
@@ -483,6 +722,7 @@ where
                 vscode_url: vscode.url,
                 vscode_relay: vscode.relay,
                 vscode_folder: vscode.folder,
+                vscode_session: vscode.session,
             });
         }
     }
@@ -524,6 +764,7 @@ pub fn spawn_editor_target(exe: &Path, target: &EditorTarget) -> std::io::Result
         .env(EDITOR_VSCODE_ENV, &target.vscode_url)
         .env(EDITOR_VSCODE_RELAY_ENV, &target.vscode_relay)
         .env(EDITOR_VSCODE_FOLDER_ENV, &target.vscode_folder)
+        .env(EDITOR_VSCODE_SESSION_ENV, &target.vscode_session)
         .spawn()?;
     let mut reg = crate::owner_handoff::registry().lock().unwrap_or_else(|e| e.into_inner());
     reg.record(handoff, u64::from(child.id()), std::time::Instant::now());
@@ -577,8 +818,12 @@ mod tests {
             IdeAction::OpenUrl("jetbrains-gateway://connect#type=ssh".into())
         );
         assert_eq!(plan(IdeKind::Ember, None), IdeAction::EmberPlaceholder);
+        // VS Code is always offered (FR-W4c (1b)): with no launch and no url, picking it starts
+        // the launch on the server, whatever `available` says.
+        assert_eq!(plan(IdeKind::VsCode, Some(&target("vscode", false, None))), IdeAction::StartVsCode);
+        assert_eq!(plan(IdeKind::VsCode, None), IdeAction::StartVsCode);
         assert_eq!(
-            plan(IdeKind::VsCode, Some(&target("vscode", false, None))),
+            plan(IdeKind::Gateway, Some(&target("gateway", false, None))),
             IdeAction::Unavailable("no ide_url configured".into())
         );
         // A server cannot make the client open a local file or program.
@@ -594,11 +839,216 @@ mod tests {
         assert_eq!(open_command("u").last().map(String::as_str), Some("u"));
     }
 
-    /// SPEC FR-L7 (VS Code target), FR-W4c (1b), INTENT D55 (#1064): a VS Code target whose
-    /// launch carries the relay route (and no `url`) opens the IDE window in its relay mode, with
-    /// the server token in the child's environment and never in argv.
+    /// SPEC FR-L7, FR-W4c (1b), INTENT D55 (#1064): the current server lists VS Code as
+    /// `{kind: "vscode"}` alone. It parses as available, picking it starts the launch, and its
+    /// chooser row is an ordinary row: no badge, no unavailable line.
     #[test]
-    fn fr_l7_vscode_target_with_relay_spawns_the_window_in_relay_mode() {
+    fn fr_l7_vscode_is_always_offered() {
+        let t: IdeTarget = serde_json::from_value(serde_json::json!({ "kind": "vscode" })).unwrap();
+        assert!(t.available, "a vscode target without `available` is available");
+        assert_eq!((t.url.as_deref(), t.launch.as_ref(), t.reason.as_deref()), (None, None, None));
+        assert_eq!(plan(IdeKind::VsCode, Some(&t)), IdeAction::StartVsCode);
+
+        let launch: crate::server::IdeLaunch = serde_json::from_value(serde_json::json!({
+            "session": "s", "project": "p", "folder": "/work/repo",
+            "computer": { "name": "local", "local": true },
+            "targets": [
+                { "kind": "ember", "available": false, "reason": "no OSE" },
+                { "kind": "vscode" },
+                { "kind": "gateway", "available": false, "reason": "no ssh_host" }
+            ]
+        }))
+        .unwrap();
+        assert!(launch.target("vscode").unwrap().available);
+        let choices = crate::ui::session::ide_choices(None);
+        let rows = crate::ui::cr::session::ide_pop_rows(&choices, None);
+        let rows = crate::ui::cr::session::with_ember_notice(rows, &choices, Some(&Ok(launch)));
+        let (row, _) = rows
+            .iter()
+            .zip(&choices)
+            .find(|(_, c)| c.kind == IdeKind::VsCode)
+            .expect("VS Code is in the chooser");
+        assert!(row.badge.is_none(), "no badge on VS Code: {:?}", row.badge);
+        assert_eq!(row.description.as_deref(), Some(crate::ui::session::ide_description(IdeKind::VsCode)));
+        assert!(!row.danger && !row.spinner);
+    }
+
+    fn vscode_launch() -> crate::server::VsCodeLaunch {
+        serde_json::from_value(serde_json::json!({
+            "session": "s1", "project": "p", "computer": "node-a", "computer_name": "studio",
+            "folder": "/work/repo", "server_url": "http://127.0.0.1:8740",
+            "ose": { "relay": "/api/computers/node-a/ide/relay/v1", "ose_commit": "abc" }
+        }))
+        .unwrap()
+    }
+
+    /// SPEC FR-L7, FR-W4c (1c), INTENT D55: picking VS Code calls the on-pick route for the
+    /// session, then spawns `ember-app --vscode-window` on its launch, with no credential in argv;
+    /// the route's error is what the user sees, and nothing is spawned then.
+    #[tokio::test]
+    async fn fr_l7_vscode_pick_calls_the_on_pick_route_then_spawns_the_helper() {
+        let mut asked: Option<(String, Option<String>)> = None;
+        let mut spawned: Option<(PathBuf, Vec<String>)> = None;
+        pick_vscode(
+            "s1",
+            None,
+            |sid, computer| {
+                asked = Some((sid, computer));
+                async { Ok(vscode_launch()) }
+            },
+            |relay| {
+                assert_eq!(
+                    relay,
+                    IdeRelay {
+                        relay: "/api/computers/node-a/ide/relay/v1".into(),
+                        folder: "/work/repo".into(),
+                        server_url: "http://127.0.0.1:8740".into(),
+                    }
+                );
+                open_ide_relay_with(
+                    Some("/custom/ember-ide-webview"),
+                    Some(Path::new("/opt/ember/ember-app")),
+                    None,
+                    &relay.server_url,
+                    &relay,
+                    |prog, args| {
+                        spawned = Some((prog.to_path_buf(), args.to_vec()));
+                        Ok(())
+                    },
+                )
+            },
+        )
+        .await
+        .expect("picked");
+        assert_eq!(asked, Some(("s1".to_owned(), None)));
+        let (prog, args) = spawned.expect("the helper was spawned");
+        assert_eq!(prog, PathBuf::from("/opt/ember/ember-app"), "the helper is this same program");
+        assert_eq!(
+            args,
+            vec![
+                "--vscode-window",
+                "--relay-path",
+                "/api/computers/node-a/ide/relay/v1",
+                "--server-url",
+                "http://127.0.0.1:8740",
+                "--folder",
+                "/work/repo",
+            ]
+        );
+        assert!(!args.iter().any(|a| a.contains("ember-ide-webview")), "the shell does not start the window itself");
+
+        // The route's error is shown as it is, and nothing opens.
+        let mut opened = false;
+        let err = pick_vscode(
+            "s1",
+            Some("node-a"),
+            |_, computer| async move {
+                assert_eq!(computer.as_deref(), Some("node-a"));
+                Err("node unreachable: connection refused".to_owned())
+            },
+            |_| {
+                opened = true;
+                Ok(())
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err, "node unreachable: connection refused");
+        assert!(!opened);
+        assert_eq!(
+            start_error_text(crate::server::ServerError::Status { status: 502, message: "no OSE binary".into() }),
+            "no OSE binary"
+        );
+
+        // A launch whose relay is outside `/api/` or has no folder is not opened.
+        let mut bad = vscode_launch();
+        bad.ose.relay = "http://evil/relay".into();
+        assert!(relay_of_launch(&bad).is_err());
+        let mut no_folder = vscode_launch();
+        no_folder.folder = String::new();
+        assert!(relay_of_launch(&no_folder).is_err());
+
+        // A missing window binary is reported by the shell, before any helper starts.
+        let mut called = false;
+        let missing = open_ide_relay_with(
+            None,
+            Some(Path::new("/nonexistent/ember-dir/ember-app")),
+            None,
+            "http://127.0.0.1:8740",
+            &relay_of_launch(&vscode_launch()).unwrap(),
+            |_, _| {
+                called = true;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(!called && missing.contains(IDE_WEBVIEW_BIN_NAME), "{missing}");
+    }
+
+    /// SPEC FR-L7, INTENT D55: `ember-app --vscode-window` takes the relay path, the server and an
+    /// absolute folder, and no credential; the command the shell builds parses back.
+    #[test]
+    fn fr_l7_helper_args_parse() {
+        assert_eq!(parse_vscode_window_args(["ember-app"]), None);
+        assert_eq!(parse_vscode_window_args(["ember-app", "--editor", "p", "/w"]), None);
+        let relay = relay_of_launch(&vscode_launch()).unwrap();
+        let (_, args) = vscode_window_command(Path::new("ember-app"), "peer:abcd", &relay);
+        let parsed = parse_vscode_window_args(std::iter::once("ember-app".to_owned()).chain(args)).unwrap().unwrap();
+        assert_eq!(
+            parsed,
+            VsCodeWindowArgs {
+                relay_path: "/api/computers/node-a/ide/relay/v1".into(),
+                server_url: "peer:abcd".into(),
+                folder: "/work/repo".into(),
+            }
+        );
+        let good = ["--relay-path", "/api/computers/c/ide/relay/l", "--server-url", "http://127.0.0.1:8740", "--folder", "/w"];
+        let parse = |args: &[&str]| parse_vscode_window_args(["ember-app", "--vscode-window"].iter().chain(args.iter()).copied());
+        assert!(parse(&good).unwrap().is_ok());
+        assert!(parse(&good[..4]).unwrap().unwrap_err().contains("--folder"));
+        assert!(parse(&good[2..]).unwrap().unwrap_err().contains("--relay-path"));
+        assert!(parse(&good[..5]).unwrap().unwrap_err().contains("requires a value"));
+        let mut token = good.to_vec();
+        token.extend(["--token", "secret"]);
+        assert!(parse(&token).unwrap().unwrap_err().contains("unknown argument"), "no credential in argv");
+        for (i, bad) in [
+            (1, "/other/path"),
+            (1, "/api/computers/c/ide/relay/l?x=1"),
+            (1, "http://evil/api/computers/c/ide/relay/l"),
+            (3, "http://a b"),
+            (5, "relative/dir"),
+        ] {
+            let mut args = good.to_vec();
+            args[i] = bad;
+            assert!(parse(&args).unwrap().is_err(), "{bad:?} must be refused");
+        }
+        let mut win = good.to_vec();
+        win[5] = "C:\\work";
+        assert!(parse(&win).unwrap().is_ok());
+    }
+
+    /// SPEC FR-L7, FR-W5b, INTENT D55: the helper opens `ember-ide-webview` on the gateway's
+    /// first-load URL with `--vscode`, and strips the server credentials from the window's
+    /// environment.
+    #[test]
+    fn fr_l7_helper_spawns_the_window_on_the_gateway_url_with_the_vscode_flag() {
+        let addr: std::net::SocketAddr = "127.0.0.1:41234".parse().unwrap();
+        let page = ember_gateway::page_url(addr, "0123abcd", "/work/ember app");
+        assert_eq!(page, "http://127.0.0.1:41234/?folder=%2Fwork%2Fember%20app&egw=0123abcd");
+        let (prog, args) = vscode_webview_command(Path::new("/opt/ember/ember-ide-webview"), &page);
+        assert_eq!(prog, PathBuf::from("/opt/ember/ember-ide-webview"));
+        assert_eq!(args, vec!["--url", page.as_str(), "--vscode"]);
+        assert!(!args.iter().any(|a| a.contains("/ide/relay/") || a.contains("--relay-path")));
+        assert!(CREDENTIAL_ENVS.contains(&"EMBER_SERVER_TOKEN") && CREDENTIAL_ENVS.contains(&EDITOR_TOKEN_ENV));
+        // The helper itself never builds a webview: this crate links no browser engine.
+        let manifest = include_str!("../Cargo.toml");
+        assert!(manifest.contains("ember-gateway") && !manifest.contains("wry") && !manifest.contains("tao ="));
+    }
+
+    /// SPEC FR-L7 (VS Code target): a relay launch already in the listing (a server between D55
+    /// and the on-pick route) opens in the helper too; an old server's `url` keeps the URL mode.
+    #[test]
+    fn fr_l7_vscode_target_with_relay_spawns_the_helper() {
         let t: IdeTarget = serde_json::from_value(serde_json::json!({
             "kind": "vscode", "available": true,
             "launch": {
@@ -615,37 +1065,24 @@ mod tests {
         };
         assert_eq!(plan(IdeKind::VsCode, Some(&t)), IdeAction::OpenIdeRelay(relay.clone()));
 
-        let mut captured: Option<(PathBuf, Vec<String>, Option<String>)> = None;
+        let mut captured: Option<(PathBuf, Vec<String>)> = None;
         open_ide_relay_with(
             Some("/custom/ember-ide-webview"),
-            None,
+            Some(Path::new("/opt/ember/ember-app")),
             None,
             "http://127.0.0.1:8740",
             &relay,
-            Some("srv-secret"),
-            |prog, args, token| {
-                captured = Some((prog.to_path_buf(), args.to_vec(), token.map(str::to_owned)));
+            |prog, args| {
+                captured = Some((prog.to_path_buf(), args.to_vec()));
                 Ok(())
             },
         )
         .expect("spawn");
-        let (prog, args, token) = captured.unwrap();
-        assert_eq!(prog, PathBuf::from("/custom/ember-ide-webview"));
-        assert_eq!(
-            args,
-            vec![
-                "--relay-path",
-                "/api/computers/node-a/ide/relay/l1",
-                "--server-url",
-                "http://127.0.0.1:8740",
-                "--folder",
-                "/work/repo",
-            ]
-        );
-        assert!(!args.iter().any(|a| a.contains("srv-secret")), "the token is never in argv");
+        let (prog, args) = captured.unwrap();
+        assert_eq!(prog, PathBuf::from("/opt/ember/ember-app"));
+        assert_eq!(args[0], VSCODE_WINDOW_ARG);
+        assert!(args.windows(2).any(|w| w == ["--relay-path", "/api/computers/node-a/ide/relay/l1"]));
         assert!(!args.iter().any(|a| a == "--url"));
-        assert_eq!(token.as_deref(), Some("srv-secret"), "the token goes to the child's environment");
-        assert_eq!(IDE_SERVER_TOKEN_ENV, "EMBER_SERVER_TOKEN");
 
         // An older server's target with a url keeps the url path; a relay target with no folder
         // or a relay path outside /api is not opened.
@@ -888,6 +1325,7 @@ mod tests {
                 url: String::new(),
                 relay: "/api/computers/node-a/ide/relay/v1".into(),
                 folder: "/work/repo".into(),
+                session: String::new(),
             },
         )
         .unwrap();
@@ -912,14 +1350,15 @@ mod tests {
     }
 
     /// SPEC FR-E10 (#32), FR-L7, INTENT D55: the fallback of an editor window whose VS Code target
-    /// is a relay launch spawns `ember-ide-webview` in relay mode on the editor's own server, with
-    /// the server token in the child's environment and never in argv; a bad relay path offers
-    /// nothing, and an old server's URL still opens in URL mode.
+    /// is a relay launch spawns the `--vscode-window` helper on the editor's own server, with no
+    /// credential in argv; a target offered with no launch asks for the session's launch; a bad
+    /// relay path offers nothing, and an old server's URL still opens in URL mode.
     #[test]
     fn fr_e10_fallback_opens_vscode_through_the_relay() {
         let target = EditorTarget {
             project: "p".into(),
             folder: "/work/repo".into(),
+            token: "editor-secret".into(),
             server_url: "http://127.0.0.1:8740".into(),
             computer: "node-a".into(),
             relay: "/api/computers/node-a/ide/relay/e1".into(),
@@ -935,25 +1374,25 @@ mod tests {
         let fallback = VsCodeFallback::for_editor(&target);
         assert_eq!(fallback, Some(VsCodeFallback::Relay(relay.clone())));
 
-        let mut captured: Option<(PathBuf, Vec<String>, Option<String>)> = None;
+        let mut captured: Option<(PathBuf, Vec<String>)> = None;
         open_ide_relay_with(
             Some("/custom/ember-ide-webview"),
-            None,
+            Some(Path::new("/opt/ember/ember-app")),
             None,
             &relay.server_url,
             &relay,
-            Some("srv-secret"),
-            |prog, args, token| {
-                captured = Some((prog.to_path_buf(), args.to_vec(), token.map(str::to_owned)));
+            |prog, args| {
+                captured = Some((prog.to_path_buf(), args.to_vec()));
                 Ok(())
             },
         )
         .expect("spawn");
-        let (prog, args, token) = captured.unwrap();
-        assert_eq!(prog, PathBuf::from("/custom/ember-ide-webview"));
+        let (prog, args) = captured.unwrap();
+        assert_eq!(prog, PathBuf::from("/opt/ember/ember-app"));
         assert_eq!(
             args,
             vec![
+                "--vscode-window",
                 "--relay-path",
                 "/api/computers/node-a/ide/relay/v1",
                 "--server-url",
@@ -962,8 +1401,23 @@ mod tests {
                 "/work/repo",
             ]
         );
-        assert!(!args.iter().any(|a| a.contains("srv-secret")), "the token is never in argv");
-        assert_eq!(token.as_deref(), Some("srv-secret"));
+        assert!(!args.iter().any(|a| a.contains("secret")), "no credential is ever in argv");
+
+        // The current server offers VS Code with no launch: the button asks for the session's.
+        let start = EditorTarget { vscode_session: "s1".into(), ..Default::default() };
+        assert_eq!(VsCodeFallback::for_editor(&start), Some(VsCodeFallback::Start { session: "s1".into() }));
+        let (_, editor_args) = editor_command(Path::new("ember"), "p", "/w", "");
+        let parsed = parse_editor_args_with_env(
+            std::iter::once("ember".to_owned()).chain(editor_args),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            VsCodeEnv { session: "s1".into(), ..Default::default() },
+        )
+        .unwrap();
+        assert_eq!(parsed.vscode_session, "s1");
+        assert_eq!(EDITOR_VSCODE_SESSION_ENV, "EMBER_EDITOR_VSCODE_SESSION");
 
         // A relay path outside `/api/`, or one with no folder, offers no button.
         let bad = EditorTarget { vscode_relay: "http://evil/relay".into(), ..target.clone() };

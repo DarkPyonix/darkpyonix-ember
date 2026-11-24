@@ -889,6 +889,7 @@ mod tests {
             vscode_url: String::new(),
             vscode_relay: String::new(),
             vscode_folder: String::new(),
+            vscode_session: String::new(),
         };
 
         // Same server (localhost vs 127.0.0.1) in two different folders shares one StorageHub.
@@ -920,6 +921,7 @@ mod tests {
             vscode_url: String::new(),
             vscode_relay: String::new(),
             vscode_folder: String::new(),
+            vscode_session: String::new(),
         };
         let r1 = session_config_for(&make_relay("mac-mini", "/a"), &pool).storage_hub.unwrap();
         let r2 = session_config_for(&make_relay("MAC-MINI", "/b"), &pool).storage_hub.unwrap();

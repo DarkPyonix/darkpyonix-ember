@@ -324,9 +324,9 @@ note = "owner, 2026-11-23 (Q-E7, INTENT D54): VS Code AI chat is not supported f
 "$disposeEntry" = "todo"
 
 [MainThreadSecretState]
-"$getPassword" = "todo"
-"$setPassword" = "todo"
-"$deletePassword" = "todo"
+"$getPassword" = "bridged"
+"$setPassword" = "bridged"
+"$deletePassword" = "bridged"
 "$getKeys" = "todo"
 
 [MainThreadStorage]

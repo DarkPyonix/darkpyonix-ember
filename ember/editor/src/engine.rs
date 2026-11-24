@@ -154,6 +154,8 @@ pub enum Input {
     Language(crate::language::LanguageRequest),
     /// An event of an extension webview or its host (FR-E8).
     Webview(crate::webview::WebviewEvent),
+    /// Outcome of a `MainThreadSecretState` operation (`$getPassword`, `$setPassword`, `$deletePassword`).
+    SecretState { req: u32, result: Result<crate::secret_state::SecretReply, String> },
     /// A request of the debugging window; answered with [`SessionUpdate::Debug`].
     Debug(crate::debugger::DebugRequest),
     /// Result of reading one persisted extension storage file (`MainThreadStorage`).
@@ -202,6 +204,8 @@ pub enum Effect {
     Unwatch { uri: UriComponents },
     /// Work for the highlighting thread; its answer comes back as [`Input::Highlighted`].
     Highlight(HighlightJob),
+    /// Run a `MainThreadSecretState` operation against the secret store; answered with [`Input::SecretState`].
+    SecretState { req: u32, op: crate::secret_state::SecretOp },
     Ui(SessionUpdate),
 }
 
@@ -395,6 +399,8 @@ pub struct SessionCore {
     inline: HashMap<String, InlineDoc>,
     ids: DecorationIds,
     pending: HashMap<Token, Pending>,
+    /// `(extension_id, key)` of each secret write or delete awaiting its outcome, by request id.
+    pub(crate) secret_writes: HashMap<u32, (String, String)>,
     saves: HashMap<Token, (String, u64, Vec<u8>)>,
     /// The write in flight per document key: one at a time, so an older write cannot land after a newer one.
     saving: HashMap<String, Token>,
@@ -481,6 +487,7 @@ impl SessionCore {
             inline: HashMap::new(),
             ids: DecorationIds::new(),
             pending: HashMap::new(),
+            secret_writes: HashMap::new(),
             saves: HashMap::new(),
             saving: HashMap::new(),
             save_queued: HashSet::new(),
@@ -572,6 +579,7 @@ impl SessionCore {
                 let out = self.webviews.on_event(event);
                 self.apply_webview(out);
             }
+            Input::SecretState { req, result } => self.on_secret_state_result(req, result),
             Input::Debug(request) => self.on_debug_request(request),
             Input::StorageRead { shared, extension_id, result } => {
                 let next = self.next_token + 1;
@@ -765,6 +773,29 @@ impl SessionCore {
             let path = doc.uri.path.trim_end_matches('/');
             (path == prefix || path.strip_prefix(prefix).is_some_and(|r| r.starts_with('/'))) && doc.is_dirty()
         })
+    }
+
+    fn on_secret_state_result(&mut self, req: u32, result: Result<crate::secret_state::SecretReply, String>) {
+        use crate::secret_state::SecretReply;
+        let write = self.secret_writes.remove(&req);
+        match result {
+            Ok(SecretReply::Value(Some(value))) => {
+                self.respond(req, Ok(Reply::Json(Value::String(value))));
+            }
+            Ok(SecretReply::Value(None)) => self.respond(req, Ok(Reply::Empty)),
+            Ok(reply @ (SecretReply::Unit | SecretReply::Deleted { .. })) => {
+                self.respond(req, Ok(Reply::Empty));
+                // The secret storage service raises a change only when a stored value changed,
+                // so deleting an entry that did not exist is silent.
+                let changed = !matches!(reply, SecretReply::Deleted { existed: false });
+                if let (true, Some((extension_id, key))) = (changed, write) {
+                    self.rpc(exthost::secret_changed(&extension_id, &key));
+                }
+            }
+            Err(err) => {
+                self.respond(req, Err(Some(js_error("Error", &err))));
+            }
+        }
     }
 
     fn on_decide_trust(&mut self, trusted: bool) {

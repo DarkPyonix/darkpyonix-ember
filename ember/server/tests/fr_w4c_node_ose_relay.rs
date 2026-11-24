@@ -175,6 +175,19 @@ async fn post_json(app: &Router, uri: &str, body: &str) -> (StatusCode, Value) {
     (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
 }
 
+async fn delete_json(app: &Router, uri: &str) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method(Method::DELETE)
+        .uri(uri)
+        .header("host", "ember.test:8740")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    let status = res.status();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+}
+
 fn ember_target(v: &Value) -> &Value {
     v["targets"].as_array().unwrap().iter().find(|t| t["kind"] == "ember").expect("an ember target")
 }
@@ -422,6 +435,66 @@ async fn fr_w4c_server_ide_extensions_forwards_to_node() {
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{v}");
     assert!(v["error"].as_str().unwrap().starts_with("node unreachable"), "{v}");
     let (status, _) = post_json(&s.app, "/api/computers/nope/ide/extensions", r#"{"id":"a.b"}"#).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn fr_w4c_server_ide_extensions_uninstall_forwards_to_node() {
+    // `$1` is `--uninstall-extension`, `$2` the extension id.
+    let node = start_node(|base| {
+        let script = base.join("fake-ose");
+        common::write_exec_ready(
+            &script,
+            "#!/bin/sh\ncase \"$1:$2\" in\n  --uninstall-extension:fail.ext) echo \"extension not installed\" >&2; exit 3 ;;\n  --uninstall-extension:*) echo \"uninstalled $2 on the node\" ;;\n  *) echo \"unexpected args: $*\" >&2; exit 2 ;;\nesac\n",
+        );
+        OseManager::with_data_root(Some(script), base.join("ose-data"))
+    })
+    .await;
+    let s = server();
+    let computer = s.computers.registry().insert("box", &node.url, NODE_TOKEN).unwrap();
+    let base = format!("/api/computers/{}/ide/extensions", computer.id);
+
+    // The node ran the uninstall; its answer comes back unchanged.
+    let (status, v) = delete_json(&s.app, &format!("{base}/good.ext")).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["uninstalled"], true);
+    assert_eq!(v["id"], "good.ext");
+    assert!(v["output"].as_str().unwrap().contains("uninstalled good.ext on the node"), "{v}");
+
+    // Bad extension ids are rejected with 400 before contacting the node.
+    for bad in ["..%2Fx", "-a.b", "a.b%401.2.3"] {
+        let (status, v) = delete_json(&s.app, &format!("{base}/{bad}")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {v}");
+        assert!(v["error"].is_string(), "{bad}: {v}");
+    }
+
+    // The node's failure status and body come back unchanged.
+    let (status, v) = delete_json(&s.app, &format!("{base}/fail.ext")).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{v}");
+    assert_eq!(v["uninstalled"], false);
+    assert_eq!(v["id"], "fail.ext");
+    assert!(v["output"].as_str().unwrap().contains("extension not installed"), "{v}");
+
+    // A stale node token is 502 `node_auth_failed`, never the node's 401.
+    let stale = s.computers.registry().insert("stale", &node.url, "stale-node-token").unwrap();
+    let (status, v) = delete_json(&s.app, &format!("/api/computers/{}/ide/extensions/good.ext", stale.id)).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{v}");
+    assert_eq!(v["code"], "node_auth_failed", "{v}");
+    assert!(!v.to_string().contains("stale-node-token"), "{v}");
+
+    // A node without the binary: its 503 and reason.
+    let bare = start_node(no_binary).await;
+    let bare_computer = s.computers.registry().insert("bare", &bare.url, NODE_TOKEN).unwrap();
+    let (status, v) = delete_json(&s.app, &format!("/api/computers/{}/ide/extensions/a.b", bare_computer.id)).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("not installed"), "{v}");
+
+    // A node that does not answer is 502; an unknown computer is 404.
+    let gone = s.computers.registry().insert("gone", "http://127.0.0.1:1", "tok").unwrap();
+    let (status, v) = delete_json(&s.app, &format!("/api/computers/{}/ide/extensions/a.b", gone.id)).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{v}");
+    assert!(v["error"].as_str().unwrap().starts_with("node unreachable"), "{v}");
+    let (status, _) = delete_json(&s.app, "/api/computers/nope/ide/extensions/a.b").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 

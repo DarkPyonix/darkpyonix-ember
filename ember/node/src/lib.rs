@@ -42,6 +42,7 @@ pub mod hub;
 pub mod jobs;
 pub mod keystore;
 pub mod metrics;
+pub mod editor_manager;
 pub mod ose;
 pub mod ose_api;
 pub mod policy;

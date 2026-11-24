@@ -602,14 +602,13 @@ async fn serve_main() -> anyhow::Result<()> {
             tracing::warn!("local node did not start for ember-term: {e}");
         }
     }
-    let ose = Arc::new(ember_server::ose::OseManager::default().with_terminal_env(
-        ember_server::ose::TerminalEnv {
-            ember_term_dir,
-            local_node_state_dir: local_node_options.state_dir.clone(),
-        },
+    // The local computer's extension commands still run the OSE binary of this machine (FR-L31.14).
+    let ose = Arc::new(ember_server::ose::OseManager::default());
+    // FR-W4c (D55, #1064): the local computer's editor launches and relays go to the DarkPyonix
+    // manager of this machine, named by the local node's `manager.json`, else the environment.
+    let editor = Arc::new(ember_node::editor_manager::EditorRelays::new(
+        ember_node::editor_manager::ManagerSource::discover(local_node_options.state_dir.clone()),
     ));
-    // A SIGKILL of the previous server skips the token file drop (#521).
-    ose.sweep_stale_tokens();
     let transfers = ember_server::transfers::TransferManager::new(
         &data_dir,
         Some(devices.clone()),
@@ -646,7 +645,7 @@ async fn serve_main() -> anyhow::Result<()> {
         .merge(ember_server::api::harnesses::router(sessions.clone(), computers.clone()))
         .merge(ember_server::api::git::router(sessions.clone(), computers.clone()))
         .merge(ember_server::api::integrations::router(sessions.clone(), computers.clone()))
-        .merge(ember_server::api::ide::router_with_computers_and_ose(sessions.clone(), ide, computers.clone(), ose.clone()))
+        .merge(ember_server::api::ide::router_with_computers_and_editor(sessions.clone(), ide, computers.clone(), editor.clone()))
         .merge(ember_server::api::ide_extensions::router(computers.clone(), ose.clone()))
         .merge(ember_server::schedules::api::agent_router(scheduler.clone(), a2a.clone()))
         .merge(ember_server::schedules::api::router(scheduler))

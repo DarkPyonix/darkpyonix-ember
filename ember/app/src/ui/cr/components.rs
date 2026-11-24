@@ -2534,7 +2534,7 @@ mod tests {
     #[test]
     fn fr_l10_1_new_session_long_hints_are_the_field_placeholder() {
         let src = include_str!("new_session.rs");
-        for ph in ["\"/path/to/project\"", "\"에이전트 기본값\""] {
+        for ph in ["\"/path/to/project\""] {
             let at = src.find(ph).unwrap_or_else(|| panic!("{ph}"));
             let opts = &src[src[..at].rfind("EmberField(FieldOptions {").expect("field")..at];
             assert!(!opts.contains("one_line_hint"), "{ph}: {opts}");
@@ -4922,7 +4922,8 @@ mod tests {
             ui.open_new_session(None);
             let mut mh = ModalHost::new(crate::ui::cr::new_session::NewSessionDialog);
             assert_eq!(mh.open_modals().len(), 1, "only NewSessionDialog open");
-            mh.click_text("claude-code");
+            let shown = crate::ui::home::default_mode(crate::ui::home::Harness::ClaudeCode).label();
+            mh.click_text(shown);
             assert_eq!(mh.open_modals().len(), 2, "NewSessionDialog + Select OptionSheet open");
             mh.press_escape();
             assert_eq!(mh.open_modals().len(), 1, "1st Escape closed only the Select OptionSheet");

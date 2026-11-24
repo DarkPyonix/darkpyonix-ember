@@ -1061,18 +1061,7 @@ impl Api {
     pub async fn open_push(&self) -> ApiResult<PushSocket> {
         let url = self.push_url();
         let io: Box<dyn PushIo> = match &self.reach {
-            Reach::Http(_) => {
-                let rest = url
-                    .strip_prefix("ws://")
-                    .ok_or_else(|| ApiError::Push(format!("{url}: only plain ws:// is supported")))?;
-                let authority = rest.split('/').next().unwrap_or_default();
-                let (host, port) = authority_addr(authority);
-                let tcp = tokio::net::TcpStream::connect((host.as_str(), port))
-                    .await
-                    .map_err(|e| ApiError::Push(e.to_string()))?;
-                let _ = tcp.set_nodelay(true);
-                Box::new(tcp)
-            }
+            Reach::Http(_) => socket_io(&url).await?,
             Reach::Peer { dialer, addr } => Box::new(dialer.open_bi(addr, SERVER_SERVICE).await.map_err(peer_err)?),
         };
         let request = self.push_request(&url)?;
@@ -1108,19 +1097,21 @@ impl Api {
         Ok(crate::fs_watch::FsWatch::new(socket))
     }
 
-    /// A WebSocket at `path` (below `/api`) over plain HTTP, with the token rules of
-    /// [`Api::open_push`]. A refused upgrade keeps the server's status and `code`.
+    /// A WebSocket at `path` (below `/api`) over plain HTTP (`ws://`) or TLS (`wss://` for an
+    /// `https` server), with the token rules of [`Api::open_push`]. A refused upgrade keeps the
+    /// server's status and `code`; a 401 re-reads the token once and opens the socket again when
+    /// it changed (#369, #1048), as the other HTTP calls do.
     async fn open_http_socket(&self, path: &str) -> ApiResult<PushSocket> {
         let url = self.socket_url(path);
-        let rest = url
-            .strip_prefix("ws://")
-            .ok_or_else(|| ApiError::Push(format!("{url}: only plain ws:// is supported")))?;
-        let authority = rest.split('/').next().unwrap_or_default();
-        let (host, port) = authority_addr(authority);
-        let tcp = tokio::net::TcpStream::connect((host.as_str(), port)).await.map_err(|e| ApiError::Push(e.to_string()))?;
-        let _ = tcp.set_nodelay(true);
-        let io: Box<dyn PushIo> = Box::new(tcp);
-        let request = self.push_request(&url)?;
+        match self.http_socket_once(&url).await {
+            Err(ApiError::Unauthorized(_)) if self.reload_token() => self.http_socket_once(&url).await,
+            other => other,
+        }
+    }
+
+    async fn http_socket_once(&self, url: &str) -> ApiResult<PushSocket> {
+        let io = socket_io(url).await?;
+        let request = self.push_request(url)?;
         let (ws, _) = tokio_tungstenite::client_async(request, io).await.map_err(socket_error)?;
         Ok(ws)
     }
@@ -1678,21 +1669,71 @@ impl Api {
     }
 }
 
-/// `host:port` (default port 80) for `TcpStream::connect`, with IPv6 brackets removed.
-fn authority_addr(authority: &str) -> (String, u16) {
+/// `host:port` (`default_port` when none is written) for `TcpStream::connect`, with IPv6
+/// brackets removed.
+fn authority_addr(authority: &str, default_port: u16) -> (String, u16) {
     if let Some(rest) = authority.strip_prefix('[') {
         if let Some((host, tail)) = rest.split_once(']') {
-            let port = tail.strip_prefix(':').and_then(|p| p.parse().ok()).unwrap_or(80);
+            let port = tail.strip_prefix(':').and_then(|p| p.parse().ok()).unwrap_or(default_port);
             return (host.to_string(), port);
         }
     }
     match authority.rsplit_once(':') {
         Some((h, p)) => match p.parse() {
             Ok(port) => (h.to_string(), port),
-            Err(_) => (authority.to_string(), 80),
+            Err(_) => (authority.to_string(), default_port),
         },
-        None => (authority.to_string(), 80),
+        None => (authority.to_string(), default_port),
     }
+}
+
+/// The byte stream for the WebSocket `url` over plain HTTP: a TCP connection for `ws://`, and
+/// for `wss://` (an `https` server, FR-S11, #1048) a TLS session on it, verified against the
+/// webpki roots with the host as the server name. There is no option to accept an unverified
+/// certificate (the rule of FR-L31.19). Any other scheme is refused before connecting.
+async fn socket_io(url: &str) -> ApiResult<Box<dyn PushIo>> {
+    let (tls, rest) = if let Some(rest) = url.strip_prefix("ws://") {
+        (false, rest)
+    } else if let Some(rest) = url.strip_prefix("wss://") {
+        (true, rest)
+    } else {
+        return Err(ApiError::Push(format!("{url}: not a ws:// or wss:// address")));
+    };
+    let authority = rest.split(['/', '?']).next().unwrap_or_default();
+    let (host, port) = authority_addr(authority, if tls { 443 } else { 80 });
+    let tcp = tokio::net::TcpStream::connect((host.as_str(), port)).await.map_err(|e| ApiError::Push(e.to_string()))?;
+    let _ = tcp.set_nodelay(true);
+    if tls {
+        tls_io(&host, tcp).await
+    } else {
+        Ok(Box::new(tcp))
+    }
+}
+
+/// A TLS client session over `tcp` to `host` (rustls with the ring provider, webpki roots).
+#[cfg(feature = "tls")]
+async fn tls_io(host: &str, tcp: tokio::net::TcpStream) -> ApiResult<Box<dyn PushIo>> {
+    use tokio_rustls::rustls;
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .map_err(|e| ApiError::Push(format!("TLS setup: {e}")))?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let name = rustls::pki_types::ServerName::try_from(host.to_owned())
+        .map_err(|e| ApiError::Push(format!("{host}: not a TLS server name: {e}")))?;
+    let stream = tokio_rustls::TlsConnector::from(Arc::new(config))
+        .connect(name, tcp)
+        .await
+        .map_err(|e| ApiError::Push(format!("TLS to {host}: {e}")))?;
+    Ok(Box::new(stream))
+}
+
+/// Without the `tls` feature a `wss://` socket cannot be opened.
+#[cfg(not(feature = "tls"))]
+async fn tls_io(host: &str, _tcp: tokio::net::TcpStream) -> ApiResult<Box<dyn PushIo>> {
+    Err(ApiError::Push(format!("wss://{host}: this build has no TLS (the `tls` feature of ember-client)")))
 }
 
 // ---- file transfer (FR-F3, FR-F4, FR-F5, FR-F8, #487; FR-F14, #773) -------------------------
@@ -1732,11 +1773,19 @@ impl Api {
     }
 
     pub async fn accept_transfer_offer(&self, id: &str) -> ApiResult<crate::transfers::TransferItem> {
-        Self::decode(self.post(&format!("/transfers/offers/{}/accept", seg(id)), json!({})).await?)
+        self.accept_transfer_offer_at(&TransferTarget::Server, id).await
+    }
+
+    pub async fn accept_transfer_offer_at(&self, target: &TransferTarget, id: &str) -> ApiResult<crate::transfers::TransferItem> {
+        Self::decode(self.post(&format!("{}/offers/{}/accept", target.prefix(), seg(id)), json!({})).await?)
     }
 
     pub async fn decline_transfer_offer(&self, id: &str) -> ApiResult<crate::transfers::HistoryRecord> {
-        Self::decode(self.post(&format!("/transfers/offers/{}/decline", seg(id)), json!({})).await?)
+        self.decline_transfer_offer_at(&TransferTarget::Server, id).await
+    }
+
+    pub async fn decline_transfer_offer_at(&self, target: &TransferTarget, id: &str) -> ApiResult<crate::transfers::HistoryRecord> {
+        Self::decode(self.post(&format!("{}/offers/{}/decline", target.prefix(), seg(id)), json!({})).await?)
     }
 
     /// Appends `data` to file `file` of transfer `id` at `offset`. `sha256` is the chunk's hash
@@ -2537,9 +2586,27 @@ mod tests {
         assert_eq!(Api::new("https://h").unwrap().push_url(), "wss://h/api/push");
         assert!(Api::new("h:1").is_err());
         assert_eq!(seg("a b/c"), "a%20b%2Fc");
-        assert_eq!(authority_addr("h:1"), ("h".to_string(), 1));
-        assert_eq!(authority_addr("h"), ("h".to_string(), 80));
-        assert_eq!(authority_addr("[::1]:8740"), ("::1".to_string(), 8740));
+        assert_eq!(authority_addr("h:1", 80), ("h".to_string(), 1));
+        assert_eq!(authority_addr("h", 80), ("h".to_string(), 80));
+        assert_eq!(authority_addr("[::1]:8740", 80), ("::1".to_string(), 8740));
+    }
+
+    /// A `wss://` socket goes to port 443 unless one is written (FR-S11, #1048).
+    #[test]
+    fn fr_s11_wss_defaults_to_port_443() {
+        assert_eq!(authority_addr("h", 443), ("h".to_string(), 443));
+        assert_eq!(authority_addr("[fd00::1]", 443), ("fd00::1".to_string(), 443));
+        assert_eq!(authority_addr("h:8443", 443), ("h".to_string(), 8443));
+    }
+
+    /// Neither `ws://` nor `wss://`: refused before any connection.
+    #[tokio::test]
+    async fn fr_s11_other_socket_schemes_are_refused() {
+        match socket_io("ftp://127.0.0.1:1/api/push").await {
+            Err(ApiError::Push(m)) => assert!(m.contains("not a ws:// or wss://"), "{m}"),
+            Err(e) => panic!("expected a refusal, got {e:?}"),
+            Ok(_) => panic!("expected a refusal, got a stream"),
+        }
     }
 
     #[test]

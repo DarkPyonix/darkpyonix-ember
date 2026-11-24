@@ -678,3 +678,269 @@ fn fr_e8_find_devtools_and_app_chords_go_through_the_host() {
     );
     assert!(d.take_window_events().is_empty());
 }
+
+fn open_custom_editor(w: &mut Webviews, res: &UriComponents, view_type: &str) -> String {
+    let out = w.on_event(WebviewEvent::OpenCustomEditor { resource: res.clone(), view_type: view_type.into() });
+    let handle = out
+        .iter()
+        .find_map(|o| match o {
+            Out::Ui(WebviewUpdate::Created { handle, .. }) => Some(handle.clone()),
+            _ => None,
+        })
+        .expect("custom editor Created update");
+    if let Some(pending) = out.iter().find_map(|o| match o {
+        Out::RpcWith(_, p @ Pending::CustomDocument { .. }) => Some(p.clone()),
+        _ => None,
+    }) {
+        w.on_reply(pending, Ok(json!({"editable": true})));
+    }
+    handle
+}
+
+fn register_custom_editor(w: &mut Webviews, req: u32, view_type: &str) {
+    w.on_call(
+        req,
+        WebviewCall::RegisterCustomEditorProvider {
+            extension: ext(),
+            view_type: view_type.into(),
+            options: PanelOptions::default(),
+            capabilities: Default::default(),
+            multiple_editors_per_document: true,
+            serialize_buffers: false,
+        },
+    );
+}
+
+#[test]
+fn fr_e8_custom_editor_edit_and_content_change_mark_dirty() {
+    let mut w = Webviews::new();
+    let mut panes = WebviewPanes::default();
+    register_custom_editor(&mut w, 1, "cat.paw");
+
+    let res = UriComponents::remote("h", "/w/a.pawdraw");
+    let out = w.on_event(WebviewEvent::OpenCustomEditor { resource: res.clone(), view_type: "cat.paw".into() });
+    for u in updates(&out) {
+        panes.apply(u);
+    }
+    let handle = match updates(&out)[..] {
+        [WebviewUpdate::Created { handle, .. }] => handle.clone(),
+        ref other => panic!("{other:?}"),
+    };
+    let pending = match &out[..] {
+        [_, Out::RpcWith(_, p)] => p.clone(),
+        other => panic!("{other:?}"),
+    };
+    w.on_reply(pending, Ok(json!({"editable": true})));
+
+    assert!(!w.is_dirty(&handle));
+    assert!(!w.needs_close_confirmation(&handle));
+    assert!(!panes.is_dirty(&handle));
+
+    // `$onDidEdit` records the edit, marks the custom editor dirty, and emits `WebviewUpdate::Dirty`.
+    let out = w.on_call(
+        2,
+        WebviewCall::CustomEditorEdit {
+            resource: res.clone(),
+            view_type: "cat.paw".into(),
+            edit_id: 1,
+            label: Some("Stroke".into()),
+        },
+    );
+    assert_eq!(updates(&out), vec![&WebviewUpdate::Dirty { handle: handle.clone(), dirty: true }]);
+    for u in updates(&out) {
+        panes.apply(u);
+    }
+    assert!(w.is_dirty(&handle));
+    assert!(w.needs_close_confirmation(&handle));
+    assert!(panes.is_dirty(&handle));
+    let doc = w.custom_document_for(&handle).unwrap();
+    assert_eq!(doc.edits.len(), 1);
+    assert_eq!(doc.current_index, 1);
+    assert_eq!(doc.saved_index, Some(0));
+    assert!(doc.is_dirty());
+    assert!(doc.can_undo());
+    assert!(!doc.can_redo());
+
+    // `$onContentChange` also marks a clean custom document dirty.
+    let res2 = UriComponents::remote("h", "/w/b.pawdraw");
+    let out = w.on_event(WebviewEvent::OpenCustomEditor { resource: res2.clone(), view_type: "cat.paw".into() });
+    for u in updates(&out) {
+        panes.apply(u);
+    }
+    let handle2 = match updates(&out)[..] {
+        [WebviewUpdate::Created { handle, .. }] => handle.clone(),
+        ref other => panic!("{other:?}"),
+    };
+    let pending2 = match &out[..] {
+        [_, Out::RpcWith(_, p)] => p.clone(),
+        other => panic!("{other:?}"),
+    };
+    w.on_reply(pending2, Ok(json!({"editable": true})));
+
+    let out = w.on_call(
+        3,
+        WebviewCall::CustomEditorContentChange {
+            resource: res2,
+            view_type: "cat.paw".into(),
+        },
+    );
+    assert_eq!(updates(&out), vec![&WebviewUpdate::Dirty { handle: handle2.clone(), dirty: true }]);
+    for u in updates(&out) {
+        panes.apply(u);
+    }
+    assert!(w.is_dirty(&handle2));
+    assert!(w.needs_close_confirmation(&handle2));
+    assert!(panes.is_dirty(&handle2));
+    assert!(w.custom_document_for(&handle2).unwrap().content_dirty);
+}
+
+#[test]
+fn fr_e8_custom_editor_undo_redo_updates_dirty_and_calls_ext_host() {
+    let mut w = Webviews::new();
+    register_custom_editor(&mut w, 1, "cat.paw");
+    let res = UriComponents::remote("h", "/w/a.pawdraw");
+    let handle = open_custom_editor(&mut w, &res, "cat.paw");
+
+    // Undo and redo at empty boundaries are no-ops.
+    assert!(w.on_event(WebviewEvent::UndoCustomEditor { handle: handle.clone() }).is_empty());
+    assert!(w.on_event(WebviewEvent::RedoCustomEditor { handle: handle.clone() }).is_empty());
+
+    w.on_call(2, WebviewCall::CustomEditorEdit { resource: res.clone(), view_type: "cat.paw".into(), edit_id: 10, label: Some("A".into()) });
+    w.on_call(3, WebviewCall::CustomEditorEdit { resource: res.clone(), view_type: "cat.paw".into(), edit_id: 11, label: Some("B".into()) });
+    assert!(w.is_dirty(&handle));
+
+    // First undo: still at index 1 (dirty stays true, no redundant Dirty update).
+    let out = w.on_event(WebviewEvent::UndoCustomEditor { handle: handle.clone() });
+    assert_eq!(rpcs(&out).len(), 1);
+    assert_eq!(rpcs(&out)[0].method, "$undo");
+    assert_eq!(rpcs(&out)[0].args[2], Arg::Json(json!(11)));
+    assert_eq!(rpcs(&out)[0].args[3], Arg::Json(json!(true)));
+    assert!(updates(&out).is_empty());
+    assert!(w.is_dirty(&handle));
+
+    // Second undo: back to saved_index (0) -> clean!
+    let out = w.on_event(WebviewEvent::UndoCustomEditor { handle: handle.clone() });
+    assert_eq!(rpcs(&out)[0].method, "$undo");
+    assert_eq!(rpcs(&out)[0].args[2], Arg::Json(json!(10)));
+    assert_eq!(rpcs(&out)[0].args[3], Arg::Json(json!(false)));
+    assert_eq!(updates(&out), vec![&WebviewUpdate::Dirty { handle: handle.clone(), dirty: false }]);
+    assert!(!w.is_dirty(&handle));
+    assert!(!w.needs_close_confirmation(&handle));
+
+    // Redo restores edit 10 and marks dirty again.
+    let out = w.on_event(WebviewEvent::RedoCustomEditor { handle: handle.clone() });
+    assert_eq!(rpcs(&out)[0].method, "$redo");
+    assert_eq!(rpcs(&out)[0].args[2], Arg::Json(json!(10)));
+    assert_eq!(rpcs(&out)[0].args[3], Arg::Json(json!(true)));
+    assert_eq!(updates(&out), vec![&WebviewUpdate::Dirty { handle: handle.clone(), dirty: true }]);
+    assert!(w.is_dirty(&handle));
+}
+
+#[test]
+fn fr_e8_custom_editor_save_revert_and_branch_truncation() {
+    let mut w = Webviews::new();
+    register_custom_editor(&mut w, 1, "cat.paw");
+    let res = UriComponents::remote("h", "/w/a.pawdraw");
+    let handle = open_custom_editor(&mut w, &res, "cat.paw");
+
+    w.on_call(2, WebviewCall::CustomEditorEdit { resource: res.clone(), view_type: "cat.paw".into(), edit_id: 1, label: None });
+    w.on_call(3, WebviewCall::CustomEditorContentChange { resource: res.clone(), view_type: "cat.paw".into() });
+    assert!(w.is_dirty(&handle));
+
+    // Failed save leaves document dirty.
+    let out = w.on_event(WebviewEvent::SaveCustomEditor { handle: handle.clone() });
+    let pending = match &out[..] {
+        [Out::RpcWith(c, p)] => {
+            assert_eq!(c.method, "$onSave");
+            p.clone()
+        }
+        other => panic!("{other:?}"),
+    };
+    let out = w.on_reply(pending, Err("disk full".into()));
+    assert!(updates(&out).is_empty());
+    assert!(w.is_dirty(&handle));
+
+    // Successful save clears both edit dirty and content_dirty.
+    let out = w.on_event(WebviewEvent::SaveCustomEditor { handle: handle.clone() });
+    let pending = match &out[..] {
+        [Out::RpcWith(_, p)] => p.clone(),
+        other => panic!("{other:?}"),
+    };
+    let out = w.on_reply(pending, Ok(Value::Null));
+    assert_eq!(updates(&out), vec![&WebviewUpdate::Dirty { handle: handle.clone(), dirty: false }]);
+    assert!(!w.is_dirty(&handle));
+
+    // Undo after save marks dirty; pushing a new edit invalidates saved_index so undoing to 0 stays dirty.
+    let out = w.on_event(WebviewEvent::UndoCustomEditor { handle: handle.clone() });
+    assert_eq!(updates(&out), vec![&WebviewUpdate::Dirty { handle: handle.clone(), dirty: true }]);
+    w.on_call(4, WebviewCall::CustomEditorEdit { resource: res.clone(), view_type: "cat.paw".into(), edit_id: 2, label: None });
+    assert_eq!(w.custom_document_for(&handle).unwrap().saved_index, None);
+    let out = w.on_event(WebviewEvent::UndoCustomEditor { handle: handle.clone() });
+    assert_eq!(rpcs(&out)[0].args[3], Arg::Json(json!(true)));
+    assert!(w.is_dirty(&handle));
+
+    // Revert clears edit stack and content_dirty and marks clean on Ok (and keeps dirty on Err).
+    let out = w.on_event(WebviewEvent::RevertCustomEditor { handle: handle.clone() });
+    let pending = match &out[..] {
+        [Out::RpcWith(c, p)] => {
+            assert_eq!(c.method, "$revert");
+            p.clone()
+        }
+        other => panic!("{other:?}"),
+    };
+    assert!(w.on_reply(pending, Err("cancelled".into())).is_empty());
+    assert!(w.is_dirty(&handle));
+
+    let out = w.on_event(WebviewEvent::RevertCustomEditor { handle: handle.clone() });
+    let pending = match &out[..] {
+        [Out::RpcWith(_, p)] => p.clone(),
+        other => panic!("{other:?}"),
+    };
+    let out = w.on_reply(pending, Ok(Value::Null));
+    assert_eq!(updates(&out), vec![&WebviewUpdate::Dirty { handle: handle.clone(), dirty: false }]);
+    assert!(!w.is_dirty(&handle));
+    let doc = w.custom_document_for(&handle).unwrap();
+    assert!(doc.edits.is_empty());
+    assert_eq!(doc.current_index, 0);
+    assert_eq!(doc.saved_index, Some(0));
+    assert!(!doc.content_dirty);
+}
+
+#[test]
+fn fr_e8_custom_editor_shared_document_dirty_and_close_confirmation() {
+    let mut w = Webviews::new();
+    register_custom_editor(&mut w, 1, "cat.paw");
+    let res = UriComponents::remote("h", "/w/shared.pawdraw");
+    let h1 = open_custom_editor(&mut w, &res, "cat.paw");
+
+    w.on_call(2, WebviewCall::CustomEditorEdit { resource: res.clone(), view_type: "cat.paw".into(), edit_id: 1, label: None });
+    assert!(w.is_dirty(&h1));
+    assert!(w.needs_close_confirmation(&h1));
+
+    // Opening a second editor on the same already-dirty document starts it dirty too.
+    let out = w.on_event(WebviewEvent::OpenCustomEditor { resource: res.clone(), view_type: "cat.paw".into() });
+    let h2 = out
+        .iter()
+        .find_map(|o| match o {
+            Out::Ui(WebviewUpdate::Created { handle, .. }) => Some(handle.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(updates(&out).contains(&&WebviewUpdate::Dirty { handle: h2.clone(), dirty: true }));
+    assert!(w.is_dirty(&h2));
+
+    // While both editors are open, closing either one keeps the document open, so no close prompt yet.
+    assert!(!w.needs_close_confirmation(&h1));
+    assert!(!w.needs_close_confirmation(&h2));
+
+    // Closing the first leaves the second as the last dirty editor, which now needs confirmation.
+    let out = w.on_event(WebviewEvent::Closed { handle: h1 });
+    assert!(!rpcs(&out).iter().any(|c| c.method == "$disposeCustomDocument"));
+    assert!(w.is_dirty(&h2));
+    assert!(w.needs_close_confirmation(&h2));
+
+    // Closing the last editor disposes the document and removes its state.
+    let out = w.on_event(WebviewEvent::Closed { handle: h2 });
+    assert!(rpcs(&out).iter().any(|c| c.method == "$disposeCustomDocument"));
+    assert!(w.custom_document(&res, "cat.paw").is_none());
+}

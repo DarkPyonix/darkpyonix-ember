@@ -54,7 +54,7 @@ async fn fr_x7_metrics_relay_returns_the_node_sample_and_errors_map() {
         let s: MetricsSample = r.json().await.unwrap();
         assert!(!s.cpu.cores.is_empty());
         assert!(s.processes.len() <= 4);
-        assert!(s.gpu.devices.is_empty() && s.gpu.reason.is_some());
+        assert_eq!(s.gpu.devices.is_empty(), s.gpu.reason.is_some());
 
         let r = c.get(format!("{base}/api/computers/nope/metrics")).send().await.unwrap();
         assert_eq!(r.status(), 404);

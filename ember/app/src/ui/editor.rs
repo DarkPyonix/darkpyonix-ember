@@ -19,10 +19,16 @@ pub struct EditorTarget {
     /// The server's relay route to the OSE (`/api/computers/{id}/ide/relay/{launch}`, FR-W4),
     /// dialed instead of `endpoint` when set (FR-N9.1). Empty when unknown.
     pub relay: String,
-    /// The VS Code target of the same project (`IdeLaunch`'s `vscode` URL), which the window offers
-    /// when the server is a Code-OSS commit the editor does not support (SPEC FR-E10, #32). Empty
-    /// when the server offered none.
+    /// An old server's VS Code target URL (a target with `url` and no relay launch), which the
+    /// window offers when the server is a Code-OSS commit the editor does not support (SPEC
+    /// FR-E10, #32). Empty when the target has a relay launch or the server offered none.
     pub vscode_url: String,
+    /// The VS Code target's relay path (`launch.ose.relay`, FR-W4c, INTENT D55), which the
+    /// fallback opens with `ember-ide-webview --relay-path` on [`Self::server_url`]
+    /// (`crate::ide::VsCodeFallback`). Empty when the server sent no relay launch.
+    pub vscode_relay: String,
+    /// The folder the VS Code target's relay launch opens (`launch.folder`).
+    pub vscode_folder: String,
 }
 
 impl std::fmt::Debug for EditorTarget {
@@ -37,6 +43,8 @@ impl std::fmt::Debug for EditorTarget {
             .field("computer", &self.computer)
             .field("relay", &self.relay)
             .field("vscode_url", &self.vscode_url)
+            .field("vscode_relay", &self.vscode_relay)
+            .field("vscode_folder", &self.vscode_folder)
             .finish()
     }
 }
@@ -2444,6 +2452,8 @@ mod tests {
             computer: "node-a".into(),
             relay: "/api/computers/node-a/ide/relay/l1".into(),
             vscode_url: String::new(),
+            vscode_relay: String::new(),
+            vscode_folder: String::new(),
         };
         let text = format!("{target:?}");
         assert!(text.contains("/api/computers/node-a/ide/relay/l1"), "{text}");

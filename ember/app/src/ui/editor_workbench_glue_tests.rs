@@ -41,6 +41,8 @@ fn target() -> EditorTarget {
         computer: String::new(),
         relay: String::new(),
         vscode_url: String::new(),
+        vscode_relay: String::new(),
+        vscode_folder: String::new(),
     }
 }
 

@@ -273,11 +273,7 @@ impl IdeLaunch {
                 .and_then(|e| e.server_url.clone())
                 .filter(|u| !u.is_empty())
                 .or_else(|| crate::services::try_services().map(|s| s.config.server_url.clone()).filter(|u| !u.is_empty())),
-            vscode_url: l
-                .target("vscode")
-                .filter(|t| t.available)
-                .and_then(|t| t.url.clone())
-                .filter(|u| !u.is_empty()),
+            vscode: crate::ide::VsCodeFallback::of_target(l.target("vscode")),
         }
     }
 }
@@ -296,9 +292,10 @@ pub struct EditorConnection {
     pub computer: Option<String>,
     /// The ember server's base URL for the terminal relay.
     pub server_url: Option<String>,
-    /// The VS Code target's URL, offered by the editor window when the server is a Code-OSS commit
-    /// it does not support (SPEC FR-E10, #32).
-    pub vscode_url: Option<String>,
+    /// The VS Code target, offered by the editor window when the server is a Code-OSS commit it
+    /// does not support (SPEC FR-E10, #32): its relay launch (FR-W4c, INTENT D55), else an old
+    /// server's `url`.
+    pub vscode: Option<crate::ide::VsCodeFallback>,
 }
 
 /// `http://127.0.0.1:9000/` becomes `127.0.0.1:9000`; a bare `host:port` is kept.
@@ -344,25 +341,52 @@ mod editor_connection_tests {
         })
     }
 
-    /// SPEC FR-E10 (#32): the editor connection carries the available VS Code target's URL, which
-    /// the window offers on a fallback; an unavailable one is not offered.
+    /// SPEC FR-E10 (#32), FR-W4c, INTENT D55: the editor connection carries the available VS Code
+    /// target, which the window offers on a fallback: its relay launch from a current server, its
+    /// `url` from an old one; an unavailable one is not offered.
     #[test]
     fn fr_e10_editor_connection_carries_the_vscode_target() {
-        let vscode = |available: bool| IdeTarget {
+        use crate::ide::{IdeRelay, VsCodeFallback};
+        let relay_target = |available: bool| -> IdeTarget {
+            serde_json::from_value(serde_json::json!({
+                "kind": "vscode", "available": available,
+                "launch": {
+                    "session": "s", "project": "p", "computer": "c", "folder": "/w",
+                    "server_url": "http://srv:7",
+                    "ose": { "relay": "/api/computers/c/ide/relay/v1" }
+                }
+            }))
+            .unwrap()
+        };
+        let mut l = launch(Some(("http://127.0.0.1:9000/", "tok"))).unwrap();
+        assert_eq!(IdeLaunch::editor_connection(Some(&Ok(l.clone()))).vscode, None);
+        l.targets.push(relay_target(true));
+        assert_eq!(
+            IdeLaunch::editor_connection(Some(&Ok(l.clone()))).vscode,
+            Some(VsCodeFallback::Relay(IdeRelay {
+                relay: "/api/computers/c/ide/relay/v1".into(),
+                folder: "/w".into(),
+                server_url: "http://srv:7".into(),
+            }))
+        );
+        l.targets.pop();
+        l.targets.push(relay_target(false));
+        assert_eq!(IdeLaunch::editor_connection(Some(&Ok(l.clone()))).vscode, None);
+
+        // An old server's target with `url` and no relay launch still offers the URL.
+        l.targets.pop();
+        l.targets.push(IdeTarget {
             kind: "vscode".into(),
-            available,
+            available: true,
             url: Some("http://c:8890/?folder=%2Fw".into()),
             command: None,
             launch: None,
             reason: None,
-        };
-        let mut l = launch(Some(("http://127.0.0.1:9000/", "tok"))).unwrap();
-        assert_eq!(IdeLaunch::editor_connection(Some(&Ok(l.clone()))).vscode_url, None);
-        l.targets.push(vscode(true));
-        assert_eq!(IdeLaunch::editor_connection(Some(&Ok(l.clone()))).vscode_url.as_deref(), Some("http://c:8890/?folder=%2Fw"));
-        l.targets.pop();
-        l.targets.push(vscode(false));
-        assert_eq!(IdeLaunch::editor_connection(Some(&Ok(l))).vscode_url, None);
+        });
+        assert_eq!(
+            IdeLaunch::editor_connection(Some(&Ok(l))).vscode,
+            Some(VsCodeFallback::Url("http://c:8890/?folder=%2Fw".into()))
+        );
     }
 
     #[test]

@@ -417,7 +417,8 @@ impl EditorHost {
                 config.user_settings = user_layer;
                 config.user_files = user_files.paths();
                 config.server_settings = true;
-                // The VS Code target the fallback offers (SPEC FR-E10).
+                // An old server's VS Code URL, echoed into the fallback (SPEC FR-E10). The window's
+                // button opens `VsCodeFallback::for_editor(&target)`, which prefers the relay launch.
                 config.vscode_url = (!target.vscode_url.trim().is_empty()).then(|| target.vscode_url.clone());
                 // With a relay path every socket goes through the server's relay route, over the transport or
                 // HTTP as the app reaches the server (FR-N9.1); direct TCP only without one (the demo endpoint).
@@ -886,6 +887,8 @@ mod tests {
             computer: String::new(),
             relay: String::new(),
             vscode_url: String::new(),
+            vscode_relay: String::new(),
+            vscode_folder: String::new(),
         };
 
         // Same server (localhost vs 127.0.0.1) in two different folders shares one StorageHub.
@@ -915,6 +918,8 @@ mod tests {
             computer: computer.into(),
             relay: format!("/api/computers/{computer}/ide/relay/1"),
             vscode_url: String::new(),
+            vscode_relay: String::new(),
+            vscode_folder: String::new(),
         };
         let r1 = session_config_for(&make_relay("mac-mini", "/a"), &pool).storage_hub.unwrap();
         let r2 = session_config_for(&make_relay("MAC-MINI", "/b"), &pool).storage_hub.unwrap();

@@ -251,8 +251,15 @@ impl SharedUi {
         server_url: Option<String>,
         computer: Option<String>,
         relay: Option<String>,
-        vscode_url: Option<String>,
+        vscode: Option<crate::ide::VsCodeFallback>,
     ) {
+        // The VS Code target travels as its relay launch (path and folder; the server is the
+        // editor's own) or an old server's URL (SPEC FR-E10, FR-W4c).
+        let (vscode_url, vscode_relay, vscode_folder) = match vscode {
+            Some(crate::ide::VsCodeFallback::Relay(r)) => (String::new(), r.relay, r.folder),
+            Some(crate::ide::VsCodeFallback::Url(u)) => (u, String::new(), String::new()),
+            None => (String::new(), String::new(), String::new()),
+        };
         let target = EditorTarget {
             project: project.clone(),
             folder: folder.clone(),
@@ -261,7 +268,9 @@ impl SharedUi {
             server_url: server_url.unwrap_or_default(),
             computer: computer.unwrap_or_default(),
             relay: relay.unwrap_or_default(),
-            vscode_url: vscode_url.unwrap_or_default(),
+            vscode_url,
+            vscode_relay,
+            vscode_folder,
         };
         #[cfg(not(test))]
         let spawn_target = target.clone();
@@ -380,10 +389,16 @@ mod tests {
             Some("http://srv:1".into()),
             Some("node-a".into()),
             Some("/api/computers/node-a/ide/relay/l1".into()),
-            Some("http://node-a:8890/?folder=%2Fwork".into()),
+            Some(crate::ide::VsCodeFallback::Relay(crate::ide::IdeRelay {
+                relay: "/api/computers/node-a/ide/relay/v1".into(),
+                folder: "/work".into(),
+                server_url: "http://srv:1".into(),
+            })),
         );
         let target = ui.editor.get_untracked().unwrap();
-        assert_eq!(target.vscode_url, "http://node-a:8890/?folder=%2Fwork");
+        assert_eq!(target.vscode_relay, "/api/computers/node-a/ide/relay/v1");
+        assert_eq!(target.vscode_folder, "/work");
+        assert_eq!(target.vscode_url, "");
         assert_eq!(target.relay, "/api/computers/node-a/ide/relay/l1");
         assert_eq!((target.server_url.as_str(), target.computer.as_str()), ("http://srv:1", "node-a"));
         assert_eq!(target.endpoint, "localhost:8000");

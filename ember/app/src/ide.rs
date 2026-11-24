@@ -79,7 +79,7 @@ pub struct IdeRelay {
 }
 
 /// The relay launch of a VS Code target, when the server sent one.
-fn relay_launch(t: &IdeTarget) -> Option<IdeRelay> {
+pub(crate) fn relay_launch(t: &IdeTarget) -> Option<IdeRelay> {
     let launch = t.launch.as_ref()?;
     let relay = launch.ose.as_ref()?.relay.clone().filter(|r| !r.trim().is_empty())?;
     Some(IdeRelay {
@@ -367,7 +367,7 @@ where
         var(EDITOR_SERVER_ENV),
         var(EDITOR_COMPUTER_ENV),
         var(EDITOR_RELAY_ENV),
-        var(EDITOR_VSCODE_ENV),
+        VsCodeEnv { url: var(EDITOR_VSCODE_ENV), relay: var(EDITOR_VSCODE_RELAY_ENV), folder: var(EDITOR_VSCODE_FOLDER_ENV) },
     )
 }
 
@@ -380,9 +380,76 @@ pub const EDITOR_COMPUTER_ENV: &str = "EMBER_EDITOR_COMPUTER";
 /// Environment variable carrying the server's relay route to the OSE (FR-N9.1), which the
 /// editor dials instead of the endpoint when it is set.
 pub const EDITOR_RELAY_ENV: &str = "EMBER_EDITOR_RELAY";
-/// Environment variable carrying the project's VS Code target URL, which the editor window offers
-/// when the server is a Code-OSS commit it does not support (SPEC FR-E10, #32).
+/// Environment variable carrying an old server's VS Code target URL (a target with `url` and no
+/// relay launch), which the editor window's fallback opens in URL mode (SPEC FR-E10, #32). Empty
+/// when the target has a relay launch.
 pub const EDITOR_VSCODE_ENV: &str = "EMBER_EDITOR_VSCODE";
+/// Environment variable carrying the VS Code target's relay path (`launch.ose.relay`,
+/// `/api/computers/{id}/ide/relay/{launch}`, FR-W4c, INTENT D55), which the editor window's
+/// fallback opens with `ember-ide-webview --relay-path` against the editor's own server
+/// (`EMBER_EDITOR_SERVER`) and server token (SPEC FR-E10).
+pub const EDITOR_VSCODE_RELAY_ENV: &str = "EMBER_EDITOR_VSCODE_RELAY";
+/// Environment variable carrying the folder the VS Code target's relay launch opens
+/// (`launch.folder`), beside [`EDITOR_VSCODE_RELAY_ENV`].
+pub const EDITOR_VSCODE_FOLDER_ENV: &str = "EMBER_EDITOR_VSCODE_FOLDER";
+
+/// The VS Code target the editor window's fallback opens, as it travels in the environment.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct VsCodeEnv {
+    url: String,
+    relay: String,
+    folder: String,
+}
+
+/// What the Ember editor window's `VS Code에서 열기` opens when the server is a Code-OSS commit
+/// the editor does not support (SPEC FR-E10, #32).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VsCodeFallback {
+    /// The VS Code target's relay launch (FR-W4c, INTENT D55): the IDE window's relay mode.
+    Relay(IdeRelay),
+    /// An old server's VS Code target URL: the IDE window's URL mode.
+    Url(String),
+}
+
+impl VsCodeFallback {
+    /// The VS Code target of an IDE launch, when it is available: its relay launch, else an old
+    /// server's `url`.
+    pub fn of_target(target: Option<&IdeTarget>) -> Option<VsCodeFallback> {
+        let t = target.filter(|t| t.available)?;
+        if let Some(relay) = relay_launch(t) {
+            return Some(VsCodeFallback::Relay(relay));
+        }
+        t.url.clone().filter(|u| !u.trim().is_empty()).map(VsCodeFallback::Url)
+    }
+
+    /// The fallback of an editor window's target, checked as [`plan`] checks the VS Code target:
+    /// a relay path under `/api/` with a folder, dialed on the editor's own server; else an
+    /// http(s) URL. `None` when the target offers neither, and the window then shows no button.
+    pub fn for_editor(target: &EditorTarget) -> Option<VsCodeFallback> {
+        let relay = target.vscode_relay.trim();
+        if !relay.is_empty() {
+            if !relay.starts_with("/api/") || target.vscode_folder.trim().is_empty() {
+                return None;
+            }
+            return Some(VsCodeFallback::Relay(IdeRelay {
+                relay: relay.to_owned(),
+                folder: target.vscode_folder.clone(),
+                server_url: target.server_url.clone(),
+            }));
+        }
+        let url = target.vscode_url.trim();
+        allowed_url(IdeKind::VsCode, url).then(|| VsCodeFallback::Url(url.to_owned()))
+    }
+
+    /// Spawn the IDE window for this fallback: relay mode with the server token in its
+    /// environment ([`open_ide_relay`]), or URL mode ([`open_ide_window`]).
+    pub fn open(&self) -> Result<(), String> {
+        match self {
+            VsCodeFallback::Relay(relay) => open_ide_relay(relay),
+            VsCodeFallback::Url(url) => open_ide_window(url),
+        }
+    }
+}
 
 fn parse_editor_args_with_env<I, S>(
     args: I,
@@ -390,7 +457,7 @@ fn parse_editor_args_with_env<I, S>(
     server_url: String,
     computer: String,
     relay: String,
-    vscode_url: String,
+    vscode: VsCodeEnv,
 ) -> Option<EditorTarget>
 where
     I: IntoIterator<Item = S>,
@@ -405,7 +472,18 @@ where
                 .map(|s| s.as_ref().to_string())
                 .unwrap_or_default();
             let endpoint = it.next().map(|s| s.as_ref().to_string()).unwrap_or_default();
-            return Some(EditorTarget { project, folder, endpoint, token, server_url, computer, relay, vscode_url });
+            return Some(EditorTarget {
+                project,
+                folder,
+                endpoint,
+                token,
+                server_url,
+                computer,
+                relay,
+                vscode_url: vscode.url,
+                vscode_relay: vscode.relay,
+                vscode_folder: vscode.folder,
+            });
         }
     }
     None
@@ -444,6 +522,8 @@ pub fn spawn_editor_target(exe: &Path, target: &EditorTarget) -> std::io::Result
         .env(EDITOR_COMPUTER_ENV, &target.computer)
         .env(EDITOR_RELAY_ENV, &target.relay)
         .env(EDITOR_VSCODE_ENV, &target.vscode_url)
+        .env(EDITOR_VSCODE_RELAY_ENV, &target.vscode_relay)
+        .env(EDITOR_VSCODE_FOLDER_ENV, &target.vscode_folder)
         .spawn()?;
     let mut reg = crate::owner_handoff::registry().lock().unwrap_or_else(|e| e.into_inner());
     reg.record(handoff, u64::from(child.id()), std::time::Instant::now());
@@ -763,7 +843,7 @@ mod tests {
             "http://srv:1".into(),
             "node-a".into(),
             String::new(),
-            String::new(),
+            VsCodeEnv::default(),
         )
         .unwrap();
         assert_eq!(target.endpoint, "localhost:8000");
@@ -784,7 +864,7 @@ mod tests {
             "peer:abc".into(),
             "local".into(),
             relay.into(),
-            String::new(),
+            VsCodeEnv::default(),
         )
         .unwrap();
         assert_eq!(target.relay, relay);
@@ -792,20 +872,110 @@ mod tests {
         assert_eq!(EDITOR_RELAY_ENV, "EMBER_EDITOR_RELAY");
     }
 
-    /// SPEC FR-E10 (#32): the VS Code target the fallback offers travels in the environment.
+    /// SPEC FR-E10 (#32), FR-W4c: the VS Code target the fallback offers travels in the
+    /// environment, its relay launch (path and folder) or an old server's URL, never in argv.
     #[test]
-    fn fr_e10_editor_args_carry_the_vscode_url_in_the_environment() {
+    fn fr_e10_editor_args_carry_the_vscode_relay_in_the_environment() {
         let (_, args) = editor_command(Path::new("ember"), "project", "/work", "127.0.0.1:9000");
+        assert!(!args.iter().any(|arg| arg.contains("/ide/relay/")), "the relay path is not in argv");
         let target = parse_editor_args_with_env(
+            std::iter::once("ember".to_owned()).chain(args.clone()),
+            String::new(),
+            "http://srv:1".into(),
+            String::new(),
+            String::new(),
+            VsCodeEnv {
+                url: String::new(),
+                relay: "/api/computers/node-a/ide/relay/v1".into(),
+                folder: "/work/repo".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(target.vscode_relay, "/api/computers/node-a/ide/relay/v1");
+        assert_eq!(target.vscode_folder, "/work/repo");
+        assert_eq!(target.vscode_url, "");
+        assert_eq!(EDITOR_VSCODE_RELAY_ENV, "EMBER_EDITOR_VSCODE_RELAY");
+        assert_eq!(EDITOR_VSCODE_FOLDER_ENV, "EMBER_EDITOR_VSCODE_FOLDER");
+
+        // An old server's VS Code target (`url`, no relay launch) still travels as the URL.
+        let old = parse_editor_args_with_env(
             std::iter::once("ember".to_owned()).chain(args),
             String::new(),
             String::new(),
             String::new(),
             String::new(),
-            "http://node:8890/?folder=%2Fwork".into(),
+            VsCodeEnv { url: "http://node:8890/?folder=%2Fwork".into(), ..Default::default() },
         )
         .unwrap();
-        assert_eq!(target.vscode_url, "http://node:8890/?folder=%2Fwork");
+        assert_eq!(old.vscode_url, "http://node:8890/?folder=%2Fwork");
         assert_eq!(EDITOR_VSCODE_ENV, "EMBER_EDITOR_VSCODE");
+    }
+
+    /// SPEC FR-E10 (#32), FR-L7, INTENT D55: the fallback of an editor window whose VS Code target
+    /// is a relay launch spawns `ember-ide-webview` in relay mode on the editor's own server, with
+    /// the server token in the child's environment and never in argv; a bad relay path offers
+    /// nothing, and an old server's URL still opens in URL mode.
+    #[test]
+    fn fr_e10_fallback_opens_vscode_through_the_relay() {
+        let target = EditorTarget {
+            project: "p".into(),
+            folder: "/work/repo".into(),
+            server_url: "http://127.0.0.1:8740".into(),
+            computer: "node-a".into(),
+            relay: "/api/computers/node-a/ide/relay/e1".into(),
+            vscode_relay: "/api/computers/node-a/ide/relay/v1".into(),
+            vscode_folder: "/work/repo".into(),
+            ..Default::default()
+        };
+        let relay = IdeRelay {
+            relay: "/api/computers/node-a/ide/relay/v1".into(),
+            folder: "/work/repo".into(),
+            server_url: "http://127.0.0.1:8740".into(),
+        };
+        let fallback = VsCodeFallback::for_editor(&target);
+        assert_eq!(fallback, Some(VsCodeFallback::Relay(relay.clone())));
+
+        let mut captured: Option<(PathBuf, Vec<String>, Option<String>)> = None;
+        open_ide_relay_with(
+            Some("/custom/ember-ide-webview"),
+            None,
+            None,
+            &relay.server_url,
+            &relay,
+            Some("srv-secret"),
+            |prog, args, token| {
+                captured = Some((prog.to_path_buf(), args.to_vec(), token.map(str::to_owned)));
+                Ok(())
+            },
+        )
+        .expect("spawn");
+        let (prog, args, token) = captured.unwrap();
+        assert_eq!(prog, PathBuf::from("/custom/ember-ide-webview"));
+        assert_eq!(
+            args,
+            vec![
+                "--relay-path",
+                "/api/computers/node-a/ide/relay/v1",
+                "--server-url",
+                "http://127.0.0.1:8740",
+                "--folder",
+                "/work/repo",
+            ]
+        );
+        assert!(!args.iter().any(|a| a.contains("srv-secret")), "the token is never in argv");
+        assert_eq!(token.as_deref(), Some("srv-secret"));
+
+        // A relay path outside `/api/`, or one with no folder, offers no button.
+        let bad = EditorTarget { vscode_relay: "http://evil/relay".into(), ..target.clone() };
+        assert_eq!(VsCodeFallback::for_editor(&bad), None);
+        let no_folder = EditorTarget { vscode_folder: String::new(), ..target.clone() };
+        assert_eq!(VsCodeFallback::for_editor(&no_folder), None);
+
+        // An old server's URL opens in URL mode; a non-http(s) one offers nothing.
+        let old = EditorTarget { vscode_url: "http://node:8890/?folder=%2Fwork".into(), ..Default::default() };
+        assert_eq!(VsCodeFallback::for_editor(&old), Some(VsCodeFallback::Url("http://node:8890/?folder=%2Fwork".into())));
+        let file = EditorTarget { vscode_url: "file:///etc/passwd".into(), ..Default::default() };
+        assert_eq!(VsCodeFallback::for_editor(&file), None);
+        assert_eq!(VsCodeFallback::for_editor(&EditorTarget::default()), None);
     }
 }

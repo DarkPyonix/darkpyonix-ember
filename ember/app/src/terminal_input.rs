@@ -141,6 +141,19 @@ impl ImeInput {
     }
 }
 
+impl MultiLinePasteWarning {
+    /// The setting's value. Code-OSS still takes the old boolean: `true` is `auto`, `false` is
+    /// `never` (`terminalConfiguration.ts` migration).
+    pub fn from_setting(value: Option<&serde_json::Value>) -> Self {
+        match value {
+            Some(serde_json::Value::String(v)) if v == "always" => Self::Always,
+            Some(serde_json::Value::String(v)) if v == "never" => Self::Never,
+            Some(serde_json::Value::Bool(false)) => Self::Never,
+            _ => Self::Auto,
+        }
+    }
+}
+
 /// Result of handling a clipboard read for a terminal paste chord (FR-L31.21).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PasteAction {
@@ -203,6 +216,23 @@ pub const PASTE_TOO_LONG: &str = "클립보드 텍스트가 너무 길어 붙여
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fr_l31_21_the_setting_reads_strings_and_old_booleans() {
+        use serde_json::json;
+        // Code-OSS still takes the old boolean: `true` is `auto`, `false` is `never`.
+        assert_eq!(MultiLinePasteWarning::from_setting(None), MultiLinePasteWarning::Auto);
+        assert_eq!(MultiLinePasteWarning::from_setting(Some(&json!("auto"))), MultiLinePasteWarning::Auto);
+        assert_eq!(MultiLinePasteWarning::from_setting(Some(&json!("always"))), MultiLinePasteWarning::Always);
+        assert_eq!(MultiLinePasteWarning::from_setting(Some(&json!("never"))), MultiLinePasteWarning::Never);
+        assert_eq!(MultiLinePasteWarning::from_setting(Some(&json!(false))), MultiLinePasteWarning::Never);
+        assert_eq!(MultiLinePasteWarning::from_setting(Some(&json!(true))), MultiLinePasteWarning::Auto);
+        // `always` asks even with bracketed paste on; `never` sends without asking.
+        assert_eq!(plan_paste("a\nb", MultiLinePasteWarning::Always, true), PasteAction::Confirm("a\nb".into()));
+        assert_eq!(plan_paste("a\nb", MultiLinePasteWarning::Never, false), PasteAction::Send(b"a\rb".to_vec()));
+        // One line plus a trailing break does not ask in `auto`.
+        assert_eq!(plan_paste("make\n", MultiLinePasteWarning::Auto, false), PasteAction::Send(b"make\r".to_vec()));
+    }
 
     #[test]
     fn fr_l31_21_single_line_pastes_immediately_and_multiline_confirms() {

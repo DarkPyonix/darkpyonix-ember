@@ -919,7 +919,7 @@ fn start_with(
     let task_shared = Arc::downgrade(&shared);
     let (computer, folder, project) = (computer_id.to_owned(), folder.to_owned(), project.to_owned());
     spawn_task(async move {
-        use crate::terminal_reconnect::{Next, Reconnect, StreamEnd};
+        use crate::terminal_reconnect::{Reconnect, StreamEnd};
         let mut rx = rx;
         let mut policy = Reconnect::default();
         loop {
@@ -949,34 +949,51 @@ fn start_with(
                 shared.update(|s| s.disconnected());
                 return;
             }
-            match policy.on_end(end) {
-                Next::Stop => {
-                    shared.update(|s| s.disconnected());
-                    return;
-                }
-                Next::GiveUp => {
-                    shared.update(|s| s.gave_up());
-                    return;
-                }
-                Next::Retry { attempt, delay } => {
-                    shared.update(|s| s.waiting(attempt, delay));
-                    drop(shared);
-                    tokio::time::sleep(delay).await;
-                    // Keys typed while the stream was down are not replayed into the shell.
-                    loop {
-                        match rx.try_recv() {
-                            Ok(_) => continue,
-                            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return,
-                        }
-                    }
-                    let Some(shared) = task_shared.upgrade() else { return };
-                    shared.update(|s| s.reconnecting());
-                }
+            drop(shared);
+            if !retry_after(&task_shared, &mut policy, &mut rx, end).await {
+                return;
             }
         }
     });
     TerminalHandle { shared }
+}
+
+/// What follows the end of a stream under the reconnect policy (FR-L31.22): `true` to attach
+/// again, after the backoff wait, with the keys typed meanwhile dropped (they are not replayed
+/// into the shell); `false` when the attachment is over, its state already set.
+async fn retry_after(
+    shared: &std::sync::Weak<Shared>,
+    policy: &mut crate::terminal_reconnect::Reconnect,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    end: crate::terminal_reconnect::StreamEnd,
+) -> bool {
+    use crate::terminal_reconnect::Next;
+    let Some(strong) = shared.upgrade() else { return false };
+    match policy.on_end(end) {
+        Next::Stop => {
+            strong.update(|s| s.disconnected());
+            false
+        }
+        Next::GiveUp => {
+            strong.update(|s| s.gave_up());
+            false
+        }
+        Next::Retry { attempt, delay } => {
+            strong.update(|s| s.waiting(attempt, delay));
+            drop(strong);
+            tokio::time::sleep(delay).await;
+            loop {
+                match rx.try_recv() {
+                    Ok(_) => continue,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return false,
+                }
+            }
+            let Some(strong) = shared.upgrade() else { return false };
+            strong.update(|s| s.reconnecting());
+            true
+        }
+    }
 }
 
 /// Attach the editor to the existing terminal `term_id` (FR-P6: a terminal that survived the window,
@@ -994,7 +1011,8 @@ pub fn attach_existing(base_url: &str, computer_id: &str, term_id: &str, on_chan
     shared.update(|s| s.connecting());
     let task_shared = Arc::downgrade(&shared);
     let (base, computer, term) = (base_url.to_owned(), computer_id.to_owned(), term_id.to_owned());
-    crate::services::services().rt.spawn(async move {
+    spawn_task(async move {
+        use crate::terminal_reconnect::{Reconnect, StreamEnd};
         let hello = TermHello {
             device: device_name(),
             kind: Some("ember-editor".into()),
@@ -1006,14 +1024,22 @@ pub fn attach_existing(base_url: &str, computer_id: &str, term_id: &str, on_chan
         };
         let token = server_token(&base);
         let mut rx = rx;
-        // No reconnect policy: a reattached tab ends when its stream ends, as in #768.
-        if let Err(e) = stream(&task_shared, &base, &computer, &term, hello, token, &mut rx, None).await {
-            if let Some(shared) = task_shared.upgrade() {
-                shared.update(|s| s.fail(e.to_string()));
+        // FR-L31.22: a reattached tab follows the same policy as the panel's first shell. Its id
+        // names a terminal the node keeps, so attaching again never starts a second one.
+        let mut policy = Reconnect::default();
+        loop {
+            let end = match stream(&task_shared, &base, &computer, &term, hello.clone(), token.clone(), &mut rx, Some(&mut policy)).await {
+                Ok(end) => end,
+                Err(e) => {
+                    tracing::warn!("editor terminal reattach failed: {e}");
+                    let Some(shared) = task_shared.upgrade() else { return };
+                    shared.update(|s| s.fail(e.to_string()));
+                    StreamEnd::Dropped
+                }
+            };
+            if !retry_after(&task_shared, &mut policy, &mut rx, end).await {
+                return;
             }
-        }
-        if let Some(shared) = task_shared.upgrade() {
-            shared.update(|s| s.disconnected());
         }
     });
     TerminalHandle { shared }
@@ -1246,9 +1272,24 @@ pub fn attach_existing_with(
             snapshot: true,
         };
         let mut rx = rx;
-        let r = stream_peer(&task_shared, &api, &computer, &term, hello, &mut rx, None).await;
-        let r = after_peer_end(&api, r).await.map(|_| ());
-        finish(&task_shared, r);
+        // FR-L31.22 over the transport too; a refusal (scope, revoked device) is final.
+        let mut policy = crate::terminal_reconnect::Reconnect::default();
+        loop {
+            let r = stream_peer(&task_shared, &api, &computer, &term, hello.clone(), &mut rx, Some(&mut policy)).await;
+            let end = match after_peer_end(&api, r).await {
+                Ok(end) => end,
+                Err(e @ ClientError::Refused(_)) => return finish(&task_shared, Err(e)),
+                Err(e) => {
+                    tracing::warn!("terminal reattach over the transport failed: {e}");
+                    let Some(shared) = task_shared.upgrade() else { return };
+                    shared.update(|s| s.fail(e.to_string()));
+                    crate::terminal_reconnect::StreamEnd::Dropped
+                }
+            };
+            if !retry_after(&task_shared, &mut policy, &mut rx, end).await {
+                return;
+            }
+        }
     });
     TerminalHandle { shared }
 }
@@ -1294,8 +1335,8 @@ async fn view_peer(
 }
 
 /// Attaches to `term_id` over the transport and runs until the stream ends. `policy` is the
-/// editor shell's reconnect policy; the pane's viewer and a reattached tab have none and end with
-/// their stream, as over HTTP.
+/// editor's reconnect policy (the panel's shell and a reattached tab, FR-L31.22); the pane's
+/// viewer has none and ends with its stream, as over HTTP.
 async fn stream_peer(
     shared: &std::sync::Weak<Shared>,
     api: &ember_client::api::Api,

@@ -696,6 +696,13 @@ async fn fr_w4c_registered_computer_relay_is_404_on_the_guest_door() {
         .body(Body::from(r#"{"id":"a.b"}"#))
         .unwrap();
     assert_eq!(guest.clone().oneshot(req).await.unwrap().status(), StatusCode::NOT_FOUND, "POST {install}");
+
+    // The VS Code pick (FR-W4c (1c)) is not served there either.
+    let sid = s.store.create_session("proj", AgentKind::Scripted, "/tmp", None, "t").unwrap().id;
+    let pick = format!("/api/sessions/{sid}/ide/vscode?computer={}", computer.id);
+    let req =
+        Request::builder().method(Method::POST).uri(&pick).header("host", "127.0.0.1:9000").body(Body::empty()).unwrap();
+    assert_eq!(guest.clone().oneshot(req).await.unwrap().status(), StatusCode::NOT_FOUND, "POST {pick}");
 }
 
 // ---- The VS Code target (FR-W4c (1b), D55, #1064) ---------------------------------------------
@@ -736,9 +743,10 @@ fn vscode_target(v: &Value) -> &Value {
     v["targets"].as_array().unwrap().iter().find(|t| t["kind"] == "vscode").expect("a vscode target")
 }
 
-/// FR-W4c (1b): the VS Code target of a registered computer is the node's socket launch behind
-/// this server's relay path, with no URL, no endpoint and no token, beside the Ember target's own
-/// launch of the same folder; route (2) bridges it with the bytes unchanged.
+/// FR-W4c (1b), (1c): the listing names VS Code and starts nothing; the pick
+/// (`POST /api/sessions/{sid}/ide/vscode`) asks the node for the folder's socket launch and
+/// answers it behind this server's relay path, with no URL, no endpoint and no token, beside the
+/// Ember target's own launch of the same folder; route (2) bridges it with the bytes unchanged.
 #[tokio::test]
 async fn fr_w4c_vscode_target_of_a_node_computer_is_a_relay_launch_without_token() {
     let node = start_node(no_binary).await;
@@ -754,22 +762,23 @@ async fn fr_w4c_vscode_target_of_a_node_computer_is_a_relay_launch_without_token
     let (status, text) = get_json(&s.app, &format!("/api/sessions/{sid}/ide?computer={}", computer.id)).await;
     assert_eq!(status, StatusCode::OK, "{text}");
     let v: Value = serde_json::from_str(&text).unwrap();
-    let vscode = vscode_target(&v);
-    assert_eq!(vscode["available"], true, "{vscode}");
-    for absent in ["url", "reason", "command"] {
-        assert!(vscode.get(absent).is_none(), "{absent} in {vscode}");
+    assert_eq!(*vscode_target(&v), json!({ "kind": "vscode" }), "the listing carries the kind alone");
+    let ember = ember_target(&v);
+    assert_eq!(ember["launch"]["ose"]["connection_token"], ember_conn.connection_token.as_str());
+
+    let (status, launch) = post_json(&s.app, &format!("/api/sessions/{sid}/ide/vscode?computer={}", computer.id), "").await;
+    assert_eq!(status, StatusCode::OK, "{launch}");
+    for absent in ["url", "endpoint", "connection_token", "available", "reason"] {
+        assert!(launch.get(absent).is_none(), "{absent} in {launch}");
     }
-    let launch = &vscode["launch"];
     assert_eq!(launch["session"], sid.as_str());
     assert_eq!(launch["computer"], computer.id.as_str());
     assert_eq!(launch["computer_name"], "box");
     assert_eq!(launch["folder"].as_str(), Some(&*node.root.to_string_lossy()));
     let relay = format!("/api/computers/{}/ide/relay/{vs_id}", computer.id);
     assert_eq!(launch["ose"], json!({ "relay": relay }), "the VS Code launch carries the relay alone");
-    let ember = ember_target(&v);
-    assert_eq!(ember["launch"]["ose"]["connection_token"], ember_conn.connection_token.as_str());
     assert_ne!(ember["launch"]["ose"]["relay"], launch["ose"]["relay"], "one OSE per target");
-    assert!(!text.contains(REAL_TOKEN), "the real token is in the launch: {text}");
+    assert!(!launch.to_string().contains(REAL_TOKEN), "the real token is in the launch: {launch}");
 
     // Route (2) bridges it, and nothing is replaced: the Ember placeholder passes as sent.
     let addr = serve_tcp(s.app.clone()).await;
@@ -780,15 +789,168 @@ async fn fr_w4c_vscode_target_of_a_node_computer_is_a_relay_launch_without_token
     assert_eq!(*fake.received.lock().unwrap(), sent, "the socket OSE got other bytes");
     ws.close(None).await.unwrap();
     wait_for("the socket connection to close", WAIT, || fake.live.load(Ordering::SeqCst) == 0).await;
+}
 
-    // A folder with no running OSE on a node without the binary: unavailable, with the reason.
-    let sub = node.root.join("sub");
-    std::fs::create_dir_all(&sub).unwrap();
-    let sid = s.store.create_session("proj", AgentKind::Scripted, &sub.to_string_lossy(), None, "t").unwrap().id;
-    let (_, text) = get_json(&s.app, &format!("/api/sessions/{sid}/ide?computer={}", computer.id)).await;
-    let v: Value = serde_json::from_str(&text).unwrap();
-    let vscode = vscode_target(&v);
-    assert_eq!(vscode["available"], false, "{vscode}");
-    assert!(vscode["reason"].as_str().unwrap().contains("not installed"), "{vscode}");
-    assert!(vscode["launch"].get("ose").is_none(), "{vscode}");
+/// What a recording stand-in node answers to `POST /ide/ose`.
+#[derive(Clone, Copy)]
+enum NodeAnswer {
+    /// A node with D55: a socket launch for the VS Code target, a TCP launch for the Ember one.
+    Current,
+    /// A node older than D55: it ignores `target` and answers a TCP launch with a token.
+    BeforeD55,
+}
+
+const SOCKET_LAUNCH_ID: &str = "0123456789abcdef0123456789abcdef";
+const TCP_LAUNCH_ID: &str = "fedcba9876543210fedcba9876543210";
+
+/// A stand-in node on a loopback port that records the body of every `POST /ide/ose`.
+async fn start_recording_node(answer: NodeAnswer) -> (String, Arc<Mutex<Vec<Value>>>) {
+    use axum::routing::post;
+    let calls = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let seen = calls.clone();
+    let app = Router::new().route(
+        "/ide/ose",
+        post(move |axum::Json(body): axum::Json<Value>| {
+            let seen = seen.clone();
+            async move {
+                let vscode = body.get("target").and_then(Value::as_str) == Some("vscode");
+                seen.lock().unwrap().push(body);
+                axum::Json(match (answer, vscode) {
+                    (NodeAnswer::Current, true) => json!({ "launch_id": SOCKET_LAUNCH_ID, "ose_commit": "c0ffee" }),
+                    _ => json!({
+                        "launch_id": TCP_LAUNCH_ID,
+                        "endpoint": "http://127.0.0.1:9",
+                        "connection_token": "p".repeat(64),
+                    }),
+                })
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (url, calls)
+}
+
+/// The targets a recorded call asked for (`ember` when the body has none).
+fn recorded_targets(calls: &Mutex<Vec<Value>>) -> Vec<String> {
+    calls
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|c| c.get("target").and_then(Value::as_str).unwrap_or("ember").to_string())
+        .collect()
+}
+
+/// FR-W4c (1b): listing the targets asks the node for the Ember OSE alone; no VS Code OSE is
+/// started until it is picked.
+#[tokio::test]
+async fn fr_w4c_listing_the_targets_starts_no_vscode_ose() {
+    let (url, calls) = start_recording_node(NodeAnswer::Current).await;
+    let s = server();
+    let computer = s.computers.registry().insert("box", &url, NODE_TOKEN).unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let sid = s.store.create_session("proj", AgentKind::Scripted, &folder.path().to_string_lossy(), None, "t").unwrap().id;
+
+    for _ in 0..2 {
+        let (status, text) = get_json(&s.app, &format!("/api/sessions/{sid}/ide?computer={}", computer.id)).await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        let v: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(*vscode_target(&v), json!({ "kind": "vscode" }));
+        assert_eq!(ember_target(&v)["available"], true, "{v}");
+    }
+    assert_eq!(recorded_targets(&calls), ["ember", "ember"], "the listing asked the node for a VS Code OSE");
+}
+
+/// FR-W4c (1c): picking VS Code makes one `POST /ide/ose {folder, target: "vscode"}` and answers
+/// the launch with this server's relay path and the node's `ose_commit`; the computer's name
+/// resolves as on the listing.
+#[tokio::test]
+async fn fr_w4c_picking_vscode_starts_its_ose_and_answers_the_launch() {
+    let (url, calls) = start_recording_node(NodeAnswer::Current).await;
+    let s = server();
+    let computer = s.computers.registry().insert("box", &url, NODE_TOKEN).unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let cwd = folder.path().to_string_lossy().into_owned();
+    let sid = s.store.create_session("proj", AgentKind::Scripted, &cwd, None, "t").unwrap().id;
+
+    for which in [computer.id.as_str(), "box"] {
+        let (status, launch) = post_json(&s.app, &format!("/api/sessions/{sid}/ide/vscode?computer={which}"), "").await;
+        assert_eq!(status, StatusCode::OK, "{launch}");
+        assert_eq!(
+            launch,
+            json!({
+                "session": sid,
+                "project": "proj",
+                "computer": computer.id,
+                "computer_name": "box",
+                "folder": cwd,
+                "server_url": "http://ember.test:8740",
+                "ose": {
+                    "relay": format!("/api/computers/{}/ide/relay/{SOCKET_LAUNCH_ID}", computer.id),
+                    "ose_commit": "c0ffee",
+                },
+            })
+        );
+    }
+    let recorded = calls.lock().unwrap().clone();
+    assert_eq!(recorded.len(), 2, "{recorded:?}");
+    for call in &recorded {
+        assert_eq!(*call, json!({ "folder": cwd, "target": "vscode" }));
+    }
+}
+
+/// FR-W4c (1b), (1c): a VS Code failure appears only as the pick's error `{code, error}`: an
+/// unreachable node 502, a node without the OSE binary 503, a node older than D55 502
+/// `node_too_old_for_vscode`, an unknown session 404. The listing still offers VS Code on each.
+#[tokio::test]
+async fn fr_w4c_picking_vscode_on_an_unavailable_computer_is_an_error() {
+    let s = server();
+    let folder = tempfile::tempdir().unwrap();
+    let sid = s.store.create_session("proj", AgentKind::Scripted, &folder.path().to_string_lossy(), None, "t").unwrap().id;
+
+    let pick = |computer: String| {
+        let app = s.app.clone();
+        let sid = sid.clone();
+        async move {
+            let (status, text) = get_json(&app, &format!("/api/sessions/{sid}/ide?computer={computer}")).await;
+            assert_eq!(status, StatusCode::OK, "{text}");
+            let v: Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(*vscode_target(&v), json!({ "kind": "vscode" }), "the listing dropped VS Code");
+            post_json(&app, &format!("/api/sessions/{sid}/ide/vscode?computer={computer}"), "").await
+        }
+    };
+
+    // A node that does not answer.
+    let gone = s.computers.registry().insert("gone", "http://127.0.0.1:1", NODE_TOKEN).unwrap();
+    let (status, body) = pick(gone.id.clone()).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(body["code"], ide::NODE_UNREACHABLE, "{body}");
+    assert!(body["error"].as_str().unwrap().starts_with("node unreachable"), "{body}");
+
+    // A node without the OSE binary.
+    let node = start_node(no_binary).await;
+    let bare = s.computers.registry().insert("bare", &node.url, NODE_TOKEN).unwrap();
+    let sid_on_node =
+        s.store.create_session("proj", AgentKind::Scripted, &node.root.to_string_lossy(), None, "t").unwrap().id;
+    let (status, body) =
+        post_json(&s.app, &format!("/api/sessions/{sid_on_node}/ide/vscode?computer={}", bare.id), "").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["code"], ide::OSE_NOT_INSTALLED, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("not installed"), "{body}");
+
+    // A node older than D55: it ignored `target` and answered a token.
+    let (old_url, calls) = start_recording_node(NodeAnswer::BeforeD55).await;
+    let old = s.computers.registry().insert("old", &old_url, NODE_TOKEN).unwrap();
+    let (status, body) = pick(old.id.clone()).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(body["code"], ide::NODE_TOO_OLD_FOR_VSCODE_CODE, "{body}");
+    assert_eq!(body["error"], ide::NODE_TOO_OLD_FOR_VSCODE, "{body}");
+    assert!(!body.to_string().contains(&"p".repeat(64)), "the node's token is in the error: {body}");
+    assert_eq!(recorded_targets(&calls), ["ember", "vscode"]);
+
+    // An unknown session.
+    let (status, body) = post_json(&s.app, "/api/sessions/nope/ide/vscode", "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], ide::SESSION_NOT_FOUND, "{body}");
 }

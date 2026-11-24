@@ -86,16 +86,9 @@ async fn default_computer_targets() {
     assert_eq!(ember["launch"]["folder"], "/Users/me/acme app");
     assert_eq!(ember["launch"]["server_url"], "http://mini.local:8740");
 
-    // VS Code (D55, #1064): a launch like the Ember target's, never a URL, even with an
-    // `ide_url` configured. The folder does not exist here, so this server's OSE cannot start.
-    let vscode = target(&v, "vscode");
-    assert!(vscode.get("url").is_none(), "{vscode}");
-    assert_eq!(vscode["launch"]["session"], id.as_str());
-    assert_eq!(vscode["launch"]["computer"], "mini");
-    assert_eq!(vscode["launch"]["folder"], "/Users/me/acme app");
-    assert_eq!(vscode["available"], false, "{vscode}");
-    assert!(vscode["reason"].as_str().unwrap().contains("project folder"), "{vscode}");
-    assert!(vscode["launch"].get("ose").is_none(), "{vscode}");
+    // VS Code (D55, #1064): the kind alone, never a URL, even with an `ide_url` configured. It
+    // starts only when picked (`POST .../ide/vscode`), so the listing says nothing more.
+    assert_eq!(*target(&v, "vscode"), serde_json::json!({ "kind": "vscode" }));
 
     // No SSH configured for this computer → Gateway unavailable, with a reason.
     let gw = target(&v, "gateway");
@@ -110,11 +103,9 @@ async fn remote_computer_by_query() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(v["computer"]["name"], "studio");
     assert_eq!(v["computer"]["local"], false);
-    // D55: no URL from `ide_url`; a computer with no node and not local has no OSE to relay to.
-    let vscode = target(&v, "vscode");
-    assert!(vscode.get("url").is_none(), "{vscode}");
-    assert_eq!(vscode["available"], false);
-    assert_eq!(vscode["reason"], "OSE server is only available on the local computer");
+    // D55: no URL from `ide_url`; VS Code is listed as the kind alone, and picking it on a
+    // computer with no node and not local is the pick's error.
+    assert_eq!(*target(&v, "vscode"), serde_json::json!({ "kind": "vscode" }));
 
     let gw = target(&v, "gateway");
     let url = "jetbrains-gateway://connect#type=ssh&host=studio.local&port=22&user=me\
@@ -131,8 +122,7 @@ async fn unconfigured_computer_and_host_fallback() {
     cfg.server_url = None;
     let (status, v) = get(s, cfg, &format!("/api/sessions/{id}/ide?computer=bare")).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(target(&v, "vscode")["available"], false);
-    assert_eq!(target(&v, "vscode")["reason"], "OSE server is only available on the local computer");
+    assert_eq!(*target(&v, "vscode"), serde_json::json!({ "kind": "vscode" }));
     assert_eq!(target(&v, "ember")["launch"]["server_url"], "http://ember.test:8740");
 }
 
@@ -143,6 +133,37 @@ async fn unknown_session_and_computer_are_404() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     let (status, v) = get(s, config(), &format!("/api/sessions/{id}/ide?computer=ghost")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(v["error"].as_str().unwrap().contains("ghost"));
+}
+
+async fn post(s: Arc<Sessions>, cfg: IdeConfig, uri: &str) -> (StatusCode, Value) {
+    let app = ide::router(s, Arc::new(cfg));
+    let resp = app
+        .oneshot(Request::post(uri).header("host", "ember.test:8740").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&body).unwrap())
+}
+
+/// FR-W4c (1c) (D55, #1064): picking VS Code on a computer known only from
+/// `EMBER_IDE_COMPUTERS` and not local is an error with a code (no OSE to relay to); an unknown
+/// session or computer is 404 with a code, the same resolution as the listing.
+#[tokio::test]
+async fn fr_w4c_vscode_pick_errors_carry_a_code() {
+    let (s, id) = setup("/home/me/acme");
+    let (status, v) = post(s.clone(), config(), &format!("/api/sessions/{id}/ide/vscode?computer=studio")).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["code"], ide::VSCODE_UNAVAILABLE);
+    assert_eq!(v["error"], "OSE server is only available on the local computer");
+
+    let (status, v) = post(s.clone(), config(), "/api/sessions/nope/ide/vscode").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{v}");
+    assert_eq!(v["code"], ide::SESSION_NOT_FOUND);
+    let (status, v) = post(s, config(), &format!("/api/sessions/{id}/ide/vscode?computer=ghost")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{v}");
+    assert_eq!(v["code"], ide::UNKNOWN_COMPUTER);
     assert!(v["error"].as_str().unwrap().contains("ghost"));
 }
 

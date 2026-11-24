@@ -7,7 +7,7 @@
 //! | `kind`    | What it is                                    | What we return                    |
 //! |-----------|-----------------------------------------------|-----------------------------------|
 //! | `ember`   | Ember's own editor-core IDE (dioxus-compose, M8) | launch info only (no URL)       |
-//! | `vscode`  | VS Code Web of that computer's OSE, in the IDE window | launch info: the relay path only (no URL, no endpoint, no token) |
+//! | `vscode`  | VS Code Web of that computer's OSE, in the IDE window | `{kind}` alone; started on pick by `POST .../ide/vscode` |
 //! | `gateway` | JetBrains Gateway                             | a `jetbrains-gateway://` link and the command that opens it on that computer |
 //!
 //! **Computers come from the registry** (`FR-L7`, `FR-W4`) when the router is built with
@@ -22,13 +22,19 @@
 //! `EMBER_IDE_COMPUTERS` list exists, exactly as before.
 //! The folder is the session's `cwd`, taken as a path on that computer.
 //!
-//! **The VS Code target goes through the relay** (SPEC FR-W4c (1b), D55, #1064), like the Ember
-//! target: a registered computer's node starts the folder's token-free OSE on a 0700 Unix socket
-//! (`POST /ide/ose {folder, target: "vscode"}`), the local computer's comes from this server's
-//! own manager, and the launch's `ose` is `{relay: "/api/computers/{id}/ide/relay/{launch_id}"}`
-//! (plus `ose_commit` when known). A computer known only from `EMBER_IDE_COMPUTERS` and not local
-//! has no OSE to relay to, so both targets are unavailable there. `ide_url` (and `EMBER_IDE_URL`)
-//! no longer makes a VS Code URL; `ide_url` is still accepted so an existing configuration parses.
+//! **The VS Code target starts only when it is picked** (SPEC FR-W4c (1b), (1c), D55, #1064).
+//! The listing carries it as `{kind: "vscode"}` alone (no `available`, no `reason`, no `launch`)
+//! on every computer and starts nothing, so listing the targets never costs a second OSE process:
+//! VS Code is always offered, because the DarkPyonix manager installed at the first connection
+//! brings the OSE. `POST /api/sessions/{id}/ide/vscode[?computer=<name>]` (the same computer
+//! resolution) starts or reuses the folder's token-free OSE on a 0700 Unix socket: a registered
+//! computer's node does it (`POST /ide/ose {folder, target: "vscode"}`), the local computer's comes
+//! from this server's own manager. It answers the launch, whose `ose` is
+//! `{relay: "/api/computers/{id}/ide/relay/{launch_id}"}` (plus `ose_commit` when known), or
+//! `{code, error}`, the only place a VS Code failure appears. A computer known only from
+//! `EMBER_IDE_COMPUTERS` and not local has no OSE to relay to: its Ember target is unavailable and
+//! picking VS Code there is an error. `ide_url` (and `EMBER_IDE_URL`) no longer makes a VS Code
+//! URL; `ide_url` is still accepted so an existing configuration parses.
 //!
 //! Link formats:
 //! - Gateway: `jetbrains-gateway://connect#type=ssh&host=…&port=…&user=…&projectPath=…`
@@ -45,16 +51,19 @@ use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use ember_node::client::ClientError;
 use ember_node::ose_api::{pump_ose_relay, OseRelayStream};
+use ember_node::proto::ErrorCode;
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::computers::{Computer, Computers, LOCAL, LOCAL_NAME};
-use crate::ose::{valid_computer_id, OseManager, OseTarget, RelayLookupError, LOCAL_COMPUTER};
+use crate::ose::{
+    valid_computer_id, OseManager, OseTarget, RelayLookupError, LOCAL_COMPUTER, NOT_INSTALLED, SOCKET_UNSUPPORTED,
+};
 use crate::session::Sessions;
 use crate::store::SessionRecord;
 
@@ -87,13 +96,15 @@ pub(crate) fn node_refused_server(status: u16) -> bool {
 /// the CALLER's credential being refused, and the app would drop its server token or open the
 /// owner sheet. The body names the computer and no token.
 pub(crate) fn node_auth_failed(computer: &str) -> Response {
-    let body = json!({
-        "code": NODE_AUTH_FAILED,
-        "error": format!(
-            "the server could not authenticate to computer {computer}: the computer refused the node token the server holds; enrol the computer again"
-        ),
-    });
+    let body = json!({ "code": NODE_AUTH_FAILED, "error": node_auth_failed_message(computer) });
     (StatusCode::BAD_GATEWAY, Json(body)).into_response()
+}
+
+/// The English message of [`node_auth_failed`]: names the computer, never a token.
+fn node_auth_failed_message(computer: &str) -> String {
+    format!(
+        "the server could not authenticate to computer {computer}: the computer refused the node token the server holds; enrol the computer again"
+    )
 }
 
 /// One computer's IDE endpoints.
@@ -199,7 +210,11 @@ pub struct EmberLaunch {
 pub struct Target {
     /// `ember`, `vscode` or `gateway`.
     pub kind: &'static str,
-    pub available: bool,
+    /// Whether the target can be opened now. `None`, and left out of the JSON, for the VS Code
+    /// target, which is always offered and starts only on pick (SPEC FR-W4c (1b), D55): its
+    /// failure is the error of `POST /api/sessions/{id}/ide/vscode`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub available: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     /// argv that opens `url` on the target computer (Gateway), for ember node to run.
@@ -214,7 +229,7 @@ pub struct Target {
 
 impl Target {
     fn unavailable(kind: &'static str, reason: String) -> Target {
-        Target { kind, available: false, url: None, command: None, launch: None, reason: Some(reason) }
+        Target { kind, available: Some(false), url: None, command: None, launch: None, reason: Some(reason) }
     }
 }
 
@@ -375,8 +390,9 @@ pub fn launch_targets(
 }
 
 /// The launch targets for one session on one resolved computer, with the OSE of this server for
-/// a local computer (one per target, D55). A registered computer's OSE runs on its node: the
-/// route asks the node and calls [`launch_targets_with`] (SPEC FR-W4c).
+/// a local computer. A registered computer's OSE runs on its node: the route asks the node and
+/// calls [`launch_targets_with`] (SPEC FR-W4c). Only the Ember target's OSE is started; the VS
+/// Code target is listed and starts on pick (FR-W4c (1b), D55).
 pub fn launch_targets_for(
     rec: &SessionRecord,
     target: &IdeComputer,
@@ -384,54 +400,56 @@ pub fn launch_targets_for(
     ose: &OseManager,
 ) -> IdeLaunch {
     let folder = std::path::Path::new(&rec.cwd);
-    let (connection, vscode) = if target.ide.local {
-        (
-            ose.connection(folder),
-            ose.launch_for_target(LOCAL_COMPUTER, folder, OseTarget::Vscode).map(|l| l.connection),
-        )
-    } else {
-        (Err(LOCAL_ONLY.into()), Err(LOCAL_ONLY.into()))
-    };
-    launch_targets_with(rec, target, server_url, connection, vscode)
+    let connection = if target.ide.local { ose.connection(folder) } else { Err(LOCAL_ONLY.into()) };
+    launch_targets_with(rec, target, server_url, connection)
+}
+
+/// The launch of `rec`'s folder on `target`, with `ose` as its connection.
+fn launch_of(
+    rec: &SessionRecord,
+    target: &IdeComputer,
+    server_url: Option<&str>,
+    ose: Option<EmberOseConnection>,
+) -> EmberLaunch {
+    EmberLaunch {
+        session: rec.id.clone(),
+        project: rec.project.clone(),
+        computer: target.id.clone(),
+        computer_name: target.named.then(|| target.name.clone()),
+        folder: rec.cwd.clone(),
+        server_url: server_url.map(String::from),
+        ose,
+    }
 }
 
 /// The launch targets for one session on one resolved computer, given the OSE connection of the
-/// Ember target and of the VS Code target (or why there is none). The VS Code connection has a
-/// relay and no endpoint and no token (D55), so its `ose` is `{relay}` in the JSON.
+/// Ember target (or why there is none). The VS Code target is `{kind: "vscode"}` alone, on every
+/// computer: it is started on pick by `POST /api/sessions/{id}/ide/vscode`, whose error is the
+/// only place a VS Code failure appears (SPEC FR-W4c (1b), (1c), D55).
 pub fn launch_targets_with(
     rec: &SessionRecord,
     target: &IdeComputer,
     server_url: Option<&str>,
     connection: Result<EmberOseConnection, String>,
-    vscode: Result<EmberOseConnection, String>,
 ) -> IdeLaunch {
     let computer_name = target.id.as_str();
     let computer = &target.ide;
     let display = target.named.then(|| target.name.clone());
     let folder = rec.cwd.clone();
-    let launch_target = |kind: &'static str, connection: Result<EmberOseConnection, String>| Target {
-        kind,
-        available: connection.is_ok(),
+    let ember = Target {
+        kind: "ember",
+        available: Some(connection.is_ok()),
         url: None,
         command: None,
-        launch: Some(EmberLaunch {
-            session: rec.id.clone(),
-            project: rec.project.clone(),
-            computer: computer_name.to_string(),
-            computer_name: display.clone(),
-            folder: folder.clone(),
-            server_url: server_url.map(String::from),
-            ose: connection.as_ref().ok().cloned(),
-        }),
+        launch: Some(launch_of(rec, target, server_url, connection.as_ref().ok().cloned())),
         reason: connection.err(),
     };
-    let ember = launch_target("ember", connection);
-    let vscode = launch_target("vscode", vscode);
+    let vscode = Target { kind: "vscode", available: None, url: None, command: None, launch: None, reason: None };
 
     let gateway = match gateway_url(computer, &folder) {
         Ok(url) => Target {
             kind: "gateway",
-            available: true,
+            available: Some(true),
             command: open_command(computer.os.as_deref(), &url),
             url: Some(url),
             launch: None,
@@ -446,6 +464,97 @@ pub fn launch_targets_with(
         folder,
         computer: ComputerRef { name: computer_name.to_string(), local: computer.local, computer_name: display },
         targets: vec![ember, vscode, gateway],
+    }
+}
+
+/// Why `POST /api/sessions/{id}/ide/vscode` gave no launch: the status and the body
+/// `{code, error}` (SPEC FR-W4c (1c)).
+#[derive(Debug, Clone, PartialEq)]
+pub struct VscodeLaunchError {
+    pub status: StatusCode,
+    pub code: &'static str,
+    pub error: String,
+}
+
+impl VscodeLaunchError {
+    fn new(status: StatusCode, code: &'static str, error: impl Into<String>) -> Self {
+        VscodeLaunchError { status, code, error: error.into() }
+    }
+}
+
+impl IntoResponse for VscodeLaunchError {
+    fn into_response(self) -> Response {
+        (self.status, Json(json!({ "code": self.code, "error": self.error }))).into_response()
+    }
+}
+
+/// `code` of the 404 for a session this server does not know.
+pub const SESSION_NOT_FOUND: &str = "session_not_found";
+/// `code` of the 404 for a `?computer=` that names no IDE computer.
+pub const UNKNOWN_COMPUTER: &str = "unknown_computer";
+/// `code` of the 409 for a computer that cannot run the VS Code target (known only from
+/// `EMBER_IDE_COMPUTERS` and not local, so no OSE to relay to, or a platform without Unix
+/// sockets).
+pub const VSCODE_UNAVAILABLE: &str = "vscode_unavailable";
+/// `code` of the 503 when the OSE binary is missing (on this server or on the node).
+pub const OSE_NOT_INSTALLED: &str = "ose_not_installed";
+/// `code` of the 502 when the node does not answer.
+pub const NODE_UNREACHABLE: &str = "node_unreachable";
+/// `code` of the 502 when the node answered a launch with a token or an endpoint: it is older than
+/// D55 and ignored `target` (its message is [`NODE_TOO_OLD_FOR_VSCODE`]).
+pub const NODE_TOO_OLD_FOR_VSCODE_CODE: &str = "node_too_old_for_vscode";
+/// `code` of the 502 when the node refused the launch for another reason (its text is the error).
+pub const NODE_ERROR: &str = "node_error";
+/// `code` of the 500 when this server's own OSE did not start (its text is the error).
+pub const OSE_START_FAILED: &str = "ose_start_failed";
+/// `code` of a 500 for an internal failure (the store, a task).
+pub const INTERNAL: &str = "internal";
+
+/// Starts or reuses the local computer's VS Code OSE of `rec`'s folder on this server's own
+/// manager and answers its launch (SPEC FR-W4c (1c), FR-W4a). Blocking for up to 10 s while a
+/// new OSE starts: call from `spawn_blocking`.
+pub fn local_vscode_launch(
+    rec: &SessionRecord,
+    target: &IdeComputer,
+    server_url: Option<&str>,
+    ose: &OseManager,
+) -> Result<EmberLaunch, VscodeLaunchError> {
+    match ose.launch_for_target(LOCAL_COMPUTER, std::path::Path::new(&rec.cwd), OseTarget::Vscode) {
+        Ok(l) => Ok(launch_of(rec, target, server_url, Some(l.connection))),
+        Err(m) if m == NOT_INSTALLED => Err(VscodeLaunchError::new(StatusCode::SERVICE_UNAVAILABLE, OSE_NOT_INSTALLED, m)),
+        Err(m) if m == SOCKET_UNSUPPORTED => Err(VscodeLaunchError::new(StatusCode::CONFLICT, VSCODE_UNAVAILABLE, m)),
+        Err(m) => Err(VscodeLaunchError::new(StatusCode::INTERNAL_SERVER_ERROR, OSE_START_FAILED, m)),
+    }
+}
+
+/// The answer to a node's `POST /ide/ose {folder, target: "vscode"}` for computer `id`, as the
+/// launch of `rec`'s folder or the error of route (1c). Pure, for tests.
+pub fn node_vscode_launch(
+    rec: &SessionRecord,
+    target: &IdeComputer,
+    server_url: Option<&str>,
+    answer: Result<ember_node::ose_api::OseLaunchResponse, ClientError>,
+) -> Result<EmberLaunch, VscodeLaunchError> {
+    let id = target.id.as_str();
+    match answer {
+        Ok(launch) => match connection_from_node(id, OseTarget::Vscode, launch) {
+            Ok(conn) => Ok(launch_of(rec, target, server_url, Some(conn))),
+            Err(m) if m == NODE_TOO_OLD_FOR_VSCODE => {
+                Err(VscodeLaunchError::new(StatusCode::BAD_GATEWAY, NODE_TOO_OLD_FOR_VSCODE_CODE, m))
+            }
+            Err(m) => Err(VscodeLaunchError::new(StatusCode::BAD_GATEWAY, NODE_ERROR, m)),
+        },
+        // A 403 for a path outside the node's roots is the node's answer, not a refused server.
+        Err(ClientError::Api { status, body })
+            if node_refused_server(status) && body.code != ErrorCode::ForbiddenPath =>
+        {
+            Err(VscodeLaunchError::new(StatusCode::BAD_GATEWAY, NODE_AUTH_FAILED, node_auth_failed_message(id)))
+        }
+        Err(ClientError::Api { status, body }) if status == StatusCode::SERVICE_UNAVAILABLE.as_u16() => {
+            Err(VscodeLaunchError::new(StatusCode::SERVICE_UNAVAILABLE, OSE_NOT_INSTALLED, body.error))
+        }
+        Err(ClientError::Api { body, .. }) => Err(VscodeLaunchError::new(StatusCode::BAD_GATEWAY, NODE_ERROR, body.error)),
+        Err(e) => Err(VscodeLaunchError::new(StatusCode::BAD_GATEWAY, NODE_UNREACHABLE, format!("node unreachable: {e}"))),
     }
 }
 
@@ -496,6 +605,7 @@ fn build(
 ) -> Router {
     Router::new()
         .route("/api/sessions/{id}/ide", get(ide_targets))
+        .route("/api/sessions/{id}/ide/vscode", post(ide_vscode))
         .route("/api/computers/{computer}/ide/relay/{launch_id}", get(ide_relay))
         .with_state(IdeState {
             sessions,
@@ -736,22 +846,36 @@ fn error(code: StatusCode, msg: String) -> Response {
     (code, Json(json!({ "error": msg }))).into_response()
 }
 
-async fn ide_targets(
-    State(st): State<IdeState>,
-    Path(id): Path<String>,
-    Query(q): Query<IdeQuery>,
-    headers: HeaderMap,
-) -> Response {
-    let rec = match st.sessions.store().session(&id) {
+/// A 500 for an internal failure (the store, the registry), in the shape [`resolve`] answers.
+fn internal(e: impl std::fmt::Display) -> (StatusCode, &'static str, String) {
+    (StatusCode::INTERNAL_SERVER_ERROR, INTERNAL, format!("{e:#}"))
+}
+
+/// The session, computer and server URL a request on `/api/sessions/{id}/ide[...]` names.
+struct Resolved {
+    rec: SessionRecord,
+    computer: IdeComputer,
+    /// The computer is a registered node (not local): its OSE runs on the node (SPEC FR-W4c).
+    on_node: bool,
+    server_url: Option<String>,
+}
+
+/// Resolves the session `id` and the computer of `?computer=` (else the session's current
+/// computer, else `default_computer`, else the local computer), the same way for the listing and
+/// for the VS Code pick. An error is the status, the `code` (the pick's body) and the message.
+fn resolve(
+    st: &IdeState,
+    id: &str,
+    q: Option<String>,
+    headers: &HeaderMap,
+) -> Result<Resolved, (StatusCode, &'static str, String)> {
+    let rec = match st.sessions.store().session(id) {
         Ok(Some(rec)) => rec,
-        Ok(None) => return error(StatusCode::NOT_FOUND, format!("session not found: {id}")),
-        Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+        Ok(None) => return Err((StatusCode::NOT_FOUND, SESSION_NOT_FOUND, format!("session not found: {id}"))),
+        Err(e) => return Err(internal(e)),
     };
     let registered = match &st.computers {
-        Some(c) => match c.registry().list() {
-            Ok(l) => Some(l),
-            Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
-        },
+        Some(c) => Some(c.registry().list().map_err(internal)?),
         None => None,
     };
     let (all, unmatched) = resolve_computers(&st.config, registered.as_deref());
@@ -763,13 +887,13 @@ async fn ide_targets(
             );
         }
     }
-    let computer = match q.computer {
+    let computer = match q {
         Some(name) => match find_computer(&all, &name) {
             Some(c) => c,
-            None => return error(StatusCode::NOT_FOUND, format!("unknown computer: {name}")),
+            None => return Err((StatusCode::NOT_FOUND, UNKNOWN_COMPUTER, format!("unknown computer: {name}"))),
         },
         None => {
-            let current = st.computers.as_ref().and_then(|c| c.current(&st.sessions, &id).ok());
+            let current = st.computers.as_ref().and_then(|c| c.current(&st.sessions, id).ok());
             let from_session = current
                 .filter(|cur| !cur.implicit)
                 .and_then(|cur| all.iter().find(|c| c.id == cur.computer.id));
@@ -779,10 +903,11 @@ async fn ide_targets(
             {
                 Some(c) => c,
                 None => {
-                    return error(
+                    return Err((
                         StatusCode::NOT_FOUND,
+                        UNKNOWN_COMPUTER,
                         format!("unknown computer: {}", st.config.default_computer),
-                    )
+                    ))
                 }
             }
         }
@@ -798,20 +923,30 @@ async fn ide_targets(
     let on_node = !computer.ide.local
         && computer.id != LOCAL
         && registered.as_deref().is_some_and(|l| l.iter().any(|c| c.id == computer.id));
+    Ok(Resolved { rec, computer: computer.clone(), on_node, server_url })
+}
+
+async fn ide_targets(
+    State(st): State<IdeState>,
+    Path(id): Path<String>,
+    Query(q): Query<IdeQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let Resolved { rec, computer, on_node, server_url } = match resolve(&st, &id, q.computer, &headers) {
+        Ok(r) => r,
+        Err((status, _, msg)) => return error(status, msg),
+    };
+    // Only the Ember target's OSE is started here; the VS Code target starts on pick (FR-W4c (1b)).
     let launch = match &st.computers {
         Some(computers) if on_node => {
-            // Both targets at once: each may start an OSE on the node (up to 10 s).
-            let (connection, vscode) = tokio::join!(
-                node_ose_connection(computers, &computer.id, &rec.cwd, OseTarget::Ember),
-                node_ose_connection(computers, &computer.id, &rec.cwd, OseTarget::Vscode),
-            );
-            launch_targets_with(&rec, computer, server_url.as_deref(), connection, vscode)
+            let connection = node_ose_connection(computers, &computer.id, &rec.cwd, OseTarget::Ember).await;
+            launch_targets_with(&rec, &computer, server_url.as_deref(), connection)
         }
         _ => {
             // A new OSE takes up to 10 s to listen: keep the wait off the async workers.
-            let (ose, target) = (st.ose.clone(), computer.clone());
+            let ose = st.ose.clone();
             let started = tokio::task::spawn_blocking(move || {
-                launch_targets_for(&rec, &target, server_url.as_deref(), &ose)
+                launch_targets_for(&rec, &computer, server_url.as_deref(), &ose)
             })
             .await;
             match started {
@@ -821,6 +956,53 @@ async fn ide_targets(
         }
     };
     Json(launch).into_response()
+}
+
+/// `POST /api/sessions/{id}/ide/vscode[?computer=<name>]` (SPEC FR-W4c (1c), D55): starts or
+/// reuses the folder's VS Code OSE when the user picks VS Code, and answers its launch
+/// `{session, project, computer, computer_name?, folder, server_url, ose: {relay, ose_commit?}}`,
+/// or `{code, error}`.
+async fn ide_vscode(
+    State(st): State<IdeState>,
+    Path(id): Path<String>,
+    Query(q): Query<IdeQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let Resolved { rec, computer, on_node, server_url } = match resolve(&st, &id, q.computer, &headers) {
+        Ok(r) => r,
+        Err((status, code, msg)) => return VscodeLaunchError::new(status, code, msg).into_response(),
+    };
+    let launch = match &st.computers {
+        Some(computers) if on_node => {
+            let answer = match computers.client(&computer.id) {
+                Ok(node) => node.with_deadline(NODE_OSE_START_TIMEOUT).ide_ose_for(&rec.cwd, OseTarget::Vscode).await,
+                Err(e) => Err(ClientError::Transport(format!("{e:#}"))),
+            };
+            node_vscode_launch(&rec, &computer, server_url.as_deref(), answer)
+        }
+        _ if computer.ide.local => {
+            // A new OSE takes up to 10 s to listen: keep the wait off the async workers.
+            let ose = st.ose.clone();
+            let started = tokio::task::spawn_blocking(move || {
+                local_vscode_launch(&rec, &computer, server_url.as_deref(), &ose)
+            })
+            .await;
+            match started {
+                Ok(launch) => launch,
+                Err(e) => Err(VscodeLaunchError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    INTERNAL,
+                    format!("OSE launch task failed: {e}"),
+                )),
+            }
+        }
+        // Known only from `EMBER_IDE_COMPUTERS` and not local: no OSE to relay to.
+        _ => Err(VscodeLaunchError::new(StatusCode::CONFLICT, VSCODE_UNAVAILABLE, LOCAL_ONLY)),
+    };
+    match launch {
+        Ok(launch) => Json(launch).into_response(),
+        Err(e) => e.into_response(),
+    }
 }
 
 #[cfg(test)]
@@ -861,7 +1043,7 @@ mod tests {
         let manager = OseManager::new(None);
         let targets = launch_targets(&record(dir.path()), "local", &ComputerIde { local: true, ..Default::default() }, None, &manager);
         let ember = &targets.targets[0];
-        assert!(!ember.available);
+        assert_eq!(ember.available, Some(false));
         assert!(ember.reason.as_ref().unwrap().contains("not installed"));
         assert!(serde_json::to_value(ember).unwrap()["launch"].get("ose").is_none());
     }
@@ -879,7 +1061,7 @@ while True: s.accept()[0].close()' "$@"
         let computer = ComputerIde { local: true, ..Default::default() };
         let first = launch_targets(&record(dir.path()), "local", &computer, None, &manager);
         let second = launch_targets(&record(dir.path()), "local", &computer, None, &manager);
-        assert!(first.targets[0].available);
+        assert_eq!(first.targets[0].available, Some(true));
         let connection = first.targets[0].launch.as_ref().unwrap().ose.as_ref().unwrap();
         assert_eq!(Some(connection), second.targets[0].launch.as_ref().unwrap().ose.as_ref());
         assert!(!connection.connection_token.is_empty());
@@ -914,10 +1096,10 @@ while True: s.accept()[0].close()' "$@"
         assert_eq!(percent_encode("a&b=c#d", true), "a%26b%3Dc%23d");
     }
 
-    /// FR-W4c (1b) (D55, #1064): the VS Code target is a launch like the Ember target's whose
-    /// `ose` is the relay alone: no URL, no endpoint, no token.
+    /// FR-W4c (1b) (D55, #1064): the listing's VS Code target is `{kind: "vscode"}` alone, on
+    /// every computer, whatever the Ember target's state.
     #[test]
-    fn fr_w4c_vscode_target_json_is_a_relay_launch() {
+    fn fr_w4c_listed_vscode_target_is_the_kind_alone() {
         let dir = tempfile::tempdir().unwrap();
         let computer = IdeComputer {
             id: "c1".into(), name: "box".into(), ide: ComputerIde::default(), aliases: vec![], named: true,
@@ -928,36 +1110,71 @@ while True: s.accept()[0].close()' "$@"
             connection_token: "p".repeat(64),
             ose_commit: None,
         };
-        let vscode = EmberOseConnection {
-            endpoint: String::new(),
-            relay: Some("/api/computers/c1/ide/relay/v".into()),
-            connection_token: String::new(),
-            ose_commit: None,
+        for connection in [Ok(ember), Err("node unreachable: y".to_string())] {
+            let launch = launch_targets_with(&record(dir.path()), &computer, Some("http://s"), connection);
+            let v = serde_json::to_value(&launch).unwrap();
+            assert_eq!(v["targets"][1], serde_json::json!({ "kind": "vscode" }));
+            assert!(v["targets"][0]["available"].is_boolean(), "the Ember target keeps `available`");
+            assert!(v["targets"][2]["available"].is_boolean(), "the Gateway target keeps `available`");
+        }
+        // A computer known only from `EMBER_IDE_COMPUTERS` and not local lists it too.
+        let env_only = launch_targets(&record(dir.path()), "lab", &ComputerIde::default(), None, &OseManager::new(None));
+        assert_eq!(serde_json::to_value(&env_only.targets[1]).unwrap(), serde_json::json!({ "kind": "vscode" }));
+    }
+
+    /// FR-W4c (1c) (D55, #1064): a node's answer to the pick becomes the launch with the relay
+    /// alone, or `{code, error}` with the status the SPEC names.
+    #[test]
+    fn fr_w4c_node_vscode_pick_answers_the_launch_or_a_coded_error() {
+        use ember_node::ose_api::OseLaunchResponse;
+        use ember_node::proto::ErrorBody;
+        let dir = tempfile::tempdir().unwrap();
+        let rec = record(dir.path());
+        let computer = IdeComputer {
+            id: "c1".into(), name: "box".into(), ide: ComputerIde::default(), aliases: vec![], named: true,
         };
-        let launch = launch_targets_with(&record(dir.path()), &computer, Some("http://s"), Ok(ember), Ok(vscode));
-        let v = serde_json::to_value(&launch).unwrap();
-        let vs = &v["targets"][1];
+        let id = "0123456789abcdef0123456789abcdef".to_string();
+        let socket = OseLaunchResponse {
+            launch_id: id.clone(), endpoint: String::new(), connection_token: String::new(), ose_commit: Some("abc".into()),
+        };
+        let launch = node_vscode_launch(&rec, &computer, Some("http://s"), Ok(socket)).unwrap();
         let folder = dir.path().to_string_lossy().into_owned();
         assert_eq!(
-            *vs,
+            serde_json::to_value(&launch).unwrap(),
             serde_json::json!({
-                "kind": "vscode",
-                "available": true,
-                "launch": {
-                    "session": "s", "project": "p", "computer": "c1", "computer_name": "box",
-                    "folder": folder, "server_url": "http://s",
-                    "ose": { "relay": "/api/computers/c1/ide/relay/v" }
-                }
+                "session": "s", "project": "p", "computer": "c1", "computer_name": "box",
+                "folder": folder, "server_url": "http://s",
+                "ose": { "relay": format!("/api/computers/c1/ide/relay/{id}"), "ose_commit": "abc" }
             })
         );
-        let unavailable = launch_targets_with(
-            &record(dir.path()), &computer, None, Err("x".into()), Err("node unreachable: y".into()),
-        );
-        let v = serde_json::to_value(&unavailable).unwrap();
-        assert_eq!(v["targets"][1]["available"], false);
-        assert_eq!(v["targets"][1]["reason"], "node unreachable: y");
-        assert!(v["targets"][1]["launch"].get("ose").is_none());
-        assert!(v["targets"][1].get("url").is_none());
+
+        let api = |status: u16, code: ErrorCode, error: &str| ClientError::Api {
+            status,
+            body: ErrorBody { code, error: error.into(), actual_sha256: None, errno: None },
+        };
+        let tcp = OseLaunchResponse {
+            launch_id: id, endpoint: "http://127.0.0.1:1".into(), connection_token: "p".repeat(64), ose_commit: None,
+        };
+        let cases = [
+            (Ok(tcp), StatusCode::BAD_GATEWAY, NODE_TOO_OLD_FOR_VSCODE_CODE),
+            (Err(api(503, ErrorCode::Internal, NOT_INSTALLED)), StatusCode::SERVICE_UNAVAILABLE, OSE_NOT_INSTALLED),
+            (Err(ClientError::Transport("refused".into())), StatusCode::BAD_GATEWAY, NODE_UNREACHABLE),
+            (Err(ClientError::Timeout(NODE_OSE_START_TIMEOUT)), StatusCode::BAD_GATEWAY, NODE_UNREACHABLE),
+            (Err(api(401, ErrorCode::Unauthorized, "bad token")), StatusCode::BAD_GATEWAY, NODE_AUTH_FAILED),
+            (Err(api(403, ErrorCode::ForbiddenPath, "outside the allowed roots")), StatusCode::BAD_GATEWAY, NODE_ERROR),
+        ];
+        for (answer, status, code) in cases {
+            let e = node_vscode_launch(&rec, &computer, None, answer).unwrap_err();
+            assert_eq!((e.status, e.code), (status, code), "{e:?}");
+        }
+        let old = node_vscode_launch(&rec, &computer, None, Ok(OseLaunchResponse {
+            launch_id: "0123456789abcdef0123456789abcdef".into(), endpoint: String::new(),
+            connection_token: "p".repeat(64), ose_commit: None,
+        }))
+        .unwrap_err();
+        assert_eq!(old.error, NODE_TOO_OLD_FOR_VSCODE);
+        let forbidden = node_vscode_launch(&rec, &computer, None, Err(api(403, ErrorCode::ForbiddenPath, "outside the allowed roots"))).unwrap_err();
+        assert_eq!(forbidden.error, "outside the allowed roots");
     }
 
     /// FR-W4c (1b) (D55, #1064): a node's VS Code launch with a token or an endpoint is a node that
@@ -979,16 +1196,19 @@ while True: s.accept()[0].close()' "$@"
         assert!(connection_from_node("c1", OseTarget::Vscode, bad).is_err());
     }
 
-    /// FR-W4c (1b) (D55, #1064): the local computer's VS Code target is this server's own socket
-    /// OSE of the folder, behind the local relay path, and the relay reaches its socket with no
-    /// token to replace. A short `/tmp` dir keeps the socket path inside a socket address.
+    /// FR-W4c (1b), (1c) (D55, #1064): listing the local computer's targets starts no VS Code
+    /// OSE; the pick starts this server's own socket OSE of the folder, behind the local relay
+    /// path, reuses it on a second pick, and the relay reaches its socket with no token to
+    /// replace. A short `/tmp` dir keeps the socket path inside a socket address.
     #[cfg(unix)]
     #[test]
     fn fr_w4c_local_vscode_target_is_the_servers_socket_ose() {
         let dir = tempfile::Builder::new().prefix("ew").tempdir_in("/tmp").unwrap();
         let base = dir.path().canonicalize().unwrap();
         let script = base.join("server");
-        crate::test_exec::write_exec_ready(&script, r##"#!/bin/sh
+        let starts = base.join("starts");
+        crate::test_exec::write_exec_ready(&script, &format!(r##"#!/bin/sh
+echo "$@" >> '{}'
 exec python3 -c '
 import socket, sys
 a = sys.argv
@@ -1002,24 +1222,36 @@ s.listen()
 while True:
     s.accept()[0].close()
 ' "$@"
-"##);
+"##, starts.display()));
+        let socket_starts = || {
+            std::fs::read_to_string(&starts).unwrap_or_default().lines().filter(|l| l.contains("--socket-path")).count()
+        };
         let manager = OseManager::with_data_root(Some(script), base.join("d"));
         let computer = ComputerIde { local: true, ..Default::default() };
-        let first = launch_targets(&record(&base), "local", &computer, None, &manager);
-        let vs = &first.targets[1];
-        assert_eq!(vs.kind, "vscode");
-        assert!(vs.available, "{:?}", vs.reason);
-        assert!(vs.url.is_none());
-        let conn = vs.launch.as_ref().unwrap().ose.as_ref().unwrap();
+        let listed = launch_targets(&record(&base), "local", &computer, None, &manager);
+        assert_eq!(serde_json::to_value(&listed.targets[1]).unwrap(), serde_json::json!({ "kind": "vscode" }));
+        assert_eq!(listed.targets[0].available, Some(true), "{:?}", listed.targets[0].reason);
+        assert_eq!(socket_starts(), 0, "listing started a VS Code OSE");
+
+        let target = IdeComputer { id: "local".into(), name: "local".into(), ide: computer, aliases: vec![], named: false };
+        let first = local_vscode_launch(&record(&base), &target, Some("http://s"), &manager).unwrap();
+        assert_eq!(socket_starts(), 1);
+        let conn = first.ose.as_ref().unwrap();
         assert!(conn.endpoint.is_empty() && conn.connection_token.is_empty());
         let relay = conn.relay.as_deref().unwrap();
         let launch_id = relay.strip_prefix("/api/computers/local/ide/relay/").expect(relay);
-        assert_ne!(first.targets[0].launch.as_ref().unwrap().ose.as_ref().unwrap().relay.as_deref(), Some(relay));
-        let again = launch_targets(&record(&base), "local", &computer, None, &manager);
-        assert_eq!(again.targets[1].launch.as_ref().unwrap().ose.as_ref(), Some(conn), "reused");
-        let target = manager.open_relay(LOCAL, launch_id).ok().expect("the relay finds the launch");
-        assert!(matches!(&target.address, crate::ose::OseAddress::Unix(p) if p.starts_with(base.join("d"))));
-        assert!(target.real_token.is_empty() && target.placeholder.is_empty());
+        assert_ne!(listed.targets[0].launch.as_ref().unwrap().ose.as_ref().unwrap().relay.as_deref(), Some(relay));
+        let again = local_vscode_launch(&record(&base), &target, Some("http://s"), &manager).unwrap();
+        assert_eq!(again.ose.as_ref(), Some(conn), "reused");
+        assert_eq!(socket_starts(), 1, "a second pick started another OSE");
+        let found = manager.open_relay(LOCAL, launch_id).ok().expect("the relay finds the launch");
+        assert!(matches!(&found.address, crate::ose::OseAddress::Unix(p) if p.starts_with(base.join("d"))));
+        assert!(found.real_token.is_empty() && found.placeholder.is_empty());
+
+        // Without a binary the pick is a 503 with its code.
+        let none = OseManager::with_data_root(None, base.join("d2"));
+        let e = local_vscode_launch(&record(&base), &target, None, &none).unwrap_err();
+        assert_eq!((e.status, e.code, e.error.as_str()), (StatusCode::SERVICE_UNAVAILABLE, OSE_NOT_INSTALLED, NOT_INSTALLED));
     }
 
     #[test]

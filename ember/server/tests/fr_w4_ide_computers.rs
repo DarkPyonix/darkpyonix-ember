@@ -110,13 +110,9 @@ async fn fr_l7_fr_w4_env_override_merges_onto_a_registry_computer_by_name() {
     assert_eq!(status, StatusCode::OK);
     // The id is the registry id, the IDE details are the env entry's.
     assert_eq!(v["computer"]["name"], f.node_id.as_str());
-    // D55 (#1064): the VS Code target of a registered computer comes from its node, not from
-    // `ide_url`; this node does not answer.
-    let vscode = target(&v, "vscode");
-    assert!(vscode.get("url").is_none(), "{vscode}");
-    assert_eq!(vscode["available"], false, "{vscode}");
-    assert!(vscode["reason"].as_str().unwrap().starts_with("node unreachable"), "{vscode}");
-    assert_eq!(vscode["launch"]["computer"], f.node_id.as_str());
+    // D55 (#1064): the VS Code target of a registered computer comes from its node on pick, not
+    // from `ide_url`; the listing carries the kind alone and asks the node nothing for it.
+    assert_eq!(*target(&v, "vscode"), serde_json::json!({ "kind": "vscode" }));
     assert_eq!(target(&v, "gateway")["available"], true);
     assert_eq!(target(&v, "ember")["launch"]["computer"], f.node_id.as_str());
 }
@@ -131,11 +127,9 @@ async fn fr_l7_fr_w4_env_name_without_a_registry_match_keeps_working() {
     let (status, v) = get_with(&f, c, true, "?computer=lab").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(v["computer"]["name"], "lab");
-    // D55 (#1064): `ide_url` no longer makes a URL; with no node, VS Code is unavailable.
-    let vscode = target(&v, "vscode");
-    assert!(vscode.get("url").is_none(), "{vscode}");
-    assert_eq!(vscode["available"], false);
-    assert_eq!(vscode["reason"], "OSE server is only available on the local computer");
+    // D55 (#1064): `ide_url` no longer makes a URL; VS Code is listed as the kind alone, and
+    // picking it here (no node, not local) is the pick's error.
+    assert_eq!(*target(&v, "vscode"), serde_json::json!({ "kind": "vscode" }));
 }
 
 #[tokio::test]

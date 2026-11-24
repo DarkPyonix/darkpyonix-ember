@@ -233,6 +233,17 @@ jobs:
       - name: Live extension scan (FR-L31.14)
         run: cargo test --locked --manifest-path ember/editor/Cargo.toml --test fr_l31_14_live_extensions -- --ignored --nocapture
 
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ needs.product.outputs.node }}
+
+      - name: Live tab detach and NFR-B1 timing (CDP)
+        # Verifies VS Code Web tab reorder, detach payload URL, dirty refusal, and detached window
+        # load timing against real dpx-ose-server + ember/proxy rewrite. Not a gate until its first
+        # green run (gates change in their own PR).
+        continue-on-error: true
+        run: node ember/proxy/tests/live_detach_cdp.mjs
+
       - name: Extension regression (NFR-W1)
         # Not yet a release gate: expected.json holds unverified entries until the first real run,
         # and the owner has not confirmed the list (#84). Remove continue-on-error after that.

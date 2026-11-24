@@ -2088,3 +2088,15 @@ fn fr_l31_25_action_ask_attaches_file_and_selection_context() {
     assert!(last.text.contains("이 함수 리팩터링해줘"));
 }
 
+
+#[test]
+fn fr_l31_tree_and_tab_focus_follow_the_key_outcome() {
+    use ember_app::ui::editor::{tab_key_focus, tree_key_focus, TabKeyOutcome, TreeKeyOutcome};
+    assert_eq!(tree_key_focus(&TreeKeyOutcome::Select("/p/b.rs".into(), false)), Some("/p/b.rs"));
+    assert_eq!(tree_key_focus(&TreeKeyOutcome::Expand("/p/src".into())), None);
+    assert_eq!(tree_key_focus(&TreeKeyOutcome::OpenFile("/p/b.rs".into())), None);
+    let paths = vec!["/p/a.rs".to_string(), "/p/b.rs".to_string()];
+    assert_eq!(tab_key_focus(&paths, &TabKeyOutcome::Activate("/p/b.rs".into())), Some(1));
+    assert_eq!(tab_key_focus(&paths, &TabKeyOutcome::Activate("/p/z.rs".into())), None);
+    assert_eq!(tab_key_focus(&paths, &TabKeyOutcome::Close("/p/b.rs".into())), None);
+}

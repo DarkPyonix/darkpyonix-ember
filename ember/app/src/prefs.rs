@@ -17,14 +17,21 @@ pub const PREFS_FORMAT: u32 = 1;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LastUsed {
     pub agent: String,
-    /// `None`: let the server's router choose.
-    #[serde(default)]
+    /// Legacy field kept for backwards-compatible deserialization; accounts now come from the
+    /// harness profile (FR-L8, FR-L17).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
     /// Computer id; `None`: the session's default (the main server itself).
     #[serde(default)]
     pub computer: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
+    /// Effort key (e.g. `"High"`, `"Medium"`, `"Low"`) from the model picker (FR-L15).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// Permission mode key (`"ask"`, `"edits"`, `"bypass"`, `"plan"`) from the mode picker (FR-L16).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
     #[serde(default)]
     pub cwd: String,
 }
@@ -266,6 +273,8 @@ mod tests {
                 account: Some("a1".into()),
                 computer: Some("c1".into()),
                 model: Some("o3".into()),
+                effort: Some("Medium".into()),
+                mode: Some("edits".into()),
                 cwd: "/w".into(),
             },
         );
@@ -274,6 +283,47 @@ mod tests {
         assert_eq!(load(&path), p);
         std::fs::write(&path, b"{nope").unwrap();
         assert_eq!(load(&path), Prefs::default());
+    }
+
+    #[test]
+    fn fr_l8_last_used_round_trips_effort_and_mode_and_loads_older_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+
+        // Older prefs files lack `effort` and `mode` and still carry `account`.
+        std::fs::write(
+            &path,
+            br#"{"format":1,"last_used":{"ember":{"agent":"codex","account":"a1","computer":"c1","model":"gpt-5","cwd":"/w"}}}"#,
+        )
+        .unwrap();
+        let old = load(&path);
+        let old_entry = old.last_used.get("ember").expect("ember entry");
+        assert_eq!(old_entry.agent, "codex");
+        assert_eq!(old_entry.account.as_deref(), Some("a1"));
+        assert_eq!(old_entry.model.as_deref(), Some("gpt-5"));
+        assert_eq!(old_entry.effort, None);
+        assert_eq!(old_entry.mode, None);
+
+        // New prefs round-trip `effort` and `mode` and omit `account` when `None`.
+        let mut p = Prefs::default();
+        p.last_used.insert(
+            "ember".into(),
+            LastUsed {
+                agent: "claude-code".into(),
+                account: None,
+                computer: None,
+                model: Some("opus".into()),
+                effort: Some("High".into()),
+                mode: Some("plan".into()),
+                cwd: "/work".into(),
+            },
+        );
+        save(&path, &p).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("\"effort\": \"High\""), "effort persisted: {raw}");
+        assert!(raw.contains("\"mode\": \"plan\""), "mode persisted: {raw}");
+        assert!(!raw.contains("\"account\""), "None account omitted: {raw}");
+        assert_eq!(load(&path), p);
     }
 
     #[test]

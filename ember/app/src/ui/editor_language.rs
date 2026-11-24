@@ -19,14 +19,12 @@
 //!   definition (`on_code_pointer` with `pointer_kinds`, [`pointer_definition`]).
 //! * compose-rust#556: snippet completions are forwarded as `WidgetCommand::InsertSnippet` and
 //!   opened in the widget's snippet session via `CodeEditorHandle::insert_snippet`.
-//!
-//! What is left, and why:
-//! * TODO(#673): a list takes the focus and is filtered in its own field. Keeping the focus in the
-//!   code means filtering by the word at the caret and routing Up, Down, Enter, Tab and Escape from
-//!   `on_key_preview` to the list; the toolkit has both, the change is the window's own.
-//! * TODO(#673): the parameter hint stays at the bottom of the editor area (#800). It sits inside
-//!   `.ed-main`, whose place in the window the page does not know, and a box fixed to the window
-//!   at the caret is the layout #800 moved away from; anchoring it waits for a display check.
+//! * While a completion or code actions list is open, `on_key_preview` routes `ArrowUp`,
+//!   `ArrowDown`, `Enter`, `Tab` and `Escape` directly to the list (`list_key_action`), so focus
+//!   stays in the code editor.
+//! * The parameter hint anchors above the caret (`hint_style`) once the editor reports its
+//!   rectangle, falling back to the bottom of the editor area (`hint_box::STYLE`) before the first
+//!   caret report.
 
 use std::collections::HashMap;
 
@@ -73,6 +71,52 @@ pub fn code_key_action(key: compose_rust::Key, text: &str, ctrl: bool, shift: bo
         _ => text,
     };
     action_for_key(name, ctrl, shift, alt, meta)
+}
+
+/// What a key offered by the focused code editor (`on_key_preview`) does while a completion or
+/// code actions list is open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListKeyAction {
+    MoveUp,
+    MoveDown,
+    Accept,
+    Close,
+}
+
+/// Whether `sheet` is a completion or code actions list whose navigation keys are routed from the
+/// focused code editor's `on_key_preview`.
+pub fn is_code_routed_list(sheet: &Sheet) -> bool {
+    matches!(sheet, Sheet::Completion { .. } | Sheet::Actions { .. })
+}
+
+/// Maps a key from `on_key_preview` to a list navigation, accept or close action while a
+/// completion or code actions list is open. Keys with Ctrl, Alt or Meta modifiers, and Shift+Tab,
+/// are left alone.
+pub fn list_key_action(key: compose_rust::Key, ctrl: bool, shift: bool, alt: bool, meta: bool) -> Option<ListKeyAction> {
+    if ctrl || alt || meta {
+        return None;
+    }
+    match key {
+        compose_rust::Key::ArrowUp if !shift => Some(ListKeyAction::MoveUp),
+        compose_rust::Key::ArrowDown if !shift => Some(ListKeyAction::MoveDown),
+        compose_rust::Key::Enter if !shift => Some(ListKeyAction::Accept),
+        compose_rust::Key::Tab if !shift => Some(ListKeyAction::Accept),
+        compose_rust::Key::Escape => Some(ListKeyAction::Close),
+        _ => None,
+    }
+}
+
+/// Next selected row index for `MoveUp` / `MoveDown` in a list of `count` rows.
+pub fn step_selection(current: usize, count: usize, action: ListKeyAction) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    let clamped = current.min(count - 1);
+    match action {
+        ListKeyAction::MoveDown => (clamped + 1) % count,
+        ListKeyAction::MoveUp => (clamped + count - 1) % count,
+        ListKeyAction::Accept | ListKeyAction::Close => clamped,
+    }
 }
 
 /// Where a press in the code goes to a definition (compose-rust#555): a primary-button `Down` with
@@ -547,10 +591,64 @@ pub fn caret_reveal_range(line: usize, col: usize) -> compose_rust::code::CodeRa
 }
 
 pub mod hint_box {
-    /// The box: anchored at the editor area's bottom left, above the code, below the drawer.
+    /// Shared visual frame of the parameter hint box.
+    pub const CHROME_STYLE: &str = "box-sizing:border-box; padding:8px 12px; display:flex; align-items:center; gap:8px; background:var(--surface); border:1px solid var(--line); border-radius:var(--r); box-shadow:var(--shadow-lg);";
+    /// Fallback box: anchored at the editor area's bottom left before the first caret report.
     pub const STYLE: &str = "position:absolute; z-index:15; left:12px; bottom:12px; max-width:calc(100% - 24px); box-sizing:border-box; padding:8px 12px; display:flex; align-items:center; gap:8px; background:var(--surface); border:1px solid var(--line); border-radius:var(--r); box-shadow:var(--shadow-lg);";
     /// The text: one line while it fits, wrapped anywhere past that.
     pub const TEXT_STYLE: &str = "flex:0 1 auto; min-width:0; font-family:var(--mono); font-size:13px; line-height:20px; white-space:pre-wrap; overflow-wrap:anywhere; color:var(--muted);";
+}
+
+/// Minimum vertical room needed above the caret to open the parameter hint above the line.
+const HINT_MIN_ABOVE: f32 = 44.0;
+/// Minimum horizontal room kept to the right edge of the pane when clamping the hint's left edge.
+const HINT_MIN_WIDTH: f32 = 240.0;
+/// Window edge margin when anchoring the parameter hint before the pane box is measured.
+const HINT_WINDOW_MARGIN: f32 = 12.0;
+
+/// Inline style for the parameter hint: anchored above the caret (clamped inside the editor pane
+/// or window) once the editor reports `caret`, flipping below when there is no room above, and
+/// falling back to [`hint_box::STYLE`] before the first caret report or when the caret is scrolled
+/// out of the pane.
+pub fn hint_style(caret: Option<compose_rust::code::CodeRect>, pane: Option<PaneBox>) -> String {
+    let Some(caret) = caret else { return hint_box::STYLE.to_string() };
+    if let Some(pane) = pane {
+        if !caret_in_pane(caret, pane) || pane.width <= 0.0 || pane.height <= 0.0 {
+            return hint_box::STYLE.to_string();
+        }
+        let max_w = (pane.width - 2.0 * PANE_MARGIN).max(0.0);
+        let min_w = HINT_MIN_WIDTH.min(max_w);
+        let min_left = pane.x + PANE_MARGIN;
+        let max_left = (pane.x + pane.width - PANE_MARGIN - min_w).max(min_left);
+        let left = caret.x.clamp(min_left, max_left);
+        let avail_w = (pane.x + pane.width - PANE_MARGIN - left).max(0.0);
+        let above = (caret.y - LIST_GAP) - (pane.y + PANE_MARGIN);
+        let below = (pane.y + pane.height - PANE_MARGIN) - (caret.bottom() + LIST_GAP);
+        let open_above = above >= HINT_MIN_ABOVE || above >= below;
+        let vert = if open_above {
+            let bottom_y = (caret.y - LIST_GAP).max(pane.y + PANE_MARGIN);
+            format!("top:auto; bottom:calc(100vh - {bottom_y:.0}px);")
+        } else {
+            let top_y = (caret.bottom() + LIST_GAP).min(pane.y + pane.height - PANE_MARGIN);
+            format!("top:{top_y:.0}px; bottom:auto;")
+        };
+        return format!(
+            "position:fixed; z-index:40; left:{left:.0}px; right:auto; {vert} max-width:{avail_w:.0}px; {}",
+            hint_box::CHROME_STYLE
+        );
+    }
+    // Caret reported before pane_box() is known: anchor to the caret clamped inside the window.
+    let left = caret.x.max(HINT_WINDOW_MARGIN);
+    let open_above = caret.y - LIST_GAP >= HINT_MIN_ABOVE + HINT_WINDOW_MARGIN;
+    let vert = if open_above {
+        format!("top:auto; bottom:calc(100vh - {:.0}px);", caret.y - LIST_GAP)
+    } else {
+        format!("top:{:.0}px; bottom:auto;", (caret.bottom() + LIST_GAP).max(HINT_WINDOW_MARGIN))
+    };
+    format!(
+        "position:fixed; z-index:40; left:{left:.0}px; right:auto; {vert} max-width:calc(100vw - {left:.0}px - {HINT_WINDOW_MARGIN:.0}px); {}",
+        hint_box::CHROME_STYLE
+    )
 }
 
 pub mod view {
@@ -625,6 +723,9 @@ pub mod view {
         if AWAIT_CARET.with(|cell| cell.take()).is_some() {
             redraw(s);
         }
+        if s.host.state.lock().unwrap().language.signature.is_some() {
+            redraw(s);
+        }
     }
 
     /// Whether the editor is to reveal the caret now (#895). Read once by the editor pane, which
@@ -648,10 +749,58 @@ pub mod view {
         })
     }
 
-    /// The code editor's `on_key_preview` (compose-rust#554): a language chord runs its feature and
-    /// the key is kept from the editor, and Escape closes the parameter hint when one is open. Any
-    /// other key goes on to the editor.
+    /// The code editor's `on_key_preview` (compose-rust#554): when a completion or code actions
+    /// list is open, `ArrowUp`, `ArrowDown`, `Enter`, `Tab` and `Escape` drive the list directly so
+    /// focus can stay in the code editor; otherwise Escape closes the parameter hint and language
+    /// chords run their features. Any other key goes on to the editor.
     pub fn code_key(s: &Shared, event: &compose_rust::KeyEvent) {
+        let open_list = {
+            let state = s.host.state.lock().unwrap();
+            state
+                .language
+                .sheet
+                .as_ref()
+                .filter(|sheet| super::is_code_routed_list(sheet))
+                .cloned()
+                .map(|sheet| (sheet, state.language.sheet_seq))
+        };
+        if let Some((sheet, seq)) = open_list {
+            if let Some(list_action) = super::list_key_action(
+                event.key(),
+                event.ctrl_key(),
+                event.shift_key(),
+                event.alt_key(),
+                event.meta_key(),
+            ) {
+                event.consume();
+                let ui = ui();
+                let (mut query, mut sel, mut seen) = (ui.query, ui.sel, ui.seq);
+                if *seen.peek() != seq {
+                    seen.set(seq);
+                    sel.set(0);
+                    query.set(String::new());
+                }
+                let text = query.peek().clone();
+                let shown: Vec<_> = rows(&sheet, &text, &s.folder).into_iter().take(MAX_ROWS).collect();
+                let count = shown.len();
+                let chosen = (*sel.peek()).min(count.saturating_sub(1));
+                match list_action {
+                    super::ListKeyAction::Close => cancel(s),
+                    super::ListKeyAction::MoveUp | super::ListKeyAction::MoveDown => {
+                        if count > 0 {
+                            sel.set(super::step_selection(chosen, count, list_action));
+                            redraw(s);
+                        }
+                    }
+                    super::ListKeyAction::Accept => {
+                        if let Some(index) = shown.get(chosen).filter(|row| row.enabled).map(|row| row.index) {
+                            choose(s, index);
+                        }
+                    }
+                }
+                return;
+            }
+        }
         if event.key() == compose_rust::Key::Escape && dismiss_hint(s) {
             event.consume();
             return;
@@ -851,16 +1000,18 @@ pub mod view {
         }
     }
 
-    /// The parameter hint: the signature with the parameter being typed set off. It sits at the
-    /// bottom of the editor area because the widget does not say where the caret is on screen.
-    // TODO(#673): anchor the hint above the caret (see the module notes).
+    /// The parameter hint: the signature with the parameter being typed set off. Anchored above the
+    /// caret once the editor reports its rectangle, falling back to the bottom of the editor area
+    /// before the first caret report.
     fn hint(s: &Shared, help: &ember_editor::language::SignatureHelp) -> Element {
         use super::hint_box;
         let Some((before, active, after)) = signature_parts(help) else { return rsx! {} };
         let count = help.signatures.len();
         let close_s = s.clone();
+        let (caret_rect, pane) = (CARET_RECT.with(|cell| cell.get()), pane_box());
+        let style = super::hint_style(caret_rect, pane);
         rsx! {
-            div { role: "status", "aria-label": "매개변수 정보", style: hint_box::STYLE,
+            div { role: "status", "aria-label": "매개변수 정보", style: "{style}",
                 code { style: hint_box::TEXT_STYLE,
                     "{before}"
                     span { style: "font-weight:var(--fw-semibold); color:var(--text);", "{active}" }
@@ -887,8 +1038,9 @@ pub mod view {
     }
 
     /// The list over the window, when there is one to show: under the caret once the editor has
-    /// reported it (compose-rust#553), else as a sheet like the command palette.
-    // TODO(#673): keep the focus in the code and take the list's keys from `on_key_preview`.
+    /// reported it (compose-rust#553), else as a sheet like the command palette. Completion and
+    /// code actions lists leave focus in the code editor and take navigation keys from
+    /// `on_key_preview`.
     pub fn overlay(s: &Shared) -> Element {
         capture_hook(s);
         let ui = ui();
@@ -911,6 +1063,7 @@ pub mod view {
         }
         let text = query.read().clone();
         let is_rename = matches!(sheet, Sheet::Rename { .. });
+        let is_code_list = super::is_code_routed_list(&sheet);
         let list = rows(&sheet, &text, &s.folder);
         let total = list.len();
         let shown: Vec<_> = list.into_iter().take(MAX_ROWS).collect();
@@ -943,7 +1096,7 @@ pub mod view {
                 div { class: "ed-palq", style: "margin:var(--sp1) calc(var(--sp1) * -1) var(--sp1);",
                     {icon_tone(if is_rename { "edit" } else { "search" }, 16, "muted")}
                     input {
-                        "aria-label": "{title}", placeholder: "{placeholder}", value: "{text}", autofocus: true,
+                        "aria-label": "{title}", placeholder: "{placeholder}", value: "{text}", autofocus: !is_code_list,
                         oninput: move |event| { query.set(event.value()); sel.set(0); },
                         onkeydown: move |event| {
                             match event.key() {
@@ -956,6 +1109,13 @@ pub mod view {
                                         let name = query.peek().clone();
                                         rename(&key_s, &name);
                                     } else if let Some(index) = enter {
+                                        choose(&key_s, index);
+                                    }
+                                }
+                                Key::Tab if !is_rename => {
+                                    event.stop_propagation();
+                                    event.prevent_default();
+                                    if let Some(index) = enter {
                                         choose(&key_s, index);
                                     }
                                 }
@@ -1384,5 +1544,68 @@ mod tests {
         let src = include_str!("editor_language.rs");
         let production = &src[..src.find("#[cfg(test)]").unwrap()];
         assert!(production.contains("if CARET_MOVED.with(|cell| cell.replace(false)) && pane_box().is_some_and(|pane| super::moved_caret_needs_reveal(rect, pane)) {"));
+    }
+
+    #[test]
+    fn fr_l31_13_on_key_preview_routes_list_navigation_accept_and_escape() {
+        use compose_rust::Key;
+        let u = uri("/w/src/main.rs");
+        assert!(is_code_routed_list(&LanguageState::sample("completion", &u).unwrap()));
+        assert!(is_code_routed_list(&LanguageState::sample("actions", &u).unwrap()));
+        assert!(!is_code_routed_list(&LanguageState::sample("references", &u).unwrap()));
+        assert!(!is_code_routed_list(&LanguageState::sample("rename", &u).unwrap()));
+
+        assert_eq!(list_key_action(Key::ArrowUp, false, false, false, false), Some(ListKeyAction::MoveUp));
+        assert_eq!(list_key_action(Key::ArrowDown, false, false, false, false), Some(ListKeyAction::MoveDown));
+        assert_eq!(list_key_action(Key::Enter, false, false, false, false), Some(ListKeyAction::Accept));
+        assert_eq!(list_key_action(Key::Tab, false, false, false, false), Some(ListKeyAction::Accept));
+        assert_eq!(list_key_action(Key::Escape, false, false, false, false), Some(ListKeyAction::Close));
+        assert_eq!(list_key_action(Key::Tab, false, true, false, false), None, "Shift+Tab is not accept");
+        assert_eq!(list_key_action(Key::ArrowDown, true, false, false, false), None, "modified arrow stays with editor");
+        assert_eq!(list_key_action(Key::Other, false, false, false, false), None, "typing stays with editor");
+
+        assert_eq!(step_selection(0, 3, ListKeyAction::MoveDown), 1);
+        assert_eq!(step_selection(2, 3, ListKeyAction::MoveDown), 0);
+        assert_eq!(step_selection(0, 3, ListKeyAction::MoveUp), 2);
+        assert_eq!(step_selection(2, 3, ListKeyAction::MoveUp), 1);
+        assert_eq!(step_selection(5, 3, ListKeyAction::MoveDown), 0, "clamped before wrap");
+        assert_eq!(step_selection(0, 0, ListKeyAction::MoveDown), 0, "empty list");
+
+        let src = include_str!("editor_language.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap()];
+        assert!(production.contains("super::is_code_routed_list(sheet)"));
+        assert!(production.contains("super::list_key_action("));
+        assert!(production.contains("autofocus: !is_code_list"), "completion/action lists leave focus in the code editor");
+    }
+
+    #[test]
+    fn fr_l31_13_parameter_hint_anchors_above_caret_with_bottom_fallback() {
+        use compose_rust::code::CodeRect;
+        let pane = Some(PaneBox { x: 200.0, y: 100.0, width: 800.0, height: 600.0 });
+
+        // Before the first caret report: falls back to the bottom of the editor area.
+        assert_eq!(hint_style(None, pane), hint_box::STYLE);
+        assert_eq!(hint_style(None, None), hint_box::STYLE);
+
+        // With room above the caret: anchors above the caret line.
+        let above = hint_style(Some(CodeRect::new(320.0, 260.0, 2.0, 22.0)), pane);
+        assert!(above.contains("position:fixed;") && above.contains("left:320px;"), "{above}");
+        assert!(above.contains("top:auto; bottom:calc(100vh - 258px);"), "{above}");
+        assert!(above.contains("max-width:676px;"), "{above}");
+
+        // Near the top of the pane with no room above: flips below the caret line.
+        let below = hint_style(Some(CodeRect::new(320.0, 110.0, 2.0, 22.0)), pane);
+        assert!(below.contains("top:134px; bottom:auto;"), "{below}");
+
+        // Near the right edge of the pane: clamps left inside the pane so it stays readable.
+        let right_clamped = hint_style(Some(CodeRect::new(960.0, 260.0, 2.0, 22.0)), pane);
+        assert!(right_clamped.contains("left:756px;") && right_clamped.contains("max-width:240px;"), "{right_clamped}");
+
+        // Caret scrolled outside the pane: falls back to the bottom of the editor area.
+        assert_eq!(hint_style(Some(CodeRect::new(320.0, 60.0, 2.0, 22.0)), pane), hint_box::STYLE);
+
+        // Caret reported before pane_box() is measured: still anchors above the caret in the window.
+        let no_pane = hint_style(Some(CodeRect::new(320.0, 260.0, 2.0, 22.0)), None);
+        assert!(no_pane.contains("position:fixed;") && no_pane.contains("left:320px;") && no_pane.contains("bottom:calc(100vh - 258px);"), "{no_pane}");
     }
 }

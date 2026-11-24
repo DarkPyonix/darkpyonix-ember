@@ -10,6 +10,7 @@ use axum::http::{Request, StatusCode};
 use base64::Engine;
 use ember_node::api::Node;
 use ember_node::config::NodeConfig;
+use ember_node::transfers::ReceivePolicy;
 use ember_server::computers::{self, Computers, Registry};
 use ember_transport::mem::MemNetwork;
 use ember_transport::{Dialer, PeerGate, Transport};
@@ -69,6 +70,10 @@ fn files_under(dir: &Path) -> Vec<PathBuf> {
 }
 
 async fn start() -> Fx {
+    start_with(ReceivePolicy::Owner).await
+}
+
+async fn start_with(receive: ReceivePolicy) -> Fx {
     let dir = tempfile::tempdir().unwrap();
     let base = dir.path().canonicalize().unwrap();
     let root = base.join("root");
@@ -79,7 +84,7 @@ async fn start() -> Fx {
 
     let net = MemNetwork::new();
     let (server_t, node_t) = (net.transport(), net.transport());
-    let node = Node::new(NodeConfig { state_dir: Some(node_state.clone()), ..NodeConfig::new(TOKEN, vec![root]) }).unwrap();
+    let node = Node::new(NodeConfig { state_dir: Some(node_state.clone()), receive, ..NodeConfig::new(TOKEN, vec![root]) }).unwrap();
     let gate = PeerGate::allow_list([server_t.peer_id()]);
     tokio::spawn(ember_node::transport::serve(&node_t, node.clone(), gate).unwrap());
 
@@ -173,7 +178,7 @@ async fn fr_f14_the_server_marks_relayed_offers_as_the_owners_even_if_the_body_s
 }
 
 #[tokio::test]
-async fn fr_f15_a_non_owner_offer_waits_and_cannot_be_answered_through_the_server() {
+async fn fr_f15_a_non_owner_offer_waits_until_the_relay_accepts_it() {
     let f = start().await;
     // Not through the server relay: an offer without the owner mark, as a non-owner path would send.
     let v = f
@@ -187,11 +192,46 @@ async fn fr_f15_a_non_owner_offer_waits_and_cannot_be_answered_through_the_serve
     let (st, snap) = call(&f.app, "GET", &pre, None).await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(snap["pending_offers"][0]["id"], oid.as_str());
-    let (st, _) = call(&f.app, "POST", &format!("{pre}/offers/{oid}/accept"), None).await;
-    assert_eq!(st, StatusCode::FORBIDDEN);
+    assert!(!f.node_state.join("received/.partial").exists());
+    let (st, accepted) = call(&f.app, "POST", &format!("{pre}/offers/{oid}/accept"), None).await;
+    assert_eq!(st, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["id"], oid.as_str());
+    assert_eq!(accepted["state"], "sending");
     let (st, snap) = call(&f.app, "GET", &pre, None).await;
     assert_eq!(st, StatusCode::OK);
-    assert_eq!(snap["pending_offers"][0]["id"], oid.as_str(), "still waiting");
+    assert_eq!(snap["pending_offers"], json!([]));
+    assert_eq!(snap["transfers"][0]["id"], oid.as_str());
+}
+
+#[tokio::test]
+async fn fr_f15_ask_waits_for_the_relay_to_decline_an_owner_offer() {
+    let f = start_with(ReceivePolicy::Ask).await;
+    let pre = format!("/api/computers/{}/transfers", f.pi);
+    let (status, offered) = call(
+        &f.app, "POST", &format!("{pre}/offers"),
+        Some(json!({ "from": "MacBook", "files": [{ "name": "a", "size": 1 }] })),
+    ).await;
+    assert_eq!(status, StatusCode::CREATED, "{offered}");
+    assert_eq!(offered["status"], "offered");
+    assert_eq!(offered["offer"]["owner"], true);
+    let oid = offered["id"].as_str().unwrap();
+    assert!(!f.node_state.join("received/.partial").exists());
+
+    let (status, declined) = call(&f.app, "POST", &format!("{pre}/offers/{oid}/decline"), None).await;
+    assert_eq!(status, StatusCode::OK, "{declined}");
+    assert_eq!(declined["id"], oid);
+    assert_eq!(declined["result"], "declined");
+    let (status, snapshot) = call(&f.app, "GET", &pre, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(snapshot["pending_offers"], json!([]));
+    assert_eq!(snapshot["transfers"], json!([]));
+    assert_eq!(snapshot["history"][0], declined);
+    assert!(!f.node_state.join("received/.partial").exists());
+    assert!(!f.node_state.join("received/a").exists());
+
+    let (status, missing) = call(&f.app, "POST", &format!("{pre}/offers/{oid}/accept"), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
+    assert_eq!(missing["code"], "not_found");
 }
 
 #[tokio::test]

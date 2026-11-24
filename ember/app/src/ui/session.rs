@@ -82,6 +82,80 @@ pub fn timeline_summary(demo: bool) -> &'static str {
     }
 }
 
+/// Playback state for the agent communication timeline (FR-L18).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TimelinePlayback {
+    pub playing: bool,
+    pub cursor: usize,
+}
+
+impl TimelinePlayback {
+    pub fn new() -> Self {
+        Self { playing: false, cursor: 0 }
+    }
+
+    /// The highlighted event/lane index clamped to `total`, or `None` when empty.
+    pub fn active_index(&self, total: usize) -> Option<usize> {
+        if total == 0 {
+            None
+        } else {
+            Some(self.cursor.min(total - 1))
+        }
+    }
+
+    /// The Korean label for the play/pause control.
+    pub fn action_label(&self) -> &'static str {
+        if self.playing {
+            "일시 정지"
+        } else {
+            "재생"
+        }
+    }
+
+    /// Toggles playing state. Starting from the last event rewinds to index 0 first.
+    pub fn toggle_play(&mut self, total: usize) {
+        if total == 0 {
+            self.playing = false;
+            self.cursor = 0;
+            return;
+        }
+        if self.playing {
+            self.playing = false;
+        } else {
+            if self.cursor + 1 >= total {
+                self.cursor = 0;
+            }
+            self.playing = true;
+        }
+    }
+
+    /// Advances the cursor by one event, stopping automatically at the last event (`total - 1`).
+    /// Returns `true` while playback remains active after the step.
+    pub fn step_next(&mut self, total: usize) -> bool {
+        if total == 0 {
+            self.playing = false;
+            self.cursor = 0;
+            return false;
+        }
+        if self.cursor + 1 < total {
+            self.cursor += 1;
+            if self.cursor + 1 >= total {
+                self.playing = false;
+            }
+        } else {
+            self.cursor = total - 1;
+            self.playing = false;
+        }
+        self.playing
+    }
+
+    /// Resets the cursor to 0 and pauses playback.
+    pub fn restart(&mut self) {
+        self.playing = false;
+        self.cursor = 0;
+    }
+}
+
 pub const UI_STRINGS: &[&str] = &[
     crate::ui::question::WITHDRAWN_LINE,
     crate::ui::question::CARD_TITLE,
@@ -3069,5 +3143,60 @@ mod tests {
         assert_eq!(NodeStatus::Done.label(), "완료");
         assert_eq!(NodeStatus::Fail.label(), "실패");
         assert_eq!(NodeStatus::Unknown.label(), "");
+    }
+
+    #[test]
+    fn fr_l18_timeline_playback_steps_through_events_and_restarts() {
+        let mut pb = TimelinePlayback::new();
+        assert!(!pb.playing);
+        assert_eq!(pb.cursor, 0);
+        assert_eq!(pb.active_index(5), Some(0));
+        assert_eq!(pb.active_index(0), None);
+        assert_eq!(pb.action_label(), "재생");
+
+        // Starting playback switches to playing ("일시 정지").
+        pb.toggle_play(5);
+        assert!(pb.playing);
+        assert_eq!(pb.action_label(), "일시 정지");
+        assert_eq!(pb.active_index(5), Some(0));
+
+        // Stepping advances cursor through events and stops at the last event (index 4).
+        assert!(pb.step_next(5));
+        assert_eq!(pb.active_index(5), Some(1));
+        assert!(pb.step_next(5));
+        assert_eq!(pb.active_index(5), Some(2));
+        assert!(pb.step_next(5));
+        assert_eq!(pb.active_index(5), Some(3));
+        assert!(!pb.step_next(5));
+        assert_eq!(pb.active_index(5), Some(4));
+        assert!(!pb.playing);
+        assert_eq!(pb.action_label(), "재생");
+
+        // Toggling play at the end rewinds to 0 and resumes playing.
+        pb.toggle_play(5);
+        assert!(pb.playing);
+        assert_eq!(pb.active_index(5), Some(0));
+
+        // Stepping once then toggling play pauses at current cursor.
+        assert!(pb.step_next(5));
+        assert_eq!(pb.active_index(5), Some(1));
+        pb.toggle_play(5);
+        assert!(!pb.playing);
+        assert_eq!(pb.active_index(5), Some(1));
+
+        // Restart resets cursor to 0 and stops playback.
+        pb.toggle_play(5);
+        assert!(pb.step_next(5));
+        assert_eq!(pb.active_index(5), Some(2));
+        pb.restart();
+        assert!(!pb.playing);
+        assert_eq!(pb.cursor, 0);
+        assert_eq!(pb.active_index(5), Some(0));
+
+        // Empty timeline stays paused with no active index.
+        pb.toggle_play(0);
+        assert!(!pb.playing);
+        assert_eq!(pb.active_index(0), None);
+        assert!(!pb.step_next(0));
     }
 }

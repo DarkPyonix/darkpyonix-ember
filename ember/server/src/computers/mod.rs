@@ -66,6 +66,7 @@ pub mod ports;
 pub mod relay;
 pub mod schema;
 pub mod shim;
+pub mod status_push;
 pub mod terms;
 pub mod transfers;
 
@@ -122,10 +123,9 @@ pub enum ComputerAddress {
 fn split_http_url(url: &str) -> Option<(&str, &str, &str)> {
     let (scheme, rest) = if let Some(r) = url.strip_prefix("http://") {
         ("http://", r)
-    } else if let Some(r) = url.strip_prefix("https://") {
-        ("https://", r)
     } else {
-        return None;
+        let r = url.strip_prefix("https://")?;
+        ("https://", r)
     };
     let rest = rest.split(['?', '#']).next().unwrap_or("");
     let (authority, path) = match rest.find('/') {
@@ -192,7 +192,7 @@ fn rewrite_urls_in_text(text: &str, clean: impl Fn(&str) -> String) -> String {
         .min()
     {
         // A scheme that is the tail of a longer word (`xhttp://`) is left alone.
-        let starts_word = rest[..i].chars().next_back().map_or(true, |c| !c.is_ascii_alphanumeric());
+        let starts_word = rest[..i].chars().next_back().is_none_or(|c| !c.is_ascii_alphanumeric());
         out.push_str(&rest[..i]);
         let tail = &rest[i..];
         let end = tail

@@ -51,8 +51,9 @@ use ember_server::store::Store;
 /// - `EMBER_CHROME_BIN`: the browser for remote browsing (default: found on the machine)
 /// - `EMBER_BROWSER_MCP`: `chrome-devtools`, `playwright` or `off` (default): give agents the
 ///   project's browser as an MCP server, run with `npx`/`bunx` (`EMBER_BROWSER_MCP_RUNNER`)
-/// - `EMBER_IDE_COMPUTERS`, `EMBER_IDE_URL`, `EMBER_PUBLIC_URL`: "Open IDE" targets per
-///   computer, until ember node reports them (see `api::ide::IdeConfig`)
+/// - `EMBER_IDE_COMPUTERS`, `EMBER_PUBLIC_URL`: "Open IDE" details per computer (Gateway SSH
+///   host, OS, server URL; see `api::ide::IdeConfig`). `EMBER_IDE_URL` is no longer read: the
+///   VS Code target goes through the relay (D55)
 /// - `EMBER_AGENT_URL`: the server URL given to agents for A2A (default derived from
 ///   `EMBER_LISTEN`, with an unspecified address replaced by loopback)
 /// - `EMBER_A2A=0`: agent-to-agent messaging starts off until a user turns it on

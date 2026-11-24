@@ -8,6 +8,9 @@
 //! The OSE is a fake here: a loopback TCP listener that records what it receives and echoes it
 //! (registered with `OseManager::register_launch_for_test`), or a shell script standing in for
 //! the `dpx-ose-server` binary. A real Code-OSS runtime is not covered.
+//!
+//! The VS Code target (`POST /ide/ose {folder, target: "vscode"}`, D55, #1064) starts the OSE on
+//! a 0700 Unix socket with no token; its relay joins the socket and replaces nothing.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -18,7 +21,7 @@ use std::time::Duration;
 use ember_node::api::{self, Node};
 use ember_node::client::{ClientError, NodeClient};
 use ember_node::config::NodeConfig;
-use ember_node::ose::{OseManager, LOCAL_COMPUTER};
+use ember_node::ose::{OseManager, OseTarget, LOCAL_COMPUTER};
 use ember_node::ose_api::OseRelayStream;
 use ember_node::proto::ErrorCode;
 use futures::{SinkExt, StreamExt};
@@ -48,7 +51,18 @@ struct Fx {
 
 /// A node on a loopback port whose OSE manager is what `make` builds from `(temp dir, data root)`.
 async fn start(make: impl FnOnce(&Path, &Path) -> OseManager) -> Fx {
-    let dir = tempfile::tempdir().unwrap();
+    start_in(tempfile::tempdir().unwrap(), make).await
+}
+
+/// Like [`start`] in a temp dir with a short path. A Unix socket address holds at most 104 bytes
+/// on macOS (108 on Linux), and the default temp dir there (`/private/var/folders/...`) leaves no
+/// room for `<data>/local/sockets/<16 hex>.sock`, so the VS Code target's tests use `/tmp`.
+#[cfg(unix)]
+async fn start_short(make: impl FnOnce(&Path, &Path) -> OseManager) -> Fx {
+    start_in(tempfile::Builder::new().prefix("ew").tempdir_in("/tmp").unwrap(), make).await
+}
+
+async fn start_in(dir: tempfile::TempDir, make: impl FnOnce(&Path, &Path) -> OseManager) -> Fx {
     let base_dir = dir.path().canonicalize().unwrap();
     let root = base_dir.join("root");
     let outside = base_dir.join("outside");
@@ -508,4 +522,176 @@ async fn fr_w4_ide_reports_ose_commit() {
     assert_eq!(launch.ose_commit.as_deref(), Some(COMMIT));
     let again = f.client.ide_ose(&f.root).await.unwrap();
     assert_eq!(again.ose_commit.as_deref(), Some(COMMIT), "a reused OSE reports it too");
+}
+
+/// A stand-in for `dpx-ose-server` that serves both targets: with `--socket-path` it listens on
+/// that Unix socket (the VS Code target), else on `--port`. It writes its arguments to
+/// `<script>.<socket|tcp>.args` and its pid to `<script>.<socket|tcp>.pid`, and every connection
+/// echoes what it receives and appends it to `<script>.recv`.
+#[cfg(unix)]
+fn fake_dual_ose_binary(dir: &Path, data: &Path) -> OseManager {
+    let script = dir.join("fake-ose");
+    common::write_exec_ready(
+        &script,
+        r##"#!/bin/sh
+case " $* " in *" --socket-path "*) m=socket ;; *) m=tcp ;; esac
+printf '%s\n' "$@" > "$0.$m.args"
+echo $$ > "$0.$m.pid"
+exec python3 -c '
+import socket, sys, threading
+rec = sys.argv[1]
+a = sys.argv
+if "--socket-path" in a:
+    s = socket.socket(socket.AF_UNIX)
+    s.bind(a[a.index("--socket-path") + 1])
+else:
+    s = socket.socket()
+    s.bind(("127.0.0.1", int(a[a.index("--port") + 1])))
+s.listen()
+lock = threading.Lock()
+def echo(c):
+    while True:
+        d = c.recv(65536)
+        if not d:
+            break
+        with lock:
+            with open(rec, "ab") as f:
+                f.write(d)
+        c.sendall(d)
+    c.close()
+while True:
+    c = s.accept()[0]
+    threading.Thread(target=echo, args=(c,), daemon=True).start()
+' "$0.recv" "$@"
+"##,
+    );
+    OseManager::with_data_root(Some(script), data.to_path_buf())
+}
+
+/// FR-W4a, FR-W4b (4) (D55, #1064): the VS Code target's OSE listens on a 0700 Unix socket in a
+/// 0700 dir of the node's data dir, with no token and no TCP port; the answer is the launch id
+/// alone. The same folder's Ember target is another process, with its token and port.
+#[cfg(unix)]
+#[tokio::test]
+async fn fr_w4a_vscode_target_socket_is_0700_and_no_tcp_port() {
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+
+    if python3_missing("fr_w4a_vscode_target_socket_is_0700_and_no_tcp_port") {
+        return;
+    }
+    let f = start_short(fake_dual_ose_binary).await;
+    let script = f.dir.path().canonicalize().unwrap().join("fake-ose");
+
+    // The answer: a 32-hex launch id, and no endpoint and no token of any kind.
+    let (status, body) = f.client.post_raw("/ide/ose", &json!({ "folder": f.root, "target": "vscode" })).await.unwrap();
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    let launch_id = v["launch_id"].as_str().unwrap().to_string();
+    assert_eq!(launch_id.len(), 32);
+    assert!(launch_id.bytes().all(|b| b.is_ascii_hexdigit()), "{launch_id}");
+    assert!(v.get("endpoint").is_none(), "{v}");
+    assert!(v.get("connection_token").is_none(), "{v}");
+    let typed = f.client.ide_ose_for(&f.root, OseTarget::Vscode).await.unwrap();
+    assert_eq!(typed.launch_id, launch_id, "a live socket OSE of the folder is reused");
+    assert!(typed.endpoint.is_empty() && typed.connection_token.is_empty(), "{typed:?}");
+
+    // The command line: a socket and no token; no host, no port, no token file.
+    let args = std::fs::read_to_string(format!("{}.socket.args", script.display())).unwrap();
+    let args: Vec<&str> = args.lines().collect();
+    assert!(args.contains(&"--without-connection-token"), "{args:?}");
+    for absent in ["--host", "--port", "--connection-token-file", "--connection-token"] {
+        assert!(!args.contains(&absent), "{absent} in {args:?}");
+    }
+    let at = args.iter().position(|a| *a == "--socket-path").expect("the socket flag");
+    let socket = PathBuf::from(args[at + 1]);
+    let sockets = f.data.join(LOCAL_COMPUTER).join("sockets");
+    assert_eq!(socket.parent(), Some(sockets.as_path()), "{}", socket.display());
+    let name = socket.file_name().unwrap().to_string_lossy().into_owned();
+    let stem = name.strip_suffix(".sock").expect("a .sock name");
+    assert_eq!(stem.len(), 16, "{name}");
+    assert!(stem.bytes().all(|b| b.is_ascii_hexdigit()), "{name}");
+    let dir_at = args.iter().position(|a| *a == "--server-data-dir").expect("the data dir flag");
+    assert_eq!(Path::new(args[dir_at + 1]), f.data.join(LOCAL_COMPUTER));
+
+    // The socket and its dir are the node user's alone.
+    let md = std::fs::symlink_metadata(&socket).unwrap();
+    assert!(md.file_type().is_socket(), "{} is not a socket", socket.display());
+    assert_eq!(md.permissions().mode() & 0o777, 0o700, "socket mode");
+    let dmd = std::fs::symlink_metadata(&sockets).unwrap();
+    assert!(dmd.is_dir() && !dmd.file_type().is_symlink());
+    assert_eq!(dmd.permissions().mode() & 0o777, 0o700, "sockets dir mode");
+
+    // No token file was written for it.
+    let tokens = f.data.join(LOCAL_COMPUTER).join("tokens");
+    let token_files = std::fs::read_dir(&tokens).map(|d| d.count()).unwrap_or(0);
+    assert_eq!(token_files, 0, "a token file was written for the VS Code target");
+
+    // The OSE process holds no listening TCP socket (checked when lsof is on this machine).
+    let pid = std::fs::read_to_string(format!("{}.socket.pid", script.display())).unwrap();
+    match std::process::Command::new("lsof").args(["-nP", "-a", "-p", pid.trim(), "-iTCP", "-sTCP:LISTEN"]).output() {
+        Ok(out) => assert!(
+            String::from_utf8_lossy(&out.stdout).trim().is_empty(),
+            "the VS Code target's OSE listens on TCP: {}",
+            String::from_utf8_lossy(&out.stdout)
+        ),
+        Err(_) => eprintln!("lsof is missing: the TCP listener check is skipped"),
+    }
+
+    // The Ember target of the same folder is a different OSE, with its port and placeholder.
+    let ember = f.client.ide_ose(&f.root).await.unwrap();
+    assert_ne!(ember.launch_id, launch_id);
+    assert!(ember.endpoint.starts_with("http://127.0.0.1:"), "{}", ember.endpoint);
+    assert_eq!(ember.connection_token.len(), 64);
+
+    // An unknown target is refused.
+    let (status, _) = f.client.post_raw("/ide/ose", &json!({ "folder": f.root, "target": "emacs" })).await.unwrap();
+    assert!((400..500).contains(&status), "{status}");
+
+    // When the OSE goes away, so does its socket.
+    f.ose.shutdown();
+    assert!(std::fs::symlink_metadata(&socket).is_err(), "the socket outlived its OSE");
+}
+
+/// FR-W4b (4) (D55, #1064): the relay of a VS Code launch joins the folder's Unix socket and
+/// carries the bytes unchanged both ways: even the Ember launch's placeholder of the same folder
+/// reaches that OSE as it was sent. The limits are the Ember relay's.
+#[cfg(unix)]
+#[tokio::test]
+async fn fr_w4b_vscode_target_relay_joins_the_socket_without_replacement() {
+    if python3_missing("fr_w4b_vscode_target_relay_joins_the_socket_without_replacement") {
+        return;
+    }
+    let f = start_short(|dir, data| fake_dual_ose_binary(dir, data).with_relay_limits(1, 64)).await;
+    let recv = f.dir.path().canonicalize().unwrap().join("fake-ose.recv");
+    let placeholder = f.client.ide_ose(&f.root).await.unwrap().connection_token;
+    let vscode = f.client.ide_ose_for(&f.root, OseTarget::Vscode).await.unwrap();
+
+    let mut ws = f.client.ide_ose_relay(&vscode.launch_id).await.unwrap();
+    let mut first = format!("GET /?tkn={placeholder} HTTP/1.1\r\n").into_bytes();
+    first.resize(9000, b'x');
+    ws.send(Message::Binary(first.clone().into())).await.unwrap();
+    assert_eq!(read_bytes(&mut ws, first.len()).await, first, "the relay changed the bytes");
+    let second = format!("again:{placeholder}").into_bytes();
+    ws.send(Message::Binary(second.clone().into())).await.unwrap();
+    assert_eq!(read_bytes(&mut ws, second.len()).await, second);
+
+    let seen = std::fs::read(&recv).unwrap();
+    assert_eq!(seen.len(), first.len() + second.len(), "the OSE saw other bytes");
+    assert!(find(&seen[..first.len()], placeholder.as_bytes()), "the bytes were rewritten on the way");
+    assert_eq!(&seen[..first.len()], &first[..]);
+
+    // The per-launch limit holds for the socket relay too.
+    let e = f.client.ide_ose_relay(&vscode.launch_id).await.err().unwrap();
+    assert!(matches!(&e, ClientError::Api { status: 429, .. }), "{e:?}");
+
+    // A text frame closes it with 1003.
+    ws.send(Message::text("not binary")).await.unwrap();
+    let code = loop {
+        match tokio::time::timeout(WAIT, ws.next()).await.expect("no close in time") {
+            Some(Ok(Message::Close(Some(frame)))) => break u16::from(frame.code),
+            Some(Ok(Message::Close(None))) | Some(Err(_)) | None => panic!("closed without the 1003 frame"),
+            Some(Ok(_)) => continue,
+        }
+    };
+    assert_eq!(code, 1003);
 }

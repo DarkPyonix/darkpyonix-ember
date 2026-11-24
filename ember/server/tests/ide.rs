@@ -1,4 +1,7 @@
 //! "Open IDE" launch targets: FR-L7 (`GET /api/sessions/{id}/ide`).
+//!
+//! The VS Code target is a launch through the server's relay like the Ember target (D55, #1064):
+//! `ide_url` is still accepted in `EMBER_IDE_COMPUTERS` but no longer makes a URL.
 
 use std::sync::Arc;
 
@@ -83,10 +86,16 @@ async fn default_computer_targets() {
     assert_eq!(ember["launch"]["folder"], "/Users/me/acme app");
     assert_eq!(ember["launch"]["server_url"], "http://mini.local:8740");
 
-    // VS Code: the wrapped VS Code Web, never a vscode:// desktop link.
+    // VS Code (D55, #1064): a launch like the Ember target's, never a URL, even with an
+    // `ide_url` configured. The folder does not exist here, so this server's OSE cannot start.
     let vscode = target(&v, "vscode");
-    assert_eq!(vscode["available"], true);
-    assert_eq!(vscode["url"], "http://127.0.0.1:8890/?folder=/Users/me/acme%20app");
+    assert!(vscode.get("url").is_none(), "{vscode}");
+    assert_eq!(vscode["launch"]["session"], id.as_str());
+    assert_eq!(vscode["launch"]["computer"], "mini");
+    assert_eq!(vscode["launch"]["folder"], "/Users/me/acme app");
+    assert_eq!(vscode["available"], false, "{vscode}");
+    assert!(vscode["reason"].as_str().unwrap().contains("project folder"), "{vscode}");
+    assert!(vscode["launch"].get("ose").is_none(), "{vscode}");
 
     // No SSH configured for this computer → Gateway unavailable, with a reason.
     let gw = target(&v, "gateway");
@@ -101,7 +110,11 @@ async fn remote_computer_by_query() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(v["computer"]["name"], "studio");
     assert_eq!(v["computer"]["local"], false);
-    assert_eq!(target(&v, "vscode")["url"], "http://studio.local:8890/?folder=/home/me/acme");
+    // D55: no URL from `ide_url`; a computer with no node and not local has no OSE to relay to.
+    let vscode = target(&v, "vscode");
+    assert!(vscode.get("url").is_none(), "{vscode}");
+    assert_eq!(vscode["available"], false);
+    assert_eq!(vscode["reason"], "OSE server is only available on the local computer");
 
     let gw = target(&v, "gateway");
     let url = "jetbrains-gateway://connect#type=ssh&host=studio.local&port=22&user=me\
@@ -119,7 +132,7 @@ async fn unconfigured_computer_and_host_fallback() {
     let (status, v) = get(s, cfg, &format!("/api/sessions/{id}/ide?computer=bare")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(target(&v, "vscode")["available"], false);
-    assert!(target(&v, "vscode")["reason"].as_str().unwrap().contains("dpx.serve"));
+    assert_eq!(target(&v, "vscode")["reason"], "OSE server is only available on the local computer");
     assert_eq!(target(&v, "ember")["launch"]["server_url"], "http://ember.test:8740");
 }
 

@@ -17,6 +17,11 @@
 //! [`RELAY_SUBSTITUTION_WINDOW`] bytes the client sends, so whoever bridges the relay (the server,
 //! SPEC FR-W4c) only carries bytes.
 //!
+//! **The VS Code target** (`{"folder": ..., "target": "vscode"}`, SPEC FR-W4b (4), D55, #1064)
+//! starts the folder's OSE on a 0700 Unix socket with no token and answers `{launch_id}` alone (no
+//! `endpoint`, no `connection_token`). Its relay joins the socket and replaces nothing, with the
+//! same limits and idle timeout. A platform without Unix sockets answers 501.
+//!
 //! [`pump_ose_relay`] is also what the server runs for the OSE of its own machine.
 
 use std::path::{Path as FsPath, PathBuf};
@@ -36,15 +41,17 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::api::{ApiError, Node};
 use crate::client::{ClientError, NodeClient, NodeIo};
-use crate::ose::{InstallError, RelayLookupError, RelayTarget, LOCAL_COMPUTER, NOT_INSTALLED};
+use crate::ose::{
+    InstallError, OseAddress, OseTarget, RelayLookupError, RelayTarget, LOCAL_COMPUTER, NOT_INSTALLED, SOCKET_UNSUPPORTED,
+};
 use crate::proto::ErrorCode;
 
 /// Byte window at the start of the client-to-OSE stream in which the C2 placeholder is replaced
 /// with the real OSE connection token (`FR-W4`, `#458`, `#461`).
 pub const RELAY_SUBSTITUTION_WINDOW: usize = 8 * 1024;
-/// Timeout for opening the loopback TCP connection to the local OSE process.
+/// Timeout for opening the connection (loopback TCP or Unix socket) to the local OSE process.
 const RELAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
-/// Maximum chunk size read from the OSE TCP socket per WebSocket binary frame.
+/// Maximum chunk size read from the OSE socket per WebSocket binary frame.
 const RELAY_READ_CHUNK: usize = 32 * 1024;
 
 /// Body of `POST /ide/ose`.
@@ -52,6 +59,9 @@ const RELAY_READ_CHUNK: usize = 32 * 1024;
 pub struct OseLaunchRequest {
     /// The project folder, absolute, inside the node's allowed roots.
     pub folder: PathBuf,
+    /// The client the OSE serves; absent is the Ember target (D55).
+    #[serde(default, skip_serializing_if = "OseTarget::is_ember")]
+    pub target: OseTarget,
 }
 
 /// Answer of `POST /ide/ose`: the launch of the folder's OSE on this node.
@@ -59,9 +69,13 @@ pub struct OseLaunchRequest {
 pub struct OseLaunchResponse {
     /// 32 hex characters: the `{launch_id}` of the relay route.
     pub launch_id: String,
-    /// `http://127.0.0.1:<port>` on this node. Only the node's own relay dials it.
+    /// `http://127.0.0.1:<port>` on this node. Only the node's own relay dials it. Empty, and
+    /// left out of the JSON, for the VS Code target, which has no TCP port (D55).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub endpoint: String,
     /// The placeholder token, never the real one: the relay puts the real token in its place.
+    /// Empty, and left out of the JSON, for the VS Code target, which has no token (D55).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub connection_token: String,
     /// The Code-OSS commit of this node's OSE build (SPEC FR-E10, #32); absent from older nodes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -89,8 +103,9 @@ async fn launch(State(n): State<Node>, Json(r): Json<OseLaunchRequest>) -> Resul
         ));
     }
     let ose = n.ose().clone();
+    let target = r.target;
     // A new OSE takes up to 10 s to listen: keep the wait off the async workers.
-    let started = tokio::task::spawn_blocking(move || ose.launch_for(LOCAL_COMPUTER, &folder))
+    let started = tokio::task::spawn_blocking(move || ose.launch_for_target(LOCAL_COMPUTER, &folder, target))
         .await
         .map_err(|e| internal(format!("OSE launch task failed: {e}")))?;
     match started {
@@ -101,6 +116,7 @@ async fn launch(State(n): State<Node>, Json(r): Json<OseLaunchRequest>) -> Resul
             ose_commit: l.connection.ose_commit,
         })),
         Err(m) if m == NOT_INSTALLED => Err(ApiError::new(StatusCode::SERVICE_UNAVAILABLE, ErrorCode::Internal, m)),
+        Err(m) if m == SOCKET_UNSUPPORTED => Err(ApiError::new(StatusCode::NOT_IMPLEMENTED, ErrorCode::Internal, m)),
         Err(m) => Err(internal(m)),
     }
 }
@@ -229,15 +245,33 @@ impl TokenSubstituter {
     }
 }
 
-/// One relayed OSE connection: the client's WebSocket on one side, a loopback TCP connection to
-/// the OSE of `target` on the other, until either side ends or both are idle for the target's
-/// idle timeout. The relay permit in `target` is released when this returns.
-pub async fn pump_ose_relay(socket: WebSocket, target: RelayTarget) {
-    let tcp = match tokio::time::timeout(RELAY_CONNECT_TIMEOUT, tokio::net::TcpStream::connect(target.address)).await {
-        Ok(Ok(s)) => {
+/// The byte stream to one OSE: a loopback TCP connection or a Unix socket.
+trait OseIo: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> OseIo for T {}
+
+/// Opens the connection to the OSE at `address`.
+async fn connect_ose(address: &OseAddress) -> std::io::Result<Box<dyn OseIo>> {
+    match address {
+        OseAddress::Tcp(a) => {
+            let s = tokio::net::TcpStream::connect(*a).await?;
             let _ = s.set_nodelay(true);
-            s
+            Ok(Box::new(s))
         }
+        #[cfg(unix)]
+        OseAddress::Unix(path) => Ok(Box::new(tokio::net::UnixStream::connect(path).await?)),
+        #[cfg(not(unix))]
+        OseAddress::Unix(_) => Err(std::io::Error::new(std::io::ErrorKind::Unsupported, SOCKET_UNSUPPORTED)),
+    }
+}
+
+/// One relayed OSE connection: the client's WebSocket on one side, a connection to the OSE of
+/// `target` on the other (loopback TCP for the Ember target, the Unix socket for the VS Code
+/// target), until either side ends or both are idle for the target's idle timeout. The relay
+/// permit in `target` is released when this returns. A VS Code target has no tokens, so nothing
+/// is replaced.
+pub async fn pump_ose_relay(socket: WebSocket, target: RelayTarget) {
+    let stream = match tokio::time::timeout(RELAY_CONNECT_TIMEOUT, connect_ose(&target.address)).await {
+        Ok(Ok(s)) => s,
         _ => {
             let mut socket = socket;
             let _ = socket
@@ -249,7 +283,7 @@ pub async fn pump_ose_relay(socket: WebSocket, target: RelayTarget) {
             return;
         }
     };
-    let (mut tcp_read, mut tcp_write) = tcp.into_split();
+    let (mut tcp_read, mut tcp_write) = tokio::io::split(stream);
     let (mut ws_out, mut ws_in) = socket.split();
     let mut sub = TokenSubstituter::new(&target.placeholder, &target.real_token, RELAY_SUBSTITUTION_WINDOW);
     let idle = target.idle_timeout;
@@ -366,7 +400,15 @@ impl NodeClient {
     /// [`ClientError::Api`] with its status: 403 outside the roots, 404 for a missing folder, 503
     /// without an OSE binary.
     pub async fn ide_ose(&self, folder: impl AsRef<FsPath>) -> Result<OseLaunchResponse, ClientError> {
-        self.post("/ide/ose", &OseLaunchRequest { folder: folder.as_ref().into() }).await
+        self.ide_ose_for(folder, OseTarget::Ember).await
+    }
+
+    /// Like [`NodeClient::ide_ose`] for one target. The VS Code target's answer has an empty
+    /// `endpoint` and `connection_token` (D55); a node older than D55 ignores the target and
+    /// answers an Ember launch, which the caller can tell by its token. A platform without Unix
+    /// sockets is 501.
+    pub async fn ide_ose_for(&self, folder: impl AsRef<FsPath>, target: OseTarget) -> Result<OseLaunchResponse, ClientError> {
+        self.post("/ide/ose", &OseLaunchRequest { folder: folder.as_ref().into(), target }).await
     }
 
     /// Open the relay of a launch. Send the editor's bytes as Binary frames; the OSE's bytes

@@ -59,8 +59,8 @@
 //! | POST | `/terms/{id}/control` | [`TermControlRequest`] → 204 |
 //! | POST | `/terms/{id}/kill` | [`KillRequest`] → 204 (default SIGHUP, then SIGKILL) |
 //! | DELETE | `/terms/{id}` | → 204 (409 while running) |
-//! | POST | `/ide/ose` | [`crate::ose_api::OseLaunchRequest`] → [`crate::ose_api::OseLaunchResponse`] (FR-W4b: start or reuse the folder's OSE; the token in the answer is a placeholder; 403 outside the roots, 404 for a missing folder, 503 without an OSE binary) |
-//! | GET (WS) | `/ide/ose/{launch_id}/relay` | raw byte relay to the launch's loopback OSE, the placeholder replaced by the real token ([`crate::ose_api`]; 404 for an unknown launch, 429 at the relay limit) |
+//! | POST | `/ide/ose` | [`crate::ose_api::OseLaunchRequest`] → [`crate::ose_api::OseLaunchResponse`] (FR-W4b: start or reuse the folder's OSE; the token in the answer is a placeholder; 403 outside the roots, 404 for a missing folder, 503 without an OSE binary; with `target: "vscode"` a token-free OSE on a 0700 Unix socket, answered `{launch_id}` alone, 501 without Unix sockets, D55) |
+//! | GET (WS) | `/ide/ose/{launch_id}/relay` | raw byte relay to the launch's loopback OSE, the placeholder replaced by the real token (a VS Code launch: to its Unix socket, nothing replaced; [`crate::ose_api`]; 404 for an unknown launch, 429 at the relay limit) |
 //! | POST | `/ide/extensions` | `{id, version?}` → `{installed, id, output}` (FR-W4b: 400 for a bad id, 409 while another install runs, 502 for a failed run, 503 without an OSE binary) |
 //! | GET, POST | `/transfers`, `/transfers/offers`, `/transfers/offers/{id}/accept`, `/transfers/offers/{id}/decline`, `/transfers/{id}/chunks`, `/transfers/{id}/resume-offset/{file}`, `/transfers/{id}/complete`, `/pause`, `/resume`, `/cancel`, `/transfers/history` (GET, DELETE) | the file receiver ([`crate::transfers`], FR-F13): the server's `/api/transfers*` bodies; 507 `no_space` (FR-F16); 409 without a state folder |
 //!

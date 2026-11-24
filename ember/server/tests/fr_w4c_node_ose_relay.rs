@@ -13,6 +13,10 @@
 //! way), and a node that hangs while a bridged relay closes (both sockets are closed under one
 //! 2 s budget; no test makes a node hang).
 //!
+//! The VS Code target (FR-W4c (1b), D55, #1064) is the node's socket launch: a relay and no
+//! endpoint, no token; its stand-in is a Unix socket listener that records and echoes
+//! (`OseManager::register_socket_launch_for_test`).
+//!
 //! Unix only: the stand-in for the OSE binary is a shell script.
 
 #![cfg(unix)]
@@ -46,7 +50,7 @@ use ember_transport::mem::MemNetwork;
 use ember_transport::{BiStream, Dialer, PeerAddr, Transport};
 use futures::{SinkExt, StreamExt};
 use http_body_util::BodyExt;
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
@@ -692,4 +696,99 @@ async fn fr_w4c_registered_computer_relay_is_404_on_the_guest_door() {
         .body(Body::from(r#"{"id":"a.b"}"#))
         .unwrap();
     assert_eq!(guest.clone().oneshot(req).await.unwrap().status(), StatusCode::NOT_FOUND, "POST {install}");
+}
+
+// ---- The VS Code target (FR-W4c (1b), D55, #1064) ---------------------------------------------
+
+/// A Unix socket "OSE" that records what it receives and echoes it back. It lives in a short
+/// `/tmp` dir: a socket address holds about 104 bytes, and the default temp dir on macOS is long.
+async fn start_fake_socket_ose() -> (tempfile::TempDir, PathBuf, FakeOse) {
+    let dir = tempfile::Builder::new().prefix("ew").tempdir_in("/tmp").unwrap();
+    let path = dir.path().join("ose.sock");
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    let fake = FakeOse::default();
+    let bg = fake.clone();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = listener.accept().await {
+            let fake = bg.clone();
+            fake.live.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 32 * 1024];
+                loop {
+                    match s.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            fake.received.lock().unwrap().extend_from_slice(&buf[..n]);
+                            if s.write_all(&buf[..n]).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                fake.live.fetch_sub(1, Ordering::SeqCst);
+            });
+        }
+    });
+    (dir, path, fake)
+}
+
+fn vscode_target(v: &Value) -> &Value {
+    v["targets"].as_array().unwrap().iter().find(|t| t["kind"] == "vscode").expect("a vscode target")
+}
+
+/// FR-W4c (1b): the VS Code target of a registered computer is the node's socket launch behind
+/// this server's relay path, with no URL, no endpoint and no token, beside the Ember target's own
+/// launch of the same folder; route (2) bridges it with the bytes unchanged.
+#[tokio::test]
+async fn fr_w4c_vscode_target_of_a_node_computer_is_a_relay_launch_without_token() {
+    let node = start_node(no_binary).await;
+    let (ose_addr, _) = start_fake_ose().await;
+    let ember_conn = node.ose.register_launch_for_test(LOCAL_COMPUTER, &node.root, ose_addr, REAL_TOKEN);
+    let (_sock_dir, sock, fake) = start_fake_socket_ose().await;
+    let vs = node.ose.register_socket_launch_for_test(LOCAL_COMPUTER, &node.root, &sock);
+    let vs_id = launch_id_of(vs.relay.as_deref().unwrap());
+    let s = server();
+    let computer = s.computers.registry().insert("box", &node.url, NODE_TOKEN).unwrap();
+
+    let sid = s.store.create_session("proj", AgentKind::Scripted, &node.root.to_string_lossy(), None, "t").unwrap().id;
+    let (status, text) = get_json(&s.app, &format!("/api/sessions/{sid}/ide?computer={}", computer.id)).await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let v: Value = serde_json::from_str(&text).unwrap();
+    let vscode = vscode_target(&v);
+    assert_eq!(vscode["available"], true, "{vscode}");
+    for absent in ["url", "reason", "command"] {
+        assert!(vscode.get(absent).is_none(), "{absent} in {vscode}");
+    }
+    let launch = &vscode["launch"];
+    assert_eq!(launch["session"], sid.as_str());
+    assert_eq!(launch["computer"], computer.id.as_str());
+    assert_eq!(launch["computer_name"], "box");
+    assert_eq!(launch["folder"].as_str(), Some(&*node.root.to_string_lossy()));
+    let relay = format!("/api/computers/{}/ide/relay/{vs_id}", computer.id);
+    assert_eq!(launch["ose"], json!({ "relay": relay }), "the VS Code launch carries the relay alone");
+    let ember = ember_target(&v);
+    assert_eq!(ember["launch"]["ose"]["connection_token"], ember_conn.connection_token.as_str());
+    assert_ne!(ember["launch"]["ose"]["relay"], launch["ose"]["relay"], "one OSE per target");
+    assert!(!text.contains(REAL_TOKEN), "the real token is in the launch: {text}");
+
+    // Route (2) bridges it, and nothing is replaced: the Ember placeholder passes as sent.
+    let addr = serve_tcp(s.app.clone()).await;
+    let mut ws = tcp_ws(addr, &relay).await;
+    let sent = format!("GET /?tkn={} HTTP/1.1\r\n\r\n", ember_conn.connection_token).into_bytes();
+    ws.send(Message::Binary(sent.clone().into())).await.unwrap();
+    assert_eq!(read_bytes(&mut ws, sent.len()).await, sent);
+    assert_eq!(*fake.received.lock().unwrap(), sent, "the socket OSE got other bytes");
+    ws.close(None).await.unwrap();
+    wait_for("the socket connection to close", WAIT, || fake.live.load(Ordering::SeqCst) == 0).await;
+
+    // A folder with no running OSE on a node without the binary: unavailable, with the reason.
+    let sub = node.root.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    let sid = s.store.create_session("proj", AgentKind::Scripted, &sub.to_string_lossy(), None, "t").unwrap().id;
+    let (_, text) = get_json(&s.app, &format!("/api/sessions/{sid}/ide?computer={}", computer.id)).await;
+    let v: Value = serde_json::from_str(&text).unwrap();
+    let vscode = vscode_target(&v);
+    assert_eq!(vscode["available"], false, "{vscode}");
+    assert!(vscode["reason"].as_str().unwrap().contains("not installed"), "{vscode}");
+    assert!(vscode["launch"].get("ose").is_none(), "{vscode}");
 }

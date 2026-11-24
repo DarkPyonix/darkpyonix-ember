@@ -309,15 +309,78 @@ pub fn projects() -> Vec<Project> {
             name: "demo-project".into(),
             created_at: 0,
             computers: vec!["local".into()],
+            leader_session: Some("demo-s1".into()),
             ..Default::default()
         },
         Project {
             name: "second-project".into(),
             created_at: 0,
             computers: vec!["local".into()],
+            leader_session: Some("demo-s3".into()),
             ..Default::default()
         },
     ]
+}
+
+/// Sample routines for demo mode, including a routine linked to `demo-project` so the project
+/// settings `연결` section and full project view show real linked items in captures.
+pub fn demo_routines() -> Vec<crate::ui::routines::Entry> {
+    use crate::ui::home::{default_mode, default_option, Harness, Selection};
+    use crate::ui::routines::{next_run, Entry, Routine, Run, RunStatus, Trigger};
+    let now = crate::ui::cr::routines::now_local();
+    let mut entries = crate::ui::cr::routines::sample_entries();
+    entries.push(Entry {
+        routine: Routine {
+            id: "demo-rt1".into(),
+            name: "데모 CI 상태 점검".into(),
+            trigger: Trigger::Time,
+            cron: "0 9 * * *".into(),
+            prompt: "demo-project의 최근 빌드 상태를 확인하고 실패 원인을 요약합니다.".into(),
+            enabled: true,
+            sel: Selection {
+                project: "demo-project".into(),
+                option: default_option(Harness::ClaudeCode),
+                mode: default_mode(Harness::ClaudeCode),
+                computer: Some("local".into()),
+            },
+            continue_session: None,
+        },
+        runs: vec![Run {
+            at: now - 120,
+            status: RunStatus::Done,
+            session: Some("demo-s1".into()),
+        }],
+        next_at: next_run("0 9 * * *", now),
+    });
+    entries
+}
+
+/// Sample channels for demo mode, including a channel linked to `demo-project` so the project
+/// settings `연결` section and full project view show real linked items in captures.
+pub fn demo_channels() -> Vec<crate::ui::channels::Room> {
+    use crate::ui::channels::{Member as ChannelMember, Message as ChannelMessage, Room};
+    let now = crate::model::now_ms() / 1000;
+    let mut rooms = crate::ui::cr::channels::sample_rooms();
+    rooms.push(Room {
+        id: "demo-r1".into(),
+        name: "데모 개발방".into(),
+        project: "demo-project".into(),
+        members: vec![
+            ChannelMember { id: "me".into(), name: "나".into(), is_agent: false, harness: String::new() },
+            ChannelMember { id: "demo-s1".into(), name: "demo-project-claude-code".into(), is_agent: true, harness: "claude-code".into() },
+        ],
+        messages: vec![ChannelMessage {
+            id: "demo-m1".into(),
+            from: "demo-s1".into(),
+            text: "포트 설정 변경 사항을 정리해 두었습니다.".into(),
+            at: now - 300,
+            unread: 0,
+            author_name: String::new(),
+            author_kind: String::new(),
+        }],
+        unread: 0,
+    });
+    rooms
 }
 
 /// A plausible metrics sample for the demo computer (FR-L21, `GET /api/computers/{id}/metrics`).
@@ -350,7 +413,10 @@ pub fn metrics_sample(now_ms: u64) -> ember_client::api::MetricsSample {
         }),
         disks: vec![DiskMetrics { name: "Macintosh HD".into(), mount: "/".into(), total_bytes: 500 * GB, available_bytes: 210 * GB }],
         network: vec![NetMetrics { interface: "en0".into(), rx_bytes: now_ms / 1000 * 2_400_000, tx_bytes: now_ms / 1000 * 380_000 }],
-        temperatures: vec![TempMetrics { label: "CPU".into(), celsius: wave(20.0, 48.0, 62.0, 1.0) }],
+        temperatures: vec![
+            TempMetrics { label: "CPU".into(), celsius: wave(20.0, 48.0, 62.0, 1.0) },
+            TempMetrics { label: "GPU".into(), celsius: wave(24.0, 42.0, 54.0, 2.0) },
+        ],
         gpu: GpuReport { devices: vec![], reason: Some("이 컴퓨터에서는 GPU 값을 읽지 못했습니다".into()) },
         processes: procs
             .iter()
@@ -3153,5 +3219,19 @@ mod tests {
             assert!(!ev.is_empty(), "{} has a transcript", s.id);
             assert_eq!(ev.len() as i64, s.last_seq, "{}", s.id);
         }
+    }
+
+    #[test]
+    fn demo_project_seeds_leader_and_linked_routines_and_channels() {
+        let list = projects();
+        let primary = list.iter().find(|p| p.name == "demo-project").expect("demo-project");
+        assert_eq!(primary.leader_session.as_deref(), Some("demo-s1"));
+        let links = crate::ui::project::project_links_from(
+            "demo-project",
+            &demo_routines(),
+            &demo_channels(),
+        );
+        assert_eq!(links.routine_button_label(), "루틴 (1)");
+        assert_eq!(links.channel_button_label(), "채널 (1)");
     }
 }

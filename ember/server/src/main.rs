@@ -56,6 +56,11 @@ use ember_server::store::Store;
 /// - `EMBER_AGENT_URL`: the server URL given to agents for A2A (default derived from
 ///   `EMBER_LISTEN`, with an unspecified address replaced by loopback)
 /// - `EMBER_A2A=0`: agent-to-agent messaging starts off until a user turns it on
+/// - `EMBER_A2A_TOKEN_IDLE_SECS` (default 86400), `EMBER_A2A_TOKEN_MAX_SECS` (default 604800),
+///   `EMBER_A2A_TOKEN_CHECK_SECS` (default 60): lifetimes of an agent's A2A runtime token
+///   (FR-T2a). A live agent run refreshes its token every check, so the idle lifetime ends only
+///   a token no live run holds; past the absolute lifetime an idle run is released and its next
+///   start mints a fresh token, while a run mid-turn keeps its token until the turn ends
 /// - `EMBER_EXEC_BIN`: the `ember-exec` shim for Claude Code on other computers (default: next
 ///   to this executable)
 /// - `EMBER_MOUNT`: `auto` (default), `nfs`, `fuse` or `off`. Mounts a Claude Code session's
@@ -548,7 +553,9 @@ async fn serve_main() -> anyhow::Result<()> {
     // runs in the background, so the start does not wait for an agent's turn; a draining
     // session stays running and refuses messages as busy until its drain ends.
     a2a.install_hooks();
-    sessions.recover_after_restart(shim_runtime.as_ref()).await?;
+    let recovery = sessions.recover_after_restart(shim_runtime.as_ref()).await?;
+    // FR-T2a: only a rejoined or draining agent can still hold a runtime token.
+    a2a.settle_tokens_after_restart(&recovery);
     // After binding, so agents woken by queued messages can reach the API.
     a2a.start();
     // Scheduled tasks (FR-A8): the first tick reports triggers missed while the server was down.
@@ -607,6 +614,7 @@ async fn serve_main() -> anyhow::Result<()> {
         Some(devices.clone()),
         Some(computers.clone()),
     );
+    transfers.publish_updates_to(sessions.clone());
     // The guest router is built only when the door is on, wrapped only by the door's guards, and
     // never merged into `app` (not under auth::protect either).
     let guest_app = guest_door.as_ref().map(|d| {
@@ -782,6 +790,11 @@ async fn serve_main() -> anyhow::Result<()> {
         }
         (t, _) => t,
     };
+    let computer_status = tokio::spawn({
+        let computers = computers.clone();
+        let sessions = sessions.clone();
+        async move { computers::status_push::run(&computers, &sessions).await }
+    });
     let shutdown_ose = ose.clone();
     let served = axum::serve(listener, local_app)
         .with_graceful_shutdown(async move {
@@ -789,6 +802,7 @@ async fn serve_main() -> anyhow::Result<()> {
             shutdown_ose.shutdown();
         })
         .await;
+    computer_status.abort();
     ose.shutdown();
     let _ = stop_tx.send(true);
     if let Some(mut task) = guest_task {

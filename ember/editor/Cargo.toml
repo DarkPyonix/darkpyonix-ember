@@ -28,5 +28,10 @@ tokio = { version = "1", features = ["io-util", "sync", "time", "rt", "macros", 
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 
+# OS keychain for MainThreadSecretState (macOS Keychain, Windows Credential Manager, Linux Secret
+# Service). Uses the same crate and features as ember-node; Android and iOS use the fallback backend.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

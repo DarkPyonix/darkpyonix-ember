@@ -6,6 +6,9 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+/// The HTTP receivers' default offer lifetime, matching the sender's default wait.
+pub const OFFER_TTL_MS: i64 = 5 * 60 * 1000;
+
 /// A monotonic clock. `now` is the time since an arbitrary start.
 pub trait Clock: Send + Sync {
     fn now(&self) -> Duration;

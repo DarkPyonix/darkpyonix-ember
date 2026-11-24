@@ -2385,9 +2385,11 @@ pub mod diff_editor_view {
         let selection_uri = uri;
         let range_s = s.clone();
         let metrics_s = s.clone();
+        // Before `doc.text` moves into the widget below.
+        let syntax_spans = crate::ui::editor::syntax_spans_at(&doc.syntax, doc.widget_version_of(doc.syntax.version));
         rsx! { CodeEditor {
             key: "diff-{generation}", width: Some(box_w), height: Some(box_h), handle,
-            text: doc.text, decorations, syntax_spans: crate::ui::editor::syntax_spans_at(&doc.syntax, doc.widget_version_of(doc.syntax.version)), tab_width: Some(doc.tab_width),
+            text: doc.text, decorations, syntax_spans, tab_width: Some(doc.tab_width),
             gutter_decorations, view_zones,
             // FR-L31.27: the same code type, row pitch and line number column as the file's editor.
             font_size: Some(crate::ui::fonts::CODE_FONT_SIZE), line_height: Some(crate::ui::fonts::CODE_LINE_HEIGHT),

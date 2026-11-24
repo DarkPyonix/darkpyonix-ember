@@ -1258,7 +1258,7 @@ fn HistoryRow(h: &HistoryEntry) {
     let (label, pill) = match (h.result, h.direction) {
         (HistoryResult::Done, Direction::Send) => ("보냄", PillTone::Green),
         (HistoryResult::Done, Direction::Receive) => ("받음", PillTone::Blue),
-        (HistoryResult::Declined, _) | (HistoryResult::Cancelled, _) => (h.result.label(), PillTone::Orange),
+        (HistoryResult::Declined | HistoryResult::Expired | HistoryResult::Cancelled, _) => (h.result.label(), PillTone::Orange),
         (HistoryResult::Failed, _) => (h.result.label(), PillTone::Red),
     };
     let who = crate::ui::files::history_peer_label(h.direction);

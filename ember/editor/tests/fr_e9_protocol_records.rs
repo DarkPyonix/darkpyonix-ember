@@ -43,12 +43,12 @@ fn key(proxy: &str, method: &str) -> (String, String) {
 fn fr_e9_todo_call_with_a_value_is_recorded_with_count_and_named_extension() {
     let t0 = Instant::now();
     let mut c = core(t0);
-    // $getPassword(extensionId, key): Promise<string | undefined>, todo in the ledger.
-    let fx = c.handle(t0, request(1, "MainThreadSecretState", "$getPassword", vec![json!("pub.one"), json!("k")]));
-    assert_eq!(gaps(&fx), vec![("MainThreadSecretState".into(), "$getPassword".into(), Some("pub.one".into()), 1)]);
+    // $getSession(providerId, scopes, extensionId, extensionName, options): Promise<Dto | undefined>, todo in the ledger.
+    let fx = c.handle(t0, request(1, "MainThreadAuthentication", "$getSession", vec![json!("github"), json!(["repo"]), json!("pub.one"), json!("Pub"), json!({})]));
+    assert_eq!(gaps(&fx), vec![("MainThreadAuthentication".into(), "$getSession".into(), Some("pub.one".into()), 1)]);
     assert!(fx.contains(&Effect::Respond { req: 1, result: Ok(Reply::Empty) }), "{fx:?}");
-    let fx = c.handle(t0, request(2, "MainThreadSecretState", "$getPassword", vec![json!("pub.two"), json!("k")]));
-    assert_eq!(gaps(&fx), vec![("MainThreadSecretState".into(), "$getPassword".into(), Some("pub.two".into()), 2)]);
+    let fx = c.handle(t0, request(2, "MainThreadAuthentication", "$getSession", vec![json!("github"), json!(["repo"]), json!("pub.two"), json!("Pub"), json!({})]));
+    assert_eq!(gaps(&fx), vec![("MainThreadAuthentication".into(), "$getSession".into(), Some("pub.two".into()), 2)]);
 
     // $isOnBatteryPower(): Promise<boolean>, no argument names an extension.
     let fx = c.handle(t0, request(3, "MainThreadPower", "$isOnBatteryPower", vec![]));

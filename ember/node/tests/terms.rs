@@ -7,16 +7,19 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ember_node::api::{self, Node};
 use ember_node::client::{NodeClient, TermAttachment};
 use ember_node::config::NodeConfig;
 use ember_node::proto::*;
+
+#[path = "common/term_server.rs"]
+mod term_server;
+use term_server::TermServer;
 
 const TOKEN: &str = "test-token";
 
 struct Fixture {
     client: NodeClient,
-    node: Node,
+    node: TermServer,
     root: PathBuf,
     state: PathBuf,
     _dir: tempfile::TempDir,
@@ -30,14 +33,6 @@ fn config(root: &Path, state: &Path) -> NodeConfig {
     }
 }
 
-async fn serve(cfg: NodeConfig) -> (NodeClient, Node) {
-    let node = Node::new(cfg).unwrap();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    tokio::spawn(api::serve(listener, node.clone()));
-    (NodeClient::new(&base, TOKEN).unwrap(), node)
-}
-
 async fn start() -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let base = dir.path().canonicalize().unwrap();
@@ -45,7 +40,7 @@ async fn start() -> Fixture {
     // Short: keeper sockets live here and unix socket paths are limited to ~104 bytes.
     let state = base.join("s");
     std::fs::create_dir_all(&root).unwrap();
-    let (client, node) = serve(config(&root, &state)).await;
+    let (client, node) = TermServer::start(config(&root, &state), TOKEN).await;
     Fixture { client, node, root, state, _dir: dir }
 }
 
@@ -429,7 +424,7 @@ async fn a_new_node_readopts_running_sessions_and_reports_lost_ones() {
 
         // "Restart": a second node on the same state dir. (The first one still runs in this
         // process; only the second is used from here on.)
-        let (c2, _node2) = serve(config(&f.root, &f.state)).await;
+        let (c2, _node2) = TermServer::start(config(&f.root, &f.state), TOKEN).await;
         let t2 = c2.term(&t.id).await.unwrap();
         assert_eq!(t2.state, TermState::Running);
         assert!(t2.adopted);
@@ -487,4 +482,72 @@ async fn fr_p1_terms_running_session_cap_refuses_one_more() {
         assert!(freed, "a killed session frees its slot");
     })
     .await;
+}
+
+/// The test finds its own keeper by the fixture's socket and shell PID, then waits for that
+/// keeper process to exit. Removing the temporary directory alone also removes the socket.
+#[cfg(unix)]
+#[tokio::test]
+async fn fr_p6_panicking_fixture_reaps_its_terminal_and_keeper() {
+    use std::ffi::OsStr;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+
+    let f = start().await;
+    let t = f.client.term_create(&req(&f.root, &["/bin/sh"])).await.unwrap().term;
+    let session = f.node.terms().get(&t.id).unwrap();
+    // Keep the red regression from leaking the shell or keeper when the fixture fails to stop them.
+    struct StopSession(std::sync::Arc<ember_node::term::session::Session>);
+    impl Drop for StopSession {
+        fn drop(&mut self) {
+            self.0.kill(Some(ember_node::exec::SIGKILL));
+        }
+    }
+    let cleanup = StopSession(session);
+    let socket = cleanup.0.record().keeper_socket.unwrap();
+    let shell = t.pid.unwrap();
+    let shell_arg = shell.to_string();
+    let mut processes = System::new();
+    processes.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+    );
+    let keeper = processes
+        .processes()
+        .iter()
+        .find(|(_, process)| {
+            process.parent() == Some(Pid::from_u32(std::process::id()))
+                && matches!(
+                    process.cmd(),
+                    [_, cmd, socket_flag, path, pid_flag, pid, fd_flag, _]
+                        if cmd == ember_node::term::pty::KEEPER_SUBCOMMAND
+                            && socket_flag == "--socket" && path == socket.as_os_str()
+                            && pid_flag == "--pid" && pid == OsStr::new(&shell_arg)
+                            && fd_flag == "--fd"
+                )
+        })
+        .map(|(pid, _)| pid.as_u32())
+        .expect("the fixture's keeper is running");
+
+    let panic = catch_unwind(AssertUnwindSafe(move || {
+        let _f = f;
+        panic!("simulate a test assertion failure");
+    }));
+    assert!(panic.is_err());
+
+    let wait_for_exit = || async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while ember_node::term::pty::alive(shell) || ember_node::term::pty::alive(keeper) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+    };
+    let reaped_by_fixture = wait_for_exit().await.is_ok();
+    drop(cleanup);
+    if !reaped_by_fixture {
+        wait_for_exit().await.expect("test fallback cleanup");
+    }
+    assert!(reaped_by_fixture, "unwinding left shell {shell} or keeper {keeper} alive");
 }

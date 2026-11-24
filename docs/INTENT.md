@@ -1180,6 +1180,8 @@ What trust does not protect. Under D37 agents and terminals run with the full au
 - The node applies its effective settings through its DarkPyonix manager (core): the type decides what the manager installs (OSE, a link to the user's own Microsoft `code serve-web`, or the user's script), and the pre-installed extensions are installed into that editor server. How the manager receives them is core's (darkpyonix-core D26, D27, p2E).
 - With the same answer: the manager comes from PyPI (the node installs it from there, not from a separate archive); the manager and the node are separate programs and services; the editor server stops when the manager stops; Q4 to Q7 of the note are approved as recommended (the Ember release pins the OSE version the node asks for, OSE builds and releases stay in this repository, the one-line installer, and the editor server at the manager's endpoint, D55).
 
+- **The chooser remembers per project** [user, 2026-11-25: "사용자가 지난번에 고른 편집기를 프로젝트별로 따로 보여주는걸로 해"]: the IDE a user last picked in a project is that project's default for that user; only a project with no pick yet falls back to the computer's effective `default_ide`.
+
 **Why.** One place to decide what every computer's editor looks like, with a per-computer exception where a machine needs it (a different editor server, more extensions), instead of setting each node by hand.
 
 **Rejected** *[provisional]*. Settings per node only (every node set by hand); presets fixed in the release (the owner wants them in the server's settings).

@@ -333,7 +333,7 @@ fn editor_pane() -> Element {
     // The editor fills the box the page's layout gave this tree. Until the first layout the
     // box is empty, and a CodeEditor measured without a limit would abort the renderer.
     let (box_w, box_h) = dioxus_compose::use_widget_box();
-    let _mounts = use_hook(|| MountGuard);
+    let _mounts = use_hook(|| std::rc::Rc::new(MountGuard));
     if box_w <= 0.0 || box_h <= 0.0 {
         forget_mount();
         return rsx! {};
@@ -437,9 +437,10 @@ fn editor_pane() -> Element {
     let fold_s = s.clone(); let fold_uri = uri.clone();
     let selection_s = s.clone(); let selection_uri = uri;
     let key_s = s.clone(); let pointer_s = s.clone(); let caret_s = s.clone();
+    let syntax_spans = crate::ui::editor::syntax_spans_at(&doc.syntax, doc.widget_version_of(doc.syntax.version));
     rsx! { CodeEditor {
         key: "{generation}", width: Some(box_w), height: Some(box_h), handle,
-        text: doc.text, decorations: compose_rust::code::Decorations::from_bytes(doc.decoration_bytes), syntax_spans: crate::ui::editor::syntax_spans_at(&doc.syntax, doc.widget_version_of(doc.syntax.version)), folds: crate::ui::editor::folds_from(&doc.folds, doc.widget_base), tab_width: Some(doc.tab_width),
+        text: doc.text, decorations: compose_rust::code::Decorations::from_bytes(doc.decoration_bytes), syntax_spans, folds: crate::ui::editor::folds_from(&doc.folds, doc.widget_base), tab_width: Some(doc.tab_width),
         gutter_decorations,
         // FR-L31.27: the mockup's code type, row pitch and line number column (`editor.css:2`, `:71`).
         font_size: Some(crate::ui::fonts::CODE_FONT_SIZE), line_height: Some(crate::ui::fonts::CODE_LINE_HEIGHT),

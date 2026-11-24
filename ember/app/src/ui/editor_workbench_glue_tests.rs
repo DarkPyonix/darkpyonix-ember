@@ -1623,7 +1623,7 @@ impl Page {
     fn open_dirty_a_clean_b() -> Page {
         let mut page = Page::open_two_files();
         let shared = super::shared();
-        { let mut tabs = shared.tabs; let mut tabs = tabs.write(); tabs.open(FILE); tabs.open(OTHER); tabs.activate(FILE); }
+        { let mut tabs = shared.tabs; let mut tabs = dioxus_compose::prelude::WritableExt::write(&mut tabs); tabs.open(FILE); tabs.open(OTHER); tabs.activate(FILE); }
         page.deliver(opened(7));
         page.deliver(other_opened(8, "fn other() {}\n"));
         shared.bridge.borrow_mut().on_code_changed(&uri(), 1, ember_editor::WidgetRange::empty(ember_editor::WidgetPos::new(0, 0)), "x".into()).expect("a.rs is open");

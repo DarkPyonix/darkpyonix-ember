@@ -5394,9 +5394,12 @@ mod tests {
         let sent = PaneTabSent::of(host_view_seg_compact);
         for v in SessionView::ALL {
             assert!(!view_name(v).is_empty());
+            let named: Vec<u32> = sent.names.iter().filter(|(_, n)| n == view_name(v)).map(|(id, _)| *id).collect();
             assert!(
-                sent.modifiers.iter().any(|(_, m)| m.contains("Semantics") && m.contains(view_name(v)) && m.contains("Button")),
-                "no named button for {v:?}: {:?}",
+                named.iter().any(|id| sent.mods(*id).iter().any(|m| m.starts_with("Semantics") && m.contains("Button"))),
+                "no button named {:?} for {v:?}: names {:?}, modifiers {:?}",
+                view_name(v),
+                sent.names,
                 sent.modifiers
             );
         }
@@ -5418,18 +5421,25 @@ mod tests {
         clicked: Vec<u32>,
         parents: Vec<(u32, u32)>,
         modifiers: Vec<(u32, String)>,
+        /// Accessible names: a name is a node property, not part of the semantics modifier.
+        names: Vec<(u32, String)>,
     }
 
     impl PaneTabSent {
         fn of(content: fn()) -> Self {
             let mut host = Host::new(move || Box::new(Recomposer::new(content)));
             let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
-            let mut sent = PaneTabSent { clicked: Vec::new(), parents: Vec::new(), modifiers: Vec::new() };
+            let mut sent = PaneTabSent { clicked: Vec::new(), parents: Vec::new(), modifiers: Vec::new(), names: Vec::new() };
             for m in batch.iter() {
                 match m {
                     Mutation::SetProp { node_id, property: compose_rust::PropertyKind::OnClick, .. } => sent.clicked.push(*node_id),
                     Mutation::Insert { parent_id, node_id, .. } => sent.parents.push((*node_id, *parent_id)),
                     Mutation::SetModifier { node_id, modifier, .. } => sent.modifiers.push((*node_id, format!("{modifier:?}"))),
+                    Mutation::SetProp {
+                        node_id,
+                        property: compose_rust::PropertyKind::AccessibleName,
+                        value: compose_rust::protocol::PropertyValue::String(name),
+                    } => sent.names.push((*node_id, name.to_string())),
                     _ => {}
                 }
             }

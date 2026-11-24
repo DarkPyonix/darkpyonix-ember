@@ -9,7 +9,8 @@
 use ember_editor_conn::actors::generated::{
     main_thread_bulk_edits, main_thread_commands, main_thread_debug_service, main_thread_diagnostics, main_thread_documents, main_thread_errors,
     main_thread_language_features, main_thread_languages, main_thread_logger, main_thread_message_service,
-    main_thread_output_service, main_thread_search, main_thread_storage, main_thread_window, main_thread_workspace,
+    main_thread_output_service, main_thread_search, main_thread_secret_state, main_thread_storage, main_thread_window,
+    main_thread_workspace,
 };
 use ember_editor_conn::actors::{Ctx, Outcome};
 use ember_editor_conn::coverage;
@@ -61,6 +62,7 @@ impl SessionCore {
             Some(main_thread_output_service::PROXY) => Some(main_thread_output_service::dispatch(self, &cx, method, args)),
             Some(main_thread_message_service::PROXY) => Some(main_thread_message_service::dispatch(self, &cx, method, args)),
             Some(main_thread_search::PROXY) => Some(main_thread_search::dispatch(self, &cx, method, args)),
+            Some(main_thread_secret_state::PROXY) => Some(main_thread_secret_state::dispatch(self, &cx, method, args)),
             Some(main_thread_storage::PROXY) => Some(main_thread_storage::dispatch(self, &cx, method, args)),
             Some(main_thread_language_features::PROXY) => Some(main_thread_language_features::dispatch(self, &cx, method, args)),
             Some(main_thread_documents::PROXY) => Some(main_thread_documents::dispatch(self, &cx, method, args)),
@@ -715,6 +717,44 @@ impl main_thread_window::Window for SessionCore {
     }
 }
 
+impl main_thread_secret_state::SecretState for SessionCore {
+    fn get_password(&mut self, cx: &Ctx, args: main_thread_secret_state::GetPasswordArgs) -> Outcome {
+        self.out.push(Effect::SecretState {
+            req: cx.req,
+            op: crate::secret_state::SecretOp::Get {
+                extension_id: args.extension_id,
+                key: args.key,
+            },
+        });
+        Outcome::Deferred
+    }
+
+    fn set_password(&mut self, cx: &Ctx, args: main_thread_secret_state::SetPasswordArgs) -> Outcome {
+        self.secret_writes.insert(cx.req, (args.extension_id.clone(), args.key.clone()));
+        self.out.push(Effect::SecretState {
+            req: cx.req,
+            op: crate::secret_state::SecretOp::Set {
+                extension_id: args.extension_id,
+                key: args.key,
+                value: args.value,
+            },
+        });
+        Outcome::Deferred
+    }
+
+    fn delete_password(&mut self, cx: &Ctx, args: main_thread_secret_state::DeletePasswordArgs) -> Outcome {
+        self.secret_writes.insert(cx.req, (args.extension_id.clone(), args.key.clone()));
+        self.out.push(Effect::SecretState {
+            req: cx.req,
+            op: crate::secret_state::SecretOp::Delete {
+                extension_id: args.extension_id,
+                key: args.key,
+            },
+        });
+        Outcome::Deferred
+    }
+}
+
 impl main_thread_storage::Storage for SessionCore {
     fn initialize_extension_storage(
         &mut self,
@@ -830,5 +870,74 @@ mod tests {
     #[test]
     fn fr_l31_13_registration_without_a_handle_is_malformed() {
         assert!(RegisterDefinitionSupportArgs::decode(&args(json!(["x", []]))).is_err());
+    }
+
+    #[test]
+    fn secret_state_routes_get_set_delete_and_replies() {
+        use crate::secret_state::{SecretOp, SecretReply};
+
+        let t0 = Instant::now();
+        let mut core = SessionCore::new(LanguageRegistry::from_extensions(&[]), CoreOptions::default(), t0);
+        let proxy = main_thread_secret_state::PROXY;
+        let rpc_id = ember_editor_conn::rpc_ids::id_of(proxy).unwrap();
+
+        let mk = |req: u32, method: &str, a: Value| IncomingRequest {
+            req,
+            rpc_id,
+            proxy: Some(proxy),
+            method: method.into(),
+            args: args(a),
+            cancellable: false,
+        };
+
+        let fx = core.handle(t0, Input::ExtHostRequest(mk(1, "$setPassword", json!(["ext.a", "k", "v"]))));
+        assert_eq!(
+            fx,
+            vec![Effect::SecretState {
+                req: 1,
+                op: SecretOp::Set { extension_id: "ext.a".into(), key: "k".into(), value: "v".into() },
+            }]
+        );
+        let fx = core.handle(t0, Input::SecretState { req: 1, result: Ok(SecretReply::Unit) });
+        assert_eq!(fx.len(), 2);
+        assert_eq!(fx[0], Effect::Respond { req: 1, result: Ok(Reply::Empty) });
+        assert!(matches!(&fx[1], Effect::Rpc { token: None, call } if call.method == "$onDidChangePassword"));
+
+        let fx = core.handle(t0, Input::ExtHostRequest(mk(2, "$getPassword", json!(["ext.a", "k"]))));
+        assert_eq!(
+            fx,
+            vec![Effect::SecretState {
+                req: 2,
+                op: SecretOp::Get { extension_id: "ext.a".into(), key: "k".into() },
+            }]
+        );
+        let fx = core.handle(t0, Input::SecretState { req: 2, result: Ok(SecretReply::Value(Some("v".into()))) });
+        assert_eq!(fx, vec![Effect::Respond { req: 2, result: Ok(Reply::Json(json!("v"))) }]);
+
+        let fx = core.handle(t0, Input::ExtHostRequest(mk(3, "$getPassword", json!(["ext.a", "missing"]))));
+        assert_eq!(
+            fx,
+            vec![Effect::SecretState {
+                req: 3,
+                op: SecretOp::Get { extension_id: "ext.a".into(), key: "missing".into() },
+            }]
+        );
+        let fx = core.handle(t0, Input::SecretState { req: 3, result: Ok(SecretReply::Value(None)) });
+        assert_eq!(fx, vec![Effect::Respond { req: 3, result: Ok(Reply::Empty) }]);
+
+        let fx = core.handle(t0, Input::ExtHostRequest(mk(4, "$deletePassword", json!(["ext.a", "k"]))));
+        assert_eq!(
+            fx,
+            vec![Effect::SecretState {
+                req: 4,
+                op: SecretOp::Delete { extension_id: "ext.a".into(), key: "k".into() },
+            }]
+        );
+        let fx = core.handle(t0, Input::SecretState { req: 4, result: Ok(SecretReply::Deleted { existed: true }) });
+        assert_eq!(fx.len(), 2);
+        assert_eq!(fx[0], Effect::Respond { req: 4, result: Ok(Reply::Empty) });
+        assert!(matches!(&fx[1], Effect::Rpc { token: None, call } if call.method == "$onDidChangePassword"));
+
+        assert!(core.unimplemented_calls().is_empty());
     }
 }

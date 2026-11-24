@@ -53,6 +53,7 @@ pub enum TransferResult {
     Done,
     Failed,
     Declined,
+    Expired,
     Cancelled,
 }
 
@@ -248,7 +249,7 @@ impl TransferError {
             TransferError::TooLarge => "받는 쪽의 크기 제한을 넘어서 보낼 수 없습니다.".into(),
             TransferError::ReceiveOff => "받는 쪽이 파일 받기를 꺼 두었습니다.".into(),
             TransferError::NotRegistered => "이 장비는 받는 쪽에 등록되어 있지 않습니다.".into(),
-            TransferError::Expired => "받는 쪽에서 응답이 없어 전송을 취소했습니다.".into(),
+            TransferError::Expired => "받는 쪽에서 응답이 없어 전송 요청이 만료되었습니다.".into(),
             TransferError::HashMismatch => {
                 "받은 파일이 원본과 달라서 저장하지 않았습니다. 다시 시도해 주세요.".into()
             }
@@ -275,6 +276,7 @@ impl TransferError {
         match e {
             ApiError::Transport(_) | ApiError::Peer(_) | ApiError::Push(_) => TransferError::Connection,
             ApiError::Unauthorized(_) => TransferError::Unauthorized,
+            ApiError::Status { status: 410, .. } => TransferError::Expired,
             ApiError::Status { status: 413, .. } => TransferError::TooLarge,
             ApiError::Status { status: 507, .. } => TransferError::NoSpace,
             ApiError::Status { status: 403, message, .. } if message.contains("InsecureTarget") => {
@@ -477,6 +479,7 @@ fn end_of(result: Option<TransferResult>) -> Result<UploadEnd, TransferError> {
     match result {
         Some(TransferResult::Done) => Ok(UploadEnd::Done(Vec::new())),
         Some(TransferResult::Declined) => Ok(UploadEnd::Declined),
+        Some(TransferResult::Expired) => Err(TransferError::Expired),
         Some(TransferResult::Failed) => Err(TransferError::HashMismatch),
         // No record: the receiver dropped it (a cancel, or its history was cleared).
         Some(TransferResult::Cancelled) | None => Ok(UploadEnd::Cancelled),
@@ -846,6 +849,24 @@ mod tests {
 
     fn snapshot(json: serde_json::Value) -> TransfersSnapshot {
         serde_json::from_value(json).expect("snapshot decodes")
+    }
+
+    #[test]
+    fn fr_f3_receiver_expiry_ends_the_sender_wait() {
+        let s = snapshot(serde_json::json!({
+            "ready": true,
+            "devices": [],
+            "transfers": [],
+            "pending_offers": [],
+            "received": [],
+            "history": [{
+                "id": "tr-0", "name": "late.bin", "device": "laptop", "direction": "receive",
+                "size": 12, "result": "expired", "timestamp_ms": 301_000
+            }],
+            "settings": { "receive_mode": "ask", "auto_accept_peers": [], "max_bytes": 100, "received_dir": "/x" }
+        }));
+        let Whereabouts::Ended(result) = locate(&s, "tr-0") else { panic!("the offer is still open") };
+        assert_eq!(end_of(result), Err(TransferError::Expired));
     }
 
     #[test]

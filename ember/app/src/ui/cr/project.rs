@@ -31,7 +31,7 @@ use super::characters::{CharState, Character, StylePicker};
 use crate::ui::characters::CharStyle;
 use super::components::{
     AppButton, ButtonKind, Clickable, NamedClickable, EmberField, EmberSheet, FieldOptions, FilterChip,
-    IconButton, InkIconButton, Label, Pill, PillTone, PopKind, PopMenu, PopoverMenu, SearchField, SearchFieldFocus, Select, SheetFooter,
+    IconButton, InkIconButton, Label, Pill, PillTone, PopKind, PopMenu, PopRow, PopoverMenu, SearchField, SearchFieldFocus, Select, SheetFooter,
 };
 use super::home::{content_width, fit_label, ring_image, text_px, Cols, Part};
 use super::notice;
@@ -43,8 +43,9 @@ use crate::server::IdeLaunch;
 use crate::services::{run_shared, services};
 use crate::ui::project::{
     archive_patch, danger_hint, danger_rows_for, delete_armed, delete_error_message, delete_step, full_after_removal,
-    is_owner_refusal, project_channel_tile, project_links_from, project_routine_tile, ChannelTileLoad, DeleteStep,
-    ProjectLinks, TileLoad,
+    is_owner_refusal, member_default_mode_choices, member_default_mode_label, member_default_model_choices,
+    member_default_model_label, project_channel_tile, project_links_from, project_routine_tile, ChannelTileLoad,
+    DeleteStep, ProjectLinks, TileLoad,
 };
 use crate::ui::coexist::{shared_ui, SharedUi};
 use crate::ui::shell::NavMenu;
@@ -882,11 +883,11 @@ fn FullProject(b: &ProjectBox, chips: &[ComputerChip], st: &Ui, ui: &SharedUi, w
     KpiStrip(b, ui, w);
     // The project's routines and channels from the server (FR-L26, #327); the demo lists its samples.
     let routines = remember_with_key(b.id.clone(), || {
-        mutable_state_of(if services().demo.is_some() { TileLoad::Loaded(super::routines::sample_entries()) } else { TileLoad::Loading })
+        mutable_state_of(if services().demo.is_some() { TileLoad::Loaded(crate::demo::demo_routines()) } else { TileLoad::Loading })
     });
     let channels = remember_with_key(b.id.clone(), || {
         mutable_state_of(if services().demo.is_some() {
-            ChannelTileLoad::Loaded(super::channels::sample_rooms())
+            ChannelTileLoad::Loaded(crate::demo::demo_channels())
         } else {
             ChannelTileLoad::Loading
         })
@@ -1301,7 +1302,7 @@ pub(super) fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: 
                         }
                     };
                     let (s1, s2, s3) = (submit.clone(), submit.clone(), submit);
-                    Section(NEW_SEC_BASIC.0, NEW_SEC_BASIC.1, true, || {
+                    Section(NEW_SEC_BASIC.0, NEW_SEC_BASIC.1, true, None, || {
                         // `.ps-grid`: 이름 across both columns, then 저장소 and 기본 브랜치 side by
                         // side 16 apart; one column at 560 px and below. Rows are 12 apart.
                         { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), {
@@ -1359,7 +1360,7 @@ pub(super) fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: 
                             }
                         }) };
                     });
-                    Section(NEW_SEC_STYLE.0, NEW_SEC_STYLE.1, false, || {
+                    Section(NEW_SEC_STYLE.0, NEW_SEC_STYLE.1, false, None, || {
                         let dr = st.new_draft.clone();
                         let shown = effective_style(if d.style.is_empty() { None } else { Some(&d.style) }, None);
                         StylePicker(&d.name, shown, move |c| dr.update(|s| s.style = c.id().to_string()));
@@ -1499,21 +1500,29 @@ impl SheetSkip {
 }
 
 /// [`Section`], left out when `EMBER_CR_SHEET_SCROLL` scrolled it away.
-fn SkipSection(skip: &SheetSkip, est: f32, title: &str, hint: &str, first: bool, content: impl FnOnce()) {
+fn SkipSection(
+    skip: &SheetSkip,
+    est: f32,
+    title: &str,
+    hint: &str,
+    first: bool,
+    title_color: Option<compose_rust::Paint>,
+    content: impl FnOnce(),
+) {
     if skip.show(est) {
-        Section(title, hint, first, content);
+        Section(title, hint, first, title_color, content);
     }
 }
 
 /// A settings section: a rule above (except the first), the 16 px title, its hint, the content.
-fn Section(title: &str, hint: &str, first: bool, content: impl FnOnce()) {
+fn Section(title: &str, hint: &str, first: bool, title_color: Option<compose_rust::Paint>, content: impl FnOnce()) {
     let p = ember_theme().palette;
     { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
         if !first {
             { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().fill_max_width().height(1.0).background(paint(p.line))) };
             { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[1])) };
         }
-        Label(title, Fs::Lg, Weight::Semibold, None, Some(1));
+        Label(title, Fs::Lg, Weight::Semibold, title_color, Some(1));
         if !hint.is_empty() {
             Label(hint, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(3));
         }
@@ -1695,8 +1704,8 @@ pub(super) fn SettingsSheet(
         mutable_state_of(if services().demo.is_some() {
             project_links_from(
                 &b.id,
-                &super::routines::sample_entries(),
-                &super::channels::sample_rooms(),
+                &crate::demo::demo_routines(),
+                &crate::demo::demo_channels(),
             )
         } else {
             ProjectLinks::loading()
@@ -1747,7 +1756,7 @@ pub(super) fn SettingsSheet(
     EmberSheet(&format!("{} 설정", b.name), true, request_close, Some(&mut actions), || {
         { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().fill_max_width().height(body_height), {
             { use ::compose_rust::ui::Column; Column!(spacing = SP[3], modifier = Modifier::new().fill_max_width().padding(SP[4]), {
-                SkipSection(&sheet_skip, EST_SEC_BASIC, "기본", "프로젝트 이름과 저장소입니다. 비워서 저장하면 저장소와 브랜치 설정이 지워집니다", true, || {
+                SkipSection(&sheet_skip, EST_SEC_BASIC, "기본", "프로젝트 이름과 저장소입니다. 비워서 저장하면 저장소와 브랜치 설정이 지워집니다", true, None, || {
                     { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
                         let (d1, d2, d3) = (draft.clone(), draft.clone(), draft.clone());
                         FieldRow("이름", || {
@@ -1794,7 +1803,7 @@ pub(super) fn SettingsSheet(
                         }
                     }) };
                 });
-                SkipSection(&sheet_skip, EST_SEC_COMPUTERS, "컴퓨터", "이 프로젝트의 팀원이 일할 수 있는 컴퓨터입니다", false, || {
+                SkipSection(&sheet_skip, EST_SEC_COMPUTERS, "컴퓨터", "이 프로젝트의 팀원이 일할 수 있는 컴퓨터입니다", false, None, || {
                     if chips.is_empty() {
                         Label("등록된 컴퓨터가 없습니다", Fs::Md, Weight::Regular, Some(paint(p.text_2)), None);
                     }
@@ -1810,47 +1819,110 @@ pub(super) fn SettingsSheet(
                         }
                     }) };
                 });
-                SkipSection(&sheet_skip, EST_SEC_DEFAULTS, "새 팀원 기본값", "하네스, 모델, 권한 모드는 새 팀원에게만 적용됩니다", false, || {
+                SkipSection(&sheet_skip, EST_SEC_DEFAULTS, "새 팀원 기본값", "하네스, 모델, 권한 모드는 새 팀원에게만 적용됩니다", false, None, || {
+                    let model_open = remember_with_key(b.id.clone(), || mutable_state_of(false));
+                    let mode_open = remember_with_key(b.id.clone(), || mutable_state_of(false));
+                    let model_choices = member_default_model_choices();
+                    let model_label = member_default_model_label(&d.agent, &d.model);
+                    let model_rows: Vec<PopRow> = model_choices
+                        .iter()
+                        .map(|c| PopRow {
+                            icon: Some(ICON_SPARK_SVG),
+                            title: c.label.clone(),
+                            description: c.description.map(str::to_string),
+                            chosen: c.agent == d.agent.trim() && c.model == d.model.trim(),
+                            ..Default::default()
+                        })
+                        .collect();
+                    let mode_choices = member_default_mode_choices();
+                    let mode_label = member_default_mode_label(&d.mode);
+                    let mode_rows: Vec<PopRow> = mode_choices
+                        .iter()
+                        .map(|(k, l)| PopRow {
+                            icon: Some(super::session::ICON_SHIELD_SVG),
+                            title: (*l).to_string(),
+                            chosen: *k == d.mode.trim(),
+                            danger: *k == "bypass",
+                            ..Default::default()
+                        })
+                        .collect();
+                    let model_is_open = model_open.get();
+                    let mode_is_open = mode_open.get();
                     { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
-                        let agents = agent_options();
-                        let agent_labels: Vec<String> = agents.iter().map(|(_, l)| l.to_string()).collect();
-                        let agent_at = agents.iter().position(|(k, _)| *k == d.agent).unwrap_or(0);
-                        FieldRow("하네스", || {
-                            let (dr, agents) = (draft.clone(), agents.clone());
-                            Select(&agent_labels[agent_at], &agent_labels, agent_at, 260.0, move |i| {
-                                if let Some((k, _)) = agents.get(i) {
-                                    dr.update(|s| s.agent = k.to_string());
-                                }
-                            });
-                        });
-                        FieldRow("모델", || {
-                            let dr = draft.clone();
-                            // The model picker sheet of the new session screen needs the harness
-                            // catalog (an Ember gap, not compose-rust#383, which is fixed); the id
-                            // is typed until it is shared.
-                            EmberField(FieldOptions {
-                                fill_max_width: true,
-                                text: Some(d.model.clone()),
-                                placeholder: "비워 두면 하네스 기본값을 씁니다".to_string(),
-                                enabled: Some(part_supported(SettingsPart::MemberDefaults)),
-                                on_value_change: Some(Box::new(move |v| dr.update(|s| s.model = v))),
-                                ..Default::default()
-                            });
-                        });
-                        let modes = mode_options();
-                        let mode_labels: Vec<String> = modes.iter().map(|(_, l)| l.to_string()).collect();
-                        let mode_at = modes.iter().position(|(k, _)| *k == d.mode).unwrap_or(0);
-                        FieldRow("권한 모드", || {
-                            let (dr, modes) = (draft.clone(), modes.clone());
-                            Select(&mode_labels[mode_at], &mode_labels, mode_at, 260.0, move |i| {
-                                if let Some((k, _)) = modes.get(i) {
-                                    dr.update(|s| s.mode = k.to_string());
-                                }
-                            });
-                        });
+                        { use ::compose_rust::ui::FlowRow; FlowRow!(horizontal_spacing = SP[1], vertical_spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
+                            let close_model = {
+                                let o = model_open.clone();
+                                move || o.set(false)
+                            };
+                            let (dr_model, choices_for_pick, mo_anchor) = (draft.clone(), model_choices.clone(), model_open.clone());
+                            PopoverMenu(
+                                model_is_open,
+                                PopMenu {
+                                    name: super::a11y::MODEL_PICKER,
+                                    kind: PopKind::Mode,
+                                    head: "하네스 \u{00b7} 모델",
+                                    sub: None,
+                                    rows: &model_rows,
+                                    align: compose_rust::PopoverAlign::Start,
+                                },
+                                close_model,
+                                move |i| {
+                                    if let Some(c) = choices_for_pick.get(i) {
+                                        dr_model.update(|s| {
+                                            s.agent = c.agent.to_string();
+                                            s.model = c.model.to_string();
+                                        });
+                                    }
+                                },
+                                move || {
+                                    DefaultPickerChip(
+                                        ICON_SPARK_SVG,
+                                        &model_label,
+                                        false,
+                                        model_is_open,
+                                        move || mo_anchor.set(!mo_anchor.get_untracked()),
+                                    );
+                                },
+                                None,
+                            );
+                            let close_mode = {
+                                let o = mode_open.clone();
+                                move || o.set(false)
+                            };
+                            let (dr_mode, modes_for_pick, md_anchor) = (draft.clone(), mode_choices.clone(), mode_open.clone());
+                            let mode_warn = d.mode.trim() == "bypass";
+                            PopoverMenu(
+                                mode_is_open,
+                                PopMenu {
+                                    name: super::a11y::MODE_PICKER,
+                                    kind: PopKind::Mode,
+                                    head: "권한 모드",
+                                    sub: None,
+                                    rows: &mode_rows,
+                                    align: compose_rust::PopoverAlign::Start,
+                                },
+                                close_mode,
+                                move |i| {
+                                    if let Some((k, _)) = modes_for_pick.get(i) {
+                                        dr_mode.update(|s| s.mode = (*k).to_string());
+                                    }
+                                },
+                                move || {
+                                    DefaultPickerChip(
+                                        super::session::ICON_SHIELD_SVG,
+                                        mode_label,
+                                        mode_warn,
+                                        mode_is_open,
+                                        move || md_anchor.set(!md_anchor.get_untracked()),
+                                    );
+                                },
+                                None,
+                            );
+                        }) };
+                        Label("계정은 하네스의 프로필을 따릅니다.", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
                     }) };
                 });
-                SkipSection(&sheet_skip, EST_SEC_PROFILE, "프로필 덮어쓰기", "이 프로젝트에서만 하네스에 고정할 계정입니다. 팀원 정의에 고정 계정이 없을 때 새 세션에 쓰입니다", false, || {
+                SkipSection(&sheet_skip, EST_SEC_PROFILE, "프로필 덮어쓰기", "이 프로젝트에서만 하네스에 고정할 계정입니다. 팀원 정의에 고정 계정이 없을 때 새 세션에 쓰입니다", false, None, || {
                     { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
                         let accounts: Vec<(String, String, String)> = crate::services::try_services()
                             .map(|s| s.ui.live.accounts.get().iter().map(|a| (a.id.clone(), a.agent.clone(), a.label.clone())).collect())
@@ -1871,7 +1943,7 @@ pub(super) fn SettingsSheet(
                         }
                     }) };
                 });
-                SkipSection(&sheet_skip, EST_SEC_STYLE, "팀 캐릭터", "팀원이 모두 고른 모양으로 보입니다. 저장하면 서버에 기록됩니다", false, || {
+                SkipSection(&sheet_skip, EST_SEC_STYLE, "팀 캐릭터", "팀원이 모두 고른 모양으로 보입니다. 저장하면 서버에 기록됩니다", false, None, || {
                     let dr = draft.clone();
                     let device = shared_ui().prefs.get().saved_character_style(&b.id);
                     let shown = if d.style.is_empty() { effective_style(None, device) } else { effective_style(Some(&d.style), device) };
@@ -1889,7 +1961,7 @@ pub(super) fn SettingsSheet(
                 });
                 if leader_choice_visible(&b.id) {
                     // `.ps-leads`: one radio per member, clicking toggles `draft.leader_session`.
-                    SkipSection(&sheet_skip, EST_SEC_LEADER, "리더 (오케스트레이터)", "프로젝트의 기존 세션 중에서 리더를 고릅니다. 다시 누르면 해제됩니다.", false, || {
+                    SkipSection(&sheet_skip, EST_SEC_LEADER, "리더 (오케스트레이터)", "프로젝트의 기존 세션 중에서 리더를 고릅니다. 다시 누르면 해제됩니다.", false, None, || {
                         if b.members.is_empty() {
                             Label("팀원이 없습니다", Fs::Md, Weight::Regular, Some(paint(p.text_2)), Some(1));
                         }
@@ -1922,11 +1994,11 @@ pub(super) fn SettingsSheet(
                         }) };
                     });
                 } else {
-                    SkipSection(&sheet_skip, EST_SEC_LEADER, "리더 (오케스트레이터)", "기본 프로젝트는 리더를 두지 않습니다", false, || {
+                    SkipSection(&sheet_skip, EST_SEC_LEADER, "리더 (오케스트레이터)", "기본 프로젝트는 리더를 두지 않습니다", false, None, || {
                         Label("리더가 필요하면 프로젝트를 새로 만들어 옮기세요.", Fs::Md, Weight::Regular, Some(paint(p.text_2)), Some(1));
                     });
                 }
-                SkipSection(&sheet_skip, EST_SEC_LINKS, "연결", "이 프로젝트에 묶인 루틴, 채널, 버전 관리로 바로 이동합니다", false, || {
+                SkipSection(&sheet_skip, EST_SEC_LINKS, "연결", "이 프로젝트에 묶인 루틴, 채널, 버전 관리로 바로 이동합니다", false, None, || {
                     { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
                         let nav_enabled = patch.is_empty() && !saving.get();
                         { use ::compose_rust::ui::FlowRow; FlowRow!(horizontal_spacing = SP[1], vertical_spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
@@ -1957,7 +2029,7 @@ pub(super) fn SettingsSheet(
                         }
                     }) };
                 });
-                SkipSection(&sheet_skip, EST_SEC_DANGER, "위험 영역", danger_hint(&b.id), false, || {
+                SkipSection(&sheet_skip, EST_SEC_DANGER, "위험 영역", danger_hint(&b.id), false, Some(paint(p.red.strong)), || {
                     { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
                         // 보관 is one tap (it can be undone); 삭제 asks twice (`delete_step`).
                         let armed = remember_with_key(b.id.clone(), || mutable_state_of(None::<i64>));
@@ -2067,10 +2139,63 @@ fn LeaderOption(m: &Member, project_id: &str, on_toggle: impl FnMut() + Clone + 
     });
 }
 
+const ICON_SPARK_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 0 0-2.456 2.456ZM16.894 20.567 16.5 21.75l-.394-1.183a2.25 2.25 0 0 0-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 0 0 1.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 0 0 1.423 1.423l1.183.394-1.183.394a2.25 2.25 0 0 0-1.423 1.423Z"/></svg>"#;
+
+/// Compact `.pickchip` pill for `새 팀원 기본값`: 32 dp pill with leading glyph, label and chevron.
+fn DefaultPickerChip(
+    icon: &'static str,
+    text: &str,
+    warn: bool,
+    expanded: bool,
+    on_click: impl FnMut() + 'static,
+) {
+    let p = ember_theme().palette;
+    let (fill, ink, chev) = if warn {
+        (p.red.soft, p.red.strong, p.red.strong)
+    } else if expanded {
+        (p.hover, p.text, p.muted)
+    } else {
+        (p.surface_2, p.text_2, p.muted)
+    };
+    Clickable(
+        Modifier::new()
+            .height(H_CTL)
+            .background(paint(fill))
+            .shape_role(ShapeRole::Full)
+            .expanded(expanded),
+        Alignment::Center,
+        on_click,
+        || {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
+                NavIcon(icon, ink.to_argb(), 16.0);
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[1])) };
+                Label(text, Fs::Sm, Weight::Medium, Some(paint(ink)), Some(1));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[1])) };
+                NavIcon(shell::ICON_CHEVRON_DOWN_SVG, chev.to_argb(), 14.0);
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
+            }) };
+        },
+    );
+}
+
+/// The border of `.ps-danger` (`project.css`): `color-mix(in srgb, var(--c-red) 30%, var(--line))`.
+/// Blends 30% `p.red.strong` with 70% `p.line` per sRGB channel so the red tint reads clearly in
+/// both light and dark themes.
+pub fn danger_card_border(p: &Palette) -> compose_rust::Color {
+    let mix = |a: u32, b: u32| -> u32 { ((a * 30 + b * 70 + 50) / 100).min(255) };
+    let r = p.red.strong.to_argb();
+    let l = p.line.to_argb();
+    let red = mix((r >> 16) & 0xff, (l >> 16) & 0xff);
+    let green = mix((r >> 8) & 0xff, (l >> 8) & 0xff);
+    let blue = mix(r & 0xff, l & 0xff);
+    compose_rust::Color::rgb((red << 16) | (green << 8) | blue)
+}
+
 /// `.ps-danger`: the title and what it does at the left, the destructive button at the right.
 fn DangerRowView(row: &crate::ui::project::DangerRow, enabled: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
-    { use ::compose_rust::ui::Row; Row!(spacing = SP[2], alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width().padding(SP[2]).border(1.0, paint(p.red.soft)).corner_radius(CORNER_MD), {
+    { use ::compose_rust::ui::Row; Row!(spacing = SP[2], alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width().padding(SP[2]).border(1.0, paint(danger_card_border(p))).corner_radius(CORNER_MD), {
             { use ::compose_rust::ui::Column; Column!(spacing = 2.0, modifier = Modifier::new().weight(1.0), {
                 Label(row.title, Fs::Sm, Weight::Semibold, None, Some(1));
                 Label(&row.note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
@@ -2932,7 +3057,8 @@ mod tests {
         assert!(sheet.contains("text: Some(if default_project { b.name.clone() } else { d.name.clone() })"));
         assert!(sheet.contains("text: Some(d.repo.clone())"));
         assert!(sheet.contains("text: Some(d.branch.clone())"));
-        assert!(sheet.contains("text: Some(d.model.clone())"));
+        assert!(sheet.contains("member_default_model_label(&d.agent, &d.model)"));
+        assert!(sheet.contains("member_default_mode_label(&d.mode)"));
         assert!(sheet.contains("load_project_links("));
         assert!(sheet.contains("NavMenu::Routines"));
         assert!(sheet.contains("NavMenu::Channels"));
@@ -2976,6 +3102,109 @@ mod tests {
         assert!(full.contains("NavMenu::Routines"));
         assert!(full.contains("NavMenu::Channels"));
         assert!(!full.contains("{empty}. {SOON}"));
+    }
+
+    #[test]
+    fn fr_l26_danger_section_heading_uses_red_title_color() {
+        let _guard = crate::services::test_guard();
+        let p = ember_theme().palette;
+        let mut host = Host::new(move || {
+            Box::new(Recomposer::new(move || {
+                Section("기본", "설명", true, None, || {});
+                Section("위험 영역", "되돌리기 어려운 작업", false, Some(paint(p.red.strong)), || {});
+            }))
+        });
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let node_for = |want: &str| -> u32 {
+            batch
+                .iter()
+                .find_map(|m| match m {
+                    Mutation::SetProp { node_id, value: PropertyValue::String(s), .. } if *s == want => Some(*node_id),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("missing heading {want}"))
+        };
+        let color_argbs = |id: u32| -> Vec<u32> {
+            batch
+                .iter()
+                .filter_map(|m| match m {
+                    Mutation::SetProp { node_id, value: PropertyValue::Integer(v), .. } if *node_id == id => Some(*v as u32),
+                    _ => None,
+                })
+                .collect()
+        };
+        let danger_argbs = color_argbs(node_for("위험 영역"));
+        let basic_argbs = color_argbs(node_for("기본"));
+        assert!(danger_argbs.contains(&p.red.strong.to_argb()), "danger heading must use red.strong: {danger_argbs:x?}");
+        assert!(basic_argbs.contains(&p.text.to_argb()), "default heading uses palette text: {basic_argbs:x?}");
+        assert!(!basic_argbs.contains(&p.red.strong.to_argb()), "default heading must not be red: {basic_argbs:x?}");
+
+        let src = include_str!("project.rs").split("#[cfg(test)]").next().unwrap();
+        let sheet = src.split("pub(super) fn SettingsSheet(").nth(1).unwrap().split("\nfn ").next().unwrap();
+        assert!(sheet.contains("\"위험 영역\", danger_hint(&b.id), false, Some(paint(p.red.strong))"));
+    }
+
+    #[test]
+    fn fr_l26_danger_card_border_blends_red_30_percent_with_line() {
+        // Exact sRGB 30% red.strong + 70% line (mockup: color-mix(in srgb, var(--c-red) 30%, var(--line))).
+        assert_eq!(danger_card_border(&LIGHT), compose_rust::Color::rgb(0xe5beb6));
+        assert_eq!(danger_card_border(&DARK), compose_rust::Color::rgb(0x64423c));
+
+        let _guard = crate::services::test_guard();
+        let p = ember_theme().palette;
+        let mut host = Host::new(|| {
+            Box::new(Recomposer::new(|| {
+                let [archive, _] = danger_rows_for("ember", 2, false, false);
+                DangerRowView(&archive, archive.enabled, || {});
+            }))
+        });
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let want_border = format!(
+            "{:?}",
+            compose_rust::schema::Modifier::Border { width: 1.0, paint: paint(danger_card_border(p)) }
+        );
+        let has_border = batch.iter().any(|m| {
+            matches!(m, Mutation::SetModifier { modifier, .. } if format!("{modifier:?}") == want_border)
+        });
+        assert!(has_border, "DangerRowView must use danger_card_border(p): {want_border}");
+    }
+
+    #[test]
+    fn fr_l26_member_defaults_render_as_compact_picker_chips() {
+        let src = include_str!("project.rs").split("#[cfg(test)]").next().unwrap();
+        let sheet = src.split("pub(super) fn SettingsSheet(").nth(1).unwrap().split("\nfn ").next().unwrap();
+        let defaults_sec = sheet
+            .split("\"새 팀원 기본값\"")
+            .nth(1)
+            .expect("defaults section")
+            .split("\"프로필 덮어쓰기\"")
+            .next()
+            .expect("before profile section");
+        assert!(defaults_sec.contains("FlowRow!("), "compact chips wrap in a FlowRow");
+        assert!(defaults_sec.contains("PopoverMenu(") && defaults_sec.contains("PopKind::Mode"));
+        assert!(defaults_sec.contains("DefaultPickerChip("));
+        assert!(defaults_sec.contains("member_default_model_choices()"));
+        assert!(defaults_sec.contains("member_default_mode_choices()"));
+        assert!(!defaults_sec.contains("Select("), "no full-width Select dropdowns remain");
+        assert!(!defaults_sec.contains("EmberField("), "no full-width model text field remains");
+
+        let _guard = crate::services::test_guard();
+        let mut host = Host::new(|| {
+            Box::new(Recomposer::new(|| {
+                DefaultPickerChip(ICON_SPARK_SVG, "Claude Code \u{00b7} Opus 5.5 \u{00b7} 높음", false, false, || {});
+                DefaultPickerChip(super::super::session::ICON_SHIELD_SVG, "권한 묻지 않음", true, false, || {});
+            }))
+        });
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let all = texts(&batch);
+        assert!(all.iter().any(|t| t == "Claude Code \u{00b7} Opus 5.5 \u{00b7} 높음"), "{all:?}");
+        assert!(all.iter().any(|t| t == "권한 묻지 않음"), "{all:?}");
+        let p = ember_theme().palette;
+        let warn_bg = format!("{:?}", compose_rust::schema::Modifier::Background(paint(p.red.soft)));
+        assert!(
+            batch.iter().any(|m| matches!(m, Mutation::SetModifier { modifier, .. } if format!("{modifier:?}") == warn_bg)),
+            "bypass mode chip must show red.soft warning fill"
+        );
     }
 }
 

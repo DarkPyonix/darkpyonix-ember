@@ -335,6 +335,7 @@ pub fn demo_routines() -> Vec<crate::ui::routines::Entry> {
             name: "데모 CI 상태 점검".into(),
             trigger: Trigger::Time,
             cron: "0 9 * * *".into(),
+            time_zone: Some("UTC".into()),
             prompt: "demo-project의 최근 빌드 상태를 확인하고 실패 원인을 요약합니다.".into(),
             enabled: true,
             sel: Selection {

@@ -736,7 +736,10 @@ async fn push(
     origin::check_origin(&headers)?;
     // Subscribe before the upgrade response goes out, so an event stored in between is not lost.
     let rx = s.subscribe();
-    Ok(ws.on_upgrade(move |socket| push_loop(socket, rx)))
+    Ok(ws.on_upgrade(move |socket| async move {
+        let _client = s.push_client_connected();
+        push_loop(socket, rx).await;
+    }))
 }
 
 /// Forwards pushes to one socket. It also reads the socket, so a close (or a dead connection)

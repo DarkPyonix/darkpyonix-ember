@@ -858,7 +858,19 @@ pub fn start(
     project: &str,
     on_change: Option<ChangeCallback>,
 ) -> TerminalHandle {
-    start_with(base_url, computer_id, folder, project, None, on_change)
+    start_with(TermReach::Http(base_url.to_owned()), computer_id, folder, project, None, on_change)
+}
+
+/// [`start`] on `reach` (FR-N9, #1050): over the transport the create goes through the `Api`
+/// and the attach through its own transport stream, with the same reconnect policy.
+pub fn start_on(
+    reach: TermReach,
+    computer_id: &str,
+    folder: &str,
+    project: &str,
+    on_change: Option<ChangeCallback>,
+) -> TerminalHandle {
+    start_with(reach, computer_id, folder, project, None, on_change)
 }
 
 /// Start a new terminal on `computer_id` that runs `launch` (a task of the 실행 window,
@@ -870,12 +882,23 @@ pub fn start_task(
     launch: TermLaunch,
     on_change: Option<ChangeCallback>,
 ) -> TerminalHandle {
+    start_task_on(TermReach::Http(base_url.to_owned()), computer_id, project, launch, on_change)
+}
+
+/// [`start_task`] on `reach` (FR-N9, #1050): the editor window's 실행 tasks over the transport.
+pub fn start_task_on(
+    reach: TermReach,
+    computer_id: &str,
+    project: &str,
+    launch: TermLaunch,
+    on_change: Option<ChangeCallback>,
+) -> TerminalHandle {
     let folder = launch.cwd.clone();
-    start_with(base_url, computer_id, &folder, project, Some(launch), on_change)
+    start_with(reach, computer_id, &folder, project, Some(launch), on_change)
 }
 
 fn start_with(
-    base_url: &str,
+    reach: TermReach,
     computer_id: &str,
     folder: &str,
     project: &str,
@@ -894,15 +917,23 @@ fn start_with(
     });
     shared.update(|s| s.connecting());
     let task_shared = Arc::downgrade(&shared);
-    let (base, computer, folder, project) =
-        (base_url.to_owned(), computer_id.to_owned(), folder.to_owned(), project.to_owned());
-    crate::services::services().rt.spawn(async move {
+    let (computer, folder, project) = (computer_id.to_owned(), folder.to_owned(), project.to_owned());
+    spawn_task(async move {
         use crate::terminal_reconnect::{Next, Reconnect, StreamEnd};
         let mut rx = rx;
         let mut policy = Reconnect::default();
         loop {
-            let end = match run(&task_shared, &base, &computer, &folder, &project, launch.clone(), &mut rx, &mut policy).await {
+            let end = match run(&task_shared, &reach, &computer, &folder, &project, launch.clone(), &mut rx, &mut policy).await {
                 Ok(end) => end,
+                // Over the transport a refusal (the device's scope, a revoked device, a server
+                // out of reach) is final: the panel shows its sentence and does not retry.
+                Err(ClientError::Refused(sentence)) if reach.is_peer() => {
+                    tracing::warn!("editor terminal over the transport refused: {sentence}");
+                    let Some(shared) = task_shared.upgrade() else { return };
+                    shared.update(|s| s.fail(sentence));
+                    shared.update(|s| s.disconnected());
+                    return;
+                }
                 Err(e) => {
                     // The raw text goes to the log; the panel shows a fixed sentence.
                     tracing::warn!("editor terminal stream failed: {e}");
@@ -1030,6 +1061,16 @@ impl TermReach {
     pub fn is_peer(&self) -> bool {
         matches!(self, TermReach::Peer(_))
     }
+
+    /// The reach for a window that was given `server_url` (the separate editor window, FR-N9,
+    /// #1050): the app's `Api` over the transport when the app has a peer, else `server_url` over
+    /// HTTP. Without the app's services (tests) it is `server_url` over HTTP.
+    pub fn for_base(server_url: &str) -> TermReach {
+        match crate::services::try_services() {
+            Some(s) => Self::select(server_url, s.client.api()),
+            None => TermReach::Http(server_url.to_owned()),
+        }
+    }
 }
 
 /// Where a terminal call goes: a URL over HTTP, or a path below `/api` for the `Api`.
@@ -1054,7 +1095,7 @@ pub(crate) fn refuse_peer_base(base: &str) -> Result<(), ClientError> {
 }
 
 /// `{path}` without its `/api` prefix, as the `Api` takes it.
-fn below_api(path: String) -> String {
+pub(crate) fn below_api(path: String) -> String {
     path.strip_prefix("/api").map(str::to_owned).unwrap_or(path)
 }
 
@@ -1205,7 +1246,7 @@ pub fn attach_existing_with(
             snapshot: true,
         };
         let mut rx = rx;
-        let r = stream_peer(&task_shared, &api, &computer, &term, hello, &mut rx).await;
+        let r = stream_peer(&task_shared, &api, &computer, &term, hello, &mut rx, None).await;
         let r = after_peer_end(&api, r).await.map(|_| ());
         finish(&task_shared, r);
     });
@@ -1248,12 +1289,13 @@ async fn view_peer(
         }
         return Ok(());
     };
-    let r = stream_peer(shared, api, computer, term_id, TermHello::viewer(), &mut rx).await;
+    let r = stream_peer(shared, api, computer, term_id, TermHello::viewer(), &mut rx, None).await;
     after_peer_end(api, r).await.map(|_| ())
 }
 
-/// Attaches to `term_id` over the transport and runs until the stream ends. No reconnect
-/// policy: the pane's viewer and a reattached tab end with their stream, as over HTTP.
+/// Attaches to `term_id` over the transport and runs until the stream ends. `policy` is the
+/// editor shell's reconnect policy; the pane's viewer and a reattached tab have none and end with
+/// their stream, as over HTTP.
 async fn stream_peer(
     shared: &std::sync::Weak<Shared>,
     api: &ember_client::api::Api,
@@ -1261,12 +1303,13 @@ async fn stream_peer(
     term_id: &str,
     hello: TermHello,
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    policy: Option<&mut crate::terminal_reconnect::Reconnect>,
 ) -> Result<crate::terminal_reconnect::StreamEnd, ClientError> {
     let TermTarget::Api(path) = attach_target(&TermReach::Peer(api.clone()), computer, term_id)? else {
         return Err(ClientError::Protocol("the attach has no path over the transport".into()));
     };
     let mut ws = api.open_peer_socket(&path).await.map_err(api_failure)?;
-    pump(shared, &mut ws, hello, rx, None).await
+    pump(shared, &mut ws, hello, rx, policy).await
 }
 
 /// After a stream over the transport ended (dropped, failed, or the process exited), asks the
@@ -1288,7 +1331,95 @@ async fn after_peer_end(
     }
 }
 
+/// One create-and-attach of the editor's shell or task on `reach`.
+#[allow(clippy::too_many_arguments)]
 async fn run(
+    shared: &std::sync::Weak<Shared>,
+    reach: &TermReach,
+    computer: &str,
+    folder: &str,
+    project: &str,
+    launch: Option<TermLaunch>,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    policy: &mut crate::terminal_reconnect::Reconnect,
+) -> Result<crate::terminal_reconnect::StreamEnd, ClientError> {
+    match reach {
+        TermReach::Http(base) => {
+            refuse_peer_base(base)?;
+            run_http(shared, base, computer, folder, project, launch, rx, policy).await
+        }
+        TermReach::Peer(api) => run_peer(shared, api, computer, folder, project, launch, rx, policy).await,
+    }
+}
+
+/// [`run`] over the transport (FR-N9, #1050): the create through `Api::raw_request`, the attach
+/// on its own transport stream; no token (the device key is the credential).
+#[allow(clippy::too_many_arguments)]
+async fn run_peer(
+    shared: &std::sync::Weak<Shared>,
+    api: &ember_client::api::Api,
+    computer: &str,
+    folder: &str,
+    project: &str,
+    launch: Option<TermLaunch>,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    policy: &mut crate::terminal_reconnect::Reconnect,
+) -> Result<crate::terminal_reconnect::StreamEnd, ClientError> {
+    let (cols, rows) = {
+        let strong = shared.upgrade().ok_or_else(|| ClientError::Protocol("terminal closed".into()))?;
+        let size = *strong.size.lock().unwrap_or_else(|e| e.into_inner());
+        size
+    };
+    let size = PtySize { rows, cols };
+    let request = serde_json::to_value(task_request(folder, project, size, launch))
+        .map_err(|e| ClientError::Protocol(e.to_string()))?;
+    let created: TermCreateResponse =
+        peer_json(api, reqwest::Method::POST, &below_api(terms_url("", computer)), Some(request)).await?;
+    let hello = TermHello {
+        device: device_name(),
+        kind: Some("ember-editor".into()),
+        pid: Some(std::process::id()),
+        size: Some(size),
+        active: true,
+        read_only: false,
+        snapshot: true,
+    };
+    let r = stream_peer(shared, api, computer, &created.term.id, hello, rx, Some(policy)).await;
+    after_peer_end(api, r).await
+}
+
+/// One JSON call below `/api` over the transport (FR-N9): the decoded answer, or the refusal
+/// sentence (the device's scope, a refused or unreachable device), or the status as a protocol
+/// error whose text goes to the log.
+pub(crate) async fn peer_json<T: serde::de::DeserializeOwned>(
+    api: &ember_client::api::Api,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> Result<T, ClientError> {
+    let body = peer_call(api, method, path, body).await?;
+    serde_json::from_slice(&body).map_err(|e| ClientError::Protocol(e.to_string()))
+}
+
+/// [`peer_json`] without decoding the answer.
+pub(crate) async fn peer_call(
+    api: &ember_client::api::Api,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> Result<Vec<u8>, ClientError> {
+    let (status, body) = api.raw_request(method, path, body).await.map_err(api_failure)?;
+    if (200..300).contains(&status) {
+        return Ok(body);
+    }
+    Err(match status_refusal(status, &body) {
+        Some(t) => ClientError::Refused(t),
+        None => ClientError::Protocol(format!("{path} answered {status}: {}", String::from_utf8_lossy(&body))),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_http(
     shared: &std::sync::Weak<Shared>,
     base: &str,
     computer: &str,

@@ -206,7 +206,7 @@ fn base64_std(s: &str) -> Option<Vec<u8>> {
         } as u32)
     }
     let b = s.trim().as_bytes();
-    if b.len() % 4 != 0 {
+    if !b.len().is_multiple_of(4) {
         return None;
     }
     let mut out = Vec::with_capacity(b.len() / 4 * 3);
@@ -1259,7 +1259,7 @@ mod tests {
         use crate::MemoryPkarrStore;
         let store = MemoryPkarrStore::new();
         let (ka, kb) = (SecretKey::generate(), SecretKey::generate());
-        let none: RecordFn = Arc::new(|| Vec::<String>::new());
+        let none: RecordFn = Arc::new(Vec::<String>::new);
         let a = PkarrNode::start(ka.clone(), Arc::new(store.clone()), none.clone(), fast(50));
         let b = PkarrNode::start(kb.clone(), Arc::new(store.clone()), none, fast(50));
         a.watch_peers(&[kb.peer_id()]);
@@ -1286,7 +1286,7 @@ mod tests {
         let txt = rec.encode_txt(&identity);
         let rec_joined = txt.concat();
         let _b = PkarrNode::start(kb.clone(), Arc::new(store.clone()), Arc::new(move || txt.clone()), fast(60_000));
-        let a = PkarrNode::start(ka, Arc::new(store.clone()), Arc::new(|| Vec::<String>::new()), fast(60_000));
+        let a = PkarrNode::start(ka, Arc::new(store.clone()), Arc::new(Vec::<String>::new), fast(60_000));
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         let found = loop {
             if let Some(found) = a.lookup(kb.peer_id()).await.unwrap() {

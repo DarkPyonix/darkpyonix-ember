@@ -175,8 +175,11 @@ impl SignalChannel for MemorySignal {
 /// verify or that is not newer than the stored one. Cheap to clone.
 #[derive(Clone, Default)]
 pub struct MemoryPkarrStore {
-    packets: Arc<Mutex<HashMap<PeerId, (u64, Vec<u8>)>>>,
+    packets: Arc<Mutex<PacketMap>>,
 }
+
+/// The newest signed packet per peer, with its sequence number.
+type PacketMap = HashMap<PeerId, (u64, Vec<u8>)>;
 
 impl MemoryPkarrStore {
     pub fn new() -> Self {

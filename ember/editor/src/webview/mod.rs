@@ -91,6 +91,7 @@ pub struct WebviewRecord {
     pub position: i64,
     pub ready: bool,
     pub focused: bool,
+    pub dirty: bool,
     queue: VecDeque<WebviewMessage>,
 }
 
@@ -98,6 +99,100 @@ impl WebviewRecord {
     /// Messages waiting for the page to be ready.
     pub fn queued(&self) -> impl Iterator<Item = &WebviewMessage> {
         self.queue.iter()
+    }
+}
+
+/// One edit reported by `MainThreadCustomEditors.$onDidEdit`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomEditorEdit {
+    pub edit_id: i64,
+    pub label: Option<String>,
+}
+
+/// Dirty state and undo/redo history of one non-text custom editor document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomDocumentState {
+    pub resource: UriComponents,
+    pub view_type: String,
+    /// Whether the document is editable (from `$createCustomDocument`'s `{ editable }` reply).
+    pub editable: bool,
+    /// Applied and undone edits in chronological order.
+    pub edits: Vec<CustomEditorEdit>,
+    /// Current position in `edits` (`0..=edits.len()`).
+    pub current_index: usize,
+    /// Position in `edits` matching the last saved state, or `None` if that point was truncated.
+    pub saved_index: Option<usize>,
+    /// Dirty flag set by `$onContentChange` and cleared on save or revert.
+    pub content_dirty: bool,
+}
+
+impl CustomDocumentState {
+    fn new(resource: UriComponents, view_type: String) -> Self {
+        Self {
+            resource,
+            view_type,
+            editable: true,
+            edits: Vec::new(),
+            current_index: 0,
+            saved_index: Some(0),
+            content_dirty: false,
+        }
+    }
+
+    /// Whether the document has unsaved edits or content changes.
+    pub fn is_dirty(&self) -> bool {
+        self.content_dirty || self.saved_index != Some(self.current_index)
+    }
+
+    pub fn can_undo(&self) -> bool {
+        self.current_index > 0
+    }
+
+    pub fn can_redo(&self) -> bool {
+        self.current_index < self.edits.len()
+    }
+
+    /// The edit most recently applied, if any.
+    pub fn current_edit(&self) -> Option<&CustomEditorEdit> {
+        self.current_index.checked_sub(1).and_then(|i| self.edits.get(i))
+    }
+
+    fn push_edit(&mut self, edit_id: i64, label: Option<String>) {
+        self.edits.truncate(self.current_index);
+        if self.saved_index.is_some_and(|saved| saved > self.current_index) {
+            self.saved_index = None;
+        }
+        self.edits.push(CustomEditorEdit { edit_id, label });
+        self.current_index = self.edits.len();
+    }
+
+    fn undo(&mut self) -> Option<i64> {
+        if self.current_index == 0 {
+            return None;
+        }
+        self.current_index -= 1;
+        Some(self.edits[self.current_index].edit_id)
+    }
+
+    fn redo(&mut self) -> Option<i64> {
+        if self.current_index >= self.edits.len() {
+            return None;
+        }
+        let edit_id = self.edits[self.current_index].edit_id;
+        self.current_index += 1;
+        Some(edit_id)
+    }
+
+    fn mark_saved(&mut self, save_index: usize) {
+        self.saved_index = Some(save_index);
+        self.content_dirty = false;
+    }
+
+    fn mark_reverted(&mut self) {
+        self.edits.clear();
+        self.current_index = 0;
+        self.saved_index = Some(0);
+        self.content_dirty = false;
     }
 }
 
@@ -148,6 +243,8 @@ pub enum WebviewUpdate {
     Description { handle: WebviewHandle, description: Option<String> },
     Badge { handle: WebviewHandle, badge: Option<ViewBadge> },
     Icon { handle: WebviewHandle, icon: Option<IconPath> },
+    /// Whether the webview tab (custom editor) has unsaved changes.
+    Dirty { handle: WebviewHandle, dirty: bool },
     /// Show the tab or view; take focus unless `preserve_focus`.
     Reveal { handle: WebviewHandle, preserve_focus: bool, view_column: Option<i64> },
     /// The answer to a resource request of the page.
@@ -182,6 +279,14 @@ pub enum WebviewEvent {
     ResolveView { view_type: String, title: Option<String> },
     /// Open `resource` with custom editor `view_type`.
     OpenCustomEditor { resource: UriComponents, view_type: String },
+    /// Undo the latest edit of custom editor `handle`.
+    UndoCustomEditor { handle: WebviewHandle },
+    /// Redo the next undone edit of custom editor `handle`.
+    RedoCustomEditor { handle: WebviewHandle },
+    /// Save custom editor `handle`.
+    SaveCustomEditor { handle: WebviewHandle },
+    /// Revert custom editor `handle` to its saved state.
+    RevertCustomEditor { handle: WebviewHandle },
     /// Revive a panel the window restored (needs a serializer for `view_type`).
     RestorePanel { view_type: String, title: String, state: Option<String>, content: ContentOptions, panel: PanelOptions, position: i64 },
     /// The page asked for `url` (the host's scheme handler); answered with [`WebviewUpdate::Resource`].
@@ -198,6 +303,10 @@ pub enum Pending {
     CustomDocument { handle: WebviewHandle },
     /// `$resolveCustomEditor`, `$resolveWebviewView` or `$deserializeWebviewPanel` of `handle`.
     Resolve { handle: WebviewHandle },
+    /// `$onSave` of a custom document; `save_index` is the edit stack position when save started.
+    SaveCustomDocument { resource: UriComponents, view_type: String, save_index: usize },
+    /// `$revert` of a custom document.
+    RevertCustomDocument { resource: UriComponents, view_type: String },
 }
 
 /// What [`Webviews`] asks the session to do, in order.
@@ -248,6 +357,8 @@ pub struct Webviews {
     serializers: HashMap<String, bool>,
     /// The state a closed webview view had, given back when it is resolved again.
     view_states: HashMap<String, String>,
+    /// Dirty state and undo/redo history of open non-text custom documents, keyed by `(resource.key(), view_type)`.
+    custom_docs: HashMap<(String, String), CustomDocumentState>,
     next_handle: u64,
     out: Vec<Out>,
 }
@@ -259,6 +370,65 @@ impl Webviews {
 
     pub fn get(&self, handle: &str) -> Option<&WebviewRecord> {
         self.records.get(handle)
+    }
+
+    /// Whether the webview tab has unsaved changes.
+    pub fn is_dirty(&self, handle: &str) -> bool {
+        self.records.get(handle).is_some_and(|r| r.dirty)
+    }
+
+    /// Whether closing `handle` would discard unsaved changes and therefore requires user confirmation.
+    /// When multiple custom editor tabs share one dirty document, only closing the last tab discards it.
+    pub fn needs_close_confirmation(&self, handle: &str) -> bool {
+        let Some(r) = self.records.get(handle) else { return false };
+        if !r.dirty {
+            return false;
+        }
+        if let WebviewKind::CustomEditor { view_type, resource, text: false } = &r.kind {
+            let other_open = self.records.iter().any(|(h, o)| {
+                h != handle
+                    && matches!(&o.kind, WebviewKind::CustomEditor { view_type: v, resource: res, text: false } if v == view_type && res == resource)
+            });
+            return !other_open;
+        }
+        true
+    }
+
+    /// The custom document state for `(resource, view_type)`, if open.
+    pub fn custom_document(&self, resource: &UriComponents, view_type: &str) -> Option<&CustomDocumentState> {
+        self.custom_docs.get(&(resource.key(), view_type.to_owned()))
+    }
+
+    /// The custom document state for custom editor `handle`, if it is a non-text custom editor.
+    pub fn custom_document_for(&self, handle: &str) -> Option<&CustomDocumentState> {
+        let r = self.records.get(handle)?;
+        let WebviewKind::CustomEditor { view_type, resource, text: false } = &r.kind else { return None };
+        self.custom_document(resource, view_type)
+    }
+
+    fn custom_doc_key(resource: &UriComponents, view_type: &str) -> (String, String) {
+        (resource.key(), view_type.to_owned())
+    }
+
+    fn sync_custom_doc_dirty(&mut self, resource: &UriComponents, view_type: &str, dirty: bool) {
+        let handles: Vec<WebviewHandle> = self
+            .order
+            .iter()
+            .filter(|h| {
+                self.records.get(*h).is_some_and(|r| {
+                    matches!(&r.kind, WebviewKind::CustomEditor { view_type: v, resource: res, text: false } if v == view_type && res == resource)
+                })
+            })
+            .cloned()
+            .collect();
+        for handle in handles {
+            if let Some(r) = self.records.get_mut(&handle) {
+                if r.dirty != dirty {
+                    r.dirty = dirty;
+                    self.ui(WebviewUpdate::Dirty { handle, dirty });
+                }
+            }
+        }
     }
 
     /// Every webview, oldest first.
@@ -332,6 +502,7 @@ impl Webviews {
             position,
             ready: false,
             focused: false,
+            dirty: false,
             queue: VecDeque::new(),
         };
         if !self.records.contains_key(&handle) {
@@ -449,9 +620,22 @@ impl Webviews {
                 self.editors.retain(|p| p.view_type != view_type);
                 self.providers_changed();
             }
-            // Dirty state and undo of custom documents are not modelled yet (the tab's dirty mark
-            // waits for the custom editor tab in the window).
-            WebviewCall::CustomEditorEdit { .. } | WebviewCall::CustomEditorContentChange { .. } => {}
+            WebviewCall::CustomEditorEdit { resource, view_type, edit_id, label } => {
+                let key = Self::custom_doc_key(&resource, &view_type);
+                if let Some(doc) = self.custom_docs.get_mut(&key) {
+                    doc.push_edit(edit_id, label);
+                    let dirty = doc.is_dirty();
+                    self.sync_custom_doc_dirty(&resource, &view_type, dirty);
+                }
+            }
+            WebviewCall::CustomEditorContentChange { resource, view_type } => {
+                let key = Self::custom_doc_key(&resource, &view_type);
+                if let Some(doc) = self.custom_docs.get_mut(&key) {
+                    doc.content_dirty = true;
+                    let dirty = doc.is_dirty();
+                    self.sync_custom_doc_dirty(&resource, &view_type, dirty);
+                }
+            }
             WebviewCall::RegisterViewProvider { extension, view_type, retain_context_when_hidden, serialize_buffers } => {
                 self.views.retain(|p| p.view_type != view_type);
                 self.views.push(ViewProvider { view_type, extension_id: extension.id, retain_context_when_hidden, serialize_buffers });
@@ -579,6 +763,7 @@ impl Webviews {
                                 matches!(&o.kind, WebviewKind::CustomEditor { view_type: v, resource: res, .. } if v == view_type && res == resource)
                             });
                             if !*text && !still_open {
+                                self.custom_docs.remove(&Self::custom_doc_key(resource, view_type));
                                 self.out.push(Out::Rpc(wire::dispose_custom_document(resource, view_type)));
                             }
                         }
@@ -640,12 +825,63 @@ impl Webviews {
                     0,
                     Some(ShowOptions::default()),
                 );
+                if !p.text {
+                    let key = Self::custom_doc_key(&resource, &view_type);
+                    let existing_dirty = if doc_open {
+                        self.custom_docs.get(&key).is_some_and(CustomDocumentState::is_dirty)
+                    } else {
+                        self.custom_docs.insert(key, CustomDocumentState::new(resource.clone(), view_type.clone()));
+                        false
+                    };
+                    if existing_dirty {
+                        if let Some(r) = self.records.get_mut(&handle) {
+                            r.dirty = true;
+                        }
+                        self.ui(WebviewUpdate::Dirty { handle: handle.clone(), dirty: true });
+                    }
+                }
                 if p.text || doc_open {
                     self.resolve_custom_editor(&handle);
                 } else {
                     let call = wire::create_custom_document(&resource, &view_type);
                     self.out.push(Out::RpcWith(call, Pending::CustomDocument { handle }));
                 }
+            }
+            WebviewEvent::UndoCustomEditor { handle } => {
+                let Some((resource, view_type)) = self.custom_doc_identity(&handle) else { return self.take() };
+                let key = Self::custom_doc_key(&resource, &view_type);
+                let Some(doc) = self.custom_docs.get_mut(&key) else { return self.take() };
+                if let Some(edit_id) = doc.undo() {
+                    let dirty = doc.is_dirty();
+                    self.out.push(Out::Rpc(wire::undo_custom_document(&resource, &view_type, edit_id, dirty)));
+                    self.sync_custom_doc_dirty(&resource, &view_type, dirty);
+                }
+            }
+            WebviewEvent::RedoCustomEditor { handle } => {
+                let Some((resource, view_type)) = self.custom_doc_identity(&handle) else { return self.take() };
+                let key = Self::custom_doc_key(&resource, &view_type);
+                let Some(doc) = self.custom_docs.get_mut(&key) else { return self.take() };
+                if let Some(edit_id) = doc.redo() {
+                    let dirty = doc.is_dirty();
+                    self.out.push(Out::Rpc(wire::redo_custom_document(&resource, &view_type, edit_id, dirty)));
+                    self.sync_custom_doc_dirty(&resource, &view_type, dirty);
+                }
+            }
+            WebviewEvent::SaveCustomEditor { handle } => {
+                let Some((resource, view_type)) = self.custom_doc_identity(&handle) else { return self.take() };
+                let key = Self::custom_doc_key(&resource, &view_type);
+                let Some(save_index) = self.custom_docs.get(&key).map(|d| d.current_index) else { return self.take() };
+                let call = wire::save_custom_document(&resource, &view_type);
+                self.out.push(Out::RpcWith(call, Pending::SaveCustomDocument { resource, view_type, save_index }));
+            }
+            WebviewEvent::RevertCustomEditor { handle } => {
+                let Some((resource, view_type)) = self.custom_doc_identity(&handle) else { return self.take() };
+                let key = Self::custom_doc_key(&resource, &view_type);
+                if !self.custom_docs.contains_key(&key) {
+                    return self.take();
+                }
+                let call = wire::revert_custom_document(&resource, &view_type);
+                self.out.push(Out::RpcWith(call, Pending::RevertCustomDocument { resource, view_type }));
             }
             WebviewEvent::RestorePanel { view_type, title, state, content, panel, position } => {
                 let Some(serialize_buffers) = self.serializers.get(&view_type).copied() else {
@@ -705,6 +941,14 @@ impl Webviews {
         self.take()
     }
 
+    fn custom_doc_identity(&self, handle: &str) -> Option<(UriComponents, String)> {
+        let r = self.records.get(handle)?;
+        match &r.kind {
+            WebviewKind::CustomEditor { view_type, resource, text: false } => Some((resource.clone(), view_type.clone())),
+            _ => None,
+        }
+    }
+
     fn resolve_custom_editor(&mut self, handle: &str) {
         let Some(r) = self.records.get(handle) else { return };
         let WebviewKind::CustomEditor { view_type, resource, .. } = &r.kind else { return };
@@ -729,12 +973,51 @@ impl Webviews {
     pub fn on_reply(&mut self, pending: Pending, result: Result<Value, String>) -> Vec<Out> {
         match pending {
             Pending::CustomDocument { handle } => match result {
-                Ok(_) => self.resolve_custom_editor(&handle),
-                Err(_) => self.fail(&handle),
+                Ok(value) => {
+                    if let Some((resource, view_type)) = self.custom_doc_identity(&handle) {
+                        let key = Self::custom_doc_key(&resource, &view_type);
+                        if let Some(doc) = self.custom_docs.get_mut(&key) {
+                            doc.editable = value.get("editable").and_then(Value::as_bool).unwrap_or(true);
+                        }
+                    }
+                    self.resolve_custom_editor(&handle);
+                }
+                Err(_) => {
+                    if let Some((resource, view_type)) = self.custom_doc_identity(&handle) {
+                        let other_open = self.records.iter().any(|(h, o)| {
+                            *h != handle
+                                && matches!(&o.kind, WebviewKind::CustomEditor { view_type: v, resource: res, text: false } if *v == view_type && *res == resource)
+                        });
+                        if !other_open {
+                            self.custom_docs.remove(&Self::custom_doc_key(&resource, &view_type));
+                        }
+                    }
+                    self.fail(&handle);
+                }
             },
             Pending::Resolve { handle } => {
                 if result.is_err() {
                     self.fail(&handle);
+                }
+            }
+            Pending::SaveCustomDocument { resource, view_type, save_index } => {
+                if result.is_ok() {
+                    let key = Self::custom_doc_key(&resource, &view_type);
+                    if let Some(doc) = self.custom_docs.get_mut(&key) {
+                        doc.mark_saved(save_index);
+                        let dirty = doc.is_dirty();
+                        self.sync_custom_doc_dirty(&resource, &view_type, dirty);
+                    }
+                }
+            }
+            Pending::RevertCustomDocument { resource, view_type } => {
+                if result.is_ok() {
+                    let key = Self::custom_doc_key(&resource, &view_type);
+                    if let Some(doc) = self.custom_docs.get_mut(&key) {
+                        doc.mark_reverted();
+                        let dirty = doc.is_dirty();
+                        self.sync_custom_doc_dirty(&resource, &view_type, dirty);
+                    }
                 }
             }
         }

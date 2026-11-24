@@ -1647,9 +1647,11 @@ checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
 name = "letify-link"
-version = "2.10.3"
-source = "git+https://github.com/DarkPyonix/letify?rev=c66d017a8fdbebe8fe502df65d71e45d182b7379#c66d017a8fdbebe8fe502df65d71e45d182b7379"
+version = "3.0.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "49387a89b6b74725a1ac99fab4f077479507941d72a608654645a39771dc4389"
 dependencies = [
+ "base64 0.22.1",
  "ed25519-dalek 2.2.0",
  "getrandom 0.2.17",
  "libc",
@@ -1657,9 +1659,12 @@ dependencies = [
  "rcgen",
  "rustls",
  "serde_json",
+ "sha2 0.10.9",
  "snow",
  "socket2 0.5.10",
  "tokio",
+ "tokio-rustls",
+ "webpki-roots",
 ]
 
 [[package]]

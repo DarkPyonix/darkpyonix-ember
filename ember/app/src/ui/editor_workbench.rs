@@ -1410,7 +1410,7 @@ pub mod page {
                 }
             }
             MdBlock::Code { lang, text } => rsx! {
-                div { "data-lang": "{lang}", style: "margin:var(--sp1) 0; padding:var(--sp1) var(--sp2); background:var(--surface-2); border-radius:var(--r-xs); font-family:var(--font-mono); font-size:var(--fs-xs); white-space:pre; overflow-x:auto;", "{text}" }
+                div { "data-lang": "{lang}", style: "margin:var(--sp1) 0; padding:var(--sp1) var(--sp2); background:var(--surface-2); border-radius:var(--r-xs); font-family:var(--mono); font-size:var(--fs-xs); white-space:pre; overflow-x:auto;", "{text}" }
             },
             MdBlock::Rule => rsx! { div { role: "separator", style: "border-top:1px solid var(--line); margin:var(--sp1) 0;" } },
         }
@@ -1419,7 +1419,7 @@ pub mod page {
     /// The inline runs of one hover Markdown block.
     fn hover_markdown_spans(spans: &[crate::ui::editor::MdSpan]) -> Element {
         use crate::ui::editor::MdSpan;
-        const CODE: &str = "font-family:var(--font-mono); font-size:var(--fs-xs); background:var(--surface-2); border-radius:var(--r-xs); padding:0 2px;";
+        const CODE: &str = "font-family:var(--mono); font-size:var(--fs-xs); background:var(--surface-2); border-radius:var(--r-xs); padding:0 2px;";
         let runs: Vec<(String, &'static str, String)> = spans
             .iter()
             .map(|span| match span {

@@ -27,6 +27,7 @@ pub mod editor_reach;
 pub mod ide;
 pub mod model;
 pub mod owner_claim;
+pub mod owner_handoff;
 pub mod prefs;
 pub mod self_update;
 pub mod server;
@@ -225,6 +226,11 @@ fn open_window() {
         let title: &'static str = Box::leak(format!("{} - Ember", target.project).into_boxed_str());
         services().ui.standalone_editor.set(true);
         services().ui.editor.set(Some(target));
+        // The editor window sends owner routes too (FR-S12, #1042): it claims like the shell,
+        // naming the token its shell handed it, so the shell approves it without a sheet.
+        if claims_owner(Launch::Editor) {
+            start_owner_claim(owner_handoff::claim_name(owner_handoff::own_token()));
+        }
         // TODO(dioxus-compose#161): HtmlView inside a Compose root aborts the real renderer, so the editor runs in HTML mode.
         launch_builder()
             .with_html(ui::editor_workbench::page::config)
@@ -232,22 +238,46 @@ fn open_window() {
             .launch(ui::editor_workbench::page::app);
     } else if let Some(pref) = ui::cr::gallery::requested() {
         // Phase 1 review window (#220): the compose-rust components, no app.
+        if claims_owner(Launch::Gallery) {
+            start_owner_claim(owner_claim::CLAIMANT_NAME.to_string());
+        }
         ui::cr::gallery::launch(pref);
     } else {
         // Default launch (#220 phase 8): start the background bridge and open the compose-rust
         // shell. `EMBER_CR_SHELL` still overrides the initial theme preference when set.
         bridge::start_shared();
-        start_owner_claim();
+        if claims_owner(Launch::Shell) {
+            start_owner_claim(owner_claim::CLAIMANT_NAME.to_string());
+        }
         start_self_update();
         let pref = ui::cr::shell::requested().unwrap_or_else(|| services().initial_prefs.theme);
         ui::cr::shell::launch(pref);
     }
 }
 
+/// Which desktop window a process opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Launch {
+    /// The compose-rust shell.
+    Shell,
+    /// The separate editor window (`--editor`).
+    Editor,
+    /// The component gallery (review captures, no app).
+    Gallery,
+}
+
+/// Whether a process that opens `launch` claims the owner key (FR-S12, #1042): the shell and the
+/// separate editor window do, because both send owner routes; the gallery reaches no server.
+fn claims_owner(launch: Launch) -> bool {
+    matches!(launch, Launch::Shell | Launch::Editor)
+}
+
 /// Claims the owner key for a real server on this computer (FR-S12, #842) and keeps the claim
 /// for the life of the app. Nothing in demo mode, over the transport, or for a server
-/// elsewhere. The separate editor window (`--editor`) does not claim.
-fn start_owner_claim() {
+/// elsewhere. The separate editor window (`--editor`) claims too (#1042) under `name`, which
+/// carries the token its shell handed it ([`owner_handoff`]); the shell approves that claim
+/// without a sheet. Without a token, or a shell that holds no key, it waits.
+fn start_owner_claim(name: String) {
     let s = services();
     let api = s.client.api();
     let endpoint = ember_client::owner::OwnerEndpoint::from_env();
@@ -257,7 +287,7 @@ fn start_owner_claim() {
     #[cfg(any(unix, windows))]
     if let Some(endpoint) = endpoint {
         let hooks = Arc::new(AppClaimHooks { api: api.clone(), server: s.server.clone() });
-        owner_claim::install(owner_claim::spawn(s.rt.handle(), endpoint, hooks, owner_claim::Backoff::default()));
+        owner_claim::install(owner_claim::spawn(s.rt.handle(), endpoint, name, hooks, owner_claim::Backoff::default()));
     }
 }
 
@@ -292,6 +322,11 @@ impl owner_claim::ClaimHooks for AppClaimHooks {
 
     fn notice(&self, text: String) {
         ui::cr::notice::post(text);
+    }
+
+    fn handoff(&self, pid: u64, name: &str) -> bool {
+        let mut reg = owner_handoff::registry().lock().unwrap_or_else(|e| e.into_inner());
+        reg.take(pid, name, std::time::Instant::now())
     }
 }
 
@@ -364,5 +399,18 @@ mod shutdown_tests {
         assert_eq!(code, 0);
         assert!(cache_flushed);
         assert_eq!(crate::prefs::load(&path), prefs);
+    }
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use super::*;
+
+    /// The separate editor window claims the owner key like the shell (FR-S12, #1042).
+    #[test]
+    fn fr_s12_the_editor_window_claims_too() {
+        assert!(claims_owner(Launch::Shell));
+        assert!(claims_owner(Launch::Editor));
+        assert!(!claims_owner(Launch::Gallery));
     }
 }

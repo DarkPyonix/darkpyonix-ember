@@ -198,7 +198,7 @@ fn fingerprint_hex_refuses_anything_but_64_lowercase_hex() {
 #[test]
 fn fingerprint_hex_accepts_a_real_peer_id() {
     let dir = tempfile::tempdir().unwrap();
-    let k = SecretKey::load_or_generate(&dir.path().join("k")).unwrap();
+    let k = SecretKey::load_or_generate(dir.path().join("k")).unwrap();
     let id = k.peer_id().to_string();
     let fp = fingerprint_hex(&id).expect("a real id");
     assert_eq!(fp.len(), 19);

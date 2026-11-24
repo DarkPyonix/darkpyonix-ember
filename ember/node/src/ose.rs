@@ -20,10 +20,13 @@ use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+mod process;
+use process::ManagedChild;
 
 /// How an editor reaches one OSE: the loopback endpoint, the relay path of the server route that
 /// carries it, and the placeholder token (never the real one).
@@ -89,7 +92,7 @@ pub fn runtime_dir(data_dir: &Path) -> PathBuf {
 }
 
 struct Process {
-    child: Option<Child>,
+    child: Option<ManagedChild>,
     launch_id: String,
     address: SocketAddr,
     real_token: String,
@@ -176,15 +179,6 @@ fn write_token_file(tokens_dir: &Path, folder: &Path, token: &str) -> std::io::R
     Ok(guard)
 }
 
-impl Drop for Process {
-    fn drop(&mut self) {
-        if let Some(child) = &mut self.child {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
-}
-
 /// The id of the computer this server runs on.
 pub const LOCAL_COMPUTER: &str = "local";
 /// Longest wait for one `--install-extension` run.
@@ -243,6 +237,7 @@ pub struct OseManager {
     max_relays_per_server: usize,
     active_relays: Arc<AtomicUsize>,
     installing: Arc<Mutex<HashSet<String>>>,
+    stopping: AtomicBool,
     processes: Arc<Mutex<HashMap<(String, PathBuf), Process>>>,
     terminal_env: TerminalEnv,
     /// The thread that drops the entries of exited children. `None` for a manager that can start
@@ -660,20 +655,6 @@ fn ose_command_with(
     cmd
 }
 
-/// Kills a child and everything in its process group (the child leads its own group, see
-/// `process_group(0)` at the spawn), then reaps it. On Windows only the child itself is killed
-/// (`node.exe`, see [`launch_program`]); its own children, such as the extension host, are not
-/// (no job object yet, #83).
-fn kill_tree(child: &mut Child) {
-    #[cfg(unix)]
-    {
-        // SAFETY: killpg takes plain integers; a stale group id at worst fails with ESRCH.
-        unsafe { libc::killpg(child.id() as libc::pid_t, libc::SIGKILL) };
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
 /// Removes the computer from the busy set when dropped.
 struct BusyGuard {
     set: Arc<Mutex<HashSet<String>>>,
@@ -790,9 +771,30 @@ impl OseManager {
             max_relays_per_server: MAX_RELAYS_PER_SERVER,
             active_relays: Arc::new(AtomicUsize::new(0)),
             installing: Arc::new(Mutex::new(HashSet::new())),
+            stopping: AtomicBool::new(false),
             processes,
             terminal_env: TerminalEnv::default(),
         }
+    }
+
+    /// Stops allowing new OSE processes, cancels active extension commands and drops live OSE
+    /// servers. Call before waiting for HTTP requests and relays to finish shutting down.
+    pub fn shutdown(&self) {
+        {
+            let _spawn = self.installing.lock().unwrap_or_else(|e| e.into_inner());
+            self.stopping.store(true, Ordering::SeqCst);
+        }
+        self.processes.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+
+    fn spawn(&self, command: &mut Command) -> std::io::Result<ManagedChild> {
+        // Serialize the stop flag and the spawn. An initial check before command construction
+        // would let a new child start after shutdown had already begun.
+        let _spawn = self.installing.lock().unwrap_or_else(|e| e.into_inner());
+        if self.stopping.load(Ordering::SeqCst) {
+            return Err(std::io::Error::other("OSE is shutting down"));
+        }
+        ManagedChild::spawn(command)
     }
 
     /// Sets what OSE windows' terminals need for persistent sessions ([`TerminalEnv`], #26).
@@ -967,8 +969,8 @@ impl OseManager {
 
     /// Runs `<binary> --install-extension <id>[@version]` against the computer's data dir. No
     /// shell; the arguments are separate argv entries; one install at a time per computer; the
-    /// child runs with a cleared environment (allowlist only) in its own process group, which is
-    /// killed on timeout. A server shutdown or panic does not kill a running install (TODO follow-up). Blocking: call from `spawn_blocking`.
+    /// child runs with a cleared environment (allowlist only). Timeout and graceful shutdown
+    /// kill the process tree. Blocking: call from `spawn_blocking`.
     pub fn install_extension(
         &self,
         computer_id: &str,
@@ -1019,15 +1021,16 @@ impl OseManager {
             .args(Self::dir_args(&dir))
             .arg("--accept-server-license-terms")
             .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        // Own process group, so a timeout kills a launcher's children too.
-        #[cfg(unix)]
-        std::os::unix::process::CommandExt::process_group(&mut command, 0);
-        let mut child = command.spawn().map_err(|e| InstallError::Io(format!("cannot start OSE server: {e}")))?;
-        let parts = [capture(child.stdout.take().expect("piped")), capture(child.stderr.take().expect("piped"))];
+        let mut child = self.spawn(&mut command).map_err(|e| InstallError::Io(format!("cannot start OSE server: {e}")))?;
+        let parts = [
+            capture(child.child.stdout.take().expect("piped")),
+            capture(child.child.stderr.take().expect("piped")),
+        ];
         let deadline = Instant::now() + self.install_timeout;
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
+                    drop(child);
                     let output = collect(&parts, true);
                     return if status.success() {
                         Ok(output)
@@ -1035,19 +1038,21 @@ impl OseManager {
                         Err(InstallError::Failed { message: format!("{what} failed: {status}"), output })
                     };
                 }
-                Ok(None) if Instant::now() >= deadline => {
-                    kill_tree(&mut child);
-                    let output = collect(&parts, false);
-                    return Err(InstallError::Failed {
-                        message: format!("{what} timed out after {}s", self.install_timeout.as_secs_f32()),
-                        output,
-                    });
+                Ok(None) => {
+                    let message = if self.stopping.load(Ordering::SeqCst) {
+                        Some(format!("{what} stopped because OSE is shutting down"))
+                    } else if Instant::now() >= deadline {
+                        Some(format!("{what} timed out after {}s", self.install_timeout.as_secs_f32()))
+                    } else {
+                        None
+                    };
+                    if let Some(message) = message {
+                        drop(child);
+                        return Err(InstallError::Failed { message, output: collect(&parts, false) });
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
                 }
-                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-                Err(e) => {
-                    kill_tree(&mut child);
-                    return Err(InstallError::Io(format!("cannot wait for the OSE server: {e}")));
-                }
+                Err(e) => return Err(InstallError::Io(format!("cannot wait for the OSE server: {e}"))),
             }
         }
     }
@@ -1069,6 +1074,9 @@ impl OseManager {
         let folder = folder.canonicalize().map_err(|e| format!("cannot open project folder: {e}"))?;
         let key = (computer_id.to_string(), folder.clone());
         let mut processes = self.processes.lock().unwrap_or_else(|e| e.into_inner());
+        if self.stopping.load(Ordering::SeqCst) {
+            return Err("OSE is shutting down".into());
+        }
         if let Some(process) = processes.get_mut(&key) {
             let alive = match &mut process.child {
                 Some(child) => matches!(child.try_wait(), Ok(None)),
@@ -1097,15 +1105,15 @@ impl OseManager {
         for (key, value) in self.terminal_env.vars(computer_id, base_path.as_deref()) {
             command.env(key, value);
         }
-        let child = command
+        command
             .args(["--host", "127.0.0.1", "--port", &address.port().to_string(), "--connection-token-file"])
             .arg(&token_file.0)
             .args(["--accept-server-license-terms", "--telemetry-level", "off"])
             .args(Self::dir_args(&data_dir))
             .args(watcher_args(crate::fs_kind::fs_kind(&folder)))
             .current_dir(long_path(&folder))
-            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
-            .spawn().map_err(|e| format!("cannot start OSE server: {e}"))?;
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        let child = self.spawn(&mut command).map_err(|e| format!("cannot start OSE server: {e}"))?;
         let connection = EmberOseConnection {
             endpoint: format!("http://{address}"),
             relay: Some(format!("/api/computers/{computer_id}/ide/relay/{launch_id}")),
@@ -1125,6 +1133,9 @@ impl OseManager {
         };
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
+            if self.stopping.load(Ordering::SeqCst) {
+                return Err("OSE is shutting down".into());
+            }
             if let Some(child) = &mut process.child {
                 if let Ok(Some(status)) = child.try_wait() {
                     return Err(format!("OSE server exited during startup: {status}"));

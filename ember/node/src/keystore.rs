@@ -35,6 +35,8 @@ pub trait KeyStore: Send + Sync {
     fn get(&self, account: &str) -> anyhow::Result<Option<Vec<u8>>>;
     /// Store `secret` under `account`, replacing any previous value.
     fn set(&self, account: &str, secret: &[u8]) -> anyhow::Result<()>;
+    /// Remove the secret under `account`. Removing a missing entry succeeds.
+    fn delete(&self, account: &str) -> anyhow::Result<()>;
 }
 
 /// The store picked by `EMBER_KEYSTORE`.
@@ -201,6 +203,13 @@ impl KeyStore for OsKeyStore {
     fn set(&self, account: &str, secret: &[u8]) -> anyhow::Result<()> {
         Ok(keyring::Entry::new(SERVICE, account)?.set_secret(secret)?)
     }
+
+    fn delete(&self, account: &str) -> anyhow::Result<()> {
+        match keyring::Entry::new(SERVICE, account)?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
 }
 
 /// An in-memory store for tests, with switches to simulate failures.
@@ -232,6 +241,12 @@ impl KeyStore for MemoryKeyStore {
             value.iter_mut().for_each(|b| *b ^= 0xff);
         }
         self.entries.lock().unwrap().insert(account.to_owned(), value);
+        Ok(())
+    }
+
+    fn delete(&self, account: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.unavailable && !self.fail_set, "memory store delete failed");
+        self.entries.lock().unwrap().remove(account);
         Ok(())
     }
 }

@@ -1170,3 +1170,19 @@ What trust does not protect. Under D37 agents and terminals run with the full au
 **Rejected** *[provisional]*. `ember-node` starting OSE itself (D42, #896) or dialing the editor socket (an earlier draft of this decision): the owner put the editor server at the manager. For the VS Code target: keeping the token and accepting that it reaches the device (it breaks D42's rule that the real token never leaves the node, and `FR-W5a`'s acceptance); a gateway that terminates HTTP and WebSocket, strips the cookie and parses OSE's IPC to swap the token back (fragile and redone per Code-OSS commit). A pre-set `ide_url` per computer from `EMBER_IDE_COMPUTERS` or `EMBER_IDE_URL` (SPEC "IDE computers", #454): the address must be configured on the server for each computer, it bypasses the relay and the device key, the proxy's own login is a second credential, and a phone cannot reach it (D53). `EMBER_IDE_COMPUTERS` keeps only what has no relay, the Gateway SSH host.
 
 **Status.** Draft, #1064. Written, not compiled: the on-pick route, the gateway crate and the `ember-app --vscode-window` helper (HTTP and `peer:` servers), and a node-spawned socket OSE that this decision replaces (rewritten in #1064 to the manager client). Not built: the manager's editor install, supervision and serving (core, p2E), the node's manager client and relay, the ticket in the clients' connections.
+
+### D56: Editor server presets live in the main server's settings, and each node inherits and overrides them
+
+**Decision.** [user, 2026-11-25, answering the install design note (`darkpyonix-core/.scratch/leader/node-manager-editor-install-design.md`, Q1 to Q8): "매니저는 pypi에서 받는거야. 매니저랑 노드는 따로야. 매니저가 꺼지면 편집기는 당연히 꺼져야지. 6 7 승인. 8번은 자, 엠어 메인서버 세팅에 에디터 서버와 에디터 서버 프리 인스톨 확장 프로그램 테마 등등 프리셋이 있고, 엠버 노드 연결할 때 에디터 서버 세팅이 있어서 메인서버 세팅 상속해서 수정 가능하게 해야지. 그리고 거기서 에디터 서버 종류를 다운받는 세팅이 있는데 거기에 선택이 Code OSE, VS Code, Manual Script 이렇게 있는거고. 그 세팅도 메인서버에 처음 세팅되고 상속해 수정할 수도 있는거고. 그런 느낌인거야. 그리고 메인 서버 세팅에 또 엠버 에디터를 기본으로 노출할건지 Code를 기본으로 할건지 Gateway를 기본으로 할건지도 지정이 가능하게 하는거고."]
+
+- The main server's settings hold the **editor server presets**: the editor server type to install (**Code OSE**, **VS Code** or **Manual Script**), the extensions to pre-install, the theme, and the other editor server defaults. They also hold the **default IDE** the chooser shows first: Ember 에디터, Code (VS Code) or Gateway (`FR-L7`).
+- When an Ember node is connected, it gets **editor server settings** of its own that inherit the main server's and can be changed per node. A field the node does not change follows the main server's value when that changes.
+- The node applies its effective settings through its DarkPyonix manager (core): the type decides what the manager installs (OSE, a link to the user's own Microsoft `code serve-web`, or the user's script), and the pre-installed extensions are installed into that editor server. How the manager receives them is core's (darkpyonix-core D26, D27, p2E).
+- With the same answer: the manager comes from PyPI (the node installs it from there, not from a separate archive); the manager and the node are separate programs and services; the editor server stops when the manager stops; Q4 to Q7 of the note are approved as recommended (the Ember release pins the OSE version the node asks for, OSE builds and releases stay in this repository, the one-line installer, and the editor server at the manager's endpoint, D55).
+
+**Why.** One place to decide what every computer's editor looks like, with a per-computer exception where a machine needs it (a different editor server, more extensions), instead of setting each node by hand.
+
+**Rejected** *[provisional]*. Settings per node only (every node set by hand); presets fixed in the release (the owner wants them in the server's settings).
+
+**Status.** Draft. Not built. SPEC `FR-W7`, `FR-W7a`, `FR-W7b`, `FR-L7`.
+

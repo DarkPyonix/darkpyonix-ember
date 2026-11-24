@@ -36,7 +36,7 @@ use crate::events::{AgentEvent, SessionStatus};
 use crate::session::{Push, Sessions};
 use crate::store::SessionRecord;
 pub use channel::ChannelReply;
-pub use store::{A2aMessage, A2aStore};
+pub use store::{A2aMessage, A2aStore, TokenTimes};
 
 /// Name of the agent-side command (a bin target of this crate).
 pub const CLI_NAME: &str = "ember-a2a";
@@ -97,6 +97,8 @@ pub struct A2aConfig {
     pub enabled_by_default: bool,
     /// Timings of FR-T8 reports (#995).
     pub reports: report::ReportTimes,
+    /// Runtime token lifetimes (FR-T2a, #102).
+    pub tokens: TokenTimes,
 }
 
 impl A2aConfig {
@@ -107,6 +109,7 @@ impl A2aConfig {
             limits: Limits::default(),
             enabled_by_default: true,
             reports: report::ReportTimes::default(),
+            tokens: TokenTimes::from_env(),
         }
     }
 
@@ -692,6 +695,7 @@ fn is_busy(status: SessionStatus) -> bool {
 
 impl A2a {
     pub fn new(sessions: Arc<Sessions>, store: A2aStore, config: A2aConfig) -> Arc<A2a> {
+        store.set_token_times(config.tokens);
         Arc::new(A2a {
             sessions,
             store,
@@ -765,6 +769,13 @@ impl A2a {
             Ok(())
         }));
         self.install_end_hook();
+        // FR-T2a (#102): a token lives only as long as the agent run that got it.
+        let weak = Arc::downgrade(self);
+        self.sessions.add_run_end_hook(Arc::new(move |id: &str| {
+            if let Some(a) = weak.upgrade() {
+                a.revoke_tokens(id, "its agent run ended");
+            }
+        }));
         // Mentions in user messages (FR-T6).
         let weak = Arc::downgrade(self);
         self.sessions.add_user_message_hook(Arc::new(move |session: String, text: String| {
@@ -799,6 +810,103 @@ impl A2a {
                 this.check_stalls().await;
             }
         });
+        // FR-T2a (#102): live runs keep their tokens; the absolute lifetime rotates them.
+        let weak = Arc::downgrade(self);
+        let every = self.config.tokens.settled().check;
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(every);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                let Some(this) = weak.upgrade() else { return };
+                this.check_tokens().await;
+            }
+        });
+    }
+
+    /// Revoke every runtime token of `id` (FR-T2a). Never logs a token.
+    fn revoke_tokens(&self, id: &str, why: &str) {
+        match self.store.revoke_session_tokens(id) {
+            Ok(0) => {}
+            Ok(n) => tracing::debug!(session = %id, revoked = n, "A2A token revoked: {why}"),
+            Err(e) => tracing::warn!(session = %id, "revoking A2A tokens failed: {e:#}"),
+        }
+    }
+
+    /// Server start (FR-T2a, FR-S8): only an agent that outlived the previous server and was
+    /// rejoined, or whose interrupted turn is being drained, can still hold a runtime token. Every
+    /// other session's tokens are revoked; the kept ones count as just seen, so a long downtime
+    /// does not idle-expire a surviving agent's token. Call after
+    /// [`Sessions::recover_after_restart`] and before the listeners serve agents.
+    pub fn settle_tokens_after_restart(&self, recovery: &crate::session::Recovery) {
+        let mut keep = recovery.rejoined.clone();
+        keep.extend(recovery.draining.iter().cloned());
+        match self.store.revoke_tokens_except(&keep) {
+            Ok(0) => {}
+            Ok(n) => tracing::info!("revoked {n} A2A token(s) of agents that did not outlive the previous server"),
+            Err(e) => tracing::warn!("revoking stale A2A tokens failed: {e:#}"),
+        }
+        let now = store::now_ms();
+        for id in &keep {
+            if let Err(e) = self.store.touch_session_tokens(id, now) {
+                tracing::warn!(session = %id, "refreshing a surviving agent's A2A token failed: {e:#}");
+            }
+        }
+    }
+
+    /// One liveness check of the runtime tokens (FR-T2a), run every [`TokenTimes::check`]:
+    ///
+    /// - a session whose agent run is alive (or whose surviving turn is being drained) has its
+    ///   tokens marked as seen, so the idle lifetime never ends a token under a live run;
+    /// - a session whose shim died has its tokens revoked (the run is gone; the next start mints);
+    /// - a live run past the absolute lifetime is released when it is between turns, so its next
+    ///   start mints a fresh token; mid-turn its tokens are held for another idle lifetime instead,
+    ///   so a turn is never cut off;
+    /// - tokens that can no longer pass are deleted.
+    pub async fn check_tokens(&self) {
+        let times = self.store.token_times();
+        let now = store::now_ms();
+        let max_ms = times.max.as_millis().min(i64::MAX as u128) as i64;
+        let idle_ms = times.idle.as_millis().min(i64::MAX as u128) as i64;
+        let held = match self.store.token_sessions() {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::warn!("reading A2A tokens failed: {e:#}");
+                return;
+            }
+        };
+        for t in held {
+            let id = t.session_id.as_str();
+            let draining = self.sessions.is_draining(id);
+            if !draining && !self.sessions.is_live(id).await {
+                continue;
+            }
+            if !draining && crate::agents::proc::shim_died(id) {
+                self.revoke_tokens(id, "its agent's shim died");
+                continue;
+            }
+            if let Err(e) = self.store.touch_session_tokens(id, now) {
+                tracing::warn!(session = %id, "refreshing A2A tokens failed: {e:#}");
+            }
+            if now < t.oldest_created_at.saturating_add(max_ms) {
+                continue;
+            }
+            let busy = draining
+                || self.sessions.store().session(id).ok().flatten().is_some_and(|r| is_busy(r.status));
+            if busy {
+                if let Err(e) = self.store.hold_session_tokens(id, now.saturating_add(idle_ms)) {
+                    tracing::warn!(session = %id, "holding A2A tokens failed: {e:#}");
+                }
+            } else {
+                tracing::info!(session = %id, "A2A token reached its absolute lifetime; releasing the idle agent so its next start gets a fresh one");
+                if let Err(e) = self.sessions.release(id).await {
+                    tracing::warn!(session = %id, "releasing for A2A token rotation failed: {e}");
+                }
+            }
+        }
+        if let Err(e) = self.store.sweep_expired_tokens(now) {
+            tracing::warn!("sweeping expired A2A tokens failed: {e:#}");
+        }
     }
 
     /// Drop a session's `channel_fallback` entry when the session ends (its team member is ended),
@@ -809,6 +917,8 @@ impl A2a {
         self.sessions.add_end_hook(Arc::new(move |id: &str| {
             if let Some(a) = weak.upgrade() {
                 a.channel_fallback.lock().unwrap().remove(id);
+                // FR-T2a: a session ended for good keeps no token.
+                a.revoke_tokens(id, "its session ended");
             }
         }));
     }
@@ -970,9 +1080,17 @@ impl A2a {
         }
     }
 
-    /// Environment for an agent process: a fresh runtime token per process start.
+    /// Environment for an agent process: a fresh runtime token per agent run start (FR-T2,
+    /// FR-T2a). It replaces the session's earlier tokens, unless the session's agent still runs
+    /// under a live shim: then this start may rejoin that agent (FR-S8), which keeps the token in
+    /// its environment, so the earlier ones stay until the run ends.
     fn runtime_env(&self, rec: &SessionRecord) -> Vec<(String, String)> {
-        let token = match self.store.issue_token(&rec.id) {
+        let minted = if crate::agents::proc::shim_alive(&rec.id) {
+            self.store.issue_token_beside(&rec.id)
+        } else {
+            self.store.issue_token(&rec.id)
+        };
+        let token = match minted {
             Ok(t) => t,
             Err(e) => {
                 tracing::error!(session = %rec.id, "issuing A2A token failed: {e:#}");
@@ -1111,11 +1229,16 @@ impl A2a {
         }
     }
 
-    /// The session a bearer token belongs to.
+    /// The session a bearer token belongs to (FR-T2a): a token that is unknown, revoked or
+    /// expired, or whose session no longer exists, is refused. A token of a deleted session is
+    /// revoked here.
     pub fn authenticate(&self, token: &str) -> Result<String, A2aError> {
-        self.store
-            .session_for_token(token)?
-            .ok_or(A2aError::Unauthorized)
+        let id = self.store.session_for_token(token)?.ok_or(A2aError::Unauthorized)?;
+        if self.sessions.store().session(&id)?.is_none() {
+            self.revoke_tokens(&id, "its session was deleted");
+            return Err(A2aError::Unauthorized);
+        }
+        Ok(id)
     }
 
     pub fn enabled(&self) -> anyhow::Result<bool> {

@@ -24,7 +24,9 @@
 #
 # OSE_REGRESS_OUT=<dir> keeps what the run found there: results.json (the final status of every
 # listed extension; deep.json in the deep run), installed.txt (the installed folders, so an unpinned version can be pinned)
-# and the extension host logs.
+# and the extension host logs, and protocol-gaps.json: the FR-E9 records of the activation run (every
+# `todo` method with a value that got the fallback reply: actor, method, count, and the extensions
+# that named themselves in an argument).
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 reg="$here/regression"
@@ -39,7 +41,7 @@ out="${OSE_REGRESS_OUT:-}"
 keep() { # copy what the run found to OSE_REGRESS_OUT, if set; never fails the run
   [ -n "$out" ] || return 0
   mkdir -p "$out/logs" || return 0
-  for f in results.json deep.json installed.txt install-failed.txt server.log; do
+  for f in results.json deep.json protocol-gaps.json installed.txt install-failed.txt server.log; do
     if [ -f "$tmp/$f" ]; then cp "$tmp/$f" "$out/" || true; fi
   done
   find "$tmp/data" -name '*.log' -path '*exthost*' -exec cp {} "$out/logs/" \; 2>/dev/null || true
@@ -99,7 +101,7 @@ done
 if [ "$up" != 1 ]; then echo "FAIL: the server did not start on port $port" >&2; cat "$tmp/server.log" >&2; exit 1; fi
 client_status=0
 OSE_REGRESS_URL="http://127.0.0.1:$port/" OSE_REGRESS_ADDR="127.0.0.1:$port" OSE_REGRESS_WS="$tmp/ws" \
-  OSE_REGRESS_MODE="$mode" OSE_REGRESS_DEEP="$tmp/deep" \
+  OSE_REGRESS_MODE="$mode" OSE_REGRESS_DEEP="$tmp/deep" OSE_REGRESS_GAPS="$tmp/protocol-gaps.json" \
   bash -c "$OSE_REGRESS_CLIENT" || client_status=$?
 sleep 5
 kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; pid=""

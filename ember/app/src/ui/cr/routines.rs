@@ -23,6 +23,8 @@ use compose_rust::{Alignment, ButtonVariant, Color, DrawList, IconRole, ShapeRol
 
 use ember_client::api::ApiError;
 
+use crate::ui::routines::entry_next_text;
+
 pub use crate::ui::routines::{
     apply_server_run_started, begin_demo_run, changed_patch, demo_run_allowed,
     demo_session_title, draft_schedule_kind, event_field_text, finish_demo_run, has_running_remote_run,
@@ -48,7 +50,7 @@ use crate::ui::home::{
 };
 use super::components::{
     pill_colors, pill_metrics, pressable_on, AppButton, BackButton, ButtonKind, EmberCard, EmberField, EmberSheet, InsetPanel, SearchField,
-    ChoiceRow, CloseButton, DataNamedOverlay, FieldOptions, Label, MonoLabel, NamedClickable, NamedClickableOn, NamedDisabled, NamedSelect, Pill, PillTone, SheetFooter,
+    ChoiceRow, CloseButton, FieldOptions, Label, MonoLabel, NamedClickable, NamedClickableOn, NamedDisabled, NamedSelect, Pill, PillTone, SheetFooter,
 };
 use super::characters::{CharState, Character};
 use super::compat::Spinner;
@@ -1556,19 +1558,24 @@ fn SegChoices(
 fn FilterSegButton(text: &str, selected: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let (bg, border, fg) = seg_colors(selected, p);
-    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
-                .height(H_CTL)
-                .background(paint(bg))
-                .border(1.0, paint(border))
-                .shape_role(ShapeRole::Full), alignment = Alignment::Center, content = move || {
+    NamedClickableOn(
+        text,
+        Modifier::new()
+            .height(H_CTL)
+            .background(paint(bg))
+            .border(1.0, paint(border))
+            .shape_role(ShapeRole::Full),
+        Some(bg),
+        Alignment::Center,
+        on_click,
+        move || {
             { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, {
                 { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SEG_PAD_X)) };
                 Label(text, SEG_FS, Weight::Medium, Some(paint(fg)), Some(1));
                 { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SEG_PAD_X)) };
             }) };
-            // A project's name is data, so the button over the pill carries it.
-            DataNamedOverlay(text, true, None, on_click);
-        }) };
+        },
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1878,16 +1885,21 @@ fn RoutineRow(
     let row_border = if selected { p.ink } else { p.line };
     let row_alpha = if routine_enabled { 1.0 } else { 0.6 };
 
-    // The row is named by its routine (data), so a clear button under its content carries the
-    // name and the click (`DataNamedOverlay`); the switch above it keeps its own.
-    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
-                .fill_max_width()
-                .height(103.0)
-                .background(paint(p.surface))
-                .border(1.0, paint(row_border))
-                .corner_radius(CORNER_MD)
-                .alpha(row_alpha), content = move || {
-            DataNamedOverlay(&routine_name, true, None, move || on_open(open_id.clone()));
+    // The row is named by its routine directly on the painted box (`NamedClickable`,
+    // compose-rust#831); the switch inside keeps its own handler.
+    let row_label = routine_name.clone();
+    NamedClickable(
+        &row_label,
+        Modifier::new()
+            .fill_max_width()
+            .height(103.0)
+            .background(paint(p.surface))
+            .border(1.0, paint(row_border))
+            .corner_radius(CORNER_MD)
+            .alpha(row_alpha),
+        Alignment::TopStart,
+        move || on_open(open_id.clone()),
+        move || {
             { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new()
                         .fill_max_width()
                         .height(103.0)
@@ -1925,7 +1937,8 @@ fn RoutineRow(
                             }
                         }) };
                 }) };
-        }) };
+        },
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1996,8 +2009,8 @@ fn DetailPane(
     let next = match routine_trigger {
         _ if !routine_enabled => "꺼져 있습니다".to_string(),
         Trigger::Event => "이벤트가 있을 때 실행됩니다".to_string(),
-        Trigger::Time => match entry.next_at.or_else(|| next_run(&routine_cron, now)) {
-            Some(t) => format!("다음 실행 {}", format_next(t, now)),
+        Trigger::Time => match entry_next_text(entry, now - LOCAL_OFFSET_MIN) {
+            Some(t) => format!("다음 실행 {t}"),
             None => "다음 실행 없음".to_string(),
         },
     };
@@ -2547,7 +2560,12 @@ fn FormFields(ctx: &FormCtx) {
     let modes: Vec<crate::ui::home::PermMode> = modes_for(d.sel.option.harness).to_vec();
     let mode_labels: Vec<String> = modes.iter().map(|m| m.label().to_string()).collect();
     let mode_at = modes.iter().position(|m| *m == d.sel.mode).unwrap_or(0);
-    let schedule_hint = schedule_description(d.trigger, &d.cron, now_local());
+    let schedule_hint = schedule_description(
+        d.trigger,
+        &d.cron,
+        &d.time_zone,
+        now_local() - LOCAL_OFFSET_MIN,
+    );
 
     if editing {
         Label(
@@ -2638,6 +2656,20 @@ fn FormFields(ctx: &FormCtx) {
                     ..Default::default()
                 });
             }
+            FormField::TimeZone => {
+                FormLabel("시간대");
+                let draft_zone = draft.clone();
+                EmberField(FieldOptions {
+                    fill_max_width: true,
+                    label: Some("시간대"),
+                    text: Some(d.time_zone.clone()),
+                    placeholder: "예: Asia/Seoul".into(),
+                    on_value_change: Some(Box::new(move |v| {
+                        draft_zone.update(|d| d.time_zone = v);
+                    })),
+                    ..Default::default()
+                });
+            }
             FormField::Model => {
                 FormLabel("하네스 · 모델 · 추론 강도");
                 let (pick, choices) = (draft.clone(), models.clone());
@@ -2696,6 +2728,9 @@ fn FormFields(ctx: &FormCtx) {
     };
     let two = form_two_columns(ctx.layout, field_w);
     for row in form_rows(two) {
+        if row == [FormField::TimeZone] && d.trigger != Trigger::Time {
+            continue;
+        }
         if let [a, b] = row[..] {
             // The mockup's `.form` grid: 16 between the columns, 8 under each label.
             let half = ((field_w - SP[3]) / 2.0).max(0.0);
@@ -2737,6 +2772,7 @@ pub fn sample_entries() -> Vec<Entry> {
                 name: "develop CI 실패 요약".into(),
                 trigger: Trigger::Time,
                 cron: "0 9 * * *".into(),
+                time_zone: Some("UTC".into()),
                 prompt: "develop 브랜치에서 지난 24시간 동안 실패한 CI 체크를 모아 원인별로 요약하고, ember 개발방 채널에 올립니다.".into(),
                 enabled: true,
                 sel: Selection {
@@ -2772,6 +2808,7 @@ pub fn sample_entries() -> Vec<Entry> {
                 name: "PR 열리면 리뷰".into(),
                 trigger: Trigger::Event,
                 cron: "event: pull_request.opened, synchronize".into(),
+                time_zone: None,
                 prompt: "새 PR의 diff를 읽고 SPEC ID와 테스트가 있는지 확인한 뒤, 문제점을 PR 코멘트로 남깁니다.".into(),
                 enabled: true,
                 sel: Selection {
@@ -2802,6 +2839,7 @@ pub fn sample_entries() -> Vec<Entry> {
                 name: "주간 의존성 점검".into(),
                 trigger: Trigger::Time,
                 cron: "0 10 * * 1".into(),
+                time_zone: Some("UTC".into()),
                 prompt: "각 크레이트의 Cargo.lock에서 보안 권고와 오래된 의존성을 찾아 표로 정리하고, 갱신 PR 초안을 만듭니다.".into(),
                 enabled: false,
                 sel: Selection {
@@ -2825,6 +2863,7 @@ pub fn sample_entries() -> Vec<Entry> {
                 name: "OSE 야간 빌드".into(),
                 trigger: Trigger::Time,
                 cron: "0 2 * * *".into(),
+                time_zone: Some("UTC".into()),
                 prompt: "Windows에서 OSE 빌드를 돌리고 실패하면 로그 마지막 200줄과 함께 CI 알림 채널에 올립니다.".into(),
                 enabled: true,
                 sel: Selection {
@@ -2855,6 +2894,7 @@ pub fn sample_entries() -> Vec<Entry> {
                 name: "hub API 회귀 테스트".into(),
                 trigger: Trigger::Event,
                 cron: "event: push(develop)".into(),
+                time_zone: None,
                 prompt: "kernel, manager, hub API 통합 테스트를 돌리고 실패하면 원인을 찾아 수정 PR을 엽니다.".into(),
                 enabled: true,
                 sel: Selection {
@@ -2885,6 +2925,7 @@ pub fn sample_entries() -> Vec<Entry> {
                 name: "벤치마크 리포트".into(),
                 trigger: Trigger::Time,
                 cron: "0 18 * * 5".into(),
+                time_zone: Some("UTC".into()),
                 prompt: "텍스트 레이아웃 벤치마크를 돌려 지난주와 비교한 표를 docs/bench.md에 갱신합니다.".into(),
                 enabled: true,
                 sel: Selection {
@@ -2908,6 +2949,7 @@ pub fn sample_entries() -> Vec<Entry> {
                 name: "아침 브리핑".into(),
                 trigger: Trigger::Time,
                 cron: "30 8 * * 1-5".into(),
+                time_zone: Some("UTC".into()),
                 prompt: "모든 프로젝트의 밤사이 세션 결과, 승인 대기, 사용량을 한 화면으로 요약합니다.".into(),
                 enabled: true,
                 sel: Selection {
@@ -2952,6 +2994,7 @@ mod tests {
             name: name.into(),
             trigger: Trigger::Time,
             cron: cron.into(),
+            time_zone: Some("UTC".into()),
             prompt: "CI 실패를 요약합니다".into(),
             enabled: true,
             sel: Selection {
@@ -3255,6 +3298,7 @@ mod tests {
         assert!(!routine_form_dirty(&init, &d), "typing and deleting again is clean");
         for edit in [
             |d: &mut FormDraft| d.cron = "0 10 * * *".into(),
+            |d: &mut FormDraft| d.time_zone = "Asia/Seoul".into(),
             |d: &mut FormDraft| d.prompt = "x".into(),
             |d: &mut FormDraft| d.sel.project = "core".into(),
             |d: &mut FormDraft| d.sel.computer = Some("c1".into()),
@@ -3550,6 +3594,7 @@ mod tests {
                 FormField::Trigger,
                 FormField::ScheduleDescription,
                 FormField::Schedule,
+                FormField::TimeZone,
                 FormField::Model,
                 FormField::Mode,
                 FormField::Computer,
@@ -3577,11 +3622,11 @@ mod tests {
     #[test]
     fn fr_l25_schedule_description_reads_the_cron_and_the_event() {
         let now = at(2026, 11, 6, 8, 0);
-        let t = schedule_description(Trigger::Time, "0 9 * * *", now);
+        let t = schedule_description(Trigger::Time, "0 9 * * *", "UTC", now);
         assert!(t.starts_with("매일 오전 9시 · 다음 실행"), "{t}");
-        assert_eq!(schedule_description(Trigger::Time, "nope", now), describe_cron("nope"));
+        assert_eq!(schedule_description(Trigger::Time, "nope", "UTC", now), describe_cron("nope"));
         assert_eq!(
-            schedule_description(Trigger::Event, "pull_request.opened", now),
+            schedule_description(Trigger::Event, "pull_request.opened", "UTC", now),
             "이벤트가 일어날 때 실행됩니다"
         );
     }
@@ -4142,30 +4187,53 @@ mod tests {
         assert!(pill.2.iter().any(|m| *m == format!("Height({H_CTL:?})")) && pill.2.iter().any(|m| m.starts_with("Background")), "{:?}", pill.2);
 
         let nodes = composed(|| FilterSegButton("ember", true, || {}));
-        let over = nodes.iter().find(|n| n.1 == "Button").expect("the button over a pill named from data");
-        assert!(over.3.iter().any(|p| p == "Text=String(\"ember\")") && over.3.iter().any(|p| p == "AccessibleName=String(\"ember\")"), "{:?}", over.3);
-        assert!(over.2.iter().any(|m| m == "MatchParentSize") && !over.2.iter().any(|m| m.starts_with("FillMax")), "{:?}", over.2);
+        assert!(!nodes.iter().any(|n| n.1 == "Button"), "no clear button over a pill named from data");
+        let seg = nodes.iter().find(|n| n.3.iter().any(|p| p == "AccessibleName=String(\"ember\")")).expect("the named filter pill");
+        assert_eq!(seg.1, "Box");
+        assert!(seg.3.iter().any(|p| p.starts_with("OnClick=")), "{:?}", seg.3);
+        assert!(seg.2.iter().any(|m| m.starts_with("Semantics") && m.contains("Button")), "{:?}", seg.2);
+        assert_eq!(seg.2.iter().filter(|m| m.starts_with("PressFeedback")).count(), 1, "{:?}", seg.2);
 
         let production = include_str!("routines.rs").split("#[cfg(test)]").next().unwrap().to_string();
-        for gone in [["Focus", "Overlay("].concat(), ["Named", "Overlay("].concat(), ["Disabled", "Overlay("].concat()] {
-            // `DataNamedOverlay(` (compose-rust#831) is the kept overlay, not the old one.
-            assert!(!production.replace("DataNamedOverlay(", "").contains(&gone), "{gone} is gone");
+        for gone in [["Focus", "Overlay("].concat(), ["Named", "Overlay("].concat(), ["Disabled", "Overlay("].concat(), ["DataNamed", "Overlay("].concat()] {
+            assert!(!production.contains(&gone), "{gone} is gone");
         }
         assert!(production.contains("NamedDisabled(RUN_NOW_BUSY_LABEL, run_box"), "the busy square is named and disabled, with no click");
         compose_rust::window::reset_window_size();
     }
 
     fn extract_buttons<'a>(mutations: &'a [Mutation<'a>]) -> Vec<(u32, Option<&'a str>)> {
-        use std::collections::HashMap;
+        use std::collections::{HashMap, HashSet};
         let mut buttons: HashMap<u32, Option<&'a str>> = HashMap::new();
+        let mut created_boxes: HashSet<u32> = HashSet::new();
         for m in mutations {
-            if let Mutation::Create { node_id, widget: WidgetKind::Button } = m {
-                buttons.insert(*node_id, None);
+            match m {
+                Mutation::Create { node_id, widget: WidgetKind::Button } => {
+                    buttons.insert(*node_id, None);
+                }
+                Mutation::Create { node_id, widget: WidgetKind::Box } => {
+                    created_boxes.insert(*node_id);
+                }
+                _ => {}
+            }
+        }
+        for m in mutations {
+            if let Mutation::SetModifier { node_id, modifier, .. } = m {
+                if created_boxes.contains(node_id)
+                    && matches!(modifier, compose_rust::Modifier::Semantics { .. })
+                    && format!("{modifier:?}").contains("role: Button,")
+                {
+                    buttons.entry(*node_id).or_insert(None);
+                }
             }
         }
         for m in mutations {
             match m {
-                Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                Mutation::SetProp {
+                    node_id,
+                    property: PropertyKind::Text | PropertyKind::AccessibleName,
+                    value: PropertyValue::String(s),
+                } => {
                     if let Some(slot) = buttons.get_mut(node_id) {
                         *slot = Some(s);
                     }
@@ -4320,6 +4388,7 @@ mod tests {
                 name: "로컬 테스트 루틴".into(),
                 trigger: Trigger::Time,
                 cron: "0 0 * * *".into(),
+                time_zone: Some("UTC".into()),
                 prompt: "로컬 프롬프트".into(),
                 enabled: true,
                 sel: Selection::initial(),
@@ -4336,6 +4405,7 @@ mod tests {
                 name: "로컬 테스트 루틴 2".into(),
                 trigger: Trigger::Time,
                 cron: "0 0 * * *".into(),
+                time_zone: Some("UTC".into()),
                 prompt: "로컬 프롬프트 2".into(),
                 enabled: true,
                 sel: Selection::initial(),
@@ -4402,12 +4472,12 @@ mod tests {
     }
 
     #[test]
-    fn fr_l25_host_edit_form_prefills_fields_and_allows_editing() {
+    fn fr_a8_host_edit_form_prefills_fields_and_saved_zone() {
         let _guard = crate::services::test_guard();
         compose_rust::window::reset_window_size();
-        let entries = sample_entries();
-        let target = &entries[0].routine;
-        let initial = FormDraft::from_routine(target);
+        let mut target = sample_entries().remove(0).routine;
+        target.time_zone = Some("Europe/Berlin".into());
+        let initial = FormDraft::from_routine(&target);
         let draft = mutable_state_of(initial.clone());
         let computers = vec![("mac-mini".to_string(), "Mac mini".to_string())];
         let projects = vec!["ember".to_string(), "core".to_string()];
@@ -4448,7 +4518,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(text_fields.len(), 3, "expected Name, Schedule, and Prompt TextFields");
+        assert_eq!(text_fields.len(), 4, "expected Name, Schedule, Time Zone, and Prompt TextFields");
 
         let field_texts: Vec<&str> = mutations
             .iter()
@@ -4477,6 +4547,7 @@ mod tests {
             target.prompt
         );
 
+        assert!(field_texts.contains(&"Europe/Berlin"), "{field_texts:?}");
         let any_disabled = mutations.iter().any(|m| match m {
             Mutation::SetProp {
                 node_id,

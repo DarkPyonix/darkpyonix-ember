@@ -77,6 +77,8 @@ pub struct Shared {
     pub tab_menu: Signal<Option<(String, f64, f64)>>,
     /// The unsaved-changes question on a close, while it is open (FR-L31.5).
     pub close_confirm: Signal<Option<crate::ui::editor::CloseRequest>>,
+    /// Pending multi-line paste waiting for confirmation in the editor terminal (FR-L31.21).
+    pub term_paste_confirm: Signal<crate::terminal_input::PendingPaste>,
     pub keymap: Signal<Keymap>,
     pub folder: String,
     pub server_url: String,
@@ -183,6 +185,7 @@ fn init(target: EditorTarget) {
     let menu_open = use_hook(|| Signal::new_in_scope(false, root));
     let tab_menu = use_hook(|| Signal::new_in_scope(None::<(String, f64, f64)>, root));
     let close_confirm = use_hook(|| Signal::new_in_scope(None::<crate::ui::editor::CloseRequest>, root));
+    let term_paste_confirm = use_hook(|| Signal::new_in_scope(crate::terminal_input::PendingPaste::default(), root));
     let keymap = use_hook(|| Signal::new_in_scope(crate::services::services().ui.prefs.get_untracked().keymap, root));
     // The saved zoom (Code-OSS's window.zoomLevel) applies when the window opens (FR-L31.15).
     use_hook(|| compose_rust::zoom::set_zoom_level(crate::services::services().ui.prefs.get_untracked().editor_zoom_level));
@@ -223,7 +226,7 @@ fn init(target: EditorTarget) {
     });
     let extensions = use_hook(|| crate::ui::editor_extensions::Extensions::new(&target.computer, revision));
     let agent = use_hook(|| crate::ui::editor_agent::AgentTool::new(&target.project, &target.folder, revision));
-    SHARED.with(|s| *s.borrow_mut() = Some(Shared { extensions, agent, host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, tree_multi_sel, tree_clipboard, tree_drag_src, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, recent_files, theme, position, stripes, menu_open, tab_menu, close_confirm, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris, open_errors, editor_versions, last_find_cmd, pending_goto, next_goto_id, last_goto_id, problems_limit, selected_output_channel, workbench_logs, scm, notifications }));
+    SHARED.with(|s| *s.borrow_mut() = Some(Shared { extensions, agent, host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, tree_multi_sel, tree_clipboard, tree_drag_src, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, recent_files, theme, position, stripes, menu_open, tab_menu, close_confirm, term_paste_confirm, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris, open_errors, editor_versions, last_find_cmd, pending_goto, next_goto_id, last_goto_id, problems_limit, selected_output_channel, workbench_logs, scm, notifications }));
 }
 
 pub(crate) fn join_path(dir: &str, name: &str) -> String {
@@ -840,6 +843,8 @@ pub mod page {
             | crate::ui::palette::Payload::EncodingAction(_)
             | crate::ui::palette::Payload::SetEncoding { .. }
             | crate::ui::palette::Payload::SetLanguage(_)
+            | crate::ui::palette::Payload::IndentationSize(_)
+            | crate::ui::palette::Payload::SetIndentation(_)
             | crate::ui::palette::Payload::Cancel) => choose_format_item(s, payload),
         }
     }
@@ -865,6 +870,17 @@ pub mod page {
         let bridge = s.bridge.borrow();
         let doc = bridge.document(&uri)?;
         Some((path, doc.format.clone(), doc.dirty))
+    }
+
+    /// The active document's own indentation options and the tab size its settings give it, for the
+    /// indentation pick.
+    fn active_indentation(s: &Shared) -> Option<(ember_editor::Indentation, u32)> {
+        let path = s.tabs.read().current_path().map(str::to_owned)?;
+        let uri = s.uris.borrow().get(&path).cloned()?;
+        let current = s.bridge.borrow().document(&uri)?.effective_indentation();
+        let language = s.bridge.borrow().document(&uri).map(|d| d.language_id.clone());
+        let configured = s.host.state.lock().unwrap().settings.editor(language.as_deref()).tab_size;
+        Some((current, configured))
     }
 
     /// Open one of the status bar's pickers in the palette sheet, on the current item (FR-L31.7).
@@ -896,6 +912,8 @@ pub mod page {
             }
             Payload::SetEncoding { mode, encoding } => { s.host.send(HostCommand::SetEncoding { path, encoding, mode }); }
             Payload::SetLanguage(language_id) => { s.host.send(HostCommand::SetLanguage { path, language_id }); }
+            Payload::IndentationSize(kind) => open_picker(s, Mode::IndentationSize(kind)),
+            Payload::SetIndentation(action) => { s.host.send(HostCommand::SetIndentation { path, action }); }
             _ => {}
         }
     }
@@ -927,7 +945,12 @@ pub mod page {
             if crate::ui::editor_status::is_picker(mode) {
                 let format = active_format(s).and_then(|(_, f, _)| f);
                 let languages = s.host.state.lock().unwrap().languages.clone();
-                let items = crate::ui::editor_status::picker_items(mode, format.as_ref(), &languages);
+                let items = match active_indentation(s) {
+                    Some((current, configured)) if crate::ui::editor_status::is_indentation_pick(mode) => {
+                        crate::ui::editor_status::indentation_items(mode, current, configured)
+                    }
+                    _ => crate::ui::editor_status::picker_items(mode, format.as_ref(), &languages),
+                };
                 let ranked = rank(&effective_query, &items);
                 (std::borrow::Cow::Owned(items), ranked, None)
             } else {
@@ -947,7 +970,17 @@ pub mod page {
         let chosen = if picker {
             let format = active_format(s).and_then(|(_, f, _)| f);
             let languages = s.host.state.lock().unwrap().languages.clone();
-            crate::ui::editor_status::resolve_selection(*sel.read(), mode, format.as_ref(), &languages, shown.len())
+            match active_indentation(s) {
+                Some((current, _)) if crate::ui::editor_status::is_indentation_pick(mode) => {
+                    let row = if *sel.read() == crate::ui::editor_status::FOLLOW_CURRENT {
+                        crate::ui::editor_status::indentation_initial_selection(mode, current)
+                    } else {
+                        *sel.read()
+                    };
+                    row.min(shown.len().saturating_sub(1))
+                }
+                _ => crate::ui::editor_status::resolve_selection(*sel.read(), mode, format.as_ref(), &languages, shown.len()),
+            }
         } else {
             (*sel.read()).min(shown.len().saturating_sub(1))
         };
@@ -1788,19 +1821,27 @@ pub mod page {
         }
     }
 
+    /// Entries shown in the ⋯ menu: the current tab's own context menu opens directly on right-click
+    /// or Shift+F10 / ContextMenu on the tab strip, so the redundant tab group is omitted here.
+    pub(super) fn main_menu_entries(has_tab: bool) -> Vec<crate::ui::editor_menu::Entry> {
+        use crate::ui::editor_menu::{Entry, Submenu};
+        crate::ui::editor_menu::entries(has_tab)
+            .into_iter()
+            .filter(|entry| *entry != Entry::Group(Submenu::Tab))
+            .collect()
+    }
+
     /// The ⋯ menu (FR-L31, #795): fixed under the top bar at the page level, its groups opened as
     /// submenus beside it (`editor_menu`), so it fits the window without scrolling.
     fn menu(s: &Shared, keymap: Keymap) -> Element {
         use crate::ui::editor_menu::{self as em, Submenu};
         let os = Os::current();
-        // The current tab's items (FR-L31.5) head the menu. A tab's right-click opens its own menu
-        // (`oncontextmenu`, compose-rust#417); this group is where Shift+F10 on the tab strip leads.
-        // TODO(#673): open the tab's own menu at the tab from the keyboard and drop this group.
         let current_tab = s.tabs.read().current_path().map(str::to_owned);
-        let tab_items = current_tab.as_deref().map(|p| crate::ui::editor::tab_menu_items(&s.tabs.read(), p)).unwrap_or_default();
-        let tab_label = current_tab.as_deref().map(|p| format!("탭: {}", crate::ui::editor::display_name(base_name(p)))).unwrap_or_default();
-        let rows = em::top_rows(current_tab.is_some());
-        let open = em::open_submenu().filter(|sub| *sub != Submenu::Tab || current_tab.is_some());
+        let rows: Vec<_> = em::top_rows(current_tab.is_some())
+            .into_iter()
+            .filter(|row| *row != em::TopRow::Group(Submenu::Tab))
+            .collect();
+        let open = em::open_submenu().filter(|sub| *sub != Submenu::Tab);
         let group = |sub: Submenu, label: String| {
             let mut revision = s.revision;
             let on = open == Some(sub);
@@ -1817,7 +1858,7 @@ pub mod page {
             None => rsx! {},
             Some(sub) => {
                 let size = match sub {
-                    Submenu::Tab => tab_items.len(),
+                    Submenu::Tab => 0,
                     Submenu::Code => 1 + crate::ui::editor_language::MENU.len(),
                     Submenu::AutoSave => crate::ui::editor_states::AutoSave::ALL.len(),
                     Submenu::Keymap => Keymap::ALL.len(),
@@ -1825,28 +1866,7 @@ pub mod page {
                 let top = em::submenu_top_fitted(&rows, sub, size).unwrap_or(em::TOP);
                 let style = em::submenu_style(top);
                 let body = match sub {
-                    Submenu::Tab => {
-                        let tab_path = current_tab.clone().unwrap_or_default();
-                        rsx! {
-                            for (item, enabled) in tab_items.into_iter() {
-                                {
-                                    let s = s.clone();
-                                    let path = tab_path.clone();
-                                    let mut menu_open = s.menu_open;
-                                    let aria_disabled = (!enabled).to_string();
-                                    rsx! {
-                                        button { role: "menuitem", disabled: !enabled, "aria-disabled": "{aria_disabled}",
-                                            onclick: move |_| {
-                                                menu_open.set(false);
-                                                if enabled { run_tab_menu_item(&s, item, &path); }
-                                            },
-                                            span { class: "spacer", "{item.label()}" }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    Submenu::Tab => rsx! {},
                     Submenu::Code => rsx! {
                         {
                             let s = s.clone();
@@ -1903,7 +1923,7 @@ pub mod page {
         };
         let menu_style = em::menu_style();
         // The mockup's items, a separator, then Ember's (owner placement rule 2026-11-13, rule 5).
-        let entries = em::entries(current_tab.is_some());
+        let entries = main_menu_entries(current_tab.is_some());
         let item = |top: em::TopItem| -> Element {
             use em::TopItem as T;
             let s = s.clone();
@@ -1949,7 +1969,7 @@ pub mod page {
                             em::Entry::Group(Submenu::Code) => group(Submenu::Code, "코드".to_string()),
                             em::Entry::Group(Submenu::Keymap) => group(Submenu::Keymap, "단축키 체계".to_string()),
                             em::Entry::Group(Submenu::AutoSave) => group(Submenu::AutoSave, "자동 저장".to_string()),
-                            em::Entry::Group(Submenu::Tab) => group(Submenu::Tab, tab_label.clone()),
+                            em::Entry::Group(Submenu::Tab) => rsx! {},
                             em::Entry::Sep => rsx! { div { class: "ed-msep" } },
                         }
                     }
@@ -2453,6 +2473,7 @@ pub mod page {
                             event.stop_propagation();
                             match action {
                                 crate::ui::editor::TreeKeyOutcome::Select(p, is_dir) => {
+                                    focus_mount(&ROW_MOUNTS, &p);
                                     tree_multi_sel.set(vec![(p.clone(), is_dir)]);
                                     tree_sel.set(Some((p, is_dir)));
                                 }
@@ -2569,6 +2590,7 @@ pub mod page {
                             rsx! { div { key: "{row.path}", class, role: "treeitem", "aria-label": "{row_label}", "aria-selected": "{chosen}", tabindex: "{row_ti}", style: "{row_style}",
                                 "aria-expanded": if is_dir { "{row.open}" } else { "" },
                                 draggable: "true",
+                                onmounted: { let mount_path = row.path.clone(); move |event| remember_mount(&ROW_MOUNTS, mount_path.clone(), event.data()) },
                                 ondragstart: move |_| {
                                     tree_drag_src.set(Some(drag_path.clone()));
                                 },
@@ -2691,6 +2713,15 @@ pub mod page {
         crate::ui::workspace_trust::view::prompt_up(s) || s.close_confirm.peek().is_some() || s.notifications.borrow().modal().is_some()
     }
 
+    /// Where a keyboard-opened tab context menu (Shift+F10 / ContextMenu) anchors under the tab
+    /// strip: horizontally aligned with the current tab's slot and vertically right under the strip.
+    pub(super) fn keyboard_tab_menu_anchor(paths: &[String], current: &str) -> (f64, f64) {
+        let index = paths.iter().position(|p| p == current).unwrap_or(0);
+        let x = 56.0 + (index as f64) * 120.0;
+        let y = f64::from(crate::ui::editor_menu::TOP);
+        (x, y)
+    }
+
     fn tab_strip(s: &Shared, paths: &[String], dirty: &[bool], current: Option<&str>) -> Element {
         let mut tabs = s.tabs;
         let mut menu_open = s.menu_open;
@@ -2716,8 +2747,8 @@ pub mod page {
                     }
                     let key_str = key_name(&event.key());
                     let m = event.modifiers();
-                    // Shift+F10 / ContextMenu opens the ⋯ menu, which holds the current tab's items; a
-                    // right-click opens the tab's own menu (compose-rust#417). TODO(#673): open that one here.
+                    // Shift+F10 / ContextMenu opens the current tab's own context menu directly,
+                    // matching right-click on a tab (FR-L31.5).
                     if crate::ui::editor::tab_menu_key(
                         &key_str,
                         m.contains(Modifiers::CONTROL),
@@ -2727,10 +2758,11 @@ pub mod page {
                     ) {
                         event.stop_propagation();
                         event.prevent_default();
-                        if current_owned.is_some() {
+                        if let Some(ref current_path) = current_owned {
+                            let (x, y) = keyboard_tab_menu_anchor(&paths_owned, current_path);
+                            menu_open.set(false);
                             let mut tab_menu = strip_s.tab_menu;
-                            tab_menu.set(None);
-                            menu_open.set(true);
+                            tab_menu.set(Some((current_path.clone(), x, y)));
                         }
                         return;
                     }
@@ -2759,6 +2791,9 @@ pub mod page {
                         event.stop_propagation();
                         match action {
                             crate::ui::editor::TabKeyOutcome::Activate(path) => {
+                                if let Some(i) = crate::ui::editor::tab_key_focus(&paths_owned, &crate::ui::editor::TabKeyOutcome::Activate(path.clone())) {
+                                    focus_mount(&TAB_MOUNTS, &i.to_string());
+                                }
                                 scm.close_diff();
                                 tabs.write().activate(&path);
                                 if let Some(handle) = webview_handle_from_tab(&path) {
@@ -2831,6 +2866,7 @@ pub mod page {
                             ondoubleclick: move |_| {
                                 tabs.write().keep_open(&keep_path);
                             },
+                            onmounted: move |event| remember_mount(&TAB_MOUNTS, i.to_string(), event.data()),
                             oncontextmenu: move |event| {
                                 event.prevent_default();
                                 event.stop_propagation();
@@ -3026,14 +3062,36 @@ pub mod page {
         } }
     }
 
+    /// Mounted elements by name, kept to move keyboard focus to one.
+    type Mounts = std::cell::RefCell<std::collections::HashMap<String, std::rc::Rc<dioxus_elements::MountedData>>>;
+
+    thread_local! {
+        /// The project tree's rows, by path: focus follows the arrow keys' selection (#302).
+        static ROW_MOUNTS: Mounts = std::cell::RefCell::new(Default::default());
+        /// The tab strip's tabs, by position in the strip.
+        static TAB_MOUNTS: Mounts = std::cell::RefCell::new(Default::default());
+    }
+
+    /// An element's `onmounted`: kept under `name` for [`focus_mount`].
+    fn remember_mount(mounts: &'static std::thread::LocalKey<Mounts>, name: String, data: std::rc::Rc<dioxus_elements::MountedData>) {
+        mounts.with(|m| { m.borrow_mut().insert(name, data); });
+    }
+
+    /// Asks for keyboard focus on the element kept under `name`. The request is applied after the
+    /// next render, which the selection change that goes with it asks for.
+    fn focus_mount(mounts: &'static std::thread::LocalKey<Mounts>, name: &str) {
+        use futures_util::FutureExt;
+        if let Some(data) = mounts.with(|m| m.borrow().get(name).cloned()) {
+            let _ = data.set_focus(true).now_or_never();
+        }
+    }
+
     thread_local! {
         /// The terminal panel element, to read its laid-out size (FR-L31.20).
         static TERM_MOUNT: std::cell::RefCell<Option<std::rc::Rc<dioxus_elements::MountedData>>> = const { std::cell::RefCell::new(None) };
         static TERM_FIT: std::cell::RefCell<crate::ui::term_fit::PanelFit> = std::cell::RefCell::new(Default::default());
         /// IME composition state of the terminal panel (FR-L31.21): only committed text is sent.
         static TERMINAL_IME: std::cell::RefCell<crate::terminal_input::ImeInput> = std::cell::RefCell::new(crate::terminal_input::ImeInput::default());
-        /// A multi-line paste waiting for the user's answer (FR-L31.21).
-        static PASTE_ASK: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
     }
 
     /// Fits the PTY to the panel on every render (FR-L31.20, #334): the panel's size from the last
@@ -3061,20 +3119,6 @@ pub mod page {
         }
     }
 
-    /// The answer to the multi-line paste question (FR-L31.21): the waiting text, as chosen, to
-    /// the terminal, bracketed if the program asks for it now.
-    fn answer_paste(handle: &TerminalHandle, revision: dioxus_compose::prelude::SyncSignal<u64>, choice: crate::terminal_input::PasteChoice) {
-        let waiting = PASTE_ASK.with(|p| p.borrow_mut().take());
-        if let Some(text) = waiting.and_then(|t| crate::terminal_input::resolve_paste(&t, choice)) {
-            let state = handle.snapshot();
-            if sends_input(&state) {
-                handle.send_input(&crate::terminal_input::paste_bytes(&text, state.bracketed_paste));
-            }
-        }
-        let mut revision = revision;
-        *revision.write() += 1;
-    }
-
     /// The active terminal tab's attachment (FR-P6, FR-L31.23). The panel lists the folder's
     /// terminals on first show and reattaches to those the node kept. `None` when the editor was not
     /// given a server URL and a computer, or the list is not there yet.
@@ -3087,7 +3131,13 @@ pub mod page {
             let mut revision = revision;
             *revision.write() += 1;
         });
-        crate::ui::editor_terminals::ensure(&s.server_url, &s.computer, &s.folder, &s.project, on_change);
+        crate::ui::editor_terminals::ensure(
+            terminal_stream::TermReach::for_base(&s.server_url),
+            &s.computer,
+            &s.folder,
+            &s.project,
+            on_change,
+        );
         crate::ui::editor_terminals::active_handle()
     }
 
@@ -3226,12 +3276,12 @@ pub mod page {
         let key_handle = handle.clone();
         let ime_handle = handle.clone();
         let control_handle = handle.clone();
+        let paste_confirm_key = s.term_paste_confirm;
+        let pending_paste_text = s.term_paste_confirm.read().text().map(str::to_owned);
         let offer_control = offers_take_control(&handle.snapshot());
         let offer_reconnect = handle.snapshot().needs_reconnect();
         let revision = s.revision;
         let paste_s = s.clone();
-        let paste_question = PASTE_ASK.with(|p| p.borrow().as_deref().map(crate::terminal_input::multiline_warning_text));
-        let answer_handles = (handle.clone(), handle.clone(), handle.clone());
         rsx! {
             {strip}
             div { class: "ed-term", role: "log", "aria-label": "터미널 출력", tabindex: "0", style: "outline:none;",
@@ -3251,24 +3301,32 @@ pub mod page {
                         event.stop_propagation();
                         event.prevent_default();
                         // Code-OSS `terminalInstance.paste`: read the clipboard, then send it or ask
-                        // first (`terminal.integrated.enableMultiLinePasteWarning`).
+                        // first (`terminal.integrated.enableMultiLinePasteWarning`, old booleans
+                        // included).
                         let setting = crate::terminal_input::MultiLinePasteWarning::from_setting(
                             paste_s.host.state.lock().unwrap().settings.scopes
                                 .value("terminal.integrated.enableMultiLinePasteWarning", None).as_ref(),
                         );
                         let paste_handle = key_handle.clone();
+                        let mut paste_confirm = paste_confirm_key;
                         compose_rust::clipboard::read_text(move |result| match result {
                             Ok(Some(text)) => {
-                                let state = paste_handle.snapshot();
-                                match crate::terminal_input::plan_paste(&text, setting, state.bracketed_paste) {
-                                    crate::terminal_input::PastePlan::Send(bytes) => {
-                                        if sends_input(&state) { paste_handle.send_input(&bytes); }
+                                let snap = paste_handle.snapshot();
+                                if !sends_input(&snap) {
+                                    return;
+                                }
+                                match crate::terminal_input::plan_paste(
+                                    &text,
+                                    setting,
+                                    snap.bracketed_paste,
+                                ) {
+                                    crate::terminal_input::PasteAction::Send(bytes) => {
+                                        paste_handle.send_input(&bytes);
                                     }
-                                    crate::terminal_input::PastePlan::Ask(text) => {
-                                        PASTE_ASK.with(|p| *p.borrow_mut() = Some(text));
-                                        let mut revision = revision;
-                                        *revision.write() += 1;
+                                    crate::terminal_input::PasteAction::Confirm(pending) => {
+                                        paste_confirm.write().ask(pending);
                                     }
+                                    crate::terminal_input::PasteAction::Empty => {}
                                 }
                             }
                             Ok(None) => {}
@@ -3294,27 +3352,50 @@ pub mod page {
                         ime_handle.send_input(&bytes);
                     }
                 },
-                if let Some(question) = paste_question {
-                    {
-                        let (paste_h, line_h, cancel_h) = answer_handles;
-                        use crate::terminal_input::{PasteChoice, WARN_CANCEL, WARN_PASTE, WARN_SINGLE_LINE};
-                        rsx! {
-                            div { id: "terminal-paste-question", role: "alertdialog", "aria-label": "{question}",
-                                style: "display:flex; align-items:center; gap:var(--sp2); padding:var(--sp1) var(--sp3); margin-bottom:var(--sp2); background:var(--surface-2); border:1px solid var(--line); border-radius:var(--r-sm);",
-                                div { style: "flex:1;", "{question}" }
-                                button { id: "terminal-paste-yes", class: "ed-pj", onclick: move |_| answer_paste(&paste_h, revision, PasteChoice::Paste), "{WARN_PASTE}" }
-                                button { id: "terminal-paste-line", class: "ed-pj", onclick: move |_| answer_paste(&line_h, revision, PasteChoice::SingleLine), "{WARN_SINGLE_LINE}" }
-                                button { id: "terminal-paste-cancel", class: "ed-pj", onclick: move |_| answer_paste(&cancel_h, revision, PasteChoice::Cancel), "{WARN_CANCEL}" }
-                            }
-                        }
-                    }
-                }
                 if let Some(banner) = view.banner {
                     div { style: "display:flex; align-items:center; gap:var(--sp2); padding:var(--sp1) var(--sp3); margin-bottom:var(--sp2); background:var(--c-orange-soft); color:var(--c-orange); border-radius:var(--r-sm);",
                         div { style: "flex:1;", "{banner}" }
                         if offer_control {
                             button { class: "ed-pj", style: "background:var(--c-orange); color:var(--ink-text); height:24px;",
                                 onclick: move |_| control_handle.take_control(), "제어권 가져오기" }
+                        }
+                    }
+                }
+                if let Some(ref pending_text) = pending_paste_text {
+                    {
+                        let prompt_text = crate::terminal_input::multiline_warning_text(pending_text);
+                        let paste_h = handle.clone();
+                        let single_h = handle.clone();
+                        let mut confirm_paste = s.term_paste_confirm;
+                        let mut confirm_single = s.term_paste_confirm;
+                        let mut confirm_cancel = s.term_paste_confirm;
+                        rsx! {
+                            div { role: "alertdialog", "aria-label": "여러 줄 붙여넣기 확인",
+                                style: "display:flex; align-items:center; gap:var(--sp2); padding:var(--sp1) var(--sp3); margin-bottom:var(--sp2); background:var(--c-orange-soft); color:var(--text); border-radius:var(--r-sm);",
+                                div { style: "flex:1;", "{prompt_text}" }
+                                button { class: "ed-pj", style: "background:var(--c-orange); color:var(--ink-text); height:24px;",
+                                    onclick: move |_| {
+                                        let snap = paste_h.snapshot();
+                                        if let Some(bytes) = confirm_paste.write().decide(crate::terminal_input::PasteChoice::Paste, snap.bracketed_paste) {
+                                            if sends_input(&snap) {
+                                                paste_h.send_input(&bytes);
+                                            }
+                                        }
+                                    }, "{crate::terminal_input::WARN_PASTE}" }
+                                button { class: "ed-pj", style: "border:1px solid var(--line); height:24px;",
+                                    onclick: move |_| {
+                                        let snap = single_h.snapshot();
+                                        if let Some(bytes) = confirm_single.write().decide(crate::terminal_input::PasteChoice::SingleLine, snap.bracketed_paste) {
+                                            if sends_input(&snap) {
+                                                single_h.send_input(&bytes);
+                                            }
+                                        }
+                                    }, "{crate::terminal_input::WARN_SINGLE_LINE}" }
+                                button { class: "ed-pj", style: "border:1px solid var(--line); height:24px;",
+                                    onclick: move |_| {
+                                        let _ = confirm_cancel.write().decide(crate::terminal_input::PasteChoice::Cancel, false);
+                                    }, "{crate::terminal_input::WARN_CANCEL}" }
+                            }
                         }
                     }
                 }
@@ -3454,6 +3535,7 @@ pub mod page {
                             let cid = id.clone();
                             let mut sel = selected_sig;
                             let bridge = s.bridge.clone();
+                            let host = s.host.clone();
                             rsx! {
                                 button {
                                     key: "{id}",
@@ -3462,6 +3544,7 @@ pub mod page {
                                     onclick: move |_| {
                                         sel.set(cid.clone());
                                         bridge.borrow_mut().set_active_output_channel(cid.clone());
+                                        host.send(HostCommand::ActiveOutputChannel(Some(cid.clone())));
                                     },
                                     "{label}"
                                 }
@@ -3580,14 +3663,14 @@ pub mod page {
         let agent = agent_status_text(agent_state);
         let dot = crate::ui::editor::agent_dot_class(agent_state);
         let position = position_text(line, col);
-        let tab_w = crate::ui::editor::tab_width_text(tab_width);
+        let tab_w = active_indentation(s).map_or_else(|| crate::ui::editor::tab_width_text(tab_width), |(i, _)| crate::ui::editor_status::indentation_text(i));
         let branch = branch.to_string();
         let has_file = current.is_some();
         // EOL, encoding and language of the active document (FR-L31.7).
         let format = active_format(s).and_then(|(_, f, _)| f);
         let crate::ui::editor_status::StatusTexts { eol: eol_t, encoding: enc_t, language: lang_t } =
             crate::ui::editor_status::status_texts(format.as_ref());
-        let (eol_s, enc_s, lang_s) = (s.clone(), s.clone(), s.clone());
+        let (eol_s, enc_s, lang_s, tab_s) = (s.clone(), s.clone(), s.clone(), s.clone());
         let goto_s = s.clone();
         let git_s = s.clone();
         // FR-L31.8: the cursor line's blame, as Code-OSS's git.blame.statusBarItem.
@@ -3606,7 +3689,8 @@ pub mod page {
                         onclick: move |_| open_picker(&eol_s, crate::ui::palette::Mode::Eol), "{eol_t}" }
                     button { class: "ed-sbi hide-md", title: "인코딩 선택", "aria-label": "인코딩 선택: {enc_t}",
                         onclick: move |_| open_picker(&enc_s, crate::ui::palette::Mode::EncodingAction), "{enc_t}" }
-                    span { class: "ed-sbi hide-md", "{tab_w}" }
+                    button { class: "ed-sbi hide-md", title: "들여쓰기 선택", "aria-label": "들여쓰기 선택: {tab_w}",
+                        onclick: move |_| open_picker(&tab_s, crate::ui::palette::Mode::Indentation), "{tab_w}" }
                     button { class: "ed-sbi hide-md", title: "언어 모드 선택", "aria-label": "언어 모드 선택: {lang_t}",
                         onclick: move |_| open_picker(&lang_s, crate::ui::palette::Mode::Language), "{lang_t}" }
                 }
@@ -3679,4 +3763,44 @@ mod tests {
         assert!(page::sends_input(&state));
     }
     #[test] fn fr_l31_status_position() { assert_eq!(position_text(2, 3), "2행 3열"); }
+
+    #[test]
+    fn fr_l31_5_tab_strip_keyboard_menu_opens_tab_context_menu_and_main_menu_omits_tab_group() {
+        use crate::ui::editor_menu::{Entry, Submenu, TOP};
+        // The ⋯ menu drops the redundant current-tab group when a tab is open or closed.
+        for has_tab in [true, false] {
+            let entries = page::main_menu_entries(has_tab);
+            assert!(!entries.contains(&Entry::Group(Submenu::Tab)), "tab group must be omitted");
+            assert!(entries.contains(&Entry::Group(Submenu::Code)));
+        }
+        // Keyboard-opened tab context menu anchors below the tab strip, advancing per tab slot.
+        let paths = vec!["/w/a.rs".to_string(), "/w/b.rs".to_string(), "/w/c.rs".to_string()];
+        let (x0, y0) = page::keyboard_tab_menu_anchor(&paths, "/w/a.rs");
+        let (x1, y1) = page::keyboard_tab_menu_anchor(&paths, "/w/b.rs");
+        assert!(x1 > x0);
+        assert_eq!(y0, f64::from(TOP));
+        assert_eq!(y1, f64::from(TOP));
+        // Wiring check: tab_strip handles tab_menu_key by setting tab_menu instead of opening ⋯.
+        let src = include_str!("editor_workbench.rs");
+        let strip = &src[src.find("fn tab_strip(").expect("tab_strip")..src.find("fn tab_context_menu(").expect("tab_context_menu")];
+        let key_block = &strip[strip.find("tab_menu_key(").expect("tab_menu_key")..strip.find("tab_move_key(").expect("tab_move_key")];
+        assert!(key_block.contains("tab_menu.set(Some(("), "keyboard shortcut opens tab_menu directly");
+        assert!(key_block.contains("menu_open.set(false)"), "keyboard shortcut closes the ⋯ menu");
+        assert!(!key_block.contains("menu_open.set(true)"), "keyboard shortcut no longer opens ⋯");
+    }
+
+    #[test]
+    fn fr_l31_21_editor_terminal_paste_chord_reads_clipboard_and_confirms_multiline() {
+        let src = include_str!("editor_workbench.rs");
+        let term = &src[src.find("fn terminal_body(").expect("terminal_body")..src.find("fn problems_body(").expect("problems_body")];
+        assert!(term.contains("compose_rust::clipboard::read_text("), "paste chord reads the clipboard");
+        assert!(term.contains("crate::terminal_input::plan_paste("), "paste chord routes through plan_paste");
+        assert!(
+            term.contains("MultiLinePasteWarning::from_setting(") && term.contains("\"terminal.integrated.enableMultiLinePasteWarning\""),
+            "paste chord follows the multi-line warning setting"
+        );
+        assert!(term.contains("crate::terminal_input::multiline_warning_text("), "multi-line paste shows confirmation prompt");
+        assert!(term.contains("crate::terminal_input::WARN_PASTE") && term.contains("crate::terminal_input::WARN_CANCEL"));
+        assert!(!term.contains("PASTE_UNAVAILABLE"), "stub paste notice is gone");
+    }
 }

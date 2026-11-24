@@ -245,6 +245,7 @@ impl<H: WebviewHost> WebviewDriver<H> {
             | WebviewUpdate::Description { .. }
             | WebviewUpdate::Badge { .. }
             | WebviewUpdate::Icon { .. }
+            | WebviewUpdate::Dirty { .. }
             | WebviewUpdate::OpenLink { .. }
             | WebviewUpdate::OpenFailed { .. }
             | WebviewUpdate::Providers { .. } => {}
@@ -410,6 +411,7 @@ pub struct WebviewPane {
     pub title: String,
     pub description: Option<String>,
     pub status: PaneStatus,
+    pub dirty: bool,
 }
 
 /// The window's list of webview places, from the session's updates.
@@ -429,6 +431,11 @@ impl WebviewPanes {
         self.panes.iter().find(|p| p.handle == handle)
     }
 
+    /// Whether the webview tab has unsaved changes.
+    pub fn is_dirty(&self, handle: &str) -> bool {
+        self.get(handle).is_some_and(|p| p.dirty)
+    }
+
     pub fn apply(&mut self, update: &WebviewUpdate) {
         match update {
             WebviewUpdate::Created { handle, kind, title, .. } => {
@@ -439,6 +446,7 @@ impl WebviewPanes {
                     title: title.clone(),
                     description: None,
                     status: PaneStatus::Waiting,
+                    dirty: false,
                 });
             }
             WebviewUpdate::Html { handle, .. } | WebviewUpdate::Options { handle, .. } => {
@@ -459,6 +467,11 @@ impl WebviewPanes {
             WebviewUpdate::Description { handle, description } => {
                 if let Some(p) = self.panes.iter_mut().find(|p| p.handle == *handle) {
                     p.description = description.clone();
+                }
+            }
+            WebviewUpdate::Dirty { handle, dirty } => {
+                if let Some(p) = self.panes.iter_mut().find(|p| p.handle == *handle) {
+                    p.dirty = *dirty;
                 }
             }
             WebviewUpdate::Disposed { handle } => self.panes.retain(|p| p.handle != *handle),

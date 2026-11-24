@@ -195,6 +195,7 @@ const MIGRATIONS: &[&str] = &[
     crate::schedules::schema::EVENTS_MIGRATION,
     crate::devices::schema::SCOPE_MIGRATION,
     PROMPT_EVENTS_INDEX_MIGRATION,
+    crate::projects::schema::LEADER_SESSION_MIGRATION,
 ];
 
 /// The position of a registered migration (tests locate migrations by position, never by length).
@@ -524,10 +525,11 @@ impl Store {
         self.session(id)
     }
 
-    /// Full-text search over every session's user and assistant messages (FR-S4), best match
-    /// first, at most `limit` hits. Uses the FTS5 index `messages_fts` (never a scan of
-    /// `events`). Each whitespace-separated word must match as a word prefix, so `오류` finds
-    /// `오류가` and `serv` finds `server`; FTS5 syntax in the query is taken literally.
+    /// Full-text search over every unarchived project's session user and assistant messages
+    /// (FR-S4, D52 Q6), best match first, at most `limit` hits. Uses the FTS5 index
+    /// `messages_fts` (never a scan of `events`). Each whitespace-separated word must match as a
+    /// word prefix, so `오류` finds `오류가` and `serv` finds `server`; FTS5 syntax in the query
+    /// is taken literally.
     pub fn search(&self, query: &str, limit: usize) -> anyhow::Result<Vec<SearchHit>> {
         let Some(fts) = fts_query(query) else { return Ok(Vec::new()) };
         let conn = self.conn.lock().unwrap();
@@ -535,8 +537,10 @@ impl Store {
             "SELECT messages_fts.session_id, messages_fts.seq, messages_fts.kind,
                     snippet(messages_fts, 0, ?2, ?3, '\u{2026}', 16),
                     sessions.title, sessions.project, sessions.archived
-             FROM messages_fts JOIN sessions ON sessions.id = messages_fts.session_id
-             WHERE messages_fts MATCH ?1
+             FROM messages_fts
+             JOIN sessions ON sessions.id = messages_fts.session_id
+             LEFT JOIN projects ON projects.name = sessions.project
+             WHERE messages_fts MATCH ?1 AND COALESCE(projects.archived, 0) = 0
              ORDER BY rank
              LIMIT ?4",
         )?;

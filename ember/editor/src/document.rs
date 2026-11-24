@@ -24,7 +24,8 @@ use ember_editor_conn::exthost::{
 use ember_editor_conn::uri::UriComponents;
 
 use crate::coords::{end_of_insert, WidgetPos, WidgetRange};
-use crate::text_format::{decode_as, encode_as, Encoding, Eol};
+use crate::indentation::Indentation;
+use crate::text_format::{decode_as, decode_reload, encode_as, Encoding, Eol};
 
 const BOM: &str = "\u{feff}";
 
@@ -53,6 +54,27 @@ pub fn decode(bytes: &[u8]) -> Result<(String, bool), DocError> {
     }
 }
 
+/// The file content a save is based on: the text Ember last read from the file or wrote to it.
+/// A write that finds anything else on disk would overwrite a change Ember has not seen.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiskBase {
+    uri: UriComponents,
+    language_id: String,
+    text: String,
+    encoding: Encoding,
+}
+
+impl DiskBase {
+    /// Whether the file bytes `disk` hold this content (a changed BOM is not a change of content, as
+    /// for a reload).
+    pub fn holds(&self, disk: &[u8]) -> bool {
+        match decode_reload(disk, self.encoding) {
+            Ok((text, _)) => DocumentMirror::new(self.uri.clone(), &text, &self.language_id).text() == self.text,
+            Err(_) => false,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct OpenDocument {
     pub uri: UriComponents,
@@ -64,14 +86,15 @@ pub struct OpenDocument {
     widget_version: u32,
     ext_base: u64,
     encoding: Encoding,
+    /// The encoding the file had when it was last read or written (`encoding` is what a save uses).
+    disk_encoding: Encoding,
     /// The file content as last read or written, in mirror form (`mirror.text()`), to tell our own
     /// save echoing back through the watcher from a real external change.
     disk_text: String,
     /// Where the user's cursor probably is: the end of the last change. FR-38 has no cursor event,
     /// so inline completions use this.
     cursor: Option<WidgetPos>,
-    tab_size: u32,
-    insert_spaces: bool,
+    indentation: Indentation,
 }
 
 impl OpenDocument {
@@ -104,9 +127,9 @@ impl OpenDocument {
             widget_version: 0,
             ext_base: ext_version,
             encoding,
+            disk_encoding: encoding,
             cursor: None,
-            tab_size,
-            insert_spaces,
+            indentation: Indentation::new(tab_size, insert_spaces),
         };
         let calls = doc.add_calls();
         (doc, calls)
@@ -116,7 +139,7 @@ impl OpenDocument {
         let editor = TextEditorAddData {
             id: self.editor_id.clone(),
             document_uri: self.uri.clone(),
-            options: exthost::default_editor_options(self.tab_size, self.insert_spaces),
+            options: exthost::editor_options(self.indentation.tab_size, self.indentation.indent_size, self.indentation.insert_spaces),
             selections: vec![Selection {
                 selection_start_line_number: 1,
                 selection_start_column: 1,
@@ -194,6 +217,23 @@ impl OpenDocument {
         Eol::from_sequence(self.mirror.eol())
     }
 
+    /// The document's own indentation options: what it opened with, or what the person chose since.
+    pub fn indentation(&self) -> Indentation {
+        self.indentation
+    }
+
+    /// Take other indentation options (Code-OSS `model.updateOptions`); returns the
+    /// `$acceptEditorPropertiesChanged` call that tells the extension host, or `None` when nothing
+    /// changed. The text is not touched.
+    pub fn set_indentation(&mut self, indentation: Indentation) -> Option<Call> {
+        if self.indentation == indentation {
+            return None;
+        }
+        self.indentation = indentation;
+        let options = exthost::editor_options(indentation.tab_size, indentation.indent_size, indentation.insert_spaces);
+        Some(exthost::accept_editor_options_changed(&self.editor_id, options))
+    }
+
     /// The document's file encoding (FR-L31.7).
     pub fn encoding(&self) -> Encoding {
         self.encoding
@@ -268,6 +308,7 @@ impl OpenDocument {
         self.widget_version = 0;
         self.generation = generation;
         self.encoding = encoding;
+        self.disk_encoding = encoding;
         self.disk_text = self.mirror.text();
         self.cursor = None;
         calls.extend(self.add_calls());
@@ -295,6 +336,21 @@ impl OpenDocument {
         calls
     }
 
+    /// The file was read in the document's current encoding (right after it was opened in it).
+    pub fn note_disk_encoding(&mut self) {
+        self.disk_encoding = self.encoding;
+    }
+
+    /// The file text the buffer is based on, in widget form (`\n` line breaks).
+    pub fn disk_widget_text(&self) -> String {
+        self.disk_text.replace("\r\n", "\n")
+    }
+
+    /// What a save of this document expects to find on disk.
+    pub fn disk_base(&self) -> DiskBase {
+        DiskBase { uri: self.uri.clone(), language_id: self.language_id.clone(), text: self.disk_text.clone(), encoding: self.disk_encoding }
+    }
+
     /// Does `text` (decoded file content) equal what Ember last read or wrote? Used to ignore
     /// watcher events caused by our own save.
     pub fn matches_disk(&self, text: &str) -> bool {
@@ -312,6 +368,7 @@ impl OpenDocument {
     pub fn saved(&mut self, saved_ext_version: u64, bytes: &[u8]) -> Vec<Call> {
         if let Ok(text) = decode_as(bytes, self.encoding) {
             self.disk_text = DocumentMirror::new(self.uri.clone(), &text, &self.language_id).text();
+            self.disk_encoding = self.encoding;
         }
         let mut calls = vec![exthost::accept_model_saved(&self.uri)];
         if saved_ext_version == self.ext_version() {

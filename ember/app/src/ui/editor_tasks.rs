@@ -535,7 +535,13 @@ pub mod view {
             let mut revision = revision;
             *revision.write() += 1;
         });
-        let handle = crate::terminal_stream::start_task(&s.server_url, &s.computer, &s.project, term_launch(l), Some(on_change));
+        let handle = crate::terminal_stream::start_task_on(
+            crate::terminal_stream::TermReach::for_base(&s.server_url),
+            &s.computer,
+            &s.project,
+            term_launch(l),
+            Some(on_change),
+        );
         // The earlier run's terminal is detached, not killed: it keeps running on the computer,
         // as a Code-OSS task terminal does until it is closed.
         RUN.with(|r| {

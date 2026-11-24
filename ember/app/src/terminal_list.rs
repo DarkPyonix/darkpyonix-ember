@@ -7,8 +7,8 @@
 //! so the list, kill and reattach rules are testable without a server.
 
 use crate::terminal_stream::{
-    check_relay, server_token, session_key, terms_list_url, terms_url, ClientError, PtySize, TermCreateRequest,
-    TermCreateResponse, TermInfo, TermOrigin,
+    below_api, check_relay, peer_call, peer_json, server_token, session_key, terms_list_url, terms_url, ClientError,
+    PtySize, TermCreateRequest, TermCreateResponse, TermInfo, TermOrigin, TermReach,
 };
 
 /// The node's origin string for terminals the editor started.
@@ -274,6 +274,50 @@ pub async fn kill(base: &str, computer: &str, term_id: &str) -> Result<(), Clien
     authed(reqwest::Client::new().post(kill_url(base, computer, term_id)), base).send().await?.error_for_status()?;
     let _ = authed(reqwest::Client::new().delete(remove_url(base, computer, term_id)), base).send().await;
     Ok(())
+}
+
+/// [`list`] on `reach` (FR-N9, #1050): over the transport through the client's `Api`, with no
+/// token (the device key is the credential).
+pub async fn list_on(reach: &TermReach, computer: &str, project: &str) -> Result<Vec<TermInfo>, ClientError> {
+    match reach {
+        TermReach::Http(base) => list(base, computer, project).await,
+        TermReach::Peer(api) => {
+            let path = below_api(terms_list_url("", computer, project, Some(EDITOR_ORIGIN), true));
+            peer_json(api, reqwest::Method::GET, &path, None).await
+        }
+    }
+}
+
+/// [`create`] on `reach` (FR-N9, #1050).
+pub async fn create_on(
+    reach: &TermReach,
+    computer: &str,
+    folder: &str,
+    project: &str,
+    key: String,
+) -> Result<TermInfo, ClientError> {
+    match reach {
+        TermReach::Http(base) => create(base, computer, folder, project, key).await,
+        TermReach::Peer(api) => {
+            let body = serde_json::to_value(create_request(folder, project, key))
+                .map_err(|e| ClientError::Protocol(e.to_string()))?;
+            let created: TermCreateResponse =
+                peer_json(api, reqwest::Method::POST, &below_api(terms_url("", computer)), Some(body)).await?;
+            Ok(created.term)
+        }
+    }
+}
+
+/// [`kill`] on `reach` (FR-N9, #1050).
+pub async fn kill_on(reach: &TermReach, computer: &str, term_id: &str) -> Result<(), ClientError> {
+    match reach {
+        TermReach::Http(base) => kill(base, computer, term_id).await,
+        TermReach::Peer(api) => {
+            peer_call(api, reqwest::Method::POST, &below_api(kill_url("", computer, term_id)), None).await?;
+            let _ = peer_call(api, reqwest::Method::DELETE, &below_api(remove_url("", computer, term_id)), None).await;
+            Ok(())
+        }
+    }
 }
 
 /// Which tab-strip call failed, for [`panel_error`].

@@ -1,10 +1,53 @@
 //! Runtime owner for a remote editor session.
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use dioxus_compose::prelude::*;
-use ember_editor::{ConnectOutcome, EditorSession, SessionConfig, SessionUpdate, WidgetEvent};
+use ember_editor::{ConnectOutcome, EditorSession, SessionConfig, SessionUpdate, StorageHub, WidgetEvent};
 use ember_editor_conn::uri::UriComponents;
 use tokio::sync::mpsc;
 use crate::ui::editor::EditorTarget;
+
+/// Canonical server key scoping one in-process [`StorageHub`], so two windows on the same server
+/// share `globalState` updates while windows on different servers stay isolated.
+pub(crate) fn canonical_server_key(target: &EditorTarget) -> String {
+    if !target.relay.trim().is_empty() {
+        let server = target.server_url.trim().trim_end_matches('/').to_ascii_lowercase();
+        let computer = target.computer.trim().to_ascii_lowercase();
+        if !computer.is_empty() {
+            return format!("relay:{server}:{computer}");
+        }
+        return format!("relay:{server}:{}", target.relay.trim());
+    }
+    let host = if target.endpoint.trim().is_empty() { "localhost" } else { target.endpoint.trim() };
+    format!("direct:{}", ember_editor::storage::canonicalize_authority(host))
+}
+
+/// Process-local pool owning one [`StorageHub`] per canonical server key.
+#[derive(Default)]
+pub(crate) struct StorageHubPool {
+    hubs: Mutex<HashMap<String, StorageHub>>,
+}
+
+impl StorageHubPool {
+    pub(crate) fn hub_for(&self, target: &EditorTarget) -> StorageHub {
+        let key = canonical_server_key(target);
+        self.hubs.lock().unwrap().entry(key).or_default().clone()
+    }
+}
+
+fn storage_hubs() -> &'static StorageHubPool {
+    static HUBS: OnceLock<StorageHubPool> = OnceLock::new();
+    HUBS.get_or_init(StorageHubPool::default)
+}
+
+/// Build the base [`SessionConfig`] for `target`, wiring the per-server [`StorageHub`].
+pub(crate) fn session_config_for(target: &EditorTarget, hubs: &StorageHubPool) -> SessionConfig {
+    // The endpoint names the OSE's host in its requests; through the relay without one, `localhost`.
+    let host = if target.endpoint.trim().is_empty() { "localhost".to_owned() } else { target.endpoint.clone() };
+    let mut config = SessionConfig::new(host, target.folder.clone());
+    config.storage_hub = Some(hubs.hub_for(target));
+    config
+}
 
 /// Commands are serialized with session updates on the application runtime.
 pub enum HostCommand {
@@ -51,10 +94,14 @@ pub enum HostCommand {
     SetEol { path: String, eol: ember_editor::Eol },
     SetEncoding { path: String, encoding: ember_editor::Encoding, mode: ember_editor::EncodingMode },
     SetLanguage { path: String, language_id: Option<String> },
+    /// One choice of the indentation pick for an open file: its own options, or its leading whitespace.
+    SetIndentation { path: String, action: ember_editor::IndentationAction },
     /// The answer to the workspace trust prompt (FR-L31.18); the window has saved it already.
     DecideTrust(bool),
     /// Answer extension message `id` with the chosen button's handle, or `undefined` (FR-L31.16).
     AnswerMessage { id: u64, handle: Option<i64> },
+    /// The output channel the window shows (FR-L31.16).
+    ActiveOutputChannel(Option<String>),
     /// Read the project's `.vscode/tasks.json` for the 실행 window (FR-L31.16).
     LoadTasks,
     /// Read the extension scan again on the management connection (FR-L31.14): after an install,
@@ -357,9 +404,7 @@ impl EditorHost {
             let mut attempt = 0u32;
             loop {
                 attempt += 1;
-                // The endpoint names the OSE's host in its requests; through the relay without one, `localhost`.
-                let host = if target.endpoint.trim().is_empty() { "localhost".to_owned() } else { target.endpoint.clone() };
-                let mut config = SessionConfig::new(host, target.folder.clone());
+                let mut config = session_config_for(&target, storage_hubs());
                 config.connection_token = (!target.token.is_empty()).then(|| target.token.clone());
                 config.app_language = "ko".into();
                 // The answer given since the window opened holds across a reconnect (FR-L31.18, FR-L31.6).
@@ -601,6 +646,7 @@ impl EditorHost {
                             Some(HostCommand::Replace { id, request }) => { let _ = session.replace(id, request); }
                             Some(HostCommand::Language(request)) => { let _ = session.language(request); }
                             Some(HostCommand::AnswerMessage { id, handle }) => { let _ = session.answer_message(id, handle); }
+                            Some(HostCommand::ActiveOutputChannel(id)) => { let _ = session.set_active_output_channel(id); }
                             Some(HostCommand::LoadTasks) => {
                                 shared.lock().unwrap().tasks = Some(crate::ui::editor_tasks::TasksLoad::Loading);
                                 *revision.write() += 1;
@@ -639,6 +685,7 @@ impl EditorHost {
                             Some(HostCommand::SetEol { path, eol }) => { let _ = session.set_eol(session.document_uri(&path), eol); }
                             Some(HostCommand::SetEncoding { path, encoding, mode }) => { let _ = session.set_encoding(session.document_uri(&path), encoding, mode); }
                             Some(HostCommand::SetLanguage { path, language_id }) => { let _ = session.set_language(session.document_uri(&path), language_id); }
+                            Some(HostCommand::SetIndentation { path, action }) => { let _ = session.set_indentation(session.document_uri(&path), action); }
                             Some(HostCommand::Restore { path, text }) => { let _ = session.restore(session.document_uri(&path), text); }
                             Some(HostCommand::Reload(path)) => { let _ = session.reload(session.document_uri(&path)); }
                             Some(HostCommand::CompareWithDisk(path)) => {
@@ -825,5 +872,57 @@ mod tests {
         let mut state = HostState::default();
         state.connect_failed("refused");
         assert_eq!(state.error.as_deref(), Some("서버에 연결할 수 없습니다: refused"));
+    }
+
+    #[test]
+    fn storage_hub_pool_shares_per_canonical_server_and_isolates_distinct_servers() {
+        let pool = StorageHubPool::default();
+        let make_direct = |endpoint: &str, folder: &str| EditorTarget {
+            project: "p".into(),
+            folder: folder.into(),
+            endpoint: endpoint.into(),
+            token: String::new(),
+            server_url: String::new(),
+            computer: String::new(),
+            relay: String::new(),
+            vscode_url: String::new(),
+        };
+
+        // Same server (localhost vs 127.0.0.1) in two different folders shares one StorageHub.
+        let cfg_a = session_config_for(&make_direct("localhost:8000", "/work/a"), &pool);
+        let cfg_b = session_config_for(&make_direct("127.0.0.1:8000", "/work/b"), &pool);
+        let hub_a = cfg_a.storage_hub.expect("storage_hub must be wired");
+        let hub_b = cfg_b.storage_hub.expect("storage_hub must be wired");
+        let mut rx_b = hub_b.subscribe();
+        hub_a.publish(1, "pub.ext".into(), Some(r#"{"v":1}"#.into()));
+        let msg = rx_b.try_recv().expect("two sessions on the same server must share one StorageHub");
+        assert_eq!(msg.extension_id, "pub.ext");
+
+        // Different direct server gets a distinct StorageHub.
+        let cfg_other = session_config_for(&make_direct("other-host:8000", "/work/a"), &pool);
+        let hub_other = cfg_other.storage_hub.expect("storage_hub must be wired");
+        let mut rx_other = hub_other.subscribe();
+        hub_a.publish(1, "pub.ext".into(), Some(r#"{"v":2}"#.into()));
+        assert!(rx_other.try_recv().is_err(), "different servers must not share a StorageHub");
+
+        // Relay targets on the same server + computer share one hub; different computers stay isolated.
+        let make_relay = |computer: &str, folder: &str| EditorTarget {
+            project: "p".into(),
+            folder: folder.into(),
+            endpoint: String::new(),
+            token: String::new(),
+            server_url: "https://Ember.Example.com/".into(),
+            computer: computer.into(),
+            relay: format!("/api/computers/{computer}/ide/relay/1"),
+            vscode_url: String::new(),
+        };
+        let r1 = session_config_for(&make_relay("mac-mini", "/a"), &pool).storage_hub.unwrap();
+        let r2 = session_config_for(&make_relay("MAC-MINI", "/b"), &pool).storage_hub.unwrap();
+        let r3 = session_config_for(&make_relay("linux-box", "/a"), &pool).storage_hub.unwrap();
+        let mut rx_r2 = r2.subscribe();
+        let mut rx_r3 = r3.subscribe();
+        r1.publish(1, "pub.relay".into(), Some(r#"{"ok":true}"#.into()));
+        assert_eq!(rx_r2.try_recv().expect("same relay computer shares hub").extension_id, "pub.relay");
+        assert!(rx_r3.try_recv().is_err(), "different relay computers must have distinct hubs");
     }
 }

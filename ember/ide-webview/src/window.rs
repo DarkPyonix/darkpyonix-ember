@@ -9,10 +9,10 @@ use tao::dpi::{LogicalPosition, LogicalSize};
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy, EventLoopWindowTarget};
 use tao::window::{Theme, Window, WindowBuilder, WindowId};
-use wry::{WebContext, WebView, WebViewBuilder};
+use wry::{PageLoadEvent, WebContext, WebView, WebViewBuilder};
 
 use crate::cli::{
-    classify_navigation, format_document_title, ChromeMode, Config, NavigationDecision,
+    classify_navigation, window_title_for_page, ChromeMode, Config, NavigationDecision,
     DARKPYONIX_BG_RGBA, DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_WIDTH, MIN_WINDOW_HEIGHT,
     MIN_WINDOW_WIDTH,
 };
@@ -26,9 +26,9 @@ pub enum UserEvent {
         source_window_id: String,
         payload: String,
     },
-    TitleChanged {
+    PageLoaded {
         logical_id: String,
-        title: String,
+        url: String,
     },
     SmokeExit,
 }
@@ -143,11 +143,15 @@ fn spawn_window(
                 }
             }
         })
-        .with_document_title_changed_handler(move |title| {
-            let _ = title_proxy.send_event(UserEvent::TitleChanged {
-                logical_id: title_logical_id.clone(),
-                title,
-            });
+        // The window keeps the `<folder> - Ember IDE` title: a finished page load re-derives it
+        // from the page's folder, and the page's own document.title is ignored.
+        .with_on_page_load_handler(move |event, url| {
+            if matches!(event, PageLoadEvent::Finished) {
+                let _ = title_proxy.send_event(UserEvent::PageLoaded {
+                    logical_id: title_logical_id.clone(),
+                    url,
+                });
+            }
         })
         .with_ipc_handler(move |req| {
             let payload = req.into_body();
@@ -258,9 +262,9 @@ pub fn run(config: Config) -> Result<(), String> {
                 tracing::info!("smoke timer elapsed; exiting");
                 *control_flow = ControlFlow::Exit;
             }
-            Event::UserEvent(UserEvent::TitleChanged { logical_id, title }) => {
+            Event::UserEvent(UserEvent::PageLoaded { logical_id, url }) => {
                 if let Some(managed) = registry.get(&logical_id) {
-                    let next = format_document_title(&title, &managed.fallback_title);
+                    let next = window_title_for_page(&url, &managed.fallback_title);
                     managed.window.set_title(&next);
                 }
             }

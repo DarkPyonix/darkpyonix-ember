@@ -200,14 +200,14 @@ pub fn derive_window_title(explicit: Option<&str>, url: &str) -> String {
     }
 }
 
-/// Normalizes a document title update from the webview, falling back to
-/// `fallback` if the document title is blank.
-pub fn format_document_title(doc_title: &str, fallback: &str) -> String {
-    let trimmed = doc_title.trim();
-    if trimmed.is_empty() {
-        fallback.to_owned()
-    } else {
-        trimmed.to_owned()
+/// The window title after the page at `page_url` has loaded: `<folder> - Ember IDE` for the
+/// page's workspace folder, else `fallback` (the title the window opened with). The page's own
+/// `document.title` (Code-OSS sets `<editor>, <folder>, <product>`) never becomes the window title,
+/// so every IDE window is named the same way whichever runtime serves it.
+pub fn window_title_for_page(page_url: &str, fallback: &str) -> String {
+    match folder_name_from_url(page_url) {
+        Some(folder) => format!("{folder} - {DEFAULT_TITLE}"),
+        None => fallback.to_owned(),
     }
 }
 
@@ -574,11 +574,20 @@ mod tests {
         assert_eq!(cfg.chrome_mode, ChromeMode::Integrated);
         assert_eq!(cfg.title, "ember app - Ember IDE");
         assert_eq!(derive_window_title(None, "http://127.0.0.1:8890/"), DEFAULT_TITLE);
+        // After a page load the title still has the SPEC form, from the page's folder; a page
+        // with no folder keeps the title the window opened with.
         assert_eq!(
-            format_document_title("  lib.rs - ember - Code  ", "Ember IDE"),
-            "lib.rs - ember - Code"
+            window_title_for_page("http://127.0.0.1:8890/?folder=%2Fwork%2Fother", "ember app - Ember IDE"),
+            "other - Ember IDE"
         );
-        assert_eq!(format_document_title("   ", "Ember IDE"), "Ember IDE");
+        assert_eq!(
+            window_title_for_page("http://127.0.0.1:8890/", "ember app - Ember IDE"),
+            "ember app - Ember IDE"
+        );
+        // The page's document.title is not passed through to the window.
+        let window_rs = include_str!("window.rs");
+        assert!(!window_rs.contains("with_document_title_changed_handler"));
+        assert!(window_rs.contains("window_title_for_page("));
     }
 
     #[test]

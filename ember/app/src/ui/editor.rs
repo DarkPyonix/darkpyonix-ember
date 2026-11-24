@@ -1788,6 +1788,25 @@ pub fn tree_key_action(
     }
 }
 
+/// The tree row that takes keyboard focus after `outcome`: the row an arrow key, `Home` or `End`
+/// selected. Focus follows the selection, as in Code-OSS, so the next `Enter` or `Space` reaches
+/// the selected row instead of the row that had focus before the arrow key.
+pub fn tree_key_focus(outcome: &TreeKeyOutcome) -> Option<&str> {
+    match outcome {
+        TreeKeyOutcome::Select(path, _) => Some(path),
+        _ => None,
+    }
+}
+
+/// The index of the tab that takes keyboard focus after `outcome`: the tab an arrow key, `Home` or
+/// `End` activated, so focus follows the selection in the strip as it does in the tree.
+pub fn tab_key_focus(paths: &[String], outcome: &TabKeyOutcome) -> Option<usize> {
+    match outcome {
+        TabKeyOutcome::Activate(path) => paths.iter().position(|p| p == path),
+        _ => None,
+    }
+}
+
 /// What path to focus in the editor when returning focus from a tool window or tree, if any.
 pub fn editor_focus_target(current: Option<&str>) -> Option<String> {
     current.map(str::to_string)

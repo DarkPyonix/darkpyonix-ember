@@ -6,6 +6,7 @@ in main.py.
 """
 import asyncio
 import logging
+import re
 from contextlib import suppress
 
 import httpx
@@ -30,6 +31,24 @@ CLIENT = httpx.AsyncClient(
 
 # Drop the re-framing headers (uvicorn re-chunks anyway).
 _HOP_HEADERS = ("transfer-encoding", "content-length", "connection")
+
+# Static workbench assets relayed from upstream get a fallback Cache-Control header
+# when upstream omits one. Commit-hashed paths are immutable; unversioned paths use
+# a bounded private max-age.
+_STATIC_ASSET_EXTS = (
+    ".js", ".mjs", ".css", ".woff", ".woff2", ".ttf", ".otf", ".eot",
+    ".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".wasm", ".map",
+)
+_VERSIONED_PREFIX_RE = re.compile(r"^/(?:(?:stable|insider|oss)-)?[0-9a-f]{7,40}/", re.IGNORECASE)
+
+
+def static_cache_control_for_path(path: str) -> str | None:
+    """Return a Cache-Control value for static workbench assets, or None for non-assets."""
+    if not path.lower().endswith(_STATIC_ASSET_EXTS):
+        return None
+    if _VERSIONED_PREFIX_RE.match(path):
+        return assets.IMMUTABLE_CACHE_CONTROL
+    return assets.WORKBENCH_CSS_CACHE_CONTROL
 
 
 def upstream_url(path: str) -> str:
@@ -82,6 +101,12 @@ async def relay(request: Request, url: str) -> Response:
     headers = dict(resp.headers)
     for h in _HOP_HEADERS:
         headers.pop(h, None)
+
+    if request.method in ("GET", "HEAD") and resp.status_code == 200:
+        if not any(k.lower() == "cache-control" for k in headers):
+            cc = static_cache_control_for_path(request.url.path)
+            if cc:
+                headers["cache-control"] = cc
 
     return StreamingResponse(
         resp.aiter_raw(),

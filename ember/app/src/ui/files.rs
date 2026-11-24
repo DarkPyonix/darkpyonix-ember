@@ -560,6 +560,7 @@ pub enum HistoryResult {
     Done,
     Failed,
     Declined,
+    Expired,
     Cancelled,
 }
 
@@ -569,6 +570,7 @@ impl HistoryResult {
             HistoryResult::Done => "완료",
             HistoryResult::Failed => "실패",
             HistoryResult::Declined => "거절됨",
+            HistoryResult::Expired => "만료됨",
             HistoryResult::Cancelled => "취소됨",
         }
     }

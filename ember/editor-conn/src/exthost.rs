@@ -46,6 +46,8 @@ pub mod proxy {
     pub const EXT_HOST_WORKSPACE: &str = "ExtHostWorkspace";
     pub const EXT_HOST_FILE_SYSTEM_INFO: &str = "ExtHostFileSystemInfo";
     pub const EXT_HOST_SEARCH: &str = "ExtHostSearch";
+    pub const EXT_HOST_STORAGE: &str = "ExtHostStorage";
+    pub const EXT_HOST_SECRET_STATE: &str = "ExtHostSecretState";
 
     pub const MAIN_THREAD_COMMANDS: &str = "MainThreadCommands";
     pub const MAIN_THREAD_DIAGNOSTICS: &str = "MainThreadDiagnostics";
@@ -222,9 +224,15 @@ pub async fn initialize(conn: Connection, init: &Value) -> Result<(RpcPeer, mpsc
     Ok(RpcPeer::start(handle, events))
 }
 
-/// Ask the extension host to exit (`RemoteExtensionHost.disconnect`).
-pub fn terminate(peer_conn: &crate::connection::ConnectionHandle) {
+/// Send `MSG_TERMINATE` without closing the socket yet so the extension host can finish
+/// `deactivate()` (for example persisting storage updates) before disconnecting.
+pub fn send_terminate(peer_conn: &crate::connection::ConnectionHandle) {
     peer_conn.send(vec![MSG_TERMINATE]);
+}
+
+/// Ask the extension host to exit (`RemoteExtensionHost.disconnect`) and close the socket.
+pub fn terminate(peer_conn: &crate::connection::ConnectionHandle) {
+    send_terminate(peer_conn);
     peer_conn.close();
 }
 
@@ -509,6 +517,30 @@ pub fn accept_configuration_changed(data: &Value, keys: &[String], overrides: &[
     )
 }
 
+/// `ExtHostStorageShape.$acceptValue(shared, extensionId, value)` (extHost.protocol.ts L3596).
+/// Pushes a storage update from another window/session into this extension host's memento cache.
+pub fn accept_storage_value(shared: bool, extension_id: &str, value: &str) -> Call {
+    Call::new(
+        proxy::EXT_HOST_STORAGE,
+        "$acceptValue",
+        vec![
+            Arg::Json(Value::Bool(shared)),
+            Arg::Json(Value::String(extension_id.to_owned())),
+            Arg::Json(Value::String(value.to_owned())),
+        ],
+    )
+}
+
+/// `ExtHostSecretStateShape.$onDidChangePassword({ extensionId, key })` (extHost.protocol.ts L2589).
+/// Tells the extension host that a secret changed, which fires `context.secrets.onDidChange`.
+pub fn secret_changed(extension_id: &str, key: &str) -> Call {
+    Call::new(
+        proxy::EXT_HOST_SECRET_STATE,
+        "$onDidChangePassword",
+        vec![Arg::Json(json!({ "extensionId": extension_id, "key": key }))],
+    )
+}
+
 /// Collect `(key, default, scope)` from extensions' `contributes.configuration`.
 /// `ConfigurationScope`: 1 application, 2 machine, 3 application-machine, 4 window (default),
 /// 5 resource, 6 language-overridable, 7 machine-overridable.
@@ -598,7 +630,21 @@ pub fn accept_documents_and_editors_delta(delta: &DocumentsAndEditorsDelta) -> C
 /// `ITextEditorConfiguration` defaults for `TextEditorAddData::options`.
 pub fn default_editor_options(tab_size: u32, insert_spaces: bool) -> Value {
     // TextEditorCursorStyle.Line = 1, RenderLineNumbersType.On = 1
-    json!({ "tabSize": tab_size, "indentSize": tab_size, "originalIndentSize": tab_size, "insertSpaces": insert_spaces, "cursorStyle": 1, "lineNumbers": 1 })
+    editor_options(tab_size, tab_size, insert_spaces)
+}
+
+/// The resolved options of an editor with its own tab size, indent size and `insertSpaces`
+/// (`IResolvedTextEditorConfiguration`).
+pub fn editor_options(tab_size: u32, indent_size: u32, insert_spaces: bool) -> Value {
+    json!({ "tabSize": tab_size, "indentSize": indent_size, "originalIndentSize": indent_size, "insertSpaces": insert_spaces, "cursorStyle": 1, "lineNumbers": 1 })
+}
+
+/// `ExtHostEditors.$acceptEditorPropertiesChanged(id, { options, selections: null, visibleRanges: null })`
+/// (extHost.protocol.ts L2437, L2448): the editor's options changed, as when the person picks another
+/// indentation.
+pub fn accept_editor_options_changed(editor_id: &str, options: Value) -> Call {
+    let data = json!({ "options": options, "selections": null, "visibleRanges": null });
+    Call::new(proxy::EXT_HOST_EDITORS, "$acceptEditorPropertiesChanged", vec![Arg::Json(editor_id.into()), Arg::Json(data)])
 }
 
 /// `ExtHostDocuments.$acceptModelChanged(uri, ISerializedModelContentChangedEvent, isDirty)`

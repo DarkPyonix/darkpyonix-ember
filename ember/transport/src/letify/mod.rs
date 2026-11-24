@@ -20,18 +20,30 @@
 //!   server. letify-link's relay only pairs two requests; it never hands one to a local acceptor.
 //! - **Address observation**: the main server runs a `QadResponder`; other endpoints ask it for
 //!   their public address and publish it in their record.
+//! - **Hole punching** (EM-11, #10): letify-link's public punch driver (`letify_link::driver`,
+//!   3.0.6) runs every punch, TCP simultaneous open first and UDP beside it; [`punching`] routes
+//!   its rendezvous messages and puts the punched path into the peer's session. An endpoint with
+//!   a rendezvous adds a punch candidate to every dial except one to the main server, and answers
+//!   the punch offers of the peers it admits. Its public IP comes from the configured observer,
+//!   or by default from the main server's relay host on UDP 7443. The path manager starts the
+//!   session on the first path that completes and leaves the relay once a punched path carries
+//!   traffic; a punch that fails (`PunchError`) leaves the session on TCP or the relay, which
+//!   stays Ember's own.
 //! - **Revocation** (`FR-N3`): [`crate::PeerGate`] calls `revoke_peer`, which revokes the key in
 //!   the acceptor (handshakes, live sessions) and in the relay (waiting and spliced pairs).
 //! - **Power** (`FR-N5` mobile): `set_power_state` and `resume_now` map to letify-link's
 //!   `PowerState`, `Session::resume_now` and `PathManager::invalidate_paths`.
 //! - Rekeying and resumption are letify-link's own: Noise IK, key epochs, resume on a new path.
 //!
-//! Not done yet (TODO in the SPEC): UDP paths and hole punching (TCP dialing plus the relay only),
-//! NAT classification beyond the QAD mapping, and discovering the main server's relay address from
-//! the hub (it is configured with `EMBER_RELAY_URL` for now).
+//! Not done yet (TODO in the SPEC): NAT classification (letify's driver classifies only with
+//! three STUN servers; Ember offers its one QAD-observed IP), IPv6 punching (the driver binds
+//! IPv4 sockets), the real-network acceptance run of the punch, and discovering the main
+//! server's relay address from the hub (it is configured with `EMBER_RELAY_URL` for now).
 
 mod link;
 mod pkarr;
+mod punching;
+mod worker;
 mod relay_guard;
 mod relay_url;
 
@@ -43,10 +55,11 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use letify_link::observe::{QadObserver, QadResponder, Reachability};
+use letify_link::observe::{AddressObserver, ObserveFuture, QadObserver, QadResponder, Reachability};
 use letify_link::record::{self, AddressRecord};
 use letify_link::relay::{new_token, Relay, RelayConfig as LinkRelayConfig, RelayDialer, RelayHandle, RelayPairing};
 use letify_link::rendezvous::{self, Message, Rendezvous};
+use letify_link::signal::SignalRendezvous;
 use letify_link::{
     Accepted, Acceptor, Candidate, Config, Identity, ManagerConfig, NodeId, PathEvent, PathKind, PathManager,
     PeerPolicy,
@@ -59,6 +72,10 @@ pub use pkarr::HttpPkarrStore;
 
 use link::{run_demux, run_path_watch, Cmd, OpenError, PeerLink};
 use pkarr::PkarrNode;
+use punching::Puncher;
+
+/// The punch runner of this backend: Ember's own rendezvous and letify's signalling Worker.
+type BackendPuncher = Puncher<SignalAdapter, SignalRendezvous>;
 pub use pkarr::{direct_addresses_from_txt, is_record_label};
 use relay_url::{parse_relay_url, RelayTarget};
 
@@ -77,6 +94,14 @@ pub const LETIFY_TRANSPORT_ID: &str = record::DEFAULT_TRANSPORT;
 const MAX_MEETINGS: usize = 8;
 /// At most this many candidate TCP addresses are dialed for one peer.
 const MAX_TCP_CANDIDATES: usize = 8;
+/// How long the punch driver waits for the address observer to report a punch socket's mapping.
+const PUNCH_OBSERVE_WAIT: Duration = Duration::from_secs(1);
+/// The UDP port of the main server's address observer by default (INTENT D36, main server
+/// defaults: the relay and the observer share port 7443). With no observer configured, a punch
+/// asks the relay host on this port (EM-11).
+const DEFAULT_OBSERVER_PORT: u16 = 7443;
+/// The time one request to the signalling Worker may take beyond its long poll's own wait.
+const WORKER_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The pairing token of a standing request (SPEC `FR-N9`, #898): the main server waits at its own
 /// relay for each allowed device under this token, and a device with no rendezvous asks the relay
@@ -147,6 +172,69 @@ impl Rendezvous for SignalAdapter {
     async fn recv(&self) -> io::Result<(NodeId, Vec<u8>)> {
         let (from, msg) = self.0.recv().await.map_err(|e| io::Error::new(io::ErrorKind::BrokenPipe, e.to_string()))?;
         Ok((node_of(from), msg))
+    }
+}
+
+/// The host of a relay address `host:port`, without the brackets of an IPv6 address.
+fn relay_host(addr: &str) -> Option<&str> {
+    let (host, port) = addr.rsplit_once(':')?;
+    port.parse::<u16>().ok()?;
+    let host = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
+    (!host.is_empty()).then_some(host)
+}
+
+/// The default address observer of a punch (EM-11): the host of `relay` on UDP
+/// [`DEFAULT_OBSERVER_PORT`], pinned to the relay's id. `None` without a relay, or when this
+/// endpoint (`me`) is the relay: the main server observes for others, not for itself.
+fn default_observer(relay: Option<&RelayTarget>, me: NodeId) -> Option<(String, NodeId)> {
+    let relay = relay?;
+    if relay.node.canonical() == me.canonical() {
+        return None;
+    }
+    Some((relay_host(&relay.addr)?.to_string(), relay.node))
+}
+
+/// Whether a dial to `peer` gets a punched UDP candidate (EM-11): never to the relay node (the
+/// main server, which every device reaches directly or through its own relay, and which has no
+/// observer of its own to answer with), and only when there is an observer to learn our mapping
+/// from: a configured one, or the default through our relay. `dial_relay` is the relay of this
+/// dial, `own_relay` the one this endpoint registered.
+fn offers_punch(
+    configured_observer: bool,
+    peer: NodeId,
+    me: NodeId,
+    dial_relay: Option<&RelayTarget>,
+    own_relay: Option<&RelayTarget>,
+) -> bool {
+    let is_relay = |r: Option<&RelayTarget>| r.is_some_and(|r| r.node.canonical() == peer.canonical());
+    if is_relay(dial_relay) || is_relay(own_relay) {
+        return false;
+    }
+    configured_observer || default_observer(own_relay, me).is_some()
+}
+
+/// The default observer as a letify-link [`AddressObserver`]: the current relay's host on UDP
+/// [`DEFAULT_OBSERVER_PORT`], resolved at each observation, with the reply's signature pinned to
+/// the relay's id. Without a relay of another endpoint it fails, and the punch with it.
+struct RelayHostObserver {
+    inner: Weak<Inner>,
+}
+
+impl AddressObserver for RelayHostObserver {
+    fn observe<'a>(&'a self, socket: &'a UdpSocket) -> ObserveFuture<'a> {
+        Box::pin(async move {
+            let target = self.inner.upgrade().and_then(|i| default_observer(i.relay_target().as_ref(), i.identity.node_id()));
+            let Some((host, pin)) = target else {
+                return Err(io::Error::new(io::ErrorKind::NotFound, "no main server relay to observe through"));
+            };
+            let v4 = socket.local_addr()?.is_ipv4();
+            let addr = tokio::net::lookup_host((host.as_str(), DEFAULT_OBSERVER_PORT))
+                .await?
+                .find(|a| a.is_ipv4() == v4)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("{host} has no address of the punch socket's family")))?;
+            let observer = QadObserver::new(addr, Some(pin)).wait(PUNCH_OBSERVE_WAIT);
+            observer.observe(socket).await
+        })
     }
 }
 
@@ -232,6 +320,9 @@ struct Inner {
     own_relay_standing: Option<RelayTarget>,
     relay_handle: Option<RelayHandle>,
     signal: Mutex<Option<Arc<SignalAdapter>>>,
+    /// The UDP punch driver, set with the rendezvous when punching is on and an address
+    /// observer is configured (EM-11).
+    punch: Mutex<Option<Arc<BackendPuncher>>>,
     /// Devices admitted through an attached gate (canonical ids); `None` until a gate attaches.
     admitted: Mutex<Option<std::collections::HashSet<NodeId>>>,
     pkarr: Mutex<Option<Arc<PkarrNode>>>,
@@ -400,6 +491,7 @@ impl LetifyBackend {
             own_relay_standing,
             relay_handle,
             signal: Mutex::new(None),
+            punch: Mutex::new(None),
             admitted: Mutex::new(None),
             pkarr: Mutex::new(None),
             publish_direct: AtomicBool::new(true),
@@ -448,6 +540,10 @@ impl Inner {
 
     fn pkarr(&self) -> Option<Arc<PkarrNode>> {
         self.pkarr.lock().unwrap().clone()
+    }
+
+    fn punch(&self) -> Option<Arc<BackendPuncher>> {
+        self.punch.lock().unwrap().clone()
     }
 
     fn watch(&self, peers: &[PeerId]) {
@@ -527,11 +623,16 @@ impl Inner {
     /// our main server, and when a gate is attached the sender must be an admitted device.
     fn trusts(&self, sender: &NodeId, relay: &NodeId) -> bool {
         let ours = self.relay_target().is_some_and(|t| t.node.canonical() == relay.canonical());
-        let allowed = match self.admitted.lock().unwrap().as_ref() {
+        ours && self.admits(sender)
+    }
+
+    /// Whether `sender` is an admitted device, or no gate is attached (`FR-N3`). Relay offers and
+    /// punch offers are served only for such a sender.
+    fn admits(&self, sender: &NodeId) -> bool {
+        match self.admitted.lock().unwrap().as_ref() {
             Some(set) => set.contains(&sender.canonical()),
             None => true,
-        };
-        ours && allowed
+        }
     }
 
     fn set_signal(self: &Arc<Self>, channel: Arc<dyn SignalChannel>) {
@@ -545,6 +646,23 @@ impl Inner {
         }
         let known: Vec<PeerId> = self.hints.lock().unwrap().keys().copied().collect();
         adapter.0.watch(&known);
+        if self.cfg.udp_punch {
+            // The configured observer, or by default the main server's relay host on UDP 7443
+            // (EM-11), looked up when a punch starts so a relay set later is used too.
+            let observers: Vec<Arc<dyn AddressObserver>> = match self.cfg.observer {
+                Some(obs) => vec![Arc::new(QadObserver::new(obs.addr, obs.node.map(node_of)).wait(PUNCH_OBSERVE_WAIT))],
+                None => vec![Arc::new(RelayHostObserver { inner: Arc::downgrade(self) })],
+            };
+            // letify's signalling Worker as an auxiliary rendezvous (owner, 2026-11-23), configured
+            // before any clone: letify-link's builder methods panic after one.
+            let worker = self.cfg.worker_rendezvous.then(|| {
+                let url = self.cfg.worker_url.as_deref().unwrap_or(letify_link::signal::DEFAULT_URL);
+                SignalRendezvous::new(url, self.identity.clone())
+                    .user_agent(&format!("ember/{}", env!("CARGO_PKG_VERSION")))
+                    .request_timeout(WORKER_REQUEST_TIMEOUT)
+            });
+            *self.punch.lock().unwrap() = Some(Puncher::new(adapter.clone(), observers, worker));
+        }
         let weak = Arc::downgrade(self);
         let pairing = RelayPairing::new(adapter.clone(), self.identity.clone(), self.acceptor.clone(), move |sender, relay, _address| {
             weak.upgrade().is_some_and(|inner| inner.trusts(sender, relay))
@@ -654,6 +772,58 @@ impl Inner {
                     link.update_state();
                 }
             }
+        }
+    }
+
+    /// A rendezvous message that is not a relay offer: a punch message goes to the punch that
+    /// waits for it, and a punch offer from an admitted peer starts letify's driver as the
+    /// responder (EM-11). Every punched path goes through the acceptor like a TCP connection, so
+    /// the policy's revocations and the gate's admission apply to it unchanged (`FR-N3`). Offers
+    /// from a peer this endpoint does not admit get no answer, as its relay offers get no meeting.
+    /// With punching off every punch message is ignored, as before EM-11.
+    fn on_punch_message(self: &Arc<Self>, from: NodeId, msg: Message) {
+        let Some(puncher) = self.punch() else { return };
+        if puncher.deliver(from, &msg) || !punching::is_offer(&msg) {
+            return;
+        }
+        if !self.admits(&from) || self.closed.load(Ordering::SeqCst) {
+            tracing::debug!(peer = %from, "ignoring a punch offer from a peer that is not admitted");
+            return;
+        }
+        puncher.answer(from, &msg, self.punched_path_handler(from));
+    }
+
+    /// A wake-up on Ember's own rendezvous: `from` punches to us through the signalling Worker
+    /// (EM-11). Only an admitted peer's wake-up is honoured (a pull-based rendezvous such as the
+    /// hub's pkarr mailbox delivers only the peers this endpoint watches); then the Worker is
+    /// polled for that one punch.
+    fn on_wake_up(self: &Arc<Self>, from: NodeId, nonce: [u8; 16]) {
+        let Some(puncher) = self.punch() else { return };
+        if !self.admits(&from) || self.closed.load(Ordering::SeqCst) {
+            tracing::debug!(peer = %from, "ignoring a Worker wake-up from a peer that is not admitted");
+            return;
+        }
+        puncher.answer_woken(from, nonce, self.punched_path_handler(from));
+    }
+
+    /// What the answering side does with each punched path: the acceptor routes it to a new
+    /// session or to the live one, as a TCP connection.
+    fn punched_path_handler(
+        self: &Arc<Self>,
+        from: NodeId,
+    ) -> impl Fn(letify_link::driver::PunchedPath) -> futures::future::BoxFuture<'static, ()> + Clone + Send + 'static {
+        let inner = self.clone();
+        move |path: letify_link::driver::PunchedPath| {
+            let inner = inner.clone();
+            Box::pin(async move {
+                if inner.closed.load(Ordering::SeqCst) {
+                    return;
+                }
+                match inner.acceptor.accept(path.into_transport()).await {
+                    Ok(accepted) => inner.on_accepted(accepted, Via::Direct),
+                    Err(e) => tracing::debug!(peer = %from, error = %e, "a punched path was refused"),
+                }
+            })
         }
     }
 
@@ -798,6 +968,18 @@ impl Inner {
             }
             _ => false,
         };
+        // A punched UDP path, when this endpoint punches (EM-11). It needs the rendezvous, so it
+        // never coexists with the standing request.
+        let punch = self.punch().filter(|_| {
+            offers_punch(self.cfg.observer.is_some(), node, self.identity.node_id(), relay.as_ref(), self.relay_target().as_ref())
+        });
+        let punching = match punch {
+            Some(driver) => {
+                candidates.push(driver.candidate(node));
+                true
+            }
+            None => false,
+        };
         if candidates.is_empty() && standing.is_none() {
             return Err(fail(if relay.is_some() {
                 "no address is known for the peer and there is no rendezvous to reach it through the relay".into()
@@ -805,7 +987,7 @@ impl Inner {
                 "no address is known for the peer and no relay is registered".into()
             }));
         }
-        if !relayed && refused_by_all(&tcp).await {
+        if !relayed && !punching && refused_by_all(&tcp).await {
             return Err(fail("every known address refused the connection".into()));
         }
 
@@ -1216,10 +1398,23 @@ async fn manage(mut pm: PathManager, mut cmds: mpsc::UnboundedReceiver<Cmd>) {
 }
 
 /// Serves relay meeting requests from the rendezvous: a `RelayOffer` from a trusted device is
-/// answered, the relay is dialed and the session on it is accepted.
+/// answered, the relay is dialed and the session on it is accepted. Punch messages go to the punch
+/// driver (EM-11).
 async fn signal_loop(inner: Arc<Inner>, signal: Arc<SignalAdapter>, pairing: RelayPairing<SignalAdapter>) {
     loop {
-        match rendezvous::recv_message(&*signal).await {
+        let received = match signal.recv().await {
+            // A wake-up for a punch through the signalling Worker is Ember's own message, not a
+            // letify-link rendezvous message (EM-11).
+            Ok((from, bytes)) => match worker::parse_wake_up(&bytes) {
+                Some(nonce) => {
+                    inner.on_wake_up(from, nonce);
+                    continue;
+                }
+                None => decode_rendezvous(from, &bytes),
+            },
+            Err(e) => Err(e),
+        };
+        match received {
             Ok((from, Message::RelayOffer { token, relay, address })) => {
                 let Ok(permit) = inner.meetings.clone().try_acquire_owned() else {
                     tracing::debug!("too many relay meetings in progress; dropping an offer");
@@ -1235,7 +1430,7 @@ async fn signal_loop(inner: Arc<Inner>, signal: Arc<SignalAdapter>, pairing: Rel
                     drop(permit);
                 });
             }
-            Ok(_) => {}
+            Ok((from, msg)) => inner.on_punch_message(from, msg),
             Err(e) if e.kind() == io::ErrorKind::InvalidData => {}
             Err(e) => {
                 tracing::debug!(error = %e, "reading the rendezvous failed");
@@ -1243,6 +1438,18 @@ async fn signal_loop(inner: Arc<Inner>, signal: Arc<SignalAdapter>, pairing: Rel
             }
         }
     }
+}
+
+/// A rendezvous message as `rendezvous::recv_message` reads it: decoded, and a `Hello` whose key
+/// is not the sender's refused.
+fn decode_rendezvous(from: NodeId, bytes: &[u8]) -> io::Result<(NodeId, Message)> {
+    let msg = Message::decode(bytes)?;
+    if let Message::Hello { key, .. } = &msg {
+        if key != from.as_bytes() {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "rendezvous: hello key differs from the sender"));
+        }
+    }
+    Ok((from, msg))
 }
 
 /// Asks the address observer for our public address now and every few minutes.
@@ -1401,7 +1608,7 @@ mod tests {
         // A short streak is never mentioned, and a new long one warns again.
         assert!(!s.failed());
         assert!(!s.recovered());
-        assert!((0..STANDING_WARN_AFTER).map(|_| s.failed()).any(|w| w));
+        assert!((0..STANDING_WARN_AFTER).any(|_| s.failed()));
     }
 
     /// `FR-N9`: what ends a relay-only dial at once, what is tried again, and what waits.
@@ -1421,6 +1628,62 @@ mod tests {
         assert_eq!(relay_failure(&refused), RelayFailure::Refused);
         let late = io::Error::new(K::TimedOut, "the relay did not pair in time");
         assert_eq!(relay_failure(&late), RelayFailure::NoAnswer);
+    }
+
+    fn relay(addr: &str) -> RelayTarget {
+        let peer = SecretKey::generate().peer_id();
+        parse_relay_url(&format!("letify://{peer}@{addr}")).unwrap()
+    }
+
+    /// EM-11: with no observer configured, a punch observes through the relay host on UDP 7443,
+    /// pinned to the relay's id; the relay itself and an endpoint without a relay get none.
+    #[test]
+    fn em11_the_default_observer_is_the_relay_host_on_udp_7443() {
+        let me = node_of(SecretKey::generate().peer_id());
+        for (addr, host) in [("relay.example.org:7443", "relay.example.org"), ("203.0.113.5:9000", "203.0.113.5"), ("[2001:db8::1]:7443", "2001:db8::1")] {
+            let r = relay(addr);
+            assert_eq!(default_observer(Some(&r), me), Some((host.to_string(), r.node)), "{addr}");
+        }
+        assert_eq!(DEFAULT_OBSERVER_PORT, 7443);
+        assert_eq!(default_observer(None, me), None);
+        let own = relay("127.0.0.1:7443");
+        assert_eq!(default_observer(Some(&own), own.node), None, "the main server observes for others only");
+    }
+
+    /// EM-11: a dial to the relay node (the main server) gets no punch candidate; a dial to
+    /// another peer gets one only when there is an observer, configured or the relay host.
+    #[test]
+    fn em11_a_dial_to_the_relay_node_offers_no_punch() {
+        let me = node_of(SecretKey::generate().peer_id());
+        let peer = node_of(SecretKey::generate().peer_id());
+        let server = relay("relay.example.org:7443");
+        assert!(!offers_punch(true, server.node, me, Some(&server), Some(&server)));
+        assert!(!offers_punch(false, server.node, me, None, Some(&server)));
+        assert!(!offers_punch(true, server.node, me, Some(&server), None));
+        assert!(offers_punch(false, peer, me, Some(&server), Some(&server)));
+        assert!(offers_punch(true, peer, me, None, None));
+        assert!(!offers_punch(false, peer, me, None, None), "no observer, no relay: nothing to learn a mapping from");
+    }
+
+    /// EM-11: `udp_punch: false` (`EMBER_LETIFY_UDP_PUNCH=off`) builds no punch driver, so no
+    /// punch candidate is offered and no offer is answered; the default builds one.
+    #[tokio::test]
+    async fn em11_udp_punch_off_offers_no_punch() {
+        let hub = crate::MemorySignalHub::new();
+        let server = relay("127.0.0.1:7443");
+        let bind = |udp_punch: bool| {
+            let key = SecretKey::generate();
+            let letify = LetifyConfig { signal: Some(hub.channel(key.peer_id())), udp_punch, ..LetifyConfig::default() };
+            TransportConfig::new(key)
+                .backend(BackendKind::Letify)
+                .bind_addr("127.0.0.1:0".parse().unwrap())
+                .relay(RelayConfig::Custom(vec![server.url.clone()]))
+                .letify(letify)
+        };
+        let off = LetifyBackend::bind(bind(false)).await.unwrap();
+        assert!(off.inner.punch().is_none());
+        let on = LetifyBackend::bind(bind(true)).await.unwrap();
+        assert!(on.inner.punch().is_some());
     }
 
     /// `FR-N5`: a peer whose record does not list `letify-link/1` is refused with both lists

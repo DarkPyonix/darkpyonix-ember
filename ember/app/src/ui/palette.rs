@@ -33,8 +33,23 @@ pub enum Payload {
     SetEncoding { mode: ember_editor::EncodingMode, encoding: ember_editor::Encoding },
     /// Put the active document under a language id; `None` is 자동 감지 (FR-L31.7).
     SetLanguage(Option<String>),
+    /// Go on to the list of sizes for indenting with spaces or tabs, or for the tab's display size.
+    IndentationSize(IndentationSizeFor),
+    /// Change the active document's indentation or its leading whitespace.
+    SetIndentation(ember_editor::IndentationAction),
     /// Close the picker and do nothing.
     Cancel,
+}
+
+/// What the list of sizes after the indentation pick sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndentationSizeFor {
+    /// 공백을 사용한 들여쓰기: the size and spaces.
+    Spaces,
+    /// 탭을 사용한 들여쓰기: the size and tabs.
+    Tabs,
+    /// 탭 표시 크기 변경: the tab's width only.
+    Display,
 }
 
 /// One line of the palette.
@@ -335,6 +350,10 @@ pub enum Mode {
     ConfirmReopen(ember_editor::Encoding),
     /// The language modes.
     Language,
+    /// The status bar's indentation pick: the actions on the document's indentation.
+    Indentation,
+    /// The sizes 1 to 8 after one of the first rows of the indentation pick.
+    IndentationSize(IndentationSizeFor),
 }
 
 /// Does the mode list the file index (so the index notes apply)?
@@ -367,6 +386,8 @@ pub fn placeholder(mode: Mode, keymap: Keymap) -> &'static str {
         Mode::Encoding(ember_editor::EncodingMode::Save) => "저장할 때 사용할 파일 인코딩 선택",
         Mode::ConfirmReopen(_) => "저장하지 않은 변경 사항을 버리고 다른 인코딩으로 다시 여시겠습니까?",
         Mode::Language => "언어 모드 선택",
+        Mode::Indentation => "작업 선택",
+        Mode::IndentationSize(_) => "현재 파일의 탭 크기 선택",
     }
 }
 
@@ -472,7 +493,14 @@ pub fn items_for_workbench<'a>(
             Cow::Owned(items)
         }
         // The status bar's pickers get their rows from `editor_status::picker_items`.
-        Mode::GotoLine | Mode::Eol | Mode::EncodingAction | Mode::Encoding(_) | Mode::ConfirmReopen(_) | Mode::Language => Cow::Owned(Vec::new()),
+        Mode::GotoLine
+        | Mode::Eol
+        | Mode::EncodingAction
+        | Mode::Encoding(_)
+        | Mode::ConfirmReopen(_)
+        | Mode::Language
+        | Mode::Indentation
+        | Mode::IndentationSize(_) => Cow::Owned(Vec::new()),
     }
 }
 
@@ -608,6 +636,8 @@ pub fn search_label(mode: Mode) -> &'static str {
         Mode::EncodingAction => "인코딩 작업 검색",
         Mode::Encoding(_) | Mode::ConfirmReopen(_) => "인코딩 검색",
         Mode::Language => "언어 모드 검색",
+        Mode::Indentation => "들여쓰기 작업 검색",
+        Mode::IndentationSize(_) => "탭 크기 검색",
     }
 }
 

@@ -214,3 +214,61 @@ fn fr_l31_7_encoding_picker_opens_on_the_current_encoding() {
         }
     }
 }
+
+// #302: the indentation pick (Code-OSS `showIndentationPicker`, `ChangeIndentationSizeAction`).
+
+#[test]
+fn fr_l31_indentation_pick_rows_follow_code_oss_in_korean() {
+    use ember_app::ui::editor_status::{indentation_initial_selection, indentation_items, indentation_text, is_indentation_pick};
+    use ember_app::ui::palette::IndentationSizeFor;
+    use ember_editor::{Indentation, IndentationAction};
+
+    let current = Indentation::new(4, true);
+    let items = indentation_items(Mode::Indentation, current, 4);
+    let titles: Vec<&str> = items.iter().map(|i| i.title.as_str()).collect();
+    assert_eq!(
+        titles,
+        [
+            "공백을 사용한 들여쓰기",
+            "탭을 사용한 들여쓰기",
+            "탭 표시 크기 변경",
+            "콘텐츠에서 들여쓰기 감지",
+            "들여쓰기를 공백으로 변환",
+            "들여쓰기를 탭으로 변환",
+            "후행 공백 자르기",
+        ]
+    );
+    assert_eq!(items[0].payload, Payload::IndentationSize(IndentationSizeFor::Spaces));
+    assert_eq!(items[3].payload, Payload::SetIndentation(IndentationAction::Detect));
+    assert_eq!(items[5].payload, Payload::SetIndentation(IndentationAction::Convert { to_spaces: false }));
+
+    // The size list: 1 to 8, the settings' size and the current one marked as Code-OSS marks them.
+    let current = Indentation { tab_size: 6, indent_size: 6, insert_spaces: true };
+    let sizes = indentation_items(Mode::IndentationSize(IndentationSizeFor::Tabs), current, 2);
+    assert_eq!(sizes.iter().map(|i| i.title.as_str()).collect::<Vec<_>>(), ["1", "2", "3", "4", "5", "6", "7", "8"]);
+    assert_eq!(sizes[1].hint, "기본 탭 크기");
+    assert_eq!(sizes[5].hint, "현재 탭 크기");
+    assert_eq!(sizes[0].hint, "");
+    let same = indentation_items(Mode::IndentationSize(IndentationSizeFor::Spaces), Indentation::new(2, true), 2);
+    assert_eq!(same[1].hint, "구성된 탭 크기");
+    assert_eq!(same[1].payload, Payload::SetIndentation(IndentationAction::IndentUsing { insert_spaces: true, size: 2 }));
+    let display = indentation_items(Mode::IndentationSize(IndentationSizeFor::Display), current, 4);
+    assert_eq!(display[7].payload, Payload::SetIndentation(IndentationAction::DisplaySize(8)));
+
+    // The size list opens on the current tab size; the action list on its first row.
+    assert_eq!(indentation_initial_selection(Mode::IndentationSize(IndentationSizeFor::Spaces), current), 5);
+    assert_eq!(indentation_initial_selection(Mode::IndentationSize(IndentationSizeFor::Spaces), Indentation::new(16, true)), 7);
+    assert_eq!(indentation_initial_selection(Mode::Indentation, current), 0);
+
+    for mode in [Mode::Indentation, Mode::IndentationSize(IndentationSizeFor::Display)] {
+        assert!(is_picker(mode) && is_indentation_pick(mode) && !lists_files(mode));
+        assert!(!placeholder(mode, Keymap::VsCode).is_empty() && !search_label(mode).is_empty());
+    }
+    assert_eq!(placeholder(Mode::Indentation, Keymap::VsCode), "작업 선택");
+    assert_eq!(placeholder(Mode::IndentationSize(IndentationSizeFor::Spaces), Keymap::VsCode), "현재 파일의 탭 크기 선택");
+
+    // The status text: spaces, tabs, and spaces with a tab of another width.
+    assert_eq!(indentation_text(Indentation::new(4, true)), "4칸");
+    assert_eq!(indentation_text(Indentation::new(2, false)), "탭 크기: 2");
+    assert_eq!(indentation_text(Indentation { tab_size: 8, indent_size: 2, insert_spaces: true }), "2칸 (탭 크기: 8)");
+}

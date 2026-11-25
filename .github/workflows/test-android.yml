@@ -54,8 +54,26 @@ jobs:
             cargo install dioxus-cli --version "$DX_VERSION" --locked --force
           fi
           dx --version
+      # Train branches are new each run, so the Gradle cache above never restores there and every
+      # run downloads the Android Gradle plugin's dependencies from Maven Central, which sometimes
+      # answers 429 Too Many Requests (em-train-24). Only that failure is retried, after a pause;
+      # any other failure ends the step at once.
       - name: Build the APK
-        run: cd ember/app && ./scripts/build-android.sh --cargo-args=--locked
+        run: |
+          set -o pipefail
+          cd ember/app
+          log="$RUNNER_TEMP/build-android.log"
+          for attempt in 1 2 3; do
+            if ./scripts/build-android.sh --cargo-args=--locked 2>&1 | tee "$log"; then
+              exit 0
+            fi
+            if ! grep -q 'Received status code 429' "$log"; then
+              exit 1
+            fi
+            echo "::warning::Maven Central rate-limited the Gradle build (attempt $attempt of 3)"
+            sleep $((attempt * 60))
+          done
+          exit 1
       - name: Verify APK output
         run: |
           set -euo pipefail

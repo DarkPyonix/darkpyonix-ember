@@ -955,7 +955,13 @@ const EXTENSION_OUTPUT_TAIL: usize = 600;
 fn extension_failure(status: u16, body: String) -> ServerError {
     let output = serde_json::from_str::<serde_json::Value>(&body)
         .ok()
-        .and_then(|v| v.get("output").and_then(|o| o.as_str()).map(|o| o.trim().to_string()))
+        .and_then(|v| {
+            // Ember's top-level `output`, or the manager's `error.data.output`.
+            v.get("output")
+                .or_else(|| v.pointer("/error/data/output"))
+                .and_then(|o| o.as_str())
+                .map(|o| o.trim().to_string())
+        })
         .unwrap_or_default();
     match status_error(status, body) {
         ServerError::Status { status, message } if !output.is_empty() => {
@@ -976,7 +982,11 @@ fn status_error(status: u16, body: String) -> ServerError {
         status == 403 && parsed.as_ref().and_then(|v| v.get("code")).and_then(|c| c.as_str()) == Some(OWNER_REQUIRED);
     let message = parsed
         .as_ref()
-        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+        .and_then(|v| {
+            let e = v.get("error")?;
+            // Ember's `{error: "<text>"}`, or the DarkPyonix manager's `{error: {code, message}}`.
+            e.as_str().or_else(|| e.get("message").and_then(|m| m.as_str())).map(str::to_string)
+        })
         .unwrap_or(body);
     let message = if owner_required { format!("{OWNER_REQUIRED}: {message}") } else { message };
     if status == 401 {
@@ -1085,6 +1095,23 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(matches!(extension_failure(401, json!({ "error": "no", "output": "x" }).to_string()), ServerError::Unauthorized(_)));
+    }
+
+    #[test]
+    fn fr_w4c_a_manager_refusal_shows_its_message_and_the_end_of_the_output() {
+        // The DarkPyonix manager's error shape, passed through by the node unchanged (FR-M10).
+        let body = json!({ "error": { "code": "extension_failed", "message": "a.b was not installed",
+            "data": { "id": "a.b", "output": "Extension 'a.b' not found." } } })
+        .to_string();
+        match extension_failure(422, body) {
+            ServerError::Status { status, message } => {
+                assert_eq!(status, 422);
+                assert_eq!(message, "a.b was not installed\nExtension 'a.b' not found.");
+            }
+            other => panic!("{other:?}"),
+        }
+        // A 204 with no body is a success with no output (the manager's uninstall).
+        assert_eq!(ServerApi::extension_output((204, String::new())).unwrap(), "");
     }
 
     #[test]

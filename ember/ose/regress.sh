@@ -22,18 +22,24 @@
 # OSE_REGRESS_DEEP (<id>.json), and step 3 compares those with the `deep` expectations of
 # expected.json (regress.py compare-deep) instead of the log.
 #
+# OSE_REGRESS_MODE=per-extension (FR-E9, NFR-W1 item 7) is the activation run with one client
+# session per entry: a first session that opens nothing ("(startup)"), then a new session for every
+# entry with an `open` file, each staying OSE_REGRESS_SETTLE seconds. The client writes each
+# session's records under its label to protocol-gaps-by-extension.json; the comparison is the
+# activation run's.
+#
 # OSE_REGRESS_OUT=<dir> keeps what the run found there: results.json (the final status of every
 # listed extension; deep.json in the deep run), installed.txt (the installed folders, so an unpinned version can be pinned)
 # and the extension host logs, and protocol-gaps.json: the FR-E9 records of the activation run (every
 # `todo` method with a value that got the fallback reply: actor, method, count, and the extensions
-# that named themselves in an argument).
+# that named themselves in an argument), and in the per-extension run protocol-gaps-by-extension.json.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 reg="$here/regression"
 if [ "${1:-}" = "--self-test" ]; then python3 -I "$reg/regress.py" --self-test; exit; fi
 dir="${1:?usage: $0 <build dir> | --self-test}"
 mode="${OSE_REGRESS_MODE:-activation}"
-case "$mode" in activation|deep) ;; *) echo "FAIL: OSE_REGRESS_MODE is activation or deep, not $mode" >&2; exit 2 ;; esac
+case "$mode" in activation|per-extension|deep) ;; *) echo "FAIL: OSE_REGRESS_MODE is activation, per-extension or deep, not $mode" >&2; exit 2 ;; esac
 bin="$dir/bin/$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["serverApplicationName"])' "$dir/product.json")"
 [ -x "$bin" ] || { echo "FAIL: no server launcher at $bin" >&2; exit 1; }
 tmp="$(mktemp -d)"; pid=""
@@ -41,7 +47,7 @@ out="${OSE_REGRESS_OUT:-}"
 keep() { # copy what the run found to OSE_REGRESS_OUT, if set; never fails the run
   [ -n "$out" ] || return 0
   mkdir -p "$out/logs" || return 0
-  for f in results.json deep.json protocol-gaps.json installed.txt install-failed.txt server.log; do
+  for f in results.json deep.json protocol-gaps.json protocol-gaps-by-extension.json installed.txt install-failed.txt server.log; do
     if [ -f "$tmp/$f" ]; then cp "$tmp/$f" "$out/" || true; fi
   done
   find "$tmp/data" -name '*.log' -path '*exthost*' -exec cp {} "$out/logs/" \; 2>/dev/null || true
@@ -102,6 +108,7 @@ if [ "$up" != 1 ]; then echo "FAIL: the server did not start on port $port" >&2;
 client_status=0
 OSE_REGRESS_URL="http://127.0.0.1:$port/" OSE_REGRESS_ADDR="127.0.0.1:$port" OSE_REGRESS_WS="$tmp/ws" \
   OSE_REGRESS_MODE="$mode" OSE_REGRESS_DEEP="$tmp/deep" OSE_REGRESS_GAPS="$tmp/protocol-gaps.json" \
+  OSE_REGRESS_GAPS_BY_EXTENSION="$tmp/protocol-gaps-by-extension.json" \
   bash -c "$OSE_REGRESS_CLIENT" || client_status=$?
 sleep 5
 kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; pid=""

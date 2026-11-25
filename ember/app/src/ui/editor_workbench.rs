@@ -552,6 +552,47 @@ pub mod page {
         }
     }
 
+    /// What a key does on the page: the keymap's action, with the user's `keybindings.json` read on
+    /// top of it (FR-L31.17). `Default` here means the key runs nothing. The page's key handler and the
+    /// terminal's (which asks whether a key goes on to the page, #1133) both read it.
+    pub(crate) fn page_key_resolution(s: &Shared, keymap: Keymap, name: &str, m: Modifiers) -> crate::ui::editor_settings::KeyResolution {
+        use crate::ui::editor_settings::KeyResolution;
+        let (ctrl, shift, alt, meta) = (m.contains(Modifiers::CONTROL), m.contains(Modifiers::SHIFT), m.contains(Modifiers::ALT), m.contains(Modifiers::META));
+        let default_action = action_for_key(keymap, Os::current(), name, ctrl, shift, alt, meta);
+        let user_rules = s.host.state.lock().unwrap().settings.keybindings.clone();
+        let resolution = if user_rules.is_empty() {
+            KeyResolution::Default
+        } else {
+            let chord = crate::ui::editor::chord_from_key(name, ctrl, shift, alt, meta);
+            crate::ui::editor_settings::resolve_key(&user_rules, &chord, default_action)
+        };
+        match (resolution, default_action) {
+            (KeyResolution::Default, Some(action)) => KeyResolution::Action(action),
+            (resolution, _) => resolution,
+        }
+    }
+
+    /// What a key pressed in the integrated terminal would do on the page, for
+    /// [`crate::ui::keymap::terminal_keeps_key`] (#1133): the chord, the keymap and what it runs.
+    pub(crate) fn terminal_page_key(s: &Shared, name: &str, m: Modifiers) -> (Keymap, Chord, crate::ui::keymap::PageKey) {
+        use crate::ui::editor_settings::KeyResolution;
+        use crate::ui::keymap::PageKey;
+        let (ctrl, shift, alt, meta) = (m.contains(Modifiers::CONTROL), m.contains(Modifiers::SHIFT), m.contains(Modifiers::ALT), m.contains(Modifiers::META));
+        let keymap = *s.keymap.peek();
+        let page = match page_key_resolution(s, keymap, name, m) {
+            KeyResolution::Action(action) => PageKey::Action(action),
+            KeyResolution::Command(id) => PageKey::Command(id),
+            KeyResolution::Default | KeyResolution::Unbound => {
+                if crate::ui::editor_language::action_for_key(name, ctrl, shift, alt, meta).is_some() {
+                    PageKey::Editor
+                } else {
+                    PageKey::Nothing
+                }
+            }
+        };
+        (keymap, crate::ui::editor::chord_from_key(name, ctrl, shift, alt, meta), page)
+    }
+
     fn notice(text: impl Into<String>) {
         crate::ui::cr::notice::post(text);
     }
@@ -1729,37 +1770,9 @@ pub mod page {
                             run_action(&key_s, action);
                         }
                     }
-                    let default_action = action_for_key(
-                        keymap,
-                        Os::current(),
-                        &key_name(&event.key()),
-                        m.contains(Modifiers::CONTROL),
-                        m.contains(Modifiers::SHIFT),
-                        m.contains(Modifiers::ALT),
-                        m.contains(Modifiers::META),
-                    );
-                    // The user's keybindings.json is read on top of the keymap (FR-L31.17).
-                    let user_rules = key_s.host.state.lock().unwrap().settings.keybindings.clone();
-                    let resolution = if user_rules.is_empty() {
+                    match page_key_resolution(&key_s, keymap, &name, m) {
                         crate::ui::editor_settings::KeyResolution::Default
-                    } else {
-                        let chord = crate::ui::editor::chord_from_key(
-                            &key_name(&event.key()),
-                            m.contains(Modifiers::CONTROL),
-                            m.contains(Modifiers::SHIFT),
-                            m.contains(Modifiers::ALT),
-                            m.contains(Modifiers::META),
-                        );
-                        crate::ui::editor_settings::resolve_key(&user_rules, &chord, default_action)
-                    };
-                    match resolution {
-                        crate::ui::editor_settings::KeyResolution::Default => {
-                            if let Some(action) = default_action {
-                                event.prevent_default();
-                                run_action(&key_s, action);
-                            }
-                        }
-                        crate::ui::editor_settings::KeyResolution::Unbound => {}
+                        | crate::ui::editor_settings::KeyResolution::Unbound => {}
                         crate::ui::editor_settings::KeyResolution::Action(action) => {
                             event.prevent_default();
                             run_action(&key_s, action);
@@ -3425,6 +3438,7 @@ pub mod page {
         let offer_reconnect = handle.snapshot().needs_reconnect();
         let revision = s.revision;
         let paste_s = s.clone();
+        let term_key_s = s.clone();
         rsx! {
             {strip}
             div { class: "ed-term", role: "log", "aria-label": "터미널 출력", tabindex: "0", style: "outline:none;",
@@ -3478,11 +3492,18 @@ pub mod page {
                         return;
                     }
                     let bytes = terminal_input(&name, m.contains(Modifiers::CONTROL), m.contains(Modifiers::ALT), m.contains(Modifiers::SHIFT), m.contains(Modifiers::META));
-                    let Some(bytes) = bytes else { return };
+                    // #1133: Code-OSS's rule (`terminal.integrated.commandsToSkipShell`, keys the shell has
+                    // no bytes for go on); one place, `keymap::terminal_keeps_key`.
+                    let (keymap, chord, page) = terminal_page_key(&term_key_s, &name, m);
+                    if !crate::ui::keymap::terminal_keeps_key(keymap, &chord, &page, bytes.is_some()) {
+                        return;
+                    }
                     event.stop_propagation();
                     event.prevent_default();
-                    if sends_input(&key_handle.snapshot()) {
-                        key_handle.send_input(&bytes);
+                    if let Some(bytes) = bytes {
+                        if sends_input(&key_handle.snapshot()) {
+                            key_handle.send_input(&bytes);
+                        }
                     }
                 },
                 // TODO(dioxus-compose#205): the live renderer does not route paste and IME composition

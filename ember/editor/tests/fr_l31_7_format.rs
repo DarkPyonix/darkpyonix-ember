@@ -155,7 +155,7 @@ fn fr_l31_7_reopen_with_encoding_reads_the_file_again_in_it() {
     assert_eq!(fx, vec![Effect::ReadFile { uri: u.clone(), purpose: ReadPurpose::ForceReload }]);
     let fx = c.handle(t0, Input::FileRead { uri: u.clone(), purpose: ReadPurpose::ForceReload, result: Ok(b"h\x00i\x00".to_vec()) });
     assert!(updates(&fx).iter().any(|x| matches!(x, SessionUpdate::Command { command: ember_editor::WidgetCommand::SetText { text, .. }, .. } if text == "hi")));
-    let delta = calls(&fx).into_iter().filter(|c| c.method == "$acceptDocumentsAndEditorsDelta").map(|c| arg(c, 0)).last().unwrap();
+    let delta = calls(&fx).into_iter().filter(|c| c.method == "$acceptDocumentsAndEditorsDelta").map(|c| arg(c, 0)).next_back().unwrap();
     assert_eq!(delta["addedDocuments"][0]["encoding"], "utf16le");
     assert_eq!(format(&fx).encoding, Encoding::Utf16Le);
     assert!(updates(&fx).contains(&&SessionUpdate::Dirty { uri: u.clone(), dirty: false }));

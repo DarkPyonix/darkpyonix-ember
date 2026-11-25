@@ -46,7 +46,7 @@ pub async fn log(policy: &PathPolicy, r: &GitLogRequest) -> Result<GitLogRespons
     if !has_head(&dir).await? {
         let head = run(&dir, &["symbolic-ref", "-q", "HEAD"], None).await?;
         let current = head.stdout.trim();
-        if r.branch.as_deref().map_or(true, |branch| {
+        if r.branch.as_deref().is_none_or(|branch| {
             head.code == 0 && (branch == current || current.strip_prefix("refs/heads/") == Some(branch))
         }) {
             return Ok(GitLogResponse { commits: Vec::new() });

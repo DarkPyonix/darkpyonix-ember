@@ -103,12 +103,15 @@ impl DebugControls {
         })
     }
 
-    fn editing_target(&self, uri: &UriComponents, caret_line: u32) -> Option<&SourceBreakpoint> {
-        let at = |line| self.view.breakpoints_in(uri).find(|bp| bp.line == line);
-        at(caret_line).or_else(|| {
-            let (clicked_uri, line) = self.last_gutter_click.as_ref()?;
-            if clicked_uri == uri { at(*line) } else { None }
-        })
+    fn editing_target<'a>(&'a self, uri: &'a UriComponents, caret_line: u32) -> Option<&'a SourceBreakpoint> {
+        if let Some(bp) = self.view.breakpoints_in(uri).find(|bp| bp.line == caret_line) {
+            return Some(bp);
+        }
+        let (clicked_uri, line) = self.last_gutter_click.as_ref()?;
+        if clicked_uri != uri {
+            return None;
+        }
+        self.view.breakpoints_in(uri).find(|bp| bp.line == *line)
     }
 }
 
@@ -589,7 +592,9 @@ pub(crate) fn start_or_continue(s: &Shared) {
 /// Shift+F5 from the keymap (`Action::Stop`): the debug session, else the running task.
 pub(crate) fn stop(s: &Shared) {
     match s.debug.peek().stop_command() {
-        Some(request) => s.host.send(HostCommand::Debug(request)),
+        Some(request) => {
+            s.host.send(HostCommand::Debug(request));
+        }
         None => super::editor_tasks::view::stop(s),
     }
 }

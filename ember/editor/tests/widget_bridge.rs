@@ -746,6 +746,8 @@ fn fr_l31_42_bridge_passes_debug_updates_and_follows_the_shown_session() {
         state,
         thread_id,
         frame_id: None,
+        can_set_variables: false,
+        no_debug: false,
     };
     let stopped = || SessionState::Stopped { reason: "breakpoint".into(), thread_id: Some(7), description: None, text: None };
     let frame = |uri: Option<UriComponents>| FrameInfo {
@@ -803,4 +805,62 @@ fn fr_l31_42_bridge_passes_debug_updates_and_follows_the_shown_session() {
     // A lost connection ends every session with it.
     bridge.apply(SessionUpdate::ConnectionLost { reason: "gone".into() });
     assert_eq!(*bridge.debug(), ember_editor::DebugView::default());
+}
+
+// FR-L31.42: a frame selected below the top one is the focused frame, marked apart from the top
+// frame (Code-OSS `debug-focused-stack-frame-line`); selecting the top frame again, or the thread
+// running on, takes it away.
+#[test]
+fn fr_l31_42_bridge_keeps_a_focused_lower_frame_apart_from_the_top_frame() {
+    use ember_editor::debugger::{DebugUpdate, FrameInfo, SessionInfo, SessionState};
+
+    let main = uri("/w/main.py");
+    let util = uri("/w/util.py");
+    let session = |state: SessionState, frame_id: Option<i64>| SessionInfo {
+        id: "a".into(),
+        name: "Python".into(),
+        debug_type: "debugpy".into(),
+        request: "launch".into(),
+        parent: None,
+        state,
+        thread_id: Some(7),
+        frame_id,
+        can_set_variables: false,
+        no_debug: false,
+    };
+    let stopped = || SessionState::Stopped { reason: "breakpoint".into(), thread_id: Some(7), description: None, text: None };
+    let frame = |id: i64, uri: &UriComponents, line: u32| FrameInfo {
+        id,
+        name: format!("f{id}"),
+        uri: Some(uri.clone()),
+        source_name: None,
+        line,
+        column: 1,
+        hint: None,
+    };
+    let sessions = |state: SessionState, frame_id: Option<i64>| {
+        SessionUpdate::Debug(DebugUpdate::Sessions { sessions: vec![session(state, frame_id)], active: Some("a".into()) })
+    };
+    let mut bridge = WidgetBridge::new();
+    bridge.apply(sessions(stopped(), Some(1)));
+    bridge.apply(SessionUpdate::Debug(DebugUpdate::CallStack {
+        session: "a".into(),
+        thread_id: 7,
+        frames: vec![frame(1, &util, 9), frame(2, &main, 4)],
+        total_frames: Some(2),
+    }));
+    assert_eq!(bridge.debug().stopped_line(&util), Some(9));
+    assert_eq!(bridge.debug().focused_frame(), None, "the top frame is focused");
+
+    bridge.apply(sessions(stopped(), Some(2)));
+    assert_eq!(bridge.debug().focused_line(&main), Some(4));
+    assert_eq!(bridge.debug().focused_line(&util), None);
+    assert_eq!(bridge.debug().stopped_line(&util), Some(9), "the top frame keeps its mark");
+
+    bridge.apply(sessions(stopped(), Some(1)));
+    assert_eq!(bridge.debug().focused_frame(), None);
+    bridge.apply(sessions(stopped(), Some(2)));
+    bridge.apply(sessions(SessionState::Running, Some(2)));
+    assert_eq!(bridge.debug().focused_frame(), None, "running on clears both marks");
+    assert_eq!(bridge.debug().stopped_at, None);
 }

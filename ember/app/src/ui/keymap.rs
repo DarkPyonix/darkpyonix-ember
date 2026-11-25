@@ -144,7 +144,7 @@ impl Action {
             Action::Find => "파일, 동작, 기호 찾기",
             Action::Recent => "최근 파일",
             Action::Palette => "명령 팔레트",
-            Action::RunConfig => "다시 실행",
+            Action::RunConfig => "디버깅 없이 실행",
             Action::Debug => "디버깅 시작",
             Action::Stop => "중지",
             Action::GotoLine => "줄로 이동",

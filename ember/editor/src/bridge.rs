@@ -10,7 +10,7 @@ use ember_editor_conn::uri::UriComponents;
 use crate::codelens::CommandDto;
 use crate::coords::{utf16_to_byte, WidgetPos, WidgetRange};
 use crate::engine::{ExternalChange, SessionUpdate};
-use crate::debugger::{DebugUpdate, SessionInfo, SessionState, SourceBreakpoint, ThreadInfo};
+use crate::debugger::{DebugUpdate, FrameInfo, SessionInfo, SessionState, SourceBreakpoint, ThreadInfo};
 use crate::folding::{compute_indent_folds, merge_folds, FoldRegion};
 use crate::hover::HoverPopup;
 use crate::widget::{Decoration, HoverPhase, WidgetCommand, WidgetEvent};
@@ -157,6 +157,8 @@ pub struct DebugView {
     /// The threads of each live session, as last listed.
     pub threads: HashMap<String, Vec<ThreadInfo>>,
     pub stopped_at: Option<StoppedLocation>,
+    /// The call stack of the stopped thread, as last loaded, to find a frame the window focuses.
+    pub stack: Vec<FrameInfo>,
     /// The whole source breakpoint registry; `verified` and `adapter_line` are the adapters' answer.
     pub breakpoints: Vec<SourceBreakpoint>,
 }
@@ -185,6 +187,28 @@ impl DebugView {
         self.stopped_at.as_ref().filter(|at| at.uri == *uri).map(|at| at.line)
     }
 
+    /// The frame the window focuses when it is not the top one: Code-OSS marks it apart from the
+    /// top frame (`debug-focused-stack-frame-line`, `editor.focusedStackFrameHighlightBackground`).
+    pub fn focused_frame(&self) -> Option<StoppedLocation> {
+        let top = self.stopped_at.as_ref()?;
+        let session = self.active_session()?;
+        let frame_id = session.frame_id.filter(|f| *f != top.frame_id)?;
+        let frame = self.stack.iter().find(|f| f.id == frame_id)?;
+        Some(StoppedLocation {
+            session: top.session.clone(),
+            thread_id: top.thread_id,
+            frame_id,
+            uri: frame.uri.clone()?,
+            line: frame.line,
+            column: frame.column,
+        })
+    }
+
+    /// The 1-based line of the focused lower frame ([`Self::focused_frame`]) in `uri`.
+    pub fn focused_line(&self, uri: &UriComponents) -> Option<u32> {
+        self.focused_frame().filter(|at| at.uri == *uri).map(|at| at.line)
+    }
+
     fn apply(&mut self, update: &DebugUpdate) {
         match update {
             DebugUpdate::Sessions { sessions, active } => {
@@ -203,6 +227,7 @@ impl DebugView {
                 };
                 if self.stopped_at.as_ref().is_some_and(|at| !still_stopped(at)) {
                     self.stopped_at = None;
+                    self.stack.clear();
                 }
             }
             DebugUpdate::Threads { session, threads } => {
@@ -214,6 +239,7 @@ impl DebugView {
                 if !shown {
                     return;
                 }
+                self.stack.clone_from(frames);
                 // A frame without a file (a native or generated one) leaves nothing to mark.
                 self.stopped_at = frames.first().and_then(|top| {
                     Some(StoppedLocation {

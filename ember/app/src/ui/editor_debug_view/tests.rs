@@ -1,5 +1,6 @@
 use super::*;
 use dioxus_compose::html::HtmlDom;
+use dioxus_compose::html::prelude::dioxus_elements::{Code, Modifiers};
 use std::cell::RefCell;
 
 thread_local! {
@@ -38,6 +39,8 @@ fn session(id: &str, state: SessionState, frame: Option<i64>) -> SessionInfo {
         state,
         thread_id: Some(1),
         frame_id: frame,
+        can_set_variables: true,
+        no_debug: false,
     }
 }
 
@@ -65,6 +68,7 @@ fn var(name: &str, value: &str, reference: i64) -> VariableInfo {
         type_name: Some("int".into()),
         variables_reference: reference,
         evaluate_name: Some(name.into()),
+        read_only: false,
     }
 }
 
@@ -587,4 +591,124 @@ fn fr_l31_42_debug_console_evaluates_input() {
         (session.as_str(), expression.as_str(), context, frame_id),
         ("s", "x * 2", EvalContext::Repl, Some(10))
     );
+}
+
+/// A stopped view with `x = 41` and a read-only `y` in Locals, the adapter able to set variables
+/// when `can_set` is.
+fn variables_view(can_set: bool) -> DebugView {
+    let (mut v, _) = stopped_view();
+    v.apply(&sessions(vec![SessionInfo { can_set_variables: can_set, ..session("s", paused(), Some(10)) }]));
+    v.apply(&DebugUpdate::Variables {
+        session: "s".into(),
+        reference: 100,
+        variables: vec![var("x", "41", 0), VariableInfo { read_only: true, ..var("y", "1", 0) }],
+        error: None,
+    });
+    v
+}
+
+// Set Value (Code-OSS `variablesView`): a variable the adapter can set and that is not read-only
+// is edited in place, and only a changed value is sent, as DAP `setVariable` on its container in
+// the focused frame.
+#[test]
+fn fr_l31_42_set_value_edits_a_variable_and_sends_only_a_change() {
+    let mut v = variables_view(true);
+    let rows = v.variable_rows();
+    let (x, y) = (rows[1].clone(), rows[2].clone());
+    assert_eq!((x.name.as_str(), y.name.as_str()), ("x", "y"));
+    assert!(x.editable);
+    assert!(!y.editable, "a read-only variable is not offered");
+    assert!(!rows[0].editable, "a scope is not a variable");
+    assert!(!v.begin_edit(&y));
+    assert!(v.begin_edit(&x));
+    assert_eq!(v.editing(), Some(x.path.as_str()));
+    assert_eq!(v.submit_edit(&x, "41"), None, "the same value is not sent");
+    assert_eq!(v.editing(), None);
+    assert!(v.begin_edit(&x));
+    assert_eq!(
+        v.submit_edit(&x, "5"),
+        Some(DebugRequest::SetVariable {
+            session: "s".into(),
+            reference: 100,
+            name: "x".into(),
+            value: "5".into(),
+            evaluate_name: Some("x".into()),
+            frame_id: Some(10),
+        })
+    );
+    assert!(v.begin_edit(&x));
+    v.cancel_edit();
+    assert_eq!(v.editing(), None);
+
+    let mut cannot = variables_view(false);
+    let x = cannot.variable_rows()[1].clone();
+    assert!(!x.editable);
+    assert!(!cannot.begin_edit(&x), "the adapter cannot set variables");
+}
+
+// After a set, the variables and the watches load again (Code-OSS `updateViews`); a refusal is
+// shown in the variable's row.
+#[test]
+fn fr_l31_42_a_set_variable_loads_the_views_again_or_shows_why_it_failed() {
+    let mut v = variables_view(true);
+    v.add_watch("x + 1");
+    let fx = v.apply(&DebugUpdate::VariableSet {
+        session: "s".into(),
+        reference: 100,
+        name: "x".into(),
+        result: Ok("5".into()),
+    });
+    assert!(fx.requests.contains(&DebugRequest::Variables { session: "s".into(), reference: 100 }), "{:?}", fx.requests);
+    assert!(
+        fx.requests.iter().any(|r| matches!(r, DebugRequest::Evaluate { expression, context: EvalContext::Watch, .. } if expression == "x + 1")),
+        "{:?}",
+        fx.requests
+    );
+
+    let mut v = variables_view(true);
+    let fx = v.apply(&DebugUpdate::VariableSet {
+        session: "s".into(),
+        reference: 100,
+        name: "x".into(),
+        result: Err("cannot assign".into()),
+    });
+    assert!(fx.requests.is_empty());
+    let x = v.variable_rows()[1].clone();
+    assert_eq!(x.error.as_deref(), Some("cannot assign"));
+    assert_eq!(x.name, "x");
+}
+
+fn editable_window() -> Element {
+    let view = use_hook(|| Signal::new(variables_view(true)));
+    rsx! { RunDebugWindow { view, debuggers: vec![], connected: true, folder: "/w", act: record } }
+}
+
+// F2 on a variable row opens its value for editing; Enter sends it.
+#[test]
+fn fr_l31_42_variables_view_f2_sets_a_value() {
+    let mut dom = HtmlDom::new(editable_window);
+    dom.layout(1000.0, 800.0, 1.0);
+    let row = dom.element_by_id("debug-var-1").expect("x is shown");
+    dom.key_down(row, Key::F2, Code::F2, Modifiers::empty());
+    dom.render();
+    dom.layout(1000.0, 800.0, 1.0);
+    let field = dom.element_by_id("debug-var-1-edit").expect("the value is edited");
+    dom.input(field, "5");
+    dom.submit(field);
+    assert_eq!(
+        requests(),
+        [DebugRequest::SetVariable {
+            session: "s".into(),
+            reference: 100,
+            name: "x".into(),
+            value: "5".into(),
+            evaluate_name: Some("x".into()),
+            frame_id: Some(10),
+        }]
+    );
+    // The read-only `y` does not open.
+    let row = dom.element_by_id("debug-var-2").unwrap();
+    dom.key_down(row, Key::F2, Code::F2, Modifiers::empty());
+    dom.render();
+    assert!(dom.element_by_id("debug-var-2-edit").is_none());
 }

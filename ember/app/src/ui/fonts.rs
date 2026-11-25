@@ -109,6 +109,9 @@ pub fn mono_registered() -> bool {
 /// before it draws any of it, so the first mono text is drawn in JetBrains Mono. The check
 /// reads the running theme, not [`mono_registered`], so a theme set after the first call
 /// without `Mono` gets it back on the next mono text.
+///
+/// TODO(compose-rust#1086): once a theme role can name a lazily registered font, set it in
+/// `app_theme` and remove this helper and its call-site test.
 pub fn text_role(role: TypeRole) -> TypeRole {
     if role == TypeRole::Mono && compose_rust::theme::current_theme().font(TypeRole::Mono).is_none() {
         let id = mono_font();

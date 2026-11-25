@@ -23,9 +23,9 @@ use super::components::{
 use super::theme::*;
 use crate::services::{run_shared, services};
 use crate::ui::characters::{
-    apply_character_override, build_character_override, characters_project, editor_save_needed, effective_character_overrides,
-    harness_label, page_width, state_label, style_apply_needed, supports_pin, team_cols, team_preview, updated_character_overrides,
-    with_topic, EDITOR_HARNESSES, EDITOR_ROLES, LEAD_MAX_W, PAGE_MAX_W, SILHOUETTES,
+    apply_character_override, build_character_override, characters_project, editor_fields_from_override, editor_save_needed,
+    effective_character_overrides, harness_label, page_width, state_label, style_apply_needed, supports_pin, team_cols,
+    team_preview, updated_character_overrides, with_topic, EDITOR_HARNESSES, EDITOR_ROLES, LEAD_MAX_W, PAGE_MAX_W, SILHOUETTES,
 };
 use crate::ui::coexist::shared_ui;
 use crate::ui::project::{effective_style, patch_error_message};
@@ -301,28 +301,19 @@ pub fn CharactersScreen() {
     let ed_style = remember(|| mutable_state_of(None::<CharStyle>));
     let ed_state = remember(|| mutable_state_of(CharState::Idle));
     let ed_pin = remember(|| mutable_state_of(None::<usize>));
-    let ed_loaded_key = remember(|| mutable_state_of(String::new()));
+    let ed_loaded_key = remember(|| mutable_state_of(None::<(String, Option<ember_client::wire::CharacterOverride>)>));
     let trimmed_ed_name = ed_name.get().trim().to_string();
-    let load_key = format!("{project_name}|{trimmed_ed_name}");
+    let saved_for_member = current_overrides.get(&trimmed_ed_name).cloned();
+    let load_key = Some((format!("{project_name}|{trimmed_ed_name}"), saved_for_member.clone()));
     if ed_loaded_key.get_untracked() != load_key {
         ed_loaded_key.set(load_key);
-        if let Some(ov) = current_overrides.get(&trimmed_ed_name) {
-            if let Some(h) = ov.harness.as_deref() {
-                if let Some(pos) = EDITOR_HARNESSES.iter().position(|(id, _)| *id == h) {
-                    ed_harness.set(pos);
-                }
-            }
-            if let Some(r) = ov.role.as_deref() {
-                if let Some(pos) = EDITOR_ROLES.iter().position(|&x| x == r) {
-                    ed_role.set(pos);
-                }
-            }
-            ed_style.set(ov.style.as_deref().and_then(CharStyle::from_id));
-            if let Some(st) = ov.state.as_deref().and_then(CharState::from_id) {
-                ed_state.set(st);
-            }
-            ed_pin.set(ov.silhouette.filter(|&i| i < SILHOUETTES.len()));
-        }
+        let matching_member = members.iter().find(|m| m.name == trimmed_ed_name);
+        let fields = editor_fields_from_override(saved_for_member.as_ref(), matching_member, style);
+        ed_harness.set(fields.harness_idx);
+        ed_role.set(fields.role_idx);
+        ed_style.set(fields.style);
+        ed_state.set(fields.state);
+        ed_pin.set(fields.pin);
     }
 
     // `.wrapx`: the content is at most 1148 dp wide and centred; a narrower room is used whole.
@@ -427,7 +418,7 @@ pub fn CharactersScreen() {
             }
 
             // 3. The editor: a stage and a form side by side (one column up to 1000 dp).
-            Section("편집기", "이름을 바꾸면 캐릭터가 바뀝니다. 말랑과 키링은 실루엣을 고정할 수 있습니다. 저장한 팀원 설정은 프로젝트에 기록됩니다.", false, || {
+            Section("편집기", "이름을 바꾸면 캐릭터가 바뀝니다. 말랑과 키링은 실루엣을 고정할 수 있습니다. 저장한 팀원 설정은 프로젝트에 기록됩니다.", project.is_none(), || {
                 let name = ed_name.get();
                 let trimmed_name = name.trim().to_string();
                 let shown_name = if trimmed_name.is_empty() { "이름 없음".to_string() } else { trimmed_name.clone() };
@@ -454,6 +445,24 @@ pub fn CharactersScreen() {
                                 }
                             }) };
                         }) };
+                };
+                let member_field = || {
+                    if !members.is_empty() {
+                        FieldRow("팀원 선택", || {
+                            let labels: Vec<String> = members.iter().map(|m| m.name.clone()).collect();
+                            let at = labels.iter().position(|n| *n == trimmed_name);
+                            let shown = at.map(|i| labels[i].as_str()).unwrap_or("직접 입력");
+                            let chosen = at.unwrap_or(0);
+                            let (n, m) = (ed_name.clone(), ed_message.clone());
+                            let pick_labels = labels.clone();
+                            NamedSelect("팀원", shown, &labels, chosen, 260.0, move |i| {
+                                if let Some(picked) = pick_labels.get(i) {
+                                    n.set(picked.clone());
+                                    m.set(None);
+                                }
+                            });
+                        });
+                    }
                 };
                 let name_field = || {
                     FieldRow("이름", || {
@@ -607,6 +616,7 @@ pub fn CharactersScreen() {
                 };
                 let form = || {
                     { use ::compose_rust::ui::Column; Column!(spacing = SP[3], modifier = Modifier::new().fill_max_width(), {
+                        member_field();
                         name_field();
                         if compact {
                             harness_field();
@@ -906,6 +916,100 @@ mod tests {
         assert!(
             !stored.is_empty(),
             "clicking '팀원 설정 저장' must persist character_overrides on the project: {stored:?}"
+        );
+        shared_ui().close_characters();
+    }
+
+    #[test]
+    fn fr_l22_editor_renders_save_and_reset_without_preview_pill_for_real_project() {
+        use compose_rust::protocol::HostEvent;
+        use compose_rust::EventPayload;
+        let _guard = crate::services::test_guard();
+        let svc = crate::services::test_services();
+        svc.reset_demo();
+        shared_ui().update_prefs(|p| p.set_character_overrides("demo-project", std::collections::BTreeMap::new()));
+        shared_ui().open_characters("demo-project");
+
+        let mut host = Host::new(|| Box::new(Recomposer::new(CharactersScreen)));
+        let batch = compose_rust::protocol::decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let texts = texts_of(&batch);
+        assert!(texts.iter().any(|(_, t)| *t == "편집기"));
+        assert!(texts.iter().any(|(_, t)| *t == "팀원 선택"));
+        assert!(texts.iter().any(|(_, t)| *t == "팀원 설정 저장"));
+        assert!(
+            !texts.iter().any(|(_, t)| *t == "미리보기"),
+            "real project with members must not show the 미리보기 pill"
+        );
+
+        let mut nodes = Nodes::default();
+        nodes.take(&batch);
+        let (save_id, save_handler) = nodes.button("팀원 설정 저장");
+        host.dispatch(HostEvent::new(save_id, save_handler, EventPayload::Clicked))
+            .expect("dispatch click on 팀원 설정 저장");
+
+        for _ in 0..40 {
+            let synced = svc
+                .client
+                .read(|st| st.project("demo-project").is_some_and(|p| !p.character_overrides.is_empty()))
+                && shared_ui()
+                    .prefs
+                    .get_untracked()
+                    .saved_character_overrides("demo-project")
+                    .is_some_and(|m| !m.is_empty());
+            if synced {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            shared_ui()
+                .prefs
+                .get_untracked()
+                .saved_character_overrides("demo-project")
+                .is_some_and(|m| !m.is_empty()),
+            "prefs must persist saved character_overrides"
+        );
+
+        // Reopen the screen and verify the reset control appears and clears both server and prefs.
+        let mut host2 = Host::new(|| Box::new(Recomposer::new(CharactersScreen)));
+        let batch2 = compose_rust::protocol::decode_batch(host2.rebuild().expect("rebuild")).expect("decode");
+        let texts2 = texts_of(&batch2);
+        assert!(texts2.iter().any(|(_, t)| *t == "초기화"), "saved member must show 초기화");
+        assert!(!texts2.iter().any(|(_, t)| *t == "미리보기"));
+
+        let mut nodes2 = Nodes::default();
+        nodes2.take(&batch2);
+        let (reset_id, reset_handler) = nodes2.button("초기화");
+        host2
+            .dispatch(HostEvent::new(reset_id, reset_handler, EventPayload::Clicked))
+            .expect("dispatch click on 초기화");
+
+        for _ in 0..40 {
+            let cleared = svc
+                .client
+                .read(|st| st.project("demo-project").is_some_and(|p| p.character_overrides.is_empty()))
+                && shared_ui()
+                    .prefs
+                    .get_untracked()
+                    .saved_character_overrides("demo-project")
+                    .is_none();
+            if cleared {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            svc.client
+                .read(|st| st.project("demo-project").is_some_and(|p| p.character_overrides.is_empty())),
+            "clicking 초기화 must clear project character_overrides"
+        );
+        assert!(
+            shared_ui()
+                .prefs
+                .get_untracked()
+                .saved_character_overrides("demo-project")
+                .is_none(),
+            "clicking 초기화 must clear prefs character_overrides"
         );
         shared_ui().close_characters();
     }

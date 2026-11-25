@@ -233,11 +233,18 @@ pub fn offers_allow_always(input: &Value) -> bool {
     input.get("allow_always") != Some(&Value::Bool(false))
 }
 
+/// Whether `tool` with `input` represents a shell command execution (FR-L5).
+pub fn is_shell_tool(tool: &str, input: &Value) -> bool {
+    matches!(
+        tool,
+        "Bash" | "bash" | "shell" | "exec_command" | "local_shell" | "run_shell_command"
+    ) || (command_of(input).is_some() && str_field(input, &["file_path"]).is_none())
+}
+
 /// The approval card's title and body for `tool` with `input` on `computer`.
 pub fn approval_text(computer: Option<&str>, tool: &str, input: &Value) -> ApprovalText {
     let pc = computer.map(str::trim).filter(|c| !c.is_empty()).unwrap_or(THIS_COMPUTER);
-    let is_shell = matches!(tool, "Bash" | "bash" | "shell" | "exec_command" | "local_shell");
-    if is_shell || (command_of(input).is_some() && str_field(input, &["file_path"]).is_none()) {
+    if is_shell_tool(tool, input) {
         if let Some(cmd) = command_of(input) {
             return ApprovalText {
                 kind: ApprovalKind::Command,

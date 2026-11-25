@@ -1066,7 +1066,7 @@ fn IdeMenu(b: &ProjectBox, ui: &SharedUi, compact: bool) {
     }
     // This project's pick, else its session's computer's default (FR-W7b, D56).
     let project = b.id.clone();
-    let remembered = ui.prefs.get().ide_for(&project, computer.get().as_deref());
+    let remembered = ui.prefs.get().ide_for(&project, crate::ide::effective_default_ide(ide.get().as_ref()));
     let choices = crate::ui::session::ide_choices(remembered);
     let has_session = session.is_some();
     let cwd = session

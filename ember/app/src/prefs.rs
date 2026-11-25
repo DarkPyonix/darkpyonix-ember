@@ -210,12 +210,12 @@ impl Prefs {
         self.ide_targets.get(project).and_then(|k| crate::ide::IdeKind::from_key(k))
     }
 
-    /// The IDE every "IDE 열기" header launches for a session of `project` on `computer`
-    /// (FR-L7, FR-W7b): the project's pick, else the computer's effective `default_ide`. `None`:
-    /// the button opens the chooser.
-    pub fn ide_for(&self, project: &str, computer: Option<&str>) -> Option<crate::ide::IdeKind> {
-        self.picked_ide(project)
-            .or_else(|| crate::ide::effective_default_ide(project, computer))
+    /// The IDE every "IDE 열기" header launches for a session of `project` (FR-L7, FR-W7b): the
+    /// project's pick, else `default_ide`, the session's computer's effective default
+    /// ([`crate::ide::effective_default_ide`] of the header's IDE listing). `None`: the button
+    /// opens the chooser.
+    pub fn ide_for(&self, project: &str, default_ide: Option<crate::ide::IdeKind>) -> Option<crate::ide::IdeKind> {
+        self.picked_ide(project).or(default_ide)
     }
 
     /// Record a pick in the chooser as `project`'s IDE (FR-W7b). A session with no known project
@@ -421,7 +421,7 @@ mod tests {
 
     /// SPEC FR-W7b, INTENT D56: the IDE picked in a project is that project's default only. After
     /// a pick of Gateway in project A, A launches Gateway directly and B, with no pick and no
-    /// effective `default_ide` yet (FR-W7 not built), opens the chooser.
+    /// effective `default_ide` (no listing yet), opens the chooser.
     #[test]
     fn fr_w7b_the_remembered_ide_is_per_project() {
         use crate::ide::IdeKind;
@@ -434,7 +434,8 @@ mod tests {
         save(&path, &p).unwrap();
         let p = load(&path);
         assert_eq!(p.picked_ide("A"), Some(IdeKind::Gateway));
-        assert_eq!(p.ide_for("A", Some("node-a")), Some(IdeKind::Gateway));
+        // The pick wins over the computer's default.
+        assert_eq!(p.ide_for("A", Some(IdeKind::VsCode)), Some(IdeKind::Gateway));
         assert_eq!(ide_click(p.ide_for("A", None)), IdeClick::Launch(IdeKind::Gateway));
         assert_eq!(p.picked_ide("B"), None);
         assert_eq!(p.ide_for("B", None), None);

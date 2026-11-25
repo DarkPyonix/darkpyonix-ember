@@ -42,7 +42,7 @@
 //! | POST | `/git/conflict`, `/git/resolve` | conflict blocks and resolution (FR-G7) |
 //! | POST | `/git/conflicts` | [`GitRepoRequest`] → [`GitConflicts`] |
 //! | GET (WS) | `/exec` | send [`ExecRequest`], then [`ExecInput`]s; receive [`ExecEvent`]s |
-//! | GET (WS) | `/exec-server` | raw byte relay to `codex exec-server --listen stdio` ([`crate::exec_server`]) |
+//! | GET (WS) | `/exec-server` | relay to `codex exec-server --listen stdio`; client requests screened against the path policy, 503 `codex_not_installed` without codex ([`crate::exec_server`]) |
 //! | GET (WS) | `/egress` | one proxied TCP connection as a raw SOCKS5 byte stream ([`crate::egress`]; 403 when disabled) |
 //! | POST | `/jobs` | [`JobRequest`] → [`JobInfo`] |
 //! | GET  | `/jobs` | → `[JobInfo]` |

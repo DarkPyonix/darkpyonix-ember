@@ -15,7 +15,6 @@ use super::components::{
     SheetFooter, Txt,
 };
 use super::theme::*;
-use crate::ide::IdeKind;
 use crate::services::try_services;
 use crate::ui::coexist::shared_ui;
 use crate::ui::keymap::{Action, Keymap, Os};
@@ -48,24 +47,6 @@ pub fn shortcut_rows(keymap: Keymap, os: Os) -> Vec<ShortcutRow> {
         .collect()
 }
 
-/// Label for the remembered default IDE target (`Prefs::ide_target`, FR-L7).
-pub fn ide_choice_label(key: Option<&str>) -> &'static str {
-    match key.and_then(IdeKind::from_key) {
-        Some(IdeKind::Ember) => "Ember 에디터",
-        Some(IdeKind::VsCode) => "VS Code",
-        Some(IdeKind::Gateway) => "JetBrains Gateway",
-        None => "매번 선택",
-    }
-}
-
-/// The `(Option<&'static str>, &'static str)` options for the default IDE selector (FR-L7).
-pub const IDE_CHOICES: [(Option<&str>, &str); 4] = [
-    (None, "매번 선택"),
-    (Some("ember"), "Ember 에디터"),
-    (Some("vscode"), "VS Code"),
-    (Some("gateway"), "JetBrains Gateway"),
-];
-
 /// The settings modal (`EmberSheet`), composed with `open` and `on_dismiss`.
 pub fn SettingsSheet(open: bool, on_dismiss: impl FnMut() + Clone + 'static) {
     let close_footer = on_dismiss.clone();
@@ -78,8 +59,10 @@ pub fn SettingsSheet(open: bool, on_dismiss: impl FnMut() + Clone + 'static) {
     });
 }
 
-/// Body of the settings sheet: theme (FR-L28), keymap (FR-L30), default IDE (FR-L7),
-/// archived sessions (FR-L9), and server/data paths.
+/// Body of the settings sheet: theme (FR-L28), keymap (FR-L30), archived sessions (FR-L9), and
+/// server/data paths. There is no device-wide default IDE: the chooser remembers the last pick per
+/// project (FR-W7b), and the default for a project with no pick is the server's editor settings
+/// (`default_ide`, FR-W7, INTENT D56).
 pub fn SettingsContent() {
     let theme = ember_theme();
     let p = theme.palette;
@@ -87,7 +70,6 @@ pub fn SettingsContent() {
     let current_theme = ui.theme_pref.get();
     let prefs = ui.prefs.get();
     let current_keymap = prefs.keymap;
-    let current_ide = prefs.ide_target.clone();
     let show_archived = ui.show_archived.get();
     let shortcuts_open = remember(|| mutable_state_of(false));
 
@@ -157,28 +139,7 @@ pub fn SettingsContent() {
 
             { use ::compose_rust::ui::Separator; Separator!(Some(paint(p.line))) };
 
-            // 3. Remembered default IDE target (FR-L7)
-            SectionBlock(
-                "기본 IDE",
-                "프로젝트나 세션에서 IDE 열기를 눌렀을 때 기본으로 실행할 대상입니다.",
-                || {
-                    ChoiceRow(|| {
-                        for (key, label) in IDE_CHOICES {
-                            let u = ui.clone();
-                            let selected = current_ide.as_deref() == key;
-                            let next = key.map(str::to_string);
-                            ChoiceButton(label, Choice::Radio, selected, true, true, move || {
-                                let v = next.clone();
-                                u.update_prefs(|pr| pr.ide_target = v);
-                            });
-                        }
-                    });
-                },
-            );
-
-            { use ::compose_rust::ui::Separator; Separator!(Some(paint(p.line))) };
-
-            // 4. Archived sessions visibility (FR-L9)
+            // 3. Archived sessions visibility (FR-L9)
             SectionBlock(
                 "세션 목록",
                 "보관 처리된 이전 세션을 목록에 함께 표시합니다.",
@@ -217,7 +178,7 @@ pub fn SettingsContent() {
 
             { use ::compose_rust::ui::Separator; Separator!(Some(paint(p.line))) };
 
-            // 5. This device on the transport (FR-N9, #856)
+            // 4. This device on the transport (FR-N9, #856)
             SectionBlock(
                 super::this_device::TITLE,
                 super::this_device::SUBTITLE,
@@ -226,7 +187,7 @@ pub fn SettingsContent() {
 
             { use ::compose_rust::ui::Separator; Separator!(Some(paint(p.line))) };
 
-            // 6. Per-device scope (FR-N8, #817)
+            // 5. Per-device scope (FR-N8, #817)
             SectionBlock(
                 "기기 권한",
                 "서버에 등록된 기기마다 할 수 있는 작업을 정합니다.",
@@ -235,7 +196,7 @@ pub fn SettingsContent() {
 
             { use ::compose_rust::ui::Separator; Separator!(Some(paint(p.line))) };
 
-            // 7. Updates of the installed app (NFR-R2, #880)
+            // 6. Updates of the installed app (NFR-R2, #880)
             SectionBlock(
                 super::self_update::TITLE,
                 super::self_update::SUBTITLE,
@@ -244,7 +205,7 @@ pub fn SettingsContent() {
 
             { use ::compose_rust::ui::Separator; Separator!(Some(paint(p.line))) };
 
-            // 8. Connection & local storage info
+            // 7. Connection & local storage info
             SectionBlock("연결 및 저장소", "현재 연결된 메인 서버 주소와 로컬 데이터 폴더입니다.", || {
                 InsetPanel(true, || {
                     { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
@@ -334,22 +295,12 @@ mod tests {
     }
 
     #[test]
-    fn fr_l7_ide_choice_labels_cover_all_targets() {
-        assert_eq!(ide_choice_label(None), "매번 선택");
-        assert_eq!(ide_choice_label(Some("ember")), "Ember 에디터");
-        assert_eq!(ide_choice_label(Some("vscode")), "VS Code");
-        assert_eq!(ide_choice_label(Some("gateway")), "JetBrains Gateway");
-        assert_eq!(ide_choice_label(Some("unknown")), "매번 선택");
-    }
-
-    #[test]
     fn fr_l28_fr_l30_settings_sheet_composes_and_updates_prefs() {
         let _guard = crate::services::test_guard();
         let ui = shared_ui();
         ui.set_theme_pref(ThemePref::System);
         ui.update_prefs(|p| {
             p.keymap = Keymap::VsCode;
-            p.ide_target = None;
         });
         ui.set_show_archived(false);
 
@@ -370,9 +321,6 @@ mod tests {
             "에디터 단축키",
             "VS Code",
             "JetBrains",
-            "기본 IDE",
-            "매번 선택",
-            "Ember 에디터",
             "보관된 세션 표시",
             "꺼짐",
             "메인 서버",
@@ -385,12 +333,16 @@ mod tests {
         ] {
             assert!(all.iter().any(|t| t == want), "missing {want}: {all:?}");
         }
+        // FR-W7b, INTENT D56: no device-wide default IDE; the chooser remembers per project and
+        // the server's editor settings hold the default (FR-W7).
+        for gone in ["기본 IDE", "매번 선택", "JetBrains Gateway"] {
+            assert!(!all.iter().any(|t| t == gone), "{gone} is not in the settings: {all:?}");
+        }
 
-        // Updating theme, keymap, ide_target and show_archived re-renders the sheet cleanly.
+        // Updating theme, keymap and show_archived re-renders the sheet cleanly.
         ui.set_theme_pref(ThemePref::Dark);
         ui.update_prefs(|p| {
             p.keymap = Keymap::JetBrains;
-            p.ide_target = Some("vscode".into());
         });
         ui.set_show_archived(true);
 
@@ -398,7 +350,6 @@ mod tests {
         let next_texts = texts(&next);
         assert!(next_texts.iter().any(|t| t == "켜짐"), "expected 켜짐 after toggling show_archived: {next_texts:?}");
         assert_eq!(ui.prefs.get_untracked().keymap, Keymap::JetBrains);
-        assert_eq!(ui.prefs.get_untracked().ide_target.as_deref(), Some("vscode"));
         assert_eq!(ui.theme_pref.get_untracked(), ThemePref::Dark);
 
         // Restore defaults for other tests.
@@ -406,7 +357,6 @@ mod tests {
         ui.set_show_archived(false);
         ui.update_prefs(|p| {
             p.keymap = Keymap::VsCode;
-            p.ide_target = None;
         });
     }
 
@@ -498,13 +448,12 @@ mod tests {
     }
 
     #[test]
-    fn fr_l7_fr_l28_fr_l30_clicking_settings_chips_updates_theme_keymap_ide_and_archived() {
+    fn fr_l28_fr_l30_clicking_settings_chips_updates_theme_keymap_and_archived() {
         let _guard = crate::services::test_guard();
         let ui = shared_ui();
         ui.set_theme_pref(ThemePref::System);
         ui.update_prefs(|p| {
             p.keymap = Keymap::VsCode;
-            p.ide_target = None;
         });
         ui.set_show_archived(false);
 
@@ -526,22 +475,7 @@ mod tests {
         host.dispatch(pointer_up_event(node, handler)).expect("click JetBrains");
         assert_eq!(ui.prefs.get_untracked().keymap, Keymap::JetBrains);
 
-        // 3. Click "VS Code" IDE target chip (note: "VS Code" appears twice, once in keymap and
-        // once in IDE choices; click "JetBrains Gateway" first, then "매번 선택").
-        let (node, handler) = clickable_for_label(&batch, "JetBrains Gateway");
-        host.dispatch(pointer_up_event(node, handler))
-            .expect("click JetBrains Gateway");
-        assert_eq!(
-            ui.prefs.get_untracked().ide_target.as_deref(),
-            Some("gateway")
-        );
-
-        let (node, handler) = clickable_for_label(&batch, "매번 선택");
-        host.dispatch(pointer_up_event(node, handler))
-            .expect("click 매번 선택");
-        assert_eq!(ui.prefs.get_untracked().ide_target, None);
-
-        // 4. Click "꺼짐" archived toggle -> show_archived becomes true.
+        // 3. Click "꺼짐" archived toggle -> show_archived becomes true.
         let (node, handler) = clickable_for_label(&batch, "꺼짐");
         host.dispatch(pointer_up_event(node, handler)).expect("click 꺼짐");
         assert!(ui.show_archived.get_untracked());
@@ -551,7 +485,6 @@ mod tests {
         ui.set_show_archived(false);
         ui.update_prefs(|p| {
             p.keymap = Keymap::VsCode;
-            p.ide_target = None;
         });
     }
 }

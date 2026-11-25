@@ -2,9 +2,10 @@
 //! route (`GET /api/computers/{computer}/ide/relay/{launch_id}`, `FR-W4`). The app's own dial
 //! (`ember_app::editor_reach`) against an in-process server whose OSE launch is a fake OSE that
 //! records what it receives and echoes it: over the transport (an allowed device's
-//! [`TermReach::Peer`]) and over plain HTTP with the server token. The launch hands out a
-//! placeholder token; the relay replaces it with the real one only inside one client WebSocket
-//! message, so each write of the stream must go out as one binary message.
+//! [`TermReach::Peer`]) and over plain HTTP with the server token. The editor server sits behind
+//! the DarkPyonix manager with no connection token (`FR-W4c` (1), INTENT D55): the relay carries
+//! the bytes unchanged, the upgrade goes below the manager's path with the ticket cookie, and the
+//! `auth` message carries the "no token" value.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -19,7 +20,7 @@ use ember_server::agents::AgentAdapter;
 use ember_server::api::ide::{self, IdeConfig};
 use ember_server::auth::{self, ServerAuth};
 use ember_server::devices::{Devices, Scope};
-use ember_server::ose::OseManager;
+use ember_node::editor_manager::{EditorRelays, ManagerEndpoint, ManagerSource};
 use ember_server::session::Sessions;
 use ember_server::store::Store;
 use ember_transport::mem::MemNetwork;
@@ -27,8 +28,12 @@ use ember_transport::{PeerAddr, Transport};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-/// The real OSE token: 64 characters, as `OseManager` makes them, so it has the placeholder's length.
+/// The manager's master token the launch is registered with. It stays on the server: the editor
+/// never sends it, so it must not appear in what reaches the manager.
 const REAL_TOKEN: &str = "1111111111111111222222222222222233333333333333334444444444444444";
+
+/// The manager's ticket the editor sends as its cookie.
+const TICKET: &str = "tk-fr-n9";
 
 const WAIT: Duration = Duration::from_secs(30);
 
@@ -60,12 +65,11 @@ async fn start_recording_ose() -> (SocketAddr, Arc<Mutex<Vec<u8>>>) {
     (addr, log)
 }
 
-/// An OSE launch on the local computer pointing at a fresh fake OSE: the IDE router, the launch's
-/// relay path and placeholder, and the fake's log.
+/// A launch on the local computer whose manager is a fresh fake (it records and echoes): the IDE
+/// router, the launch's relay path, and the fake's log.
 struct Launch {
     app: axum::Router,
     relay: String,
-    placeholder: String,
     log: Arc<Mutex<Vec<u8>>>,
     store: Arc<Store>,
     dir: tempfile::TempDir,
@@ -74,48 +78,51 @@ struct Launch {
 async fn launch() -> Launch {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open_in_memory().unwrap());
-    let ose = Arc::new(OseManager::with_data_root(None, dir.path().join("ose-data")));
-    let (ose_addr, log) = start_recording_ose().await;
-    let conn = ose.register_launch_for_test("local", dir.path(), ose_addr, REAL_TOKEN);
-    let relay = conn.relay.clone().expect("a launch has a relay path");
-    assert_ne!(conn.connection_token, REAL_TOKEN, "the launch carries a placeholder");
+    let editor = Arc::new(EditorRelays::new(ManagerSource::none()));
+    let (manager_addr, log) = start_recording_ose().await;
+    let launch_id = editor
+        .register_launch_for_test(ManagerEndpoint { url: format!("http://{manager_addr}"), token: REAL_TOKEN.into() });
+    let relay = format!("/api/computers/local/ide/relay/{launch_id}");
     let sessions = || Sessions::new(store.clone(), vec![Arc::new(ScriptedAdapter) as Arc<dyn AgentAdapter>]);
-    let app = ember_server::api::router(sessions()).merge(ide::router_with_ose(
+    let app = ember_server::api::router(sessions()).merge(ide::router_with_editor(
         sessions(),
         Arc::new(IdeConfig::default()),
-        ose,
+        editor,
     ));
-    Launch { app, relay, placeholder: conn.connection_token, log, store, dir }
+    Launch { app, relay, log, store, dir }
 }
 
-/// What the editor's first socket writes: an upgrade-like line, then an `auth`-like message,
-/// each holding the placeholder, each one write.
-fn first_writes(placeholder: &str) -> (Vec<u8>, Vec<u8>) {
-    (
-        format!("GET /?reconnectionToken=r&tkn={placeholder} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").into_bytes(),
-        format!("{{\"type\":\"auth\",\"auth\":\"{placeholder}\",\"data\":\"d\"}}").into_bytes(),
-    )
+/// What the editor's first socket writes: its upgrade request below the manager's path with the
+/// ticket cookie (as `ember-editor-conn` builds it), then an `auth` message with no token.
+fn first_writes() -> (Vec<u8>, Vec<u8>) {
+    let mut opts = ember_editor_conn::handshake::ConnectOptions::new("localhost");
+    opts.path = "/ide/ose/".into();
+    opts.ticket = ember_editor_conn::handshake::Ticket::new(TICKET);
+    let upgrade = ember_editor_conn::handshake::upgrade_request(&opts, false);
+    assert!(upgrade.starts_with("GET /ide/ose/?reconnectionToken="), "{upgrade}");
+    let no_token = ember_editor_conn::handshake::NO_CONNECTION_TOKEN;
+    (upgrade.into_bytes(), format!("{{\"type\":\"auth\",\"auth\":\"{no_token}\",\"data\":\"d\"}}").into_bytes())
 }
 
 /// Writes the two buffers (each one `write_all`, then a flush), reads the echo of both back and
-/// checks the fake OSE saw the real token in place of the placeholder, never the placeholder.
+/// checks the fake OSE saw exactly those bytes: the relay rewrites nothing, and no token appears.
 async fn round_trip(stream: &mut RelayStream, l: &Launch) {
-    let (a, b) = first_writes(&l.placeholder);
+    let (a, b) = first_writes();
     stream.write_all(&a).await.unwrap();
     stream.flush().await.unwrap();
     stream.write_all(&b).await.unwrap();
     stream.flush().await.unwrap();
 
-    let swap = |v: &[u8]| String::from_utf8(v.to_vec()).unwrap().replace(&l.placeholder, REAL_TOKEN).into_bytes();
-    let mut expected = swap(&a);
-    expected.extend_from_slice(&swap(&b));
+    let mut expected = a.clone();
+    expected.extend_from_slice(&b);
     let mut echo = vec![0u8; expected.len()];
     tokio::time::timeout(WAIT, stream.read_exact(&mut echo)).await.expect("the echo came back in time").unwrap();
     assert_eq!(String::from_utf8_lossy(&echo), String::from_utf8_lossy(&expected));
 
     let seen = String::from_utf8(l.log.lock().unwrap().clone()).unwrap();
-    assert_eq!(seen.matches(REAL_TOKEN).count(), 2, "both writes reached the OSE with the real token: {seen}");
-    assert!(!seen.contains(&l.placeholder), "the placeholder never reaches the OSE: {seen}");
+    assert_eq!(seen.as_bytes(), expected.as_slice(), "the bytes reach the OSE unchanged");
+    assert!(seen.contains(&format!("\r\nCookie: dpx-editor={TICKET}\r\n")), "{seen}");
+    assert!(!seen.contains(REAL_TOKEN), "no connection token is ever sent: {seen}");
 }
 
 /// Shutting the stream down closes the relay; reading then ends without an error.
@@ -198,4 +205,61 @@ async fn fr_n9_the_editor_stream_reaches_the_ose_through_the_relay_over_http_wit
     // A `peer:<id>` base without a transport is never dialed as a URL.
     let peer = tokio::time::timeout(WAIT, editor_reach::dial(&TermReach::Http("peer:abc".into()), &l.relay)).await.unwrap();
     assert_eq!(peer.err().map(|e| e.to_string()).as_deref(), Some(UNREACHABLE));
+}
+
+/// SPEC FR-L7, FR-W5b, INTENT D55 (#1064): the `ember-app --vscode-window` helper's gateway works
+/// on a server reached over the transport (`peer:`). Its dial is the app's own reach
+/// ([`editor_reach::ReachDial`] on [`TermReach::Peer`]), so a connection the window opens to the
+/// gateway's loopback port, with the per-launch cookie, reaches the OSE through the relay with the
+/// device key and no server token; the first-load URL answers 302 with the cookie, and a request
+/// without the token is refused before any relay is opened.
+#[tokio::test(flavor = "multi_thread")]
+async fn fr_l7_vscode_window_works_on_a_peer_server() {
+    let l = launch().await;
+    let net = MemNetwork::new();
+    let (server_t, device_t): (Transport, Transport) = (net.transport(), net.transport());
+    let devices = Devices::open(l.store.clone()).unwrap();
+    tokio::spawn(ember_server::transport::serve_scoped(&server_t, l.app.clone(), devices.clone()).unwrap());
+    devices.add(device_t.peer_id(), "laptop").unwrap();
+    let api = DeviceLink::new(device_t.clone(), PeerAddr::new(server_t.peer_id())).api();
+
+    // The helper's reach for a `peer:` server is the app's `Api` over the transport.
+    assert!(api.base_url().starts_with("peer:"), "{}", api.base_url());
+    let reach = TermReach::select(api.base_url(), &api);
+    assert!(reach.is_peer(), "{reach:?}");
+    let gateway = ember_gateway::Gateway::start_with(editor_reach::ReachDial::new(reach, l.relay.clone())).await.unwrap();
+    let token = gateway.token().to_owned();
+
+    // No token: 403, and the OSE sees nothing.
+    let mut tcp = tokio::net::TcpStream::connect(gateway.addr()).await.unwrap();
+    tcp.write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").await.unwrap();
+    let mut answer = Vec::new();
+    tokio::time::timeout(WAIT, tcp.read_to_end(&mut answer)).await.unwrap().unwrap();
+    assert!(answer.starts_with(b"HTTP/1.1 403"), "{}", String::from_utf8_lossy(&answer));
+    assert!(l.log.lock().unwrap().is_empty());
+
+    // The first-load URL under the manager's path: 302 with the cookie, keeping the ticket.
+    let page = ember_gateway::page_url_at(gateway.addr(), &token, "/ide/ose/", &[("folder", "/work/repo"), ("dpx-ticket", TICKET)]);
+    let path = page.strip_prefix(&gateway.origin()).unwrap().to_owned();
+    let mut tcp = tokio::net::TcpStream::connect(gateway.addr()).await.unwrap();
+    tcp.write_all(format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").as_bytes()).await.unwrap();
+    let mut answer = Vec::new();
+    tokio::time::timeout(WAIT, tcp.read_to_end(&mut answer)).await.unwrap().unwrap();
+    let answer = String::from_utf8_lossy(&answer).into_owned();
+    assert!(answer.starts_with("HTTP/1.1 302"), "{answer}");
+    assert!(answer.contains(&ember_gateway::set_cookie(&token)), "{answer}");
+    assert!(answer.contains(&format!("\r\nLocation: /ide/ose/?folder=%2Fwork%2Frepo&dpx-ticket={TICKET}\r\n")), "{answer}");
+
+    // With the cookie the request goes through the relay to the manager (the fake echoes it),
+    // the manager's ticket query included.
+    let head = format!(
+        "GET /ide/ose/?folder=%2Fwork%2Frepo&dpx-ticket={TICKET} HTTP/1.1\r\nHost: 127.0.0.1\r\nCookie: ember-gw={token}\r\n\r\n"
+    );
+    let mut tcp = tokio::net::TcpStream::connect(gateway.addr()).await.unwrap();
+    tcp.write_all(head.as_bytes()).await.unwrap();
+    let mut echo = vec![0u8; head.len()];
+    tokio::time::timeout(WAIT, tcp.read_exact(&mut echo)).await.expect("the echo came back in time").unwrap();
+    assert_eq!(String::from_utf8_lossy(&echo), head);
+    let seen = String::from_utf8(l.log.lock().unwrap().clone()).unwrap();
+    assert_eq!(seen, head, "the OSE got the request as the window sent it");
 }

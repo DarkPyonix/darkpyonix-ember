@@ -1021,12 +1021,13 @@ pub fn ConversationView(id: &str, embedded: bool) {
     };
 
     // ---- IDE entries ---------------------------------------------------------------------------
-    let remembered = ui
-        .prefs
-        .get()
-        .ide_target
-        .as_deref()
-        .and_then(IdeKind::from_key);
+    // The session's project's pick, else its computer's default (FR-W7b, D56).
+    let ide_project = super::session::session_project(&sid);
+    let ide_prefs = ui.prefs.get();
+    let remembered = ide_prefs.ide_for(
+        &ide_project,
+        computer.get().as_ref().map(|c| c.computer.id.as_str()),
+    );
     let ide_choices = crate::ui::session::ide_choices(remembered);
     let ide_now = ide.get();
     let ide_rows = super::session::with_ember_notice(
@@ -1151,6 +1152,7 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                 let ide_dismiss = ide_menu;
                                 let ide_choices_pick = ide_choices.clone();
                                 let ui_ide = ui.clone();
+                                let pick_project = ide_project.clone();
                                 let launch_res = ide_now.clone();
                                 let im = ide_menu;
                                 let ui_ide_btn = ui.clone();
@@ -1171,7 +1173,9 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                         let Some(choice) = ide_choices_pick.get(idx) else {
                                             return;
                                         };
-                                        super::session::launch_ide_shared(&ui_ide, choice.kind, launch_res.clone());
+                                        let kind = choice.kind;
+                                        super::session::record_ide_pick(&ui_ide, &pick_project, kind);
+                                        super::session::launch_ide_shared(&ui_ide, kind, launch_res.clone());
                                     },
                                     move || {
                                         { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, space_role = SpaceRole::Sm, content = move || {

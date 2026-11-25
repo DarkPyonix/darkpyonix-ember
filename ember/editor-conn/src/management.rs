@@ -42,6 +42,8 @@ impl RemoteAgentConnectionContext {
 #[serde(rename_all = "camelCase")]
 pub struct RemoteAgentEnvironment {
     pub pid: i64,
+    /// Empty for a server without a connection token (`--without-connection-token`, INTENT D55).
+    #[serde(default)]
     pub connection_token: String,
     pub app_root: UriComponents,
     pub extension_host_logs_path: UriComponents,

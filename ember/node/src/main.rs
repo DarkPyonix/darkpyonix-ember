@@ -83,19 +83,9 @@ async fn serve() -> anyhow::Result<()> {
     let state_dir = cfg.state_dir.clone();
     let token = cfg.token.clone();
     let mode = transport::TransportMode::from_env_or_state(state_dir.as_deref())?;
-    // FR-W4a: this computer's OSE, for the Ember editor of its projects. Token files a killed
-    // daemon left behind are removed before anything starts.
-    let ose = ember_node::ose::OseManager::for_node(state_dir.as_deref()).with_terminal_env(
-        ember_node::ose::TerminalEnv {
-            ember_term_dir: ember_node::ose::find_ember_term_dir(
-                std::env::var_os("EMBER_TERM_BIN"),
-                std::env::current_exe().ok(),
-            ),
-            local_node_state_dir: state_dir.clone(),
-        },
-    );
-    ose.sweep_stale_tokens();
-    let node = Node::with_ose(cfg, std::sync::Arc::new(ose))?;
+    // FR-W4b (D55): the editor server is the DarkPyonix manager's; the node only asks it for
+    // launches and relays bytes to it.
+    let node = Node::new(cfg)?;
     if let Some(socks) = std::env::var("EMBER_NODE_SOCKS_LISTEN").ok().filter(|s| !s.is_empty()) {
         let listener = tokio::net::TcpListener::bind(socks.parse::<std::net::SocketAddr>()?).await?;
         tracing::info!("SOCKS5 egress listening on {}", listener.local_addr()?);
@@ -194,7 +184,6 @@ async fn serve() -> anyhow::Result<()> {
         (result, _, _) = futures::future::select_all(servers) => Some(result),
         _ = shutdown_signal() => None,
     };
-    node.ose().shutdown();
     if served.is_none() {
         // Graceful stop: save every running terminal's screen so a re-adopting node (the
         // PTY keepers hold the processes) restores scrollback and screen.

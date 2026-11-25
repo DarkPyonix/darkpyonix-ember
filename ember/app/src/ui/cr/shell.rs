@@ -1353,12 +1353,12 @@ mod tests {
         let _guard = crate::services::test_guard();
         let mut host = Host::new(|| Box::new(Recomposer::new(shell)));
         let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
-        // The shell mounts SettingsSheet (with theme, keymap, default IDE and archived toggle)
-        // instead of the old "준비 중입니다" placeholder.
+        // The shell mounts SettingsSheet (with theme, keymap and archived toggle) instead of the
+        // old "준비 중입니다" placeholder. No device-wide default IDE (FR-W7b: per project).
         assert!(has_text(&batch, "설정"));
         assert!(has_text(&batch, "화면 테마"));
         assert!(has_text(&batch, "에디터 단축키"));
-        assert!(has_text(&batch, "기본 IDE"));
+        assert!(!has_text(&batch, "기본 IDE"));
         assert!(has_text(&batch, "보관된 세션 표시"));
     }
 

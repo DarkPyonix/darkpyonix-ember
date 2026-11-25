@@ -83,6 +83,9 @@ pub struct Shared {
     pub folder: String,
     pub server_url: String,
     pub computer: String,
+    /// What `VS Code에서 열기` opens on a fallback (SPEC FR-E10): the VS Code target's relay
+    /// launch, or an old server's URL. `None` when the target offers neither.
+    pub vscode: Option<crate::ide::VsCodeFallback>,
     pub project: String,
     pub project_name: String,
     pub uris: Rc<RefCell<HashMap<String, ember_editor_conn::uri::UriComponents>>>,
@@ -270,7 +273,8 @@ fn init(target: EditorTarget) {
     });
     let extensions = use_hook(|| crate::ui::editor_extensions::Extensions::new(&target.computer, revision));
     let agent = use_hook(|| crate::ui::editor_agent::AgentTool::new(&target.project, &target.folder, revision));
-    SHARED.with(|s| *s.borrow_mut() = Some(Shared { extensions, agent, host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, tree_multi_sel, tree_clipboard, tree_drag_src, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, recent_files, theme, position, stripes, menu_open, tab_menu, close_confirm, term_paste_confirm, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris, open_errors, editor_versions, last_find_cmd, pending_goto, next_goto_id, last_goto_id, problems_limit, selected_output_channel, workbench_logs, scm, notifications }));
+    let vscode = crate::ide::VsCodeFallback::for_editor(&target);
+    SHARED.with(|s| *s.borrow_mut() = Some(Shared { extensions, agent, host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, tree_multi_sel, tree_clipboard, tree_drag_src, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, recent_files, theme, position, stripes, menu_open, tab_menu, close_confirm, term_paste_confirm, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, vscode, server_url: target.server_url, computer: target.computer, uris, open_errors, editor_versions, last_find_cmd, pending_goto, next_goto_id, last_goto_id, problems_limit, selected_output_channel, workbench_logs, scm, notifications }));
 }
 
 pub(crate) fn join_path(dir: &str, name: &str) -> String {
@@ -1524,14 +1528,12 @@ pub mod page {
         };
         // SPEC FR-E10, Q-E2 (#32): an unsupported server shows one sentence and the VS Code button
         // instead of the editor; the user chooses, nothing switches by itself.
-        let fallback_text_for = |has_url: bool| fallback.as_ref().map(|f| crate::ui::editor::fallback_sentence(&f.fallback, has_url));
-        // Only an http(s) URL is handed to the OS, as `crate::ide::plan` does for the VS Code target.
-        let fallback_url = fallback.as_ref().and_then(|f| f.vscode_url.clone()).filter(|u| {
-            let lower = u.to_ascii_lowercase();
-            lower.starts_with("http://") || lower.starts_with("https://")
-        });
+        let fallback_text_for = |has_vscode: bool| fallback.as_ref().map(|f| crate::ui::editor::fallback_sentence(&f.fallback, has_vscode));
+        // The VS Code target's relay launch (FR-W4c, INTENT D55), else an old server's http(s) URL,
+        // else the session whose launch the button asks for (FR-W4c (1c)), checked as `crate::ide::plan` checks the VS Code target (`VsCodeFallback::for_editor`).
+        let fallback_vscode = fallback.as_ref().and(s.vscode.clone());
         let fallback_button = crate::ui::editor::FALLBACK_BUTTON;
-        let fallback_text = fallback_text_for(fallback_url.is_some());
+        let fallback_text = fallback_text_for(fallback_vscode.is_some());
         for (old, new) in renamed {
             // The tabs below the renamed path follow it (clean ones only: a rename with unsaved
             // changes is refused before it is sent); the session reopens them under the new name.
@@ -1770,11 +1772,15 @@ pub mod page {
                 },
                 if let Some(text) = fallback_text {
                     div { style: "{error_style}", "{text}"
-                        if let Some(url) = fallback_url {
+                        if let Some(vscode) = fallback_vscode {
                             button {
                                 onclick: move |_| {
-                                    if let Err(e) = crate::ide::open_external(&url) {
+                                    // A relay launch starts the `ember-app --vscode-window` helper with no
+                                    // credential in argv (`crate::ide::open_ide_relay`); a target with no launch
+                                    // asks the server for one first (`crate::ide::start_vscode`).
+                                    if let Err(e) = vscode.open() {
                                         tracing::warn!("could not open the VS Code target: {e}");
+                                        notice(format!("VS Code: 열지 못했습니다: {e}"));
                                     }
                                 },
                                 "{fallback_button}"

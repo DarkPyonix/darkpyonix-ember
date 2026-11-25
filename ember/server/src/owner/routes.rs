@@ -213,6 +213,7 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("GET", "/api/sessions/{id}/export", Token),
     ("POST", "/api/sessions/{id}/fork", Token),
     ("GET", "/api/sessions/{id}/ide", Token),
+    ("POST", "/api/sessions/{id}/ide/vscode", Token),
     ("POST", "/api/sessions/{id}/interrupt", Token),
     ("POST", "/api/sessions/{id}/lease", Token),
     ("GET", "/api/sessions/{id}/mentions", Token),

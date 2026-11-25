@@ -51,6 +51,24 @@ use crate::services::{Services, install, services};
 
 /// Build the services, start the client, open the window. Returns when the window closes.
 pub fn launch() {
+    // The VS Code window's helper (INTENT D55, FR-W5b): the gateway and the `ember-ide-webview`
+    // window it waits for, with no window of its own. It exits with that window.
+    if let Some(args) = ide::parse_vscode_window_args(std::env::args()) {
+        let args = args.unwrap_or_else(|e| {
+            eprintln!("ember-app: {e}");
+            std::process::exit(2);
+        });
+        prepare();
+        let code = match ide::run_vscode_window(&args) {
+            Ok(()) => 0,
+            Err(e) => {
+                tracing::warn!("the VS Code window ended: {e}");
+                eprintln!("ember-app: {e}");
+                1
+            }
+        };
+        std::process::exit(code);
+    }
     prepare();
     open_window();
     shutdown();
@@ -154,7 +172,10 @@ pub(crate) fn prepare() {
         tracing::info!("demo mode: serving demo data, no server contacted");
         source
     });
-    if demo.is_none() {
+    // The VS Code window's helper only dials the relay with the client's `Api`: no push
+    // connection, no sync and no cache writer beside the shell's (INTENT D55).
+    let vscode_helper = ide::parse_vscode_window_args(std::env::args()).is_some();
+    if demo.is_none() && !vscode_helper {
         // Push connection, resync worker and cache writer (they need the runtime's context).
         let _guard = rt.enter();
         client.start();
@@ -172,7 +193,7 @@ pub(crate) fn prepare() {
             std::process::exit(2);
         }
     };
-    let check = link.as_ref().filter(|_| demo.is_none()).map(|l| l.api());
+    let check = link.as_ref().filter(|_| demo.is_none() && !vscode_helper).map(|l| l.api());
     install(Services {
         config,
         rt,
@@ -442,7 +463,7 @@ mod shutdown_tests {
         let path = dir.path().join("prefs.json");
         let mut prefs = crate::prefs::Prefs::default();
         prefs.keymap = crate::ui::keymap::Keymap::JetBrains;
-        prefs.ide_target = Some("vscode".into());
+        prefs.set_ide_target("ember", crate::ide::IdeKind::VsCode);
         let mut cache_flushed = false;
         let code = super::flush_before_exit(Some(&path), &prefs, || {
             assert_eq!(crate::prefs::load(&path), prefs);

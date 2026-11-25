@@ -69,6 +69,14 @@ pub enum ErrorCode {
     Expired,
     /// The file receiver: the receive mode refuses the offer (403).
     Forbidden,
+    /// The editor launch (FR-W4b, D55): no DarkPyonix manager is known on this computer (503).
+    ManagerNotInstalled,
+    /// The editor launch: the manager has no editor server of that runtime installed (503).
+    OseNotInstalled,
+    /// The editor launch: the manager did not answer (502).
+    ManagerUnreachable,
+    /// The editor launch: the manager refused for another reason (502).
+    ManagerError,
 }
 
 // ---------------------------------------------------------------------------------------------

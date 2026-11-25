@@ -189,9 +189,10 @@ pub const PICKER_VISIBLE_ROWS: usize = 9;
 /// are hidden (`start > 0`) the "위에 N개 더 있습니다" row takes one row of that budget, and the
 /// highlighted row keeps one row of context below it unless it is the last one (Code-OSS reveals a
 /// quick pick's active item the same way). The rows after `end` are still drawn and scroll into view.
-/// The list is windowed from before the toolkit could scroll a row into view
+/// The list is windowed because a scroll into view does not move this list on a display
 /// (TODO(dioxus-compose#200, in 94ade333): `MountedData::scroll_to` on the highlighted row replaces
-/// the window, after a display check).
+/// the window once a capture shows it working; tried and reverted twice, e73c0ceb and #951, and the
+/// scroll path is unchanged on dioxus-compose 5b6f707c and compose-rust e52fbd39).
 pub fn list_window(selected: usize, len: usize, visible: usize) -> (usize, usize) {
     let visible = visible.max(3);
     if len <= visible {

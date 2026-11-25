@@ -124,6 +124,15 @@ impl Fingerprints {
     }
 }
 
+/// Whether the channels and the routines screens read again after `ch` (PR-1, #1049): a channel
+/// message or a schedule push, or a resync or a connection change (push lagged, or it
+/// reconnected), when either may have been missed. These screens hold what they read themselves, so the push is their signal in
+/// place of a timer.
+fn pushed_reads(ch: &Changes) -> (bool, bool) {
+    let missed = ch.resync_all || ch.connection;
+    (!ch.channels.is_empty() || missed, ch.schedules || missed)
+}
+
 fn on_changes(s: &'static Services, ch: &Changes, prints: &mut Fingerprints) {
     let sessions_changed = prints.changed(s, &ch.sessions);
     // A project change without session changes is the project list itself (a project created
@@ -137,6 +146,17 @@ fn on_changes(s: &'static Services, ch: &Changes, prints: &mut Fingerprints) {
     }
     if !ch.teams.is_empty() {
         crate::ui::coexist::SharedLive::bump(&s.ui.live.teams);
+    }
+    let (channels, schedules) = pushed_reads(ch);
+    if channels {
+        crate::ui::coexist::SharedLive::bump(&s.ui.live.channels);
+    }
+    if schedules {
+        crate::ui::coexist::SharedLive::bump(&s.ui.live.schedules);
+    }
+    if !ch.transfers.is_empty() || ch.resync_all || ch.connection {
+        // The files screen reads its snapshot now instead of at its next beat (FR-L27.8).
+        crate::ui::files_service::poke();
     }
     // Turn boundaries show up as session status changes.
     for id in &ch.sessions {
@@ -439,5 +459,28 @@ mod github_poll_tests {
         assert!(!should_poll_github(false, Some(Duration::from_secs(100)), gap, false));
         assert!(!should_poll_github(true, Some(Duration::from_secs(100)), gap, true));
         assert!(!should_poll_github(true, Some(Duration::from_secs(10)), gap, false));
+    }
+}
+
+#[cfg(test)]
+mod push_read_tests {
+    use super::*;
+
+    /// A channel message or a schedule push makes its screen read again, and a resync makes
+    /// both read again; other changes leave them alone (PR-1, #1049).
+    #[test]
+    fn pr_1_channel_and_schedule_pushes_drive_their_screens() {
+        let mut ch = Changes::default();
+        assert_eq!(pushed_reads(&ch), (false, false));
+        ch.channels.insert("c1".into());
+        assert_eq!(pushed_reads(&ch), (true, false));
+        let ch = Changes { schedules: true, ..Default::default() };
+        assert_eq!(pushed_reads(&ch), (false, true));
+        let ch = Changes { resync_all: true, ..Default::default() };
+        assert_eq!(pushed_reads(&ch), (true, true));
+        let ch = Changes { connection: true, ..Default::default() };
+        assert_eq!(pushed_reads(&ch), (true, true));
+        let ch = Changes { projects: true, ..Default::default() };
+        assert_eq!(pushed_reads(&ch), (false, false));
     }
 }

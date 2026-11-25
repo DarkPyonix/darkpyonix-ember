@@ -19,6 +19,7 @@ use crate::cli::{
 use crate::opener::{
     init_script, receive_eval_script, OpenWindowCommand, QueuedWindowOpener, WindowRegistry,
 };
+use crate::parent;
 
 #[derive(Debug)]
 pub enum UserEvent {
@@ -31,6 +32,9 @@ pub enum UserEvent {
         url: String,
     },
     SmokeExit,
+    /// stdin reached end of file under `--exit-on-stdin-eof`: the process that started the
+    /// window has ended (`FR-W5b`, #1128).
+    ParentGone,
 }
 
 struct ManagedWindow {
@@ -258,6 +262,22 @@ pub fn run(config: Config) -> Result<(), String> {
         });
     }
 
+    if config.exit_on_stdin_eof {
+        let parent_proxy = proxy.clone();
+        let started = parent::spawn_stdin_watcher(move || {
+            tracing::info!("the parent process ended (stdin closed); closing the IDE window");
+            // The loop may already be gone (the user closed the window first); the process is
+            // then exiting anyway.
+            let _ = parent_proxy.send_event(UserEvent::ParentGone);
+            std::thread::sleep(parent::PARENT_GONE_EXIT_GRACE);
+            tracing::warn!("the event loop did not exit after the parent ended; exiting directly");
+            std::process::exit(0);
+        });
+        if let Err(err) = started {
+            return Err(format!("failed to start the parent watch: {err}"));
+        }
+    }
+
     let prefix = format!("ide-{}", std::process::id());
     let mut host = BridgeHost::new(QueuedWindowOpener::new(config.origin, config.title), prefix);
 
@@ -267,6 +287,9 @@ pub fn run(config: Config) -> Result<(), String> {
         match event {
             Event::UserEvent(UserEvent::SmokeExit) => {
                 tracing::info!("smoke timer elapsed; exiting");
+                *control_flow = ControlFlow::Exit;
+            }
+            Event::UserEvent(UserEvent::ParentGone) => {
                 *control_flow = ControlFlow::Exit;
             }
             Event::UserEvent(UserEvent::PageLoaded { logical_id, url }) => {

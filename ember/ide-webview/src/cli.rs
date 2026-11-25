@@ -68,7 +68,15 @@ pub struct Config {
     /// window injects tab detach and the `dragToOpenWindow` default itself. The window holds no
     /// server credential: the helper owns the gateway and the relay.
     pub vscode: bool,
+    /// `--exit-on-stdin-eof`: exit when stdin reaches end of file (`FR-W5b`, #1128). The helper
+    /// passes it with a pipe on stdin, so the window ends when the helper ends for any reason.
+    /// Off by default, because a window started by hand may have a closed or null stdin.
+    pub exit_on_stdin_eof: bool,
 }
+
+/// The flag that turns on [`Config::exit_on_stdin_eof`] (repeated in `ember-app`'s
+/// `ide::WEBVIEW_EXIT_WITH_PARENT_FLAG`).
+pub const EXIT_ON_STDIN_EOF_FLAG: &str = "--exit-on-stdin-eof";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliAction {
@@ -79,11 +87,12 @@ pub enum CliAction {
 
 pub fn usage() -> String {
     format!(
-        "Usage: ember-ide-webview (--url <url> | {URL_ENV}=<url>) [--vscode] [--title <title>] [--window-id <id>] [--data-dir <dir>] [--native-chrome] [--smoke | --smoke-exit-ms <ms>]\n\
+        "Usage: ember-ide-webview (--url <url> | {URL_ENV}=<url>) [--vscode] [--exit-on-stdin-eof] [--title <title>] [--window-id <id>] [--data-dir <dir>] [--native-chrome] [--smoke | --smoke-exit-ms <ms>]\n\
          \n\
          Options:\n\
            --url <url>             VS Code Web URL (http:// or https://), for manual use; a URL with a secret goes in {URL_ENV} instead (not both)\n\
            --vscode                The page is the VS Code target with no proxy: inject tab detach and the workbench defaults\n\
+           --exit-on-stdin-eof     Exit when stdin reaches end of file (the parent holds the pipe)\n\
            --title <title>         Initial window title (default: derived from folder or {DEFAULT_TITLE})\n\
            --window-id <id>        Initial logical window id (default: win-1)\n\
            --data-dir <dir>        Persistent webview cache/data directory\n\
@@ -346,6 +355,7 @@ where
 
     let mut url: Option<String> = None;
     let mut vscode = false;
+    let mut exit_on_stdin_eof = false;
     let mut title: Option<String> = None;
     let mut window_id: Option<String> = None;
     let mut data_dir: Option<String> = None;
@@ -366,6 +376,9 @@ where
             }
             "--vscode" => {
                 vscode = true;
+            }
+            EXIT_ON_STDIN_EOF_FLAG => {
+                exit_on_stdin_eof = true;
             }
             "--title" => {
                 let value = iter
@@ -450,6 +463,7 @@ where
         smoke_exit_ms,
         validate_only,
         vscode,
+        exit_on_stdin_eof,
     }))
 }
 
@@ -494,6 +508,7 @@ mod tests {
                 smoke_exit_ms: Some(250),
                 validate_only: false,
                 vscode: false,
+                exit_on_stdin_eof: false,
             })
         );
     }
@@ -525,6 +540,7 @@ mod tests {
                 smoke_exit_ms: Some(DEFAULT_SMOKE_EXIT_MS),
                 validate_only: false,
                 vscode: false,
+                exit_on_stdin_eof: false,
             })
         );
     }
@@ -575,6 +591,7 @@ mod tests {
                 smoke_exit_ms: None,
                 validate_only: false,
                 vscode: true,
+                exit_on_stdin_eof: false,
             })
         );
         assert!(usage().contains("--vscode"));
@@ -620,6 +637,7 @@ mod tests {
                 smoke_exit_ms: None,
                 validate_only: false,
                 vscode: true,
+                exit_on_stdin_eof: false,
             })
         };
         // From the environment alone.
@@ -641,6 +659,37 @@ mod tests {
         assert!(main_body.find("cli::take_url_env()").unwrap() < main_body.find("tracing_subscriber").unwrap());
         let take = include_str!("cli.rs").split("pub fn take_url_env()").nth(1).unwrap();
         assert!(take.split("\n}").next().unwrap().contains("remove_var(URL_ENV)"));
+    }
+
+    /// SPEC FR-W5b (#1128): `--exit-on-stdin-eof` turns on the parent watch; without it a
+    /// window started by hand never watches stdin.
+    #[test]
+    fn fr_w5b_cli_parses_the_exit_on_stdin_eof_flag() {
+        let url = "http://127.0.0.1:41234/?folder=%2Fwork%2Frepo";
+        let parse = |args: &[&str]| {
+            match parse_args_with_url_env(
+                std::iter::once("ember-ide-webview").chain(args.iter().copied()),
+                Some(url),
+                None,
+                Some("/env/cache"),
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+            {
+                CliAction::Run(c) => c,
+                other => panic!("{other:?}"),
+            }
+        };
+        assert!(parse(&["--vscode", EXIT_ON_STDIN_EOF_FLAG]).exit_on_stdin_eof);
+        assert!(!parse(&["--vscode"]).exit_on_stdin_eof);
+        assert_eq!(EXIT_ON_STDIN_EOF_FLAG, "--exit-on-stdin-eof");
+        assert!(usage().contains(EXIT_ON_STDIN_EOF_FLAG));
+        // The window starts the watch when the flag is set and exits its loop on the signal.
+        let window = include_str!("window.rs");
+        assert!(window.contains("if config.exit_on_stdin_eof {") && window.contains("parent::spawn_stdin_watcher("));
+        assert!(window.contains("Event::UserEvent(UserEvent::ParentGone) => {"));
     }
 
     #[test]

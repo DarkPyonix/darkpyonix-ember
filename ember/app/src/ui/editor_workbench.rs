@@ -425,6 +425,24 @@ fn editor_pane() -> Element {
     } }
 }
 
+/// The Compose side of the editor window (#301): the root fills the window and holds the HTML
+/// page in an `HtmlView`, as the workbench chrome does.
+pub mod view {
+    use dioxus_compose::prelude::*;
+
+    #[component]
+    pub fn EditorRoot() -> Element {
+        root_with(super::page::app)
+    }
+
+    /// The root around `page`: the editor's stylesheets, filling the window.
+    pub(crate) fn root_with(page: fn() -> Element) -> Element {
+        rsx! {
+            HtmlView { app: page, config: Some(super::page::config as fn() -> dioxus_compose::html::HtmlConfig), fill_max_height: true }
+        }
+    }
+}
+
 pub mod page {
     use dioxus_compose::html::prelude::dioxus_elements::point_interaction::{InteractionLocation, ModifiersInteraction};
     use dioxus_compose::html::prelude::dioxus_elements::{Key, Modifiers};

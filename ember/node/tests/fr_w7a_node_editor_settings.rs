@@ -237,7 +237,7 @@ async fn fr_w7a_node_vscode_needs_the_licence_and_takes_no_extensions() {
     let f = start_node(ManagerSource::fixed(url, MANAGER_TOKEN)).await;
 
     let report = f.client.put_editor_settings(&settings(json!({ "editor_server": "vscode", "theme": "T" }))).await.unwrap();
-    assert_eq!(report.fields.editor_server.applied, false);
+    assert!(!report.fields.editor_server.applied);
     assert_eq!(report.fields.editor_server.reason.as_deref(), Some(VSC_LICENCE));
     assert_eq!(report.fields.theme.reason.as_deref(), Some(NOT_READY));
     assert!(cli_calls(&f.log).is_empty());
@@ -250,7 +250,7 @@ async fn fr_w7a_node_vscode_needs_the_licence_and_takes_no_extensions() {
     let report = f.client.put_editor_settings(&s).await.unwrap();
     assert!(report.fields.editor_server.applied, "{report:?}");
     assert_eq!(cli_calls(&f.log), ["editor install --runtime vsc --accept-server-license-terms", "editor use vsc"]);
-    assert_eq!(report.fields.extensions.applied, false);
+    assert!(!report.fields.extensions.applied);
     assert_eq!(report.fields.extensions.reason.as_deref(), Some(VSC_EXTENSIONS));
     assert!(report.fields.theme.applied && report.fields.settings.applied, "{report:?}");
     let presets = m.presets.lock().unwrap().clone();

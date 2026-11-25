@@ -19,6 +19,9 @@
 //!   not installed.
 //! - `POST {url}/api/editor/{runtime}/extensions {id, version?}` installs an extension (409 when
 //!   the runtime does not take one, as for `vsc`).
+//! - `GET {url}/api/editor` answers the installed runtimes ([`EditorStatus`]), and
+//!   `PUT {url}/api/editor/{runtime}/presets` ([`EditorPresets`]) installs missing extensions and
+//!   sets the default theme and settings (SPEC FR-W7a, `INTENT.md` D56, core FR-M8, FR-M10).
 //!
 //! **The relay.** [`EditorRelays`] keeps the launches this process handed out, by an opaque id,
 //! with the relay limits of FR-W4b (16 per launch, 64 in all, 120 s idle). A relay opens a TCP
@@ -43,6 +46,15 @@ pub const ENV_URL: &str = "DARKPYONIX_MANAGER_URL";
 pub const ENV_TOKEN: &str = "DARKPYONIX_TOKEN";
 /// The runtime both Ember targets use (the manager also has `vsc`, which Ember does not choose).
 pub const OSE_RUNTIME: &str = "ose";
+/// The OSE release the node asks the manager to install (`darkpyonix editor install --runtime ose
+/// --release <this>`, SPEC FR-W7a). It follows `ember/ose` (`ember/ose/VERSION` with the `ose-v`
+/// prefix of its release tags); change both together.
+pub const OSE_RELEASE: &str = "ose-v1.139.1";
+/// Longest wait for `GET /api/editor`.
+pub const STATUS_TIMEOUT: Duration = Duration::from_secs(10);
+/// Longest wait for `PUT /api/editor/{runtime}/presets`: it installs extensions (the manager's
+/// limit is 120 s each) and may restart the editor server.
+pub const PRESETS_TIMEOUT: Duration = Duration::from_secs(600);
 /// Longest wait for a launch: the manager starts the server and waits for its socket.
 pub const LAUNCH_TIMEOUT: Duration = Duration::from_secs(20);
 /// Longest wait for an extension install: the manager's own limit is 120 s.
@@ -240,12 +252,90 @@ fn clean_commit(commit: Option<String>) -> Option<String> {
 
 /// The `error` of a manager's refusal body, else its text, capped.
 fn reason_of(status: u16, body: &[u8]) -> String {
-    let parsed = serde_json::from_slice::<serde_json::Value>(body)
-        .ok()
-        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from));
+    let parsed = serde_json::from_slice::<serde_json::Value>(body).ok().and_then(|v| {
+        let e = v.get("error")?;
+        if let Some(s) = e.as_str() {
+            return Some(s.to_string());
+        }
+        // The manager's error shape (core FR-M10): `{"error": {code, message, data?: {output?}}}`.
+        let message = e.get("message").and_then(|m| m.as_str())?.to_string();
+        match e.get("data").and_then(|d| d.get("output")).and_then(|o| o.as_str()).map(str::trim) {
+            Some(output) if !output.is_empty() => Some(format!("{message}: {}", tail(output, 400))),
+            _ => Some(message),
+        }
+    });
     let text = parsed.unwrap_or_else(|| String::from_utf8_lossy(body).trim().to_string());
     let text: String = text.chars().take(512).collect();
     if text.is_empty() { format!("the manager answered {status}") } else { text }
+}
+
+/// The last `max` characters of `text`.
+pub(crate) fn tail(text: &str, max: usize) -> String {
+    let n = text.chars().count();
+    if n <= max {
+        return text.to_string();
+    }
+    let mut out = String::from("...");
+    out.extend(text.chars().skip(n - max));
+    out
+}
+
+/// One extension of [`EditorPresets`] (`EditorExtension`): `publisher.name` and an optional
+/// version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditorExtension {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+/// The body and answer of `PUT /api/editor/{runtime}/presets` (`EditorPresets`). An absent field
+/// is not sent, so the manager leaves it as it is.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct EditorPresets {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<Vec<EditorExtension>>,
+    /// `workbench.colorTheme`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+/// One installed runtime in [`EditorStatus`] (`EditorRuntimeStatus`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct EditorRuntimeStatus {
+    pub runtime: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub commit: String,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presets: Option<EditorPresets>,
+}
+
+/// The manager's answer to `GET /api/editor` (`EditorStatus`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct EditorStatus {
+    #[serde(default)]
+    pub runtimes: Vec<EditorRuntimeStatus>,
+    #[serde(default)]
+    pub default_runtime: String,
+    #[serde(default)]
+    pub autostart: bool,
+}
+
+impl EditorStatus {
+    /// True when `runtime` is installed.
+    pub fn has(&self, runtime: &str) -> bool {
+        self.runtimes.iter().any(|r| r.runtime == runtime)
+    }
 }
 
 /// The byte stream to the manager: TCP, or TLS over TCP.
@@ -352,6 +442,54 @@ impl ManagerClient {
         let status = res.status().as_u16();
         let body = res.bytes().await.map_err(|e| ManagerError::Unreachable(format!("manager unreachable: {e}")))?;
         Ok((status, body.to_vec()))
+    }
+
+    /// `GET /api/editor`: the installed runtimes (SPEC FR-W7a).
+    pub async fn status(&self) -> Result<EditorStatus, ManagerError> {
+        let res = self
+            .http
+            .get(self.route("/api/editor"))
+            .bearer_auth(&self.endpoint.token)
+            .timeout(STATUS_TIMEOUT)
+            .send()
+            .await
+            .map_err(|e| ManagerError::Unreachable(format!("manager unreachable: {e}")))?;
+        let status = res.status().as_u16();
+        let body = res.bytes().await.map_err(|e| ManagerError::Unreachable(format!("manager unreachable: {e}")))?;
+        if !(200..300).contains(&status) {
+            return Err(ManagerError::Refused { status, error: reason_of(status, &body) });
+        }
+        serde_json::from_slice(&body)
+            .map_err(|e| ManagerError::Unreachable(format!("the manager answered an invalid editor status: {e}")))
+    }
+
+    /// `PUT /api/editor/{runtime}/presets` with `presets`; answers the presets as applied (SPEC
+    /// FR-W7a). The manager's 409 (`vsc` with extensions, or the runtime not installed) and 422
+    /// (`extension_failed`, with the CLI's output in the reason) are [`ManagerError::Refused`].
+    pub async fn put_presets(&self, runtime: &str, presets: &EditorPresets) -> Result<EditorPresets, ManagerError> {
+        if !valid_runtime(runtime) {
+            return Err(ManagerError::Refused { status: 400, error: format!("invalid editor runtime: {runtime:?}") });
+        }
+        let res = self
+            .http
+            .put(self.route(&format!("/api/editor/{runtime}/presets")))
+            .bearer_auth(&self.endpoint.token)
+            .json(presets)
+            .timeout(PRESETS_TIMEOUT)
+            .send()
+            .await
+            .map_err(|e| ManagerError::Unreachable(format!("manager unreachable: {e}")))?;
+        let status = res.status().as_u16();
+        let body = res.bytes().await.map_err(|e| ManagerError::Unreachable(format!("manager unreachable: {e}")))?;
+        if !(200..300).contains(&status) {
+            return Err(ManagerError::Refused { status, error: reason_of(status, &body) });
+        }
+        // An empty 2xx body is taken as "applied as sent".
+        if body.iter().all(u8::is_ascii_whitespace) {
+            return Ok(presets.clone());
+        }
+        serde_json::from_slice(&body)
+            .map_err(|e| ManagerError::Unreachable(format!("the manager answered invalid presets: {e}")))
     }
 
     /// A byte stream to the manager's `host:port`: plain TCP for `http`, TLS for `https`.
@@ -613,6 +751,23 @@ mod tests {
         assert_eq!(relays.open_relay(&c).err(), Some(RelayLookupError::TooManyRelays), "the overall limit");
         drop(held_a);
         assert!(relays.open_relay(&a).is_ok(), "a released place is free again");
+    }
+
+    /// FR-W7a (D56): the pinned OSE release follows `ember/ose/VERSION`.
+    #[test]
+    fn fr_w7a_ose_release_follows_ember_ose_version() {
+        let version = include_str!("../../ose/VERSION").trim();
+        assert_eq!(OSE_RELEASE, format!("ose-v{version}"));
+    }
+
+    /// FR-W7a (core FR-M10): the manager's error object becomes its message and the CLI output.
+    #[test]
+    fn fr_w7a_manager_error_object_is_message_and_output() {
+        let body = br#"{"error":{"code":"extension_failed","message":"a.b was not installed","data":{"id":"a.b","output":"no such extension"}}}"#;
+        assert_eq!(reason_of(422, body), "a.b was not installed: no such extension");
+        assert_eq!(reason_of(409, br#"{"error":"plain"}"#), "plain");
+        assert_eq!(reason_of(500, b""), "the manager answered 500");
+        assert_eq!(tail("abcdef", 3), "...def");
     }
 
     #[test]

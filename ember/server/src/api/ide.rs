@@ -10,6 +10,9 @@
 //! | `vscode`  | VS Code Web of that computer's OSE, in the IDE window | `{kind}` alone; started on pick by `POST .../ide/vscode` |
 //! | `gateway` | JetBrains Gateway                             | a `jetbrains-gateway://` link and the command that opens it on that computer |
 //!
+//! The listing also carries `default_ide` (`ember`, `vscode` or `gateway`): the computer's
+//! effective default IDE from the editor settings (SPEC FR-W7b, [`crate::editor_settings`]).
+//!
 //! **Computers come from the registry** (`FR-L7`, `FR-W4`) when the router is built with
 //! [`router_with_computers`]: the IDE computers are the implicit local computer plus every
 //! registered node, and the launch's `computer` is the REGISTRY id (what
@@ -354,6 +357,9 @@ pub struct IdeLaunch {
     pub computer: ComputerRef,
     /// Always in the order ember, vscode, gateway.
     pub targets: Vec<Target>,
+    /// The IDE a project with no pick launches on this computer: its effective `default_ide`, the
+    /// node's override else the server's (SPEC FR-W7b, D56).
+    pub default_ide: crate::editor_settings::DefaultIde,
 }
 
 /// Percent-encodes everything but RFC 3986 unreserved characters (and `/` when asked).
@@ -490,6 +496,7 @@ pub fn launch_targets_with(
         folder,
         computer: ComputerRef { name: computer_name.to_string(), local: computer.local, computer_name: display },
         targets: vec![ember, vscode, gateway],
+        default_ide: crate::editor_settings::DefaultIde::default(),
     }
 }
 
@@ -975,7 +982,10 @@ async fn ide_targets(
         _ if computer.ide.local => local_connection(&st.editor).await.map_err(|e| e.to_string()),
         _ => Err(LOCAL_ONLY.into()),
     };
-    let launch = launch_targets_with(&rec, &computer, server_url.as_deref(), connection);
+    let mut launch = launch_targets_with(&rec, &computer, server_url.as_deref(), connection);
+    // FR-W7b: the computer's effective default IDE (an `EMBER_IDE_COMPUTERS`-only computer has no
+    // overrides, so it follows the server's).
+    launch.default_ide = crate::editor_settings::effective_default_ide(st.sessions.store(), &computer.id);
     Json(launch).into_response()
 }
 

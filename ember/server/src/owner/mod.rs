@@ -140,6 +140,15 @@ struct Held {
     who: Claimant,
 }
 
+/// The owner a request on an owner route came from, put into the request's extensions by the
+/// owner layer when a live key was presented: the name its claimant gave (shown, never trusted
+/// for authority). The editor settings record who accepted the VS Code Server licence with it
+/// (SPEC FR-W7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnerCaller {
+    pub name: String,
+}
+
 /// The live owner keys. In memory only; a restart voids every key.
 pub struct Owner {
     presence: Presence,
@@ -247,6 +256,24 @@ impl Owner {
         ok
     }
 
+    /// The claimant of `presented` when it is a live key. Every held hash is compared without an
+    /// early exit, as in [`Owner::check`].
+    pub fn holder_of(&self, presented: &str) -> Option<Claimant> {
+        if !presented.starts_with(KEY_PREFIX) {
+            return None;
+        }
+        let h = hash(presented);
+        let keys = self.keys.lock().unwrap_or_else(|e| e.into_inner());
+        let mut found = None;
+        for held in keys.values() {
+            let diff = held.hash.iter().zip(h.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y));
+            if diff == 0 {
+                found = Some(held.who.clone());
+            }
+        }
+        found
+    }
+
     /// True when `claim` holds a live key.
     pub fn is_live(&self, claim: u64) -> bool {
         self.keys.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&claim)
@@ -288,8 +315,9 @@ async fn guard(State(owner): State<Arc<Owner>>, mut req: Request<Body>, next: Ne
     if !owner_route(req.method(), req.uri().path()) {
         return next.run(req).await;
     }
-    let ok = presented.as_ref().and_then(|v| v.to_str().ok()).is_some_and(|k| owner.check(k.trim()));
-    if ok {
+    let who = presented.as_ref().and_then(|v| v.to_str().ok()).and_then(|k| owner.holder_of(k.trim()));
+    if let Some(who) = who {
+        req.extensions_mut().insert(OwnerCaller { name: who.name });
         return next.run(req).await;
     }
     match owner.presence {

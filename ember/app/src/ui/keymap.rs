@@ -53,6 +53,8 @@ pub enum Action {
     Recent,
     Palette,
     RunConfig,
+    /// Start debugging the chosen launch configuration, or continue a stopped session (FR-L31.42).
+    Debug,
     Stop,
     GotoLine,
     Format,
@@ -84,10 +86,14 @@ pub enum Action {
     NextTab,
     /// Switch to the previous open editor tab.
     PrevTab,
+    /// Show Run and Debug (`workbench.view.debug`, FR-L31.42).
+    DebugView,
+    /// Show the debug console (`workbench.debug.action.toggleRepl`, FR-L31.42).
+    DebugConsole,
 }
 
 impl Action {
-    pub const ALL: [Action; 32] = [
+    pub const ALL: [Action; 35] = [
         Action::Project,
         Action::Commit,
         Action::Git,
@@ -100,6 +106,7 @@ impl Action {
         Action::Recent,
         Action::Palette,
         Action::RunConfig,
+        Action::Debug,
         Action::Stop,
         Action::GotoLine,
         Action::Format,
@@ -120,6 +127,8 @@ impl Action {
         Action::KeybindingsJson,
         Action::NextTab,
         Action::PrevTab,
+        Action::DebugView,
+        Action::DebugConsole,
     ];
 
     pub fn label(self) -> &'static str {
@@ -136,6 +145,7 @@ impl Action {
             Action::Recent => "최근 파일",
             Action::Palette => "명령 팔레트",
             Action::RunConfig => "다시 실행",
+            Action::Debug => "디버깅 시작",
             Action::Stop => "중지",
             Action::GotoLine => "줄로 이동",
             Action::Format => "코드 정리",
@@ -156,6 +166,8 @@ impl Action {
             Action::KeybindingsJson => "키보드 단축키 열기 (JSON)",
             Action::NextTab => "다음 탭",
             Action::PrevTab => "이전 탭",
+            Action::DebugView => "실행 및 디버그",
+            Action::DebugConsole => "디버그 콘솔",
         }
     }
 }
@@ -283,7 +295,7 @@ impl Chord {
 /// `(action, macOS chord, other chord)`; an empty chord means no default binding.
 type Row = (Action, &'static str, &'static str);
 
-const VSCODE: [Row; 32] = [
+const VSCODE: [Row; 35] = [
     (Action::Project, "\u{21E7}\u{2318}E", "Ctrl+Shift+E"),
     // VS Code has no default for a commit window; the source control view shares Git's chord.
     (Action::Commit, "", ""),
@@ -297,6 +309,8 @@ const VSCODE: [Row; 32] = [
     (Action::Recent, "\u{2303}R", "Ctrl+R"),
     (Action::Palette, "\u{21E7}\u{2318}P", "Ctrl+Shift+P"),
     (Action::RunConfig, "\u{2303}F5", "Ctrl+F5"),
+    // Code-OSS: workbench.action.debug.start, and .continue while stopped.
+    (Action::Debug, "F5", "F5"),
     (Action::Stop, "\u{21E7}F5", "Shift+F5"),
     (Action::GotoLine, "\u{2303}G", "Ctrl+G"),
     (Action::Format, "\u{21E7}\u{2325}F", "Shift+Alt+F"),
@@ -319,9 +333,12 @@ const VSCODE: [Row; 32] = [
     (Action::KeybindingsJson, "", ""),
     (Action::NextTab, "\u{2303}Tab", "Ctrl+Tab"),
     (Action::PrevTab, "\u{2303}\u{21E7}Tab", "Ctrl+Shift+Tab"),
+    // Code-OSS: workbench.view.debug and workbench.debug.action.toggleRepl.
+    (Action::DebugView, "\u{21E7}\u{2318}D", "Ctrl+Shift+D"),
+    (Action::DebugConsole, "\u{21E7}\u{2318}Y", "Ctrl+Shift+Y"),
 ];
 
-const JETBRAINS: [Row; 32] = [
+const JETBRAINS: [Row; 35] = [
     (Action::Project, "\u{2318}1", "Alt+1"),
     (Action::Commit, "\u{2318}0", "Alt+0"),
     (Action::Git, "\u{2318}9", "Alt+9"),
@@ -334,6 +351,8 @@ const JETBRAINS: [Row; 32] = [
     (Action::Recent, "\u{2318}E", "Ctrl+E"),
     (Action::Palette, "\u{21E7}\u{2318}A", "Ctrl+Shift+A"),
     (Action::RunConfig, "\u{2303}R", "Shift+F10"),
+    // IntelliJ's Debug.
+    (Action::Debug, "\u{2303}D", "Shift+F9"),
     (Action::Stop, "\u{2318}F2", "Ctrl+F2"),
     (Action::GotoLine, "\u{2318}L", "Ctrl+G"),
     (Action::Format, "\u{2325}\u{2318}L", "Ctrl+Alt+L"),
@@ -357,6 +376,9 @@ const JETBRAINS: [Row; 32] = [
     (Action::KeybindingsJson, "", ""),
     (Action::NextTab, "\u{2303}Tab", "Ctrl+Tab"),
     (Action::PrevTab, "\u{2303}\u{21E7}Tab", "Ctrl+Shift+Tab"),
+    // IntelliJ's Debug tool window; its console is a tab of that window, with no chord of its own.
+    (Action::DebugView, "\u{2318}5", "Alt+5"),
+    (Action::DebugConsole, "", ""),
 ];
 
 impl Keymap {
@@ -384,7 +406,7 @@ impl Keymap {
         }
     }
 
-    fn table(self) -> &'static [Row; 32] {
+    fn table(self) -> &'static [Row; 35] {
         match self {
             Keymap::VsCode => &VSCODE,
             Keymap::JetBrains => &JETBRAINS,

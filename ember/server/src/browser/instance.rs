@@ -991,8 +991,7 @@ mod tests {
         let err = inst
             .wait_page(Duration::from_secs(60))
             .await
-            .err()
-            .expect("wait_page should fail when driver gives up");
+            .expect_err("wait_page should fail when driver gives up");
         driver.await.unwrap();
         server.abort();
 
@@ -1061,8 +1060,7 @@ mod tests {
 
         let err = drive_inner(&Arc::downgrade(&inst), &cdp, DRIVE_ATTACH_LIMIT)
             .await
-            .err()
-            .expect("drive_inner must fail after consecutive attach failures");
+            .expect_err("drive_inner must fail after consecutive attach failures");
         server.abort();
 
         let msg = format!("{err:#}");
@@ -1118,8 +1116,7 @@ mod tests {
         let err = tokio::time::timeout(Duration::from_secs(10), inst.wait_page(Duration::from_secs(60)))
             .await
             .expect("the attempt ends at its attach limit, not at a call timeout")
-            .err()
-            .expect("wait_page fails when no page was attached");
+            .expect_err("wait_page fails when no page was attached");
         tokio::time::timeout(Duration::from_secs(10), driver).await.expect("the driver ended").unwrap();
         server.abort();
 

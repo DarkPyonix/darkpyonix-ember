@@ -3118,7 +3118,7 @@ mod tests {
         let err = e.transition("x", Waiting, Joined, T0, None, None);
         assert!(matches!(err, Err(EnrolError::IllegalTransition { .. })));
         // A legal move on a row that is not in `from` is Ok(false), not a change.
-        assert_eq!(e.transition("x", Waiting, Expired, T0, None, None).unwrap(), false);
+        assert!(!e.transition("x", Waiting, Expired, T0, None, None).unwrap());
     }
 
     #[test]

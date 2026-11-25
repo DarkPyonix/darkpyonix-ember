@@ -192,9 +192,9 @@ pub fn rewrite_for_host(text: &str, base: &ResourceBase) -> String {
         if let (Some((scheme, encoded)), true) = (label.split_once('+'), after[label_len..].starts_with(&suffix)) {
             out.push_str(&base.prefix(scheme, encoded));
             rest = &after[label_len + suffix.len()..];
-        } else if after.starts_with(CDN_WILDCARD) {
+        } else if let Some(stripped) = after.strip_prefix(CDN_WILDCARD) {
             out.push_str(&base.csp_host());
-            rest = &after[CDN_WILDCARD.len()..];
+            rest = stripped;
         } else {
             out.push_str("https://");
             rest = after;

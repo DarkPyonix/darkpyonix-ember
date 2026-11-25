@@ -93,7 +93,7 @@ pub fn enabled_only(extensions: &[Value], disabled: &[String]) -> Vec<Value> {
     let off: std::collections::HashSet<String> = disabled.iter().map(|d| id_key(d)).collect();
     extensions
         .iter()
-        .filter(|desc| description_id(desc).map_or(true, |id| !off.contains(&id_key(&id))))
+        .filter(|desc| description_id(desc).is_none_or(|id| !off.contains(&id_key(&id))))
         .cloned()
         .collect()
 }

@@ -361,8 +361,12 @@ pub(crate) fn backfill_peer_ids(conn: &rusqlite::Connection) -> rusqlite::Result
 /// is still held. Only the test `fr_c2_the_duplicate_check_and_the_insert_share_one_hold` sets
 /// it, under `HOOK_TEST_LOCK`; it is `None` otherwise and then does nothing.
 #[cfg(test)]
-pub(crate) static AFTER_DUP_CHECK: std::sync::Mutex<Option<Arc<dyn Fn(&ember_transport::PeerId) + Send + Sync>>> =
+pub(crate) static AFTER_DUP_CHECK: std::sync::Mutex<Option<AfterDupCheckHook>> =
     std::sync::Mutex::new(None);
+
+/// The hook [`AFTER_DUP_CHECK`] holds.
+#[cfg(test)]
+pub(crate) type AfterDupCheckHook = Arc<dyn Fn(&ember_transport::PeerId) + Send + Sync>;
 
 /// Computers and each session's current computer, in the main [`Store`]'s database (tables
 /// from store migration 3, [`schema::MIGRATION`]).

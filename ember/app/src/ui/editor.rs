@@ -2186,6 +2186,8 @@ pub fn is_implemented(action: Action) -> bool {
                 | Action::NewTerminal
                 | Action::NextTab
                 | Action::PrevTab
+                | Action::Debug
+                | Action::Stop
         )
 }
 
@@ -2694,9 +2696,12 @@ mod tests {
             // Save, maximize and reopen act on the window's session, panel size and close history (FR-L31.15).
             // The settings view and the two settings files open a tab through the window (FR-L31.17).
             // Format document goes to the language features (FR-L31.13), not to a tab or a tool window.
+            // F5 and Shift+F5 go to the debug session or the task runner (FR-L31.42).
             if matches!(
                 action,
-                Action::Palette
+                Action::Debug
+                    | Action::Stop
+                    | Action::Palette
                     | Action::Find
                     | Action::FindInFile
                     | Action::ReplaceInFiles

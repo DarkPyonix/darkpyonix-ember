@@ -597,6 +597,15 @@ pub mod page {
             crate::ui::editor_language::view::run(s, crate::ui::editor_language::LangAction::Format);
             return;
         }
+        // FR-L31.42: F5 and Shift+F5 (Code-OSS's debug start/continue and stop).
+        if action == Action::Debug {
+            crate::ui::editor_debug::start_or_continue(s);
+            return;
+        }
+        if action == Action::Stop {
+            crate::ui::editor_debug::stop(s);
+            return;
+        }
         if action == Action::Ask {
             let mut stripes = s.stripes;
             if !stripes.read().is_selected(ToolWindow::Agent) {
@@ -1624,6 +1633,11 @@ pub mod page {
                 }
                 BridgeAction::Webview(ref wv_update) => {
                     handle_webview_update(&s, wv_update);
+                }
+                // FR-L31.42: the bridge has kept the sessions, the stop and the breakpoints; the
+                // controls take them, and the launch picker its configurations.
+                BridgeAction::Debug(ref debug_update) => {
+                    crate::ui::editor_debug::on_debug(&s, debug_update);
                 }
                 _ => {}
             }

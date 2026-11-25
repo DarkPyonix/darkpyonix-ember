@@ -17,6 +17,8 @@ fn path(name: &str) -> &'static str {
         "moon" => r#"<path stroke-linecap="round" stroke-linejoin="round" d="M21.752 15.002A9.72 9.72 0 0 1 18 15.75c-5.385 0-9.75-4.365-9.75-9.75 0-1.33.266-2.597.748-3.752A9.753 9.753 0 0 0 3 11.25C3 16.635 7.365 21 12.75 21a9.753 9.753 0 0 0 9.002-5.998Z"/>"#,
         "more" => r#"<path stroke-linecap="round" stroke-linejoin="round" d="M6.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM12.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM18.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Z"/>"#,
         "refresh" => r#"<path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99"/>"#,
+        // A bug, for 디버깅 시작 beside 실행 (FR-L31.42); the mockup draws none.
+        "bug" => r#"<path stroke-linecap="round" stroke-linejoin="round" d="M12 20.25c-2.9 0-5.25-2.52-5.25-6v-3a5.25 5.25 0 0 1 10.5 0v3c0 3.48-2.35 6-5.25 6Zm0 0v-9M6.75 12H3m18 0h-3.75M7.5 7.5 5.25 5.25m11.25 2.25 2.25-2.25M6.9 16.5l-2.4 2.25m12.6-2.25 2.4 2.25M9.75 6.3V5.25a2.25 2.25 0 0 1 4.5 0V6.3"/>"#,
         "pause" => r#"<path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25v13.5m-7.5-13.5v13.5"/>"#,
         "plus" => r#"<path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/>"#,
         "minus" => r#"<path stroke-linecap="round" stroke-linejoin="round" d="M19.5 12h-15"/>"#,
@@ -155,9 +157,14 @@ mod tests {
         for dark in [false, true] {
             assert!(token("--c-green", dark).is_some_and(|green| Some(green) != token("--text-2", dark)));
         }
+        // The task runner's 실행 and 디버깅 시작 are both run buttons (FR-L31.42).
         let debug = include_str!("editor_debug.rs");
-        assert!(debug.contains(r#"id: "debug-run", class: "ed-ib run""#));
-        assert!(debug.contains(r#"{icon_tone("play", 16, "green")}"#));
+        let run = &debug[debug.find(r#"button { id: "task-run", class: "ed-ib run", title: "실행", "aria-label": "실행","#).expect("the run button")..];
+        let run = &run[..run.find('\n').unwrap()];
+        assert!(run.ends_with(r#"{icon_tone("play", 16, "green")} }"#), "{run}");
+        assert!(debug.contains(r#"id: "debug-run", class: "ed-ib run", title: "디버깅 시작""#));
+        assert!(debug.contains(r#"{icon_tone("bug", 16, "green")}"#));
+        assert!(!path("bug").is_empty());
     }
 
     // #477: the icon strokes are the shared tokens of the stylesheet the page loads, in both palettes.

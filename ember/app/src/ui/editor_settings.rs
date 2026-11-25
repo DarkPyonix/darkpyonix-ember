@@ -426,6 +426,8 @@ pub fn command_of(action: Action) -> Option<&'static str> {
         Action::KeybindingsJson => "workbench.action.openGlobalKeybindingsFile",
         Action::NextTab => "workbench.action.nextEditor",
         Action::PrevTab => "workbench.action.previousEditor",
+        Action::Debug => "workbench.action.debug.start",
+        Action::Stop => "workbench.action.debug.stop",
         _ => return None,
     })
 }

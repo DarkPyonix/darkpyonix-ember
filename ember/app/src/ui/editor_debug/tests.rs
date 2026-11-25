@@ -6,6 +6,7 @@ use std::cell::RefCell;
 
 thread_local! {
     static REQUESTS: RefCell<Vec<DebugRequest>> = const { RefCell::new(Vec::new()) };
+    static TASK_RUNS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 fn record(request: DebugRequest) {
@@ -42,11 +43,15 @@ fn gutter_editor() -> Element {
     use dioxus_compose::prelude::*;
     let uri = uri();
     let text = "first\nsecond\n";
+    let view = DebugView {
+        breakpoints: vec![breakpoint()],
+        ..Default::default()
+    };
     let gutter = breakpoint_gutter(
         &uri,
         text,
         0,
-        &[breakpoint()],
+        &view,
         GutterDecorations::new([GutterDecoration::bar(0, 1, 0)]),
     );
     rsx! {
@@ -141,8 +146,8 @@ fn click(dom: &mut HtmlDom, id: &str) {
     dom.click(rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
 }
 
-fn toolbar() -> Element {
-    let session = SessionInfo {
+fn stopped_session() -> SessionInfo {
+    SessionInfo {
         id: "session".into(),
         name: "Python".into(),
         debug_type: "debugpy".into(),
@@ -156,8 +161,46 @@ fn toolbar() -> Element {
         },
         thread_id: Some(7),
         frame_id: None,
-    };
-    rsx! { DebugToolbar { session, send: record } }
+    }
+}
+
+fn running_session() -> SessionInfo {
+    SessionInfo {
+        state: SessionState::Running,
+        thread_id: None,
+        ..stopped_session()
+    }
+}
+
+fn toolbar() -> Element {
+    rsx! { DebugToolbar { session: stopped_session(), pause_thread: Some(7), send: record } }
+}
+
+fn running_toolbar() -> Element {
+    rsx! { DebugToolbar { session: running_session(), pause_thread: Some(5), send: record } }
+}
+
+// Code-OSS's toolbar puts 일시 중지 where 계속 is while the session runs; the steps wait for a stop.
+#[test]
+fn fr_l31_42_debug_toolbar_pauses_a_running_session() {
+    let mut dom = HtmlDom::new(running_toolbar);
+    dom.layout(1000.0, 600.0, 1.0);
+    assert!(dom.element_by_id("debug-continue").is_none());
+    for id in ["debug-pause", "debug-over", "debug-into", "debug-out", "debug-stop"] {
+        click(&mut dom, id);
+    }
+    assert_eq!(
+        requests(),
+        [
+            DebugRequest::Pause {
+                session: "session".into(),
+                thread_id: 5
+            },
+            DebugRequest::Stop {
+                session: Some("session".into())
+            },
+        ]
+    );
 }
 
 #[test]
@@ -217,7 +260,7 @@ fn run_picker() -> Element {
                 })
                 .collect(),
             error: None,
-        });
+        }, &DebugView::default());
         Signal::new(state)
     });
     let configuration = state.read().run_command();
@@ -232,9 +275,150 @@ fn run_picker() -> Element {
             run: move |_| { if let Some(request) = &configuration { record(request.clone()); } },
             refresh: move |_| {},
             tasks: move |_| {},
-            run_task: move |_| {},
+            run_task: move |_| TASK_RUNS.set(TASK_RUNS.get() + 1),
         }
     }
+}
+
+// The task runner's 실행 stays beside 디버깅 시작: one runs the default task, the other starts the
+// chosen launch configuration, and neither does the other's job.
+#[test]
+fn fr_l31_42_the_task_run_and_the_debug_start_sit_side_by_side() {
+    let mut dom = HtmlDom::new(run_picker);
+    TASK_RUNS.set(0);
+    click(&mut dom, "task-run");
+    assert_eq!(TASK_RUNS.get(), 1);
+    assert_eq!(requests(), []);
+    click(&mut dom, "debug-run");
+    assert_eq!(TASK_RUNS.get(), 1);
+    assert_eq!(
+        requests(),
+        [DebugRequest::Start {
+            selector: ConfigSelector::Name("Python".into())
+        }]
+    );
+    // In the top bar's order: the picker, 실행, then 디버깅 시작.
+    let order: Vec<_> = ["debug-configurations", "task-run", "debug-run"]
+        .into_iter()
+        .map(|id| {
+            let node = dom.element_by_id(id).unwrap();
+            dom.display_list().unwrap().get(node).unwrap().rect.x
+        })
+        .collect();
+    assert!(order[0] < order[1] && order[1] < order[2], "{order:?}");
+}
+
+fn configured(view: DebugView) -> DebugControls {
+    let mut controls = DebugControls::default();
+    controls.apply(
+        &DebugUpdate::Configurations {
+            configurations: vec![ConfigInfo {
+                name: "Python".into(),
+                debug_type: "debugpy".into(),
+                request: "launch".into(),
+                compound: false,
+            }],
+            error: None,
+        },
+        &view,
+    );
+    controls
+}
+
+fn showing(session: SessionInfo) -> DebugView {
+    DebugView {
+        active: Some(session.id.clone()),
+        sessions: vec![session],
+        ..Default::default()
+    }
+}
+
+// F5 and Shift+F5 as Code-OSS binds them: start when nothing runs, continue when stopped, nothing
+// while running; stop the shown session, else leave the key to the task runner.
+#[test]
+fn fr_l31_42_f5_starts_or_continues_and_shift_f5_stops_the_session() {
+    let idle = configured(DebugView::default());
+    assert_eq!(
+        idle.f5_command(),
+        Some(DebugRequest::Start {
+            selector: ConfigSelector::Name("Python".into())
+        })
+    );
+    assert_eq!(idle.stop_command(), None);
+    assert_eq!(DebugControls::default().f5_command(), None, "no configuration to start");
+
+    let stopped = configured(showing(stopped_session()));
+    assert_eq!(
+        stopped.f5_command(),
+        Some(DebugRequest::Continue {
+            session: "session".into(),
+            thread_id: 7
+        })
+    );
+    assert_eq!(
+        stopped.stop_command(),
+        Some(DebugRequest::Stop {
+            session: Some("session".into())
+        })
+    );
+
+    let running = configured(showing(running_session()));
+    assert_eq!(running.f5_command(), None);
+    assert!(running.stop_command().is_some());
+
+    let ended = configured(showing(SessionInfo {
+        state: SessionState::Terminated,
+        ..stopped_session()
+    }));
+    assert!(matches!(ended.f5_command(), Some(DebugRequest::Start { .. })));
+    assert_eq!(ended.stop_command(), None);
+}
+
+// The bridge's stopped location is the gutter's arrow, and a breakpoint the adapter has not
+// verified is hollow while a session runs.
+#[test]
+fn fr_l31_42_the_gutter_marks_the_stopped_line_and_unverified_breakpoints() {
+    let text = "a\nb\nc\n";
+    let glyphs = |view: &DebugView| -> Vec<char> {
+        breakpoint_gutter(&uri(), text, 0, view, GutterDecorations::default())
+            .decorations()
+            .into_iter()
+            .map(|d| char::from_u32(d.glyph).unwrap())
+            .collect()
+    };
+    let plain = SourceBreakpoint {
+        condition: None,
+        hit_condition: None,
+        ..breakpoint()
+    };
+    let mut view = DebugView {
+        breakpoints: vec![plain.clone()],
+        ..Default::default()
+    };
+    assert_eq!(glyphs(&view)[1], '●', "no session: the user's mark");
+    view = DebugView {
+        breakpoints: vec![plain.clone()],
+        ..showing(running_session())
+    };
+    assert_eq!(glyphs(&view)[1], '○', "a session the adapter did not verify it for");
+    view.breakpoints[0].verified = true;
+    assert_eq!(glyphs(&view)[1], '●');
+    view.stopped_at = Some(ember_editor::StoppedLocation {
+        session: "session".into(),
+        thread_id: 7,
+        frame_id: 1,
+        uri: uri(),
+        line: 3,
+        column: 1,
+    });
+    let marks = glyphs(&view);
+    assert_eq!((marks[1], marks[2]), ('●', '▶'));
+    // The arrow line is still a toggle target.
+    let decorations = breakpoint_gutter(&uri(), text, 0, &view, GutterDecorations::default()).decorations();
+    assert_eq!(
+        toggle_from_gutter(&uri(), decorations[2].id),
+        Some(DebugRequest::ToggleBreakpoint { uri: uri(), line: 3 })
+    );
 }
 
 #[test]

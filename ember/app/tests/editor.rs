@@ -1987,13 +1987,21 @@ mod design_chrome {
     #[test]
     fn design_a14_top_bar_actions_follow_the_mockup_order_without_a_menu_button() {
         let top = &PAGE[PAGE.find("fn top_bar(").unwrap()..PAGE.find("fn menu(s: &Shared").unwrap()];
-        let at = |label: &str| top.find(&format!("title: \"{label}\"")).unwrap_or_else(|| panic!("{label} missing"));
-        let runcfg = at("실행 구성");
-        let run = at("실행");
-        let stop = at("중지");
+        let find = |src: &str, label: &str| src.find(&format!("title: \"{label}\"")).unwrap_or_else(|| panic!("{label} missing"));
+        let at = |label: &str| find(top, label);
+        // FR-L31.42: the run configuration pill, 실행, 디버깅 시작 and the stop button (or the debug
+        // toolbar) are drawn by `editor_debug::run_picker`, in the top bar's place for them.
+        let debug = include_str!("../src/ui/editor_debug.rs");
+        let picker = &debug[debug.find("fn RunPicker(").unwrap()..];
+        let runcfg = find(picker, "실행 구성");
+        let run = find(picker, "실행");
+        let start = find(picker, "디버깅 시작");
+        let stop = find(&picker[start..], "작업 중지") + start;
+        assert!(runcfg < run && run < start && start < stop, "order is not run config, run, debug, stop");
+        let picker_at = top.find("{crate::ui::editor_debug::run_picker(s)}").expect("the run picker");
         let ask = at("에이전트에게 묻기");
         let theme = at("{theme_title}");
-        assert!(runcfg < run && run < stop && stop < ask && ask < theme, "order is not run config, run, stop, ask, theme");
+        assert!(picker_at < ask && ask < theme, "order is not run config, run, stop, ask, theme");
         assert!(!top.contains("icon(\"more\")"), "the top bar still has a ⋯ button");
     }
 }

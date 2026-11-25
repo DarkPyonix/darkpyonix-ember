@@ -1,4 +1,10 @@
-//! The editor's launch picker, debug controls and source breakpoint gutter.
+//! The editor's launch picker, debug controls and source breakpoint gutter (FR-L31.42).
+//!
+//! The top bar keeps the task runner's 실행 and puts 디버깅 시작 beside it, as Code-OSS keeps
+//! Run Task and Start Debugging apart: 디버깅 시작 (F5) starts the configuration chosen in the
+//! 실행 구성 picker, and F5 on a stopped session continues it. The sessions, the stopped line
+//! and the breakpoints come from the widget bridge ([`ember_editor::DebugView`]), which keeps
+//! them from the session's debug updates.
 
 use compose_rust::code::{GutterDecoration, GutterDecorations};
 use compose_rust::schema::ColorRole;
@@ -6,6 +12,7 @@ use dioxus_compose::html::prelude::*;
 use dioxus_compose::prelude::{Props, component};
 use dioxus_core::{EventHandler, use_hook};
 use dioxus_signals::{ReadableExt, Signal, WritableExt};
+use ember_editor::DebugView;
 use ember_editor::debugger::{
     ConfigInfo, ConfigSelector, DebugRequest, DebugUpdate, SessionInfo, SessionState,
     SourceBreakpoint,
@@ -21,37 +28,61 @@ pub(crate) struct DebugControls {
     configurations: Vec<ConfigInfo>,
     selected: Option<String>,
     configuration_error: Option<String>,
-    active: Option<SessionInfo>,
-    source: Vec<SourceBreakpoint>,
+    /// The bridge's view as of the last debug update, here so the page renders when it changes.
+    view: DebugView,
     last_gutter_click: Option<(UriComponents, u32)>,
 }
 
 impl DebugControls {
-    fn apply(&mut self, update: &DebugUpdate) {
-        match update {
-            DebugUpdate::Configurations {
-                configurations,
-                error,
-            } => {
-                self.configuration_error.clone_from(error);
-                self.configurations.clone_from(configurations);
-                if !self
-                    .configurations
-                    .iter()
-                    .any(|c| Some(&c.name) == self.selected.as_ref())
-                {
-                    self.selected = self.configurations.first().map(|c| c.name.clone());
-                }
+    /// Take one debug update: the launch picker's configurations from the update itself, the rest
+    /// from the bridge's `view`, which has already taken it.
+    fn apply(&mut self, update: &DebugUpdate, view: &DebugView) {
+        if let DebugUpdate::Configurations {
+            configurations,
+            error,
+        } = update
+        {
+            self.configuration_error.clone_from(error);
+            self.configurations.clone_from(configurations);
+            if !self
+                .configurations
+                .iter()
+                .any(|c| Some(&c.name) == self.selected.as_ref())
+            {
+                self.selected = self.configurations.first().map(|c| c.name.clone());
             }
-            DebugUpdate::Sessions { sessions, active } => {
-                self.active = sessions
-                    .iter()
-                    .find(|s| Some(&s.id) == active.as_ref() && s.state != SessionState::Terminated)
-                    .cloned();
-            }
-            DebugUpdate::Breakpoints { source, .. } => self.source.clone_from(source),
-            _ => {}
         }
+        self.view.clone_from(view);
+    }
+
+    fn active(&self) -> Option<&SessionInfo> {
+        self.view.active_session()
+    }
+
+    /// F5 (`workbench.action.debug.start`, or `.continue` while stopped): continue the shown
+    /// session when it is stopped, start the chosen configuration when none runs, and nothing while
+    /// one runs.
+    fn f5_command(&self) -> Option<DebugRequest> {
+        match self.active() {
+            Some(session) => match session.state {
+                SessionState::Stopped { thread_id, .. } => {
+                    Some(DebugRequest::Continue {
+                        session: session.id.clone(),
+                        thread_id: session.thread_id.or(thread_id)?,
+                    })
+                }
+                _ => None,
+            },
+            None => self.run_command(),
+        }
+    }
+
+    /// Shift+F5 (`workbench.action.debug.stop`): the shown session; `None` when there is none, and
+    /// the key then stops the running task instead.
+    fn stop_command(&self) -> Option<DebugRequest> {
+        self.active().map(|session| DebugRequest::Stop {
+            session: Some(session.id.clone()),
+        })
     }
 
     fn configuration_names(&self) -> Vec<String> {
@@ -65,11 +96,7 @@ impl DebugControls {
     }
 
     fn editing_target(&self, uri: &UriComponents, caret_line: u32) -> Option<&SourceBreakpoint> {
-        let at = |line| {
-            self.source
-                .iter()
-                .find(|bp| bp.line == line && bp.uri == *uri)
-        };
+        let at = |line| self.view.breakpoints_in(uri).find(|bp| bp.line == line);
         at(caret_line).or_else(|| {
             let (clicked_uri, line) = self.last_gutter_click.as_ref()?;
             if clicked_uri == uri { at(*line) } else { None }
@@ -77,17 +104,21 @@ impl DebugControls {
     }
 }
 
+/// A debug update the widget bridge passed on (`BridgeAction::Debug`), after it took it.
+pub(crate) fn on_debug(s: &Shared, update: &DebugUpdate) {
+    if let DebugUpdate::StartFailed { message } = update {
+        crate::ui::cr::notice::post(format!("디버깅을 시작하지 못했습니다: {message}"));
+        return;
+    }
+    let view = s.bridge.borrow().debug().clone();
+    let mut debug = s.debug;
+    debug.write().apply(update, &view);
+}
+
+/// The session updates other than debugging ones that the controls follow.
 pub(crate) fn on_update(s: &Shared, update: &ember_editor::SessionUpdate) {
     let mut debug = s.debug;
     match update {
-        ember_editor::SessionUpdate::Debug(
-            update @ (DebugUpdate::Configurations { .. }
-            | DebugUpdate::Sessions { .. }
-            | DebugUpdate::Breakpoints { .. }),
-        ) => debug.write().apply(update),
-        ember_editor::SessionUpdate::Debug(DebugUpdate::StartFailed { message }) => {
-            crate::ui::cr::notice::post(format!("디버깅을 시작하지 못했습니다: {message}"));
-        }
         ember_editor::SessionUpdate::ConnectionLost { .. } => debug.set(DebugControls::default()),
         ember_editor::SessionUpdate::Saved { uri }
             if uri.path == format!("{}/.vscode/launch.json", s.folder.trim_end_matches('/')) =>
@@ -115,20 +146,23 @@ fn breakpoint_gutter(
     uri: &UriComponents,
     text: &str,
     version: u32,
-    source: &[SourceBreakpoint],
+    view: &DebugView,
     existing: GutterDecorations,
 ) -> GutterDecorations {
-    let by_line: std::collections::HashMap<_, _> = source
-        .iter()
-        .filter(|bp| bp.uri == *uri)
-        .map(|bp| (bp.line, bp))
-        .collect();
+    let by_line: std::collections::HashMap<_, _> =
+        view.breakpoints_in(uri).map(|bp| (bp.line, bp)).collect();
+    let stopped = view.stopped_line(uri);
+    // While a session runs, a breakpoint its adapter did not verify is hollow, as in Code-OSS.
+    let in_session = view.active_session().is_some();
     // A blank glyph supplies a hit target on lines without a breakpoint. The other marks
     // share this gutter, including source-control bars and the renderer's fold column.
     let glyphs = (1_u32..).zip(text.split('\n')).map(|(line, _)| {
         let (glyph, color) = match by_line.get(&line) {
+            // The stopped line's arrow covers its breakpoint; a click still toggles it.
+            _ if stopped == Some(line) => ('▶', ColorRole::Tertiary),
             None => (' ', ColorRole::Background),
-            Some(bp) if !bp.enabled => ('○', ColorRole::Outline),
+            Some(bp) if !bp.enabled => ('●', ColorRole::Outline),
+            Some(bp) if in_session && !bp.verified => ('○', ColorRole::Outline),
             Some(bp) if bp.log_message.is_some() => ('▰', ColorRole::Error),
             Some(bp) if bp.condition.is_some() => ('◆', ColorRole::Error),
             Some(_) => ('●', ColorRole::Error),
@@ -151,7 +185,7 @@ pub(crate) fn gutter(
     version: u32,
     existing: GutterDecorations,
 ) -> GutterDecorations {
-    breakpoint_gutter(uri, text, version, &s.debug.read().source, existing)
+    breakpoint_gutter(uri, text, version, &s.debug.read().view, existing)
 }
 
 pub(crate) fn activate_gutter(s: &Shared, uri: &UriComponents, id: u64) -> bool {
@@ -167,23 +201,39 @@ pub(crate) fn activate_gutter(s: &Shared, uri: &UriComponents, id: u64) -> bool 
     true
 }
 
+/// The debug toolbar of a live session (Code-OSS `debugToolBar`): 계속 while stopped and 일시 중지
+/// while running in the first place, then the three steps, 다시 시작 and 디버깅 중지.
+/// `pause_thread` is the thread a pause goes to ([`DebugView::pause_thread`]).
 #[component]
-fn DebugToolbar(session: SessionInfo, send: EventHandler<DebugRequest>) -> Element {
+fn DebugToolbar(session: SessionInfo, pause_thread: Option<i64>, send: EventHandler<DebugRequest>) -> Element {
     let id = &session.id;
     let stopped_thread = match session.state {
         SessionState::Stopped { thread_id, .. } => session.thread_id.or(thread_id),
         _ => None,
     };
+    let stopped = matches!(session.state, SessionState::Stopped { .. });
     let thread_command = |request: fn(String, i64) -> DebugRequest| {
         stopped_thread.map(|thread| request(id.clone(), thread))
     };
-    let commands = [
+    let first = if stopped {
         (
             "debug-continue",
             "계속",
             "▶",
             thread_command(|session, thread_id| DebugRequest::Continue { session, thread_id }),
-        ),
+        )
+    } else {
+        (
+            "debug-pause",
+            "일시 중지",
+            "‖",
+            pause_thread
+                .filter(|_| session.state == SessionState::Running)
+                .map(|thread_id| DebugRequest::Pause { session: id.clone(), thread_id }),
+        )
+    };
+    let commands = [
+        first,
         (
             "debug-over",
             "프로시저 단위 실행",
@@ -234,6 +284,8 @@ fn DebugToolbar(session: SessionInfo, send: EventHandler<DebugRequest>) -> Eleme
     }
 }
 
+/// The 실행 구성 pill and the two start buttons: 실행 runs the default task (the task runner),
+/// 디버깅 시작 starts the chosen launch configuration (`enabled` says whether there is one to start).
 #[component]
 fn RunPicker(
     configurations: Vec<String>,
@@ -259,9 +311,10 @@ fn RunPicker(
                 },
                 {icon_tone("play", 16, "text")} span { class: "ellipsis", "{label}" } {icon_tone("chev-dn", 12, "muted")}
             }
-            button { id: "debug-run", class: "ed-ib run", title: "실행", "aria-label": "실행",
+            button { id: "task-run", class: "ed-ib run", title: "실행", "aria-label": "실행", onclick: move |_| run_task.call(()), {icon_tone("play", 16, "green")} }
+            button { id: "debug-run", class: "ed-ib run", title: "디버깅 시작", "aria-label": "디버깅 시작",
                 disabled: !enabled, onclick: move |_| { if enabled { run.call(()); } },
-                {icon_tone("play", 16, "green")}
+                {icon_tone("bug", 16, "green")}
             }
             if expanded {
                 div { class: "ed-debug-popup",
@@ -353,7 +406,7 @@ pub(crate) fn run_picker(s: &Shared) -> Element {
                 enabled: connected && state.run_command().is_some(),
                 select: move |name| debug.write().selected = Some(name),
                 run: move |_| {
-                    if let Some(reason) = blocked(&run, Restricted::Run) {
+                    if let Some(reason) = blocked(&run, Restricted::Debug) {
                         crate::ui::cr::notice::post(reason);
                     } else if let Some(request) = debug.peek().run_command() {
                         run.host.send(HostCommand::Debug(request));
@@ -361,6 +414,8 @@ pub(crate) fn run_picker(s: &Shared) -> Element {
                 },
                 refresh: move |_| { if connected { refresh.send(HostCommand::Debug(DebugRequest::ListConfigurations)); } },
                 tasks: move |_| super::editor_tasks::view::open(&tasks),
+                // The task runner's 실행 (and the picker's 기본 작업 실행): a task, so restricted
+                // mode names it as one.
                 run_task: move |_| {
                     if let Some(reason) = blocked(&run_task, Restricted::Task) {
                         crate::ui::cr::notice::post(reason);
@@ -369,8 +424,8 @@ pub(crate) fn run_picker(s: &Shared) -> Element {
                     }
                 },
             }
-            if let Some(session) = state.active.as_ref().filter(|_| connected) {
-                DebugToolbar { session: session.clone(), send: move |request| { stop.host.send(HostCommand::Debug(request)); } }
+            if let Some(session) = state.active().filter(|_| connected) {
+                DebugToolbar { session: session.clone(), pause_thread: state.view.pause_thread(), send: move |request| { stop.host.send(HostCommand::Debug(request)); } }
             } else {
                 button { class: "ed-ib", title: "작업 중지", "aria-label": "작업 중지",
                     onclick: move |_| super::editor_tasks::view::stop(&stop),
@@ -378,6 +433,36 @@ pub(crate) fn run_picker(s: &Shared) -> Element {
                 }
             }
         }
+    }
+}
+
+/// F5 from the keymap (`Action::Debug`): continue the stopped session, or start the chosen
+/// configuration, as 디버깅 시작 does.
+pub(crate) fn start_or_continue(s: &Shared) {
+    let Some(request) = s.debug.peek().f5_command() else {
+        if s.debug.peek().active().is_none() {
+            crate::ui::cr::notice::post("시작할 실행 구성이 없습니다. .vscode/launch.json에 구성을 추가하세요.");
+        }
+        return;
+    };
+    if !s.host.state.lock().unwrap().connected {
+        crate::ui::cr::notice::post("서버에 연결되어 있지 않아 디버깅을 시작할 수 없습니다.");
+        return;
+    }
+    if matches!(request, DebugRequest::Start { .. }) {
+        if let Some(reason) = blocked(s, Restricted::Debug) {
+            crate::ui::cr::notice::post(reason);
+            return;
+        }
+    }
+    s.host.send(HostCommand::Debug(request));
+}
+
+/// Shift+F5 from the keymap (`Action::Stop`): the debug session, else the running task.
+pub(crate) fn stop(s: &Shared) {
+    match s.debug.peek().stop_command() {
+        Some(request) => s.host.send(HostCommand::Debug(request)),
+        None => super::editor_tasks::view::stop(s),
     }
 }
 

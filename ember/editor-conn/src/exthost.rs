@@ -806,42 +806,22 @@ pub(crate) fn arg_json(args: &[Arg], i: usize) -> Value {
     args.get(i).and_then(Arg::as_json).cloned().unwrap_or(Value::Null)
 }
 
-/// The reply Ember gives to `MainThread*` calls it does not implement, chosen so the extension
-/// host keeps running. Most upstream methods are `void` or `Promise<void>` (→ `undefined`).
-/// Line numbers are extHost.protocol.ts at [`crate::PINNED_COMMIT`].
-/// The exceptions below would otherwise block or mislead extensions:
-///
-/// * `MainThreadStorage.$initializeExtensionStorage` (L850): awaited during every activation
-///   (`undefined` = no stored state).
-/// * `MainThreadWindow.$getInitialState` (L2301): `{ isFocused, isActive }`.
-/// * `MainThreadWorkspace.$checkExists` (L1976): `workspaceContains:` activation; `false` until Ember
-///   implements glob search over the remote filesystem.
-/// * `MainThreadWorkspace.$isResourceTrusted` / `$requestWorkspaceTrust` (L1986 / L1985): trusted
-///   (the session answers these from its workspace trust first, see `ember_editor::trust`).
-/// * `MainThreadCommands.$getCommands` (L139): empty list.
-/// * Every other method whose declared result is an array (`T[]` or `Promise<T[]>`): an empty
-///   list. The extension host iterates those results, and `undefined` throws
-///   `TypeError: ... is not iterable` (seen with `MainThreadWorkspace.$loadCertificates`, which
-///   the extension host's proxy resolver calls once an extension makes an https request).
-pub fn default_reply(proxy: Option<&str>, method: &str) -> Reply {
-    match (proxy, method) {
-        (Some(proxy::MAIN_THREAD_WINDOW), "$getInitialState") => Reply::Json(json!({ "isFocused": true, "isActive": true })),
-        (Some(proxy::MAIN_THREAD_WORKSPACE), "$checkExists") => Reply::Json(Value::Bool(false)),
-        (Some(proxy::MAIN_THREAD_WORKSPACE), "$isResourceTrusted" | "$requestWorkspaceTrust") => Reply::Json(Value::Bool(true)),
-        (Some(proxy::MAIN_THREAD_COMMANDS), "$getCommands") => Reply::Json(json!([])),
-        _ if returns_array(proxy, method) => Reply::Json(json!([])),
-        _ => Reply::Empty,
-    }
-}
+/// The reply or rejection of a request: what [`RpcPeer::respond`] takes.
+pub type ReplyResult = std::result::Result<Reply, Option<Value>>;
 
-/// The pinned protocol declares `proxy.method` to return an array (bare or in a `Promise`).
-fn returns_array(proxy: Option<&str>, method: &str) -> bool {
-    let Some(m) = proxy.and_then(crate::actors::ActorInfo::by_proxy).and_then(|a| a.method(method)) else {
-        return false;
-    };
-    let t = m.returns.trim();
-    let t = t.strip_prefix("Promise<").and_then(|t| t.strip_suffix('>')).unwrap_or(t).trim();
-    t.ends_with("[]")
+/// The reply Ember gives to `MainThread*` calls it does not implement, chosen per method from the
+/// coverage ledger (SPEC FR-E9, Q-E8 (c), [`crate::coverage::answer`]): the ledger's `answer` (for
+/// example `MainThreadWindow.$getInitialState`, `MainThreadWorkspace.$checkExists` when no session
+/// searches, the `MainThreadPower` constants of Code-OSS's browser power service), its `error` as a
+/// rejected call (`MainThreadAuthentication.$getSession`, as Code-OSS rejects for a provider that is
+/// not registered), else `[]` for a declared array result and `undefined` otherwise. A request with
+/// no known proxy is answered `undefined`.
+pub fn default_reply(proxy: Option<&str>, method: &str) -> ReplyResult {
+    match proxy.map_or(crate::coverage::Answer::Undefined, |p| crate::coverage::answer(p, method)) {
+        crate::coverage::Answer::Undefined => Ok(Reply::Empty),
+        crate::coverage::Answer::Value(v) => Ok(Reply::Json(v)),
+        crate::coverage::Answer::Error(message) => Err(Some(crate::rpc::js_error("Error", &message))),
+    }
 }
 
 #[cfg(test)]
@@ -1035,11 +1015,25 @@ mod tests {
 
     #[test]
     fn storage_init_defaults_to_undefined() {
-        assert_eq!(default_reply(Some(proxy::MAIN_THREAD_STORAGE), "$initializeExtensionStorage"), Reply::Empty);
+        assert_eq!(default_reply(Some(proxy::MAIN_THREAD_STORAGE), "$initializeExtensionStorage"), Ok(Reply::Empty));
         assert_eq!(
             default_reply(Some(proxy::MAIN_THREAD_WINDOW), "$getInitialState"),
-            Reply::Json(json!({"isFocused": true, "isActive": true}))
+            Ok(Reply::Json(json!({"isFocused": true, "isActive": true})))
         );
+    }
+
+    // Q-E8 (c): the fallback reply follows the ledger per method, including a rejection.
+    #[test]
+    fn fr_e9_default_reply_follows_the_ledger_per_method() {
+        assert_eq!(default_reply(Some("MainThreadPower"), "$isOnBatteryPower"), Ok(Reply::Json(json!(false))));
+        assert_eq!(default_reply(Some("MainThreadPower"), "$getCurrentThermalState"), Ok(Reply::Json(json!("unknown"))));
+        assert_eq!(default_reply(Some(proxy::MAIN_THREAD_WORKSPACE), "$checkExists"), Ok(Reply::Json(json!(false))));
+        assert_eq!(default_reply(Some(proxy::MAIN_THREAD_WORKSPACE), "$isResourceTrusted"), Ok(Reply::Json(json!(true))));
+        assert_eq!(default_reply(Some(proxy::MAIN_THREAD_WORKSPACE), "$requestWorkspaceTrust"), Ok(Reply::Json(json!(true))));
+        let rejected = Err(Some(crate::rpc::js_error("Error", "No authentication provider is currently registered.")));
+        assert_eq!(default_reply(Some("MainThreadAuthentication"), "$getSession"), rejected);
+        assert_eq!(default_reply(Some("MainThreadAuthentication"), "$getAccounts"), rejected);
+        assert_eq!(default_reply(Some("MainThreadSecretState"), "$getPassword"), Ok(Reply::Empty));
     }
 
     #[test]
@@ -1051,11 +1045,11 @@ mod tests {
             ("MainThreadSecretState", "$getKeys"),
             ("MainThreadFileSystem", "$readdir"),
         ] {
-            assert_eq!(default_reply(Some(p), m), Reply::Json(json!([])), "{p}.{m}");
+            assert_eq!(default_reply(Some(p), m), Ok(Reply::Json(json!([]))), "{p}.{m}");
         }
-        assert_eq!(default_reply(Some("MainThreadStatusBar"), "$setEntry"), Reply::Empty);
-        assert_eq!(default_reply(Some("MainThreadWorkspace"), "$nope"), Reply::Empty);
-        assert_eq!(default_reply(None, "$loadCertificates"), Reply::Empty);
+        assert_eq!(default_reply(Some("MainThreadStatusBar"), "$setEntry"), Ok(Reply::Empty));
+        assert_eq!(default_reply(Some("MainThreadWorkspace"), "$nope"), Ok(Reply::Empty));
+        assert_eq!(default_reply(None, "$loadCertificates"), Ok(Reply::Empty));
     }
 
     // `$append` and `$clear` are not methods of MainThreadOutputService at the pinned commit

@@ -1393,8 +1393,7 @@ impl Driver {
                             let effects = self.core.handle(Instant::now(), Input::ExtHostRequest(r));
                             self.execute(effects, internal_tx);
                         } else {
-                            let reply = exthost::default_reply(r.proxy, &r.method);
-                            self.peer.respond(r.req, Ok(reply));
+                            self.peer.respond(r.req, exthost::default_reply(r.proxy, &r.method));
                         }
                     }
                     Some(RpcEvent::Cancel(_)) => {}

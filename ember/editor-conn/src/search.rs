@@ -21,6 +21,9 @@ use crate::rpc::Arg;
 use crate::uri::UriComponents;
 use crate::Result;
 
+/// `QueryType.File`.
+pub const QUERY_TYPE_FILE: u8 = 1;
+
 /// `QueryType.Text`.
 pub const QUERY_TYPE_TEXT: u8 = 2;
 
@@ -202,6 +205,54 @@ pub fn provide_text_search_results(handle: i64, session: i64, query: &TextQuery)
         proxy: proxy::EXT_HOST_SEARCH,
         method: "$provideTextSearchResults",
         args: vec![Arg::Json(handle.into()), Arg::Json(session.into()), Arg::Json(query.to_raw())],
+        cancellable: true,
+    }
+}
+
+/// The `IRawFileQuery` of `MainThreadWorkspace.$checkExists(folders, includes)`, as Code-OSS's
+/// `checkGlobFileExists` (`services/extensions/common/workspaceContains.ts`) asks its search
+/// service: `QueryBuilder.file(folders, { _reason: 'checkExists', includePattern: includes, exists:
+/// true })`. The include globs go in as given (not expanded); each folder has the default search
+/// settings (`search.useIgnoreFiles` on, global and parent ignore files off, symlinks followed), and
+/// Code-OSS's default `files.exclude` and `search.exclude` patterns apply. With `exists` the provider
+/// stops at the first file and reports `limitHit`.
+pub fn exists_query(folders: &[UriComponents], includes: &[String]) -> Value {
+    let folder_queries: Vec<Value> = folders
+        .iter()
+        .map(|f| {
+            json!({
+                "folder": f,
+                "disregardIgnoreFiles": false,
+                "disregardGlobalIgnoreFiles": true,
+                "disregardParentIgnoreFiles": true,
+                "ignoreSymlinks": false,
+            })
+        })
+        .collect();
+    let excludes: Vec<String> = DEFAULT_EXCLUDES.iter().map(|s| s.to_string()).collect();
+    let mut q = json!({
+        "_reason": "checkExists",
+        "type": QUERY_TYPE_FILE,
+        "folderQueries": folder_queries,
+        "usingSearchPaths": false,
+        "excludePattern": glob_expression(&excludes),
+        "exists": true,
+    });
+    let includes: Vec<String> = includes.iter().filter(|p| !p.is_empty()).map(|p| p.replace('\\', "/")).collect();
+    if !includes.is_empty() {
+        q["includePattern"] = glob_expression(&includes);
+    }
+    q
+}
+
+/// `ExtHostSearch.$provideFileSearchResults(handle, session, query, token)`: answered with
+/// `ISearchCompleteStats` ([`SearchComplete::from_json`]); the files found arrive as
+/// `MainThreadSearch.$handleFileMatch(handle, session, UriComponents[])`.
+pub fn provide_file_search_results(handle: i64, session: i64, query: Value) -> Call {
+    Call {
+        proxy: proxy::EXT_HOST_SEARCH,
+        method: "$provideFileSearchResults",
+        args: vec![Arg::Json(handle.into()), Arg::Json(session.into()), Arg::Json(query)],
         cancellable: true,
     }
 }
@@ -395,6 +446,30 @@ mod tests {
         assert_eq!(files[0].matches.len(), 1);
         assert_eq!(files[0].matches[0].ranges[0].source.start_line_number, 4);
         assert_eq!(files[0].matches[0].ranges[0].preview.end_column, 8);
+    }
+
+    // FR-E9 (#1043): `$checkExists` asks the provider the query Code-OSS's `checkGlobFileExists` builds.
+    #[test]
+    fn fr_e9_check_exists_query_is_a_code_oss_exists_file_query() {
+        let folders = [UriComponents::remote("h", "/w"), UriComponents::remote("h", "/x")];
+        let q = exists_query(&folders, &["**/Cargo.toml".into(), "**/*.py".into(), String::new()]);
+        assert_eq!(q["type"], 1);
+        assert_eq!(q["_reason"], "checkExists");
+        assert_eq!(q["exists"], true);
+        assert_eq!(q["includePattern"], json!({"**/Cargo.toml": true, "**/*.py": true}), "globs as given, not expanded");
+        assert_eq!(q["folderQueries"].as_array().unwrap().len(), 2);
+        assert_eq!(q["folderQueries"][1]["folder"]["path"], "/x");
+        assert_eq!(q["folderQueries"][1]["folder"]["scheme"], "vscode-remote");
+        assert_eq!(q["folderQueries"][0]["disregardIgnoreFiles"], false);
+        assert_eq!(q["folderQueries"][0]["ignoreSymlinks"], false);
+        assert_eq!(q["excludePattern"]["**/node_modules"], true);
+        assert!(q.get("maxResults").is_none());
+        assert!(exists_query(&folders, &[]).get("includePattern").is_none());
+
+        let c = provide_file_search_results(3, 9, q.clone());
+        assert_eq!((c.proxy, c.method, c.cancellable), ("ExtHostSearch", "$provideFileSearchResults", true));
+        assert_eq!(c.args, vec![Arg::Json(json!(3)), Arg::Json(json!(9)), Arg::Json(q)]);
+        assert!(crate::rpc_ids::id_of(c.proxy).is_some());
     }
 
     #[test]

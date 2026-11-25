@@ -35,6 +35,10 @@ fn gaps(fx: &[Effect]) -> Vec<(String, String, Option<String>, u32)> {
         .collect()
 }
 
+fn no_provider() -> Value {
+    ember_editor_conn::rpc::js_error("Error", "No authentication provider is currently registered.")
+}
+
 fn key(proxy: &str, method: &str) -> (String, String) {
     (proxy.to_string(), method.to_string())
 }
@@ -46,7 +50,8 @@ fn fr_e9_todo_call_with_a_value_is_recorded_with_count_and_named_extension() {
     // $getSession(providerId, scopes, extensionId, extensionName, options): Promise<Dto | undefined>, todo in the ledger.
     let fx = c.handle(t0, request(1, "MainThreadAuthentication", "$getSession", vec![json!("github"), json!(["repo"]), json!("pub.one"), json!("Pub"), json!({})]));
     assert_eq!(gaps(&fx), vec![("MainThreadAuthentication".into(), "$getSession".into(), Some("pub.one".into()), 1)]);
-    assert!(fx.contains(&Effect::Respond { req: 1, result: Ok(Reply::Empty) }), "{fx:?}");
+    // The ledger's `error` for $getSession (Q-E8 (c)): rejected as Code-OSS rejects an unregistered provider.
+    assert!(fx.contains(&Effect::Respond { req: 1, result: Err(Some(no_provider())) }), "{fx:?}");
     let fx = c.handle(t0, request(2, "MainThreadAuthentication", "$getSession", vec![json!("github"), json!(["repo"]), json!("pub.two"), json!("Pub"), json!({})]));
     assert_eq!(gaps(&fx), vec![("MainThreadAuthentication".into(), "$getSession".into(), Some("pub.two".into()), 2)]);
 
@@ -86,4 +91,29 @@ fn fr_e9_acked_and_out_calls_are_answered_and_neither_counted_nor_recorded() {
         assert!(fx.iter().any(|e| matches!(e, Effect::Respond { req: r, result: Ok(_) } if *r == req)), "{proxy}.{method}: {fx:?}");
     }
     assert!(c.unimplemented_calls().is_empty(), "{:?}", c.unimplemented_calls());
+}
+
+// Q-E8 (c): the session's fallback reply is the ledger's answer for that method, not one blanket
+// rule: a JSON value, a rejection, or by the declared result (`[]` for an array, else `undefined`).
+#[test]
+fn fr_e9_fallback_reply_is_chosen_per_method_from_the_ledger() {
+    let t0 = Instant::now();
+    let mut c = core(t0);
+    let cases: Vec<(&'static str, &str, Vec<Value>, Result<Reply, Option<Value>>)> = vec![
+        // `answer`: Code-OSS's BrowserPowerService constants.
+        ("MainThreadPower", "$isOnBatteryPower", vec![], Ok(Reply::Json(json!(false)))),
+        ("MainThreadPower", "$getCurrentThermalState", vec![], Ok(Reply::Json(json!("unknown")))),
+        ("MainThreadPower", "$getSystemIdleTime", vec![], Ok(Reply::Json(json!(0)))),
+        // `error`: Code-OSS rejects for a provider that is not registered.
+        ("MainThreadAuthentication", "$getAccounts", vec![json!("github")], Err(Some(no_provider()))),
+        // No ledger answer: an array result answers [], anything else undefined.
+        ("MainThreadSecretState", "$getKeys", vec![json!("pub.ext")], Ok(Reply::Json(json!([])))),
+        ("MainThreadWorkspace", "$startFileSearch", vec![json!(null), json!({}), json!(null)], Ok(Reply::Empty)),
+        ("MainThreadStatusBar", "$disposeEntry", vec![json!("e")], Ok(Reply::Empty)),
+    ];
+    for (i, (proxy, method, args, want)) in cases.into_iter().enumerate() {
+        let req = i as u32 + 1;
+        let fx = c.handle(t0, request(req, proxy, method, args));
+        assert!(fx.contains(&Effect::Respond { req, result: want.clone() }), "{proxy}.{method}: want {want:?}, got {fx:?}");
+    }
 }

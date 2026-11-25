@@ -117,22 +117,6 @@ impl Fixture {
         v["error"].as_str().unwrap().to_string()
     }
 
-    async fn status(&self, repo: &Path) -> GitStatus {
-        self.ok("status", &GitRepoRequest { repo: s(repo) }).await
-    }
-
-    async fn diff(&self, repo: &Path, path: Option<&str>, staged: bool) -> String {
-        let d: GitDiff = self
-            .ok("diff", &GitDiffRequest { repo: s(repo), path: path.map(str::to_string), staged, include_untracked: false })
-            .await;
-        d.patch
-    }
-
-    async fn stage(&self, repo: &Path, paths: &[&str]) {
-        let body = GitPathsRequest { repo: s(repo), paths: paths.iter().map(|p| p.to_string()).collect() };
-        self.no_content("stage", &body).await;
-    }
-
     async fn commit(&self, repo: &Path, summary: &str) -> GitCommitResponse {
         self.ok(
             "commit",

@@ -9,7 +9,7 @@
 
 #![allow(non_snake_case)]
 
-use compose_rust::runtime::{launched_effect, mutable_state_of, remember_with_key, MutableState};
+use compose_rust::runtime::{key, launched_effect, mutable_state_of, remember_with_key, MutableState};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
 use compose_rust::{Alignment, SpaceRole};
@@ -46,7 +46,13 @@ pub struct OwnerState {
     /// The hours the next allowance gets: a preset, or the valid custom value.
     hours: MutableState<u32>,
     custom: MutableState<String>,
-    /// Bumped to draw a fresh custom field.
+    /// The custom field's identity. compose-rust's `TextField` is uncontrolled up to the pinned
+    /// rev (e52fbd3): the Renderer reads `Text` once per node (`HostTextField.kt`
+    /// `remember(nodeId)`), and an empty text is not written at all, so clearing `custom` alone
+    /// leaves the typed value on screen. Bumping this draws a fresh field that starts from
+    /// `custom`, the way the toolkit says to show other text (`TextFieldScope::text`).
+    /// TODO(compose-rust#1075): drop this and the `key` around the field once a live field takes
+    /// a new `text` (and `""`) from composition.
     custom_gen: MutableState<u64>,
     /// An action is in flight: the buttons wait, so one tap is one request.
     busy: MutableState<bool>,
@@ -185,7 +191,7 @@ impl OwnerState {
     }
 
     /// Drops what must not outlive the sheet: the link, the confirm, the armed create, the
-    /// custom hours text (the field is redrawn empty).
+    /// custom hours text (the field is drawn again, empty).
     fn reset(&self) {
         if self.sample {
             return;
@@ -196,7 +202,7 @@ impl OwnerState {
         self.armed_at.set(0);
         self.create_armed.set(false);
         self.custom.set(String::new());
-        self.custom_gen.set(self.custom_gen.get_untracked() + 1);
+        self.custom_gen.set(self.custom_gen.get_untracked().wrapping_add(1));
     }
 
     /// Reads invites and guests; a failure keeps what is shown and says so.
@@ -526,29 +532,28 @@ fn GuestList(channel: &str, st: &OwnerState) {
     let hours = st.hours.clone();
     let st_c = st.clone();
     HourChips(&ALLOW_PRESETS, current, move |h| {
-        // A preset replaces a typed value: the field is redrawn empty (generation bump).
+        // A preset replaces a typed value: `custom` is cleared and the field drawn again from it.
         st_c.confirm.set(Confirm::None);
         st_c.custom.set(String::new());
-        st_c.custom_gen.set(st_c.custom_gen.get_untracked() + 1);
+        st_c.custom_gen.set(st_c.custom_gen.get_untracked().wrapping_add(1));
         hours.set(h)
     });
     let custom = st.custom.get();
     { use ::compose_rust::ui::Row; Row!(space_role = SpaceRole::Sm, alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
-        // Read here so a generation bump redraws the field empty.
-        let _gen = st.custom_gen.get();
-        // v0.0.7: #374 fixed (`TextField::text`); workaround kept until checked on a display (a
-        // controlled value must not move the caret), so the field is uncontrolled.
         let (text, hours) = (st.custom.clone(), st.hours.clone());
-        EmberField(FieldOptions {
-            weight: Some(1.0),
-            placeholder: format!("직접 입력 ({MIN_HOURS}~{MAX_HOURS}시간)"),
-            on_value_change: Some(Box::new(move |v| {
-                if let Some((h, _)) = clamp_hours(&v) {
-                    hours.set(h);
-                }
-                text.set(v);
-            })),
-            ..Default::default()
+        key(st.custom_gen.get(), || {
+            EmberField(FieldOptions {
+                weight: Some(1.0),
+                text: Some(custom.clone()),
+                placeholder: format!("직접 입력 ({MIN_HOURS}~{MAX_HOURS}시간)"),
+                on_value_change: Some(Box::new(move |v| {
+                    if let Some((h, _)) = clamp_hours(&v) {
+                        hours.set(h);
+                    }
+                    text.set(v);
+                })),
+                ..Default::default()
+            })
         });
     }) };
     match clamp_hours(&custom) {
@@ -700,6 +705,86 @@ mod tests {
         let text = text_of(open_sheet);
         assert!(text.contains("멤버/게스트") && text.contains("서버에 연결되어 있지 않아"), "{text}");
         assert!(!text.contains("허용 중"));
+    }
+
+    #[test]
+    fn fr_t14_custom_hours_field_emits_controlled_text() {
+        use compose_rust::protocol::{decode_batch, HostEvent, Mutation, PropertyValue};
+        use compose_rust::runtime::remember;
+        use compose_rust::{EventPayload, PropertyKind, WidgetKind};
+
+        let mut host = Host::new(|| {
+            Box::new(Recomposer::new(|| {
+                let st = OwnerState::new("c1");
+                remember(|| {
+                    st.load.set(OwnerLoad::Ready);
+                    st.custom.set("12".to_string());
+                });
+                GuestList("c1", &st);
+            }))
+        });
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let text_fields: Vec<u32> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::Create { node_id, widget: WidgetKind::TextField } => Some(*node_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text_fields.len(), 1, "expected one custom-hours TextField");
+        let field_id = text_fields[0];
+        let field_texts: Vec<&str> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) }
+                    if *node_id == field_id =>
+                {
+                    Some(*s)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(field_texts, vec!["12"], "custom-hours TextField must emit controlled PropertyKind::Text");
+
+        // Picking a preset clears the field: the field is drawn again from the emptied `custom`.
+        let (preset_node, preset_handler) = batch
+            .iter()
+            .find_map(|m| match m {
+                Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
+                    Some((*node_id, *h as u64))
+                }
+                _ => None,
+            })
+            .expect("expected a preset hour button with OnClick");
+        let (bytes, _) = host
+            .dispatch(HostEvent::new(preset_node, preset_handler, EventPayload::Clicked))
+            .expect("dispatch preset click");
+        let after = decode_batch(bytes).expect("decode after click");
+        // The Renderer applies `Text` only when a field node is created (compose-rust e52fbd3
+        // `HostTextField.kt`), so clearing means a fresh field node whose text is empty (an
+        // empty text is not written), with the old one taken away.
+        let fresh: Vec<u32> = after
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::Create { node_id, widget: WidgetKind::TextField } => Some(*node_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fresh.len(), 1, "preset click must draw the custom-hours TextField again: {after:?}");
+        assert_ne!(fresh[0], field_id, "the cleared field is a new node, not the one showing 12");
+        let fresh_texts: Vec<&str> = after
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) }
+                    if *node_id == fresh[0] =>
+                {
+                    Some(*s)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(fresh_texts.iter().all(|s| s.is_empty()), "preset click must clear the controlled custom-hours TextField: {fresh_texts:?}");
+        assert!(after.iter().any(|m| matches!(m, Mutation::Remove { .. })), "the field showing 12 is taken away: {after:?}");
     }
 }
 

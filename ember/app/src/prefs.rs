@@ -1,10 +1,12 @@
 //! Per-device UI choices: the last-used new-session combination per project (FR-L8), the
-//! project selected last, and the remembered "Open IDE" target (FR-L7).
+//! project selected last, and the remembered "Open IDE" target per project (FR-L7, FR-W7b).
 //!
 //! Pins, archive marks and titles (FR-L9) and computer assignments (FR-L4) live on the main
 //! server so every client sees them (`PATCH /sessions/{id}`, `/projects/…/computers/…`). Older
 //! prefs files carried `pinned`, `archived` and `titles`; those keys are ignored when read and
-//! dropped on the next save.
+//! dropped on the next save. Older files also carried one global `ide_target`; since D56 the
+//! remembered IDE is per project (`ide_targets`), so the old key is ignored when read (it names no
+//! project to file it under) and dropped on the next save.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -45,9 +47,11 @@ pub struct Prefs {
     /// The project selected on the main screen last time.
     #[serde(default)]
     pub last_project: Option<String>,
-    /// `ember`, `vscode` or `gateway`.
+    /// The IDE last picked in the chooser, per project (FR-W7b, INTENT D56): project name to
+    /// `ember`, `vscode` or `gateway`. A project with no entry follows the computer's effective
+    /// `default_ide` ([`crate::ide::effective_default_ide`]).
     #[serde(default)]
-    pub ide_target: Option<String>,
+    pub ide_targets: BTreeMap<String, String>,
     /// System, Light or Dark (FR-L28). Older files have none, which reads as System.
     #[serde(default)]
     pub theme: crate::ui::theme::ThemePref,
@@ -114,7 +118,7 @@ impl Default for Prefs {
             format: PREFS_FORMAT,
             last_used: BTreeMap::new(),
             last_project: None,
-            ide_target: None,
+            ide_targets: BTreeMap::new(),
             theme: crate::ui::theme::ThemePref::default(),
             session_view: None,
             panes: BTreeMap::new(),
@@ -192,10 +196,35 @@ impl Prefs {
         if let Some(v) = self.panes.remove(old) {
             self.panes.entry(new.to_string()).or_insert(v);
         }
+        if let Some(v) = self.ide_targets.remove(old) {
+            self.ide_targets.entry(new.to_string()).or_insert(v);
+        }
         self.move_character_style(old, new);
         if self.last_project.as_deref() == Some(old) {
             self.last_project = Some(new.to_string());
         }
+    }
+
+    /// The IDE the user last picked in `project` (FR-W7b); `None` when none was picked there.
+    pub fn picked_ide(&self, project: &str) -> Option<crate::ide::IdeKind> {
+        self.ide_targets.get(project).and_then(|k| crate::ide::IdeKind::from_key(k))
+    }
+
+    /// The IDE every "IDE 열기" header launches for a session of `project` on `computer`
+    /// (FR-L7, FR-W7b): the project's pick, else the computer's effective `default_ide`. `None`:
+    /// the button opens the chooser.
+    pub fn ide_for(&self, project: &str, computer: Option<&str>) -> Option<crate::ide::IdeKind> {
+        self.picked_ide(project)
+            .or_else(|| crate::ide::effective_default_ide(project, computer))
+    }
+
+    /// Record a pick in the chooser as `project`'s IDE (FR-W7b). A session with no known project
+    /// (an empty name) records nothing, so one stray pick never becomes every such session's.
+    pub fn set_ide_target(&mut self, project: &str, kind: crate::ide::IdeKind) {
+        if project.is_empty() {
+            return;
+        }
+        self.ide_targets.insert(project.to_string(), kind.key().to_string());
     }
 
     pub fn set_character_style(&mut self, project: &str, style: crate::ui::characters::CharStyle) {
@@ -278,7 +307,7 @@ mod tests {
                 cwd: "/w".into(),
             },
         );
-        p.ide_target = Some("vscode".into());
+        p.set_ide_target("ember", crate::ide::IdeKind::VsCode);
         save(&path, &p).unwrap();
         assert_eq!(load(&path), p);
         std::fs::write(&path, b"{nope").unwrap();
@@ -382,12 +411,73 @@ mod tests {
         )
         .unwrap();
         let p = load(&path);
-        assert_eq!(p.ide_target.as_deref(), Some("ember"));
+        // The global `ide_target` of older files is ignored (FR-W7b).
+        assert!(p.ide_targets.is_empty());
         save(&path, &p).unwrap();
-        assert!(
-            !std::fs::read_to_string(&path).unwrap().contains("pinned"),
-            "dropped on save"
-        );
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("pinned"), "dropped on save");
+        assert!(!saved.contains("\"ide_target\""), "dropped on save");
+    }
+
+    /// SPEC FR-W7b, INTENT D56: the IDE picked in a project is that project's default only. After
+    /// a pick of Gateway in project A, A launches Gateway directly and B, with no pick and no
+    /// effective `default_ide` yet (FR-W7 not built), opens the chooser.
+    #[test]
+    fn fr_w7b_the_remembered_ide_is_per_project() {
+        use crate::ide::IdeKind;
+        use crate::ui::cr::session::{IdeClick, ide_click};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        let mut p = Prefs::default();
+        assert_eq!(p.ide_for("A", None), None);
+        p.set_ide_target("A", IdeKind::Gateway);
+        save(&path, &p).unwrap();
+        let p = load(&path);
+        assert_eq!(p.picked_ide("A"), Some(IdeKind::Gateway));
+        assert_eq!(p.ide_for("A", Some("node-a")), Some(IdeKind::Gateway));
+        assert_eq!(ide_click(p.ide_for("A", None)), IdeClick::Launch(IdeKind::Gateway));
+        assert_eq!(p.picked_ide("B"), None);
+        assert_eq!(p.ide_for("B", None), None);
+        assert_eq!(ide_click(p.ide_for("B", None)), IdeClick::Choose);
+        // A later pick in A replaces A's only.
+        let mut p = p;
+        p.set_ide_target("A", IdeKind::VsCode);
+        p.set_ide_target("B", IdeKind::Ember);
+        assert_eq!(p.ide_for("A", None), Some(IdeKind::VsCode));
+        assert_eq!(p.ide_for("B", None), Some(IdeKind::Ember));
+        // A session with no project records nothing.
+        p.set_ide_target("", IdeKind::Gateway);
+        assert!(!p.ide_targets.contains_key(""));
+        // A renamed project keeps its pick (FR-L26).
+        p.rename_project_keys("A", "A2");
+        assert_eq!(p.picked_ide("A2"), Some(IdeKind::VsCode));
+        assert_eq!(p.picked_ide("A"), None);
+        // An unknown key in the file is no pick.
+        p.ide_targets.insert("C".into(), "cursor".into());
+        assert_eq!(p.ide_for("C", None), None);
+    }
+
+    /// SPEC FR-W7b: a prefs file from before the per-project map (with or without the old global
+    /// `ide_target`) loads with no picks, keeping its other choices.
+    #[test]
+    fn fr_w7b_old_prefs_without_the_map_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        std::fs::write(&path, br#"{"format":1,"ide_target":"gateway","last_project":"ember"}"#).unwrap();
+        let p = load(&path);
+        assert!(p.ide_targets.is_empty());
+        assert_eq!(p.last_project.as_deref(), Some("ember"));
+        assert_eq!(p.ide_for("ember", None), None);
+        std::fs::write(&path, br#"{"format":1,"last_project":"ember"}"#).unwrap();
+        let p = load(&path);
+        assert!(p.ide_targets.is_empty());
+        assert_eq!(p.last_project.as_deref(), Some("ember"));
+        // The map round-trips.
+        let mut p = p;
+        p.set_ide_target("ember", crate::ide::IdeKind::Gateway);
+        save(&path, &p).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("\"ide_targets\""));
+        assert_eq!(load(&path), p);
     }
 
     #[test]

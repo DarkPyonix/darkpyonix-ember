@@ -92,7 +92,7 @@ fn never_narrow(segs: &[&str]) -> bool {
         segs,
         ["server-token", ..] | ["devices", ..] | ["chatgpt", ..]
             | ["computers", _, "terms", ..] | ["a2a", "terminal", ..]
-            | ["computers", _, "ide", ..] | ["computers", _, "fs", ..] | ["sessions", _, "ide"]
+            | ["computers", _, "ide", ..] | ["computers", _, "fs", ..] | ["sessions", _, "ide", ..]
             | ["browsers", _, "view" | "input" | "cdp" | "agent-config", ..]
             | ["agents", "antigravity", "hook"]
     )
@@ -211,6 +211,10 @@ mod tests {
         assert!(!r.allows(&Method::POST, "/api/sessions"));
         assert!(!r.allows(&Method::GET, "/api/computers/local/terms/t1/attach"));
         assert!(!r.allows(&Method::GET, "/api/sessions/s1/ide"));
+        // FR-W4c (1c): the VS Code pick starts an OSE, so no narrow scope reaches it.
+        assert!(!r.allows(&Method::POST, "/api/sessions/s1/ide/vscode"));
+        assert!(!Scope::ChatOnly.allows(&Method::POST, "/api/sessions/s1/ide/vscode"));
+        assert!(Scope::Full.allows(&Method::POST, "/api/sessions/s1/ide/vscode"));
         assert!(!r.allows(&Method::GET, "/api/server-token"));
         assert!(!r.allows(&Method::GET, "/api/devices"));
         assert!(!r.allows(&Method::GET, "/api/sessions/../devices"));

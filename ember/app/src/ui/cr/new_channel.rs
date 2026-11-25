@@ -27,8 +27,6 @@ use crate::ui::project::{display_name, CloseAction, SettingsGuard, DISCARD_QUEST
 pub struct NewChannelState {
     pub open: MutableState<bool>,
     pub(super) draft: MutableState<NewChannelDraft>,
-    /// Bumped to draw a fresh name field (the field is uncontrolled).
-    generation: MutableState<u64>,
     busy: MutableState<bool>,
     /// The last failure, a fixed sentence.
     failure: MutableState<Option<String>>,
@@ -52,7 +50,6 @@ impl NewChannelState {
             NewChannelState {
                 open: mutable_state_of(review),
                 draft: mutable_state_of(draft),
-                generation: mutable_state_of(0),
                 busy: mutable_state_of(false),
                 failure: mutable_state_of(None),
                 confirm: mutable_state_of(false),
@@ -65,7 +62,6 @@ impl NewChannelState {
     pub(super) fn start(&self, filter: Option<&str>) {
         let projects = project_names();
         self.draft.set(NewChannelDraft::new(&default_new_project(filter, &projects)));
-        self.generation.set(self.generation.get_untracked() + 1);
         self.failure.set(None);
         self.confirm.set(false);
         self.open.set(true);
@@ -244,10 +240,7 @@ pub fn NewChannelSheet(st: &NewChannelState, rooms: &[Room], feed: Option<Feed>,
                 // Name.
                 { use ::compose_rust::ui::Column; Column!(spacing = 4.0, modifier = Modifier::new().fill_max_width(), {
                     Label("이름", Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(1));
-                    let _gen = st.generation.get();
                     let d = st.draft.clone();
-                    // v0.0.7: #374 fixed (`TextField::text`); workaround kept until checked on a
-                    // display (a controlled value must not move the caret), so it is uncontrolled.
                     EmberField(FieldOptions {
                         fill_max_width: true,
                         placeholder: "채널 이름".to_string(),
@@ -409,5 +402,52 @@ mod review_tests {
         }
         let src = include_str!("new_channel.rs").split("mod review_tests {").next().unwrap();
         assert!(!src.contains(&["cu::", "Button("].concat()), "no toolkit button over the ring");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use compose_rust::protocol::{decode_batch, Mutation, PropertyValue};
+    use compose_rust::{Host, PropertyKind, Recomposer, WidgetKind};
+
+    #[test]
+    fn fr_t10_new_channel_name_field_emits_controlled_text() {
+        let _guard = crate::services::test_guard();
+        let mut host = Host::new(|| {
+            Box::new(Recomposer::new(|| {
+                let st = NewChannelState::new();
+                remember(|| {
+                    st.open.set(true);
+                    let mut draft = NewChannelDraft::new("alpha");
+                    draft.name = "설계 채널".to_string();
+                    st.draft.set(draft);
+                });
+                let open = remember(|| mutable_state_of(None::<String>));
+                NewChannelSheet(&st, &[], None, &open);
+            }))
+        });
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let text_fields: Vec<u32> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::Create { node_id, widget: WidgetKind::TextField } => Some(*node_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text_fields.len(), 1, "expected one channel-name TextField");
+        let field_id = text_fields[0];
+        let field_texts: Vec<&str> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) }
+                    if *node_id == field_id =>
+                {
+                    Some(*s)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(field_texts, vec!["설계 채널"], "channel-name TextField must emit controlled PropertyKind::Text");
     }
 }

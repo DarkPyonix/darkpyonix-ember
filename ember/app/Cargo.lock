@@ -1389,6 +1389,8 @@ dependencies = [
  "ember-client",
  "ember-editor",
  "ember-editor-conn",
+ "ember-gateway",
+ "ember-node",
  "ember-server",
  "ember-transport",
  "futures-util",
@@ -1458,6 +1460,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ember-gateway"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "getrandom 0.3.4",
+ "rustls",
+ "tokio",
+ "tokio-tungstenite 0.28.0",
+ "tracing",
+]
+
+[[package]]
 name = "ember-hub"
 version = "0.1.0"
 dependencies = [
@@ -1506,10 +1520,12 @@ dependencies = [
  "sysinfo",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-rustls",
  "tokio-tungstenite 0.29.0",
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "webpki-roots 1.0.12",
  "windows-sys 0.61.2",
  "x25519-dalek",
  "zeroize",

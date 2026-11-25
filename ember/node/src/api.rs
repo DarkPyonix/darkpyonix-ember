@@ -59,8 +59,8 @@
 //! | POST | `/terms/{id}/control` | [`TermControlRequest`] → 204 |
 //! | POST | `/terms/{id}/kill` | [`KillRequest`] → 204 (default SIGHUP, then SIGKILL) |
 //! | DELETE | `/terms/{id}` | → 204 (409 while running) |
-//! | POST | `/ide/ose` | [`crate::ose_api::OseLaunchRequest`] → [`crate::ose_api::OseLaunchResponse`] (FR-W4b: start or reuse the folder's OSE; the token in the answer is a placeholder; 403 outside the roots, 404 for a missing folder, 503 without an OSE binary) |
-//! | GET (WS) | `/ide/ose/{launch_id}/relay` | raw byte relay to the launch's loopback OSE, the placeholder replaced by the real token ([`crate::ose_api`]; 404 for an unknown launch, 429 at the relay limit) |
+//! | POST | `/ide/ose` | [`crate::ose_api::OseLaunchRequest`] → [`crate::ose_api::OseLaunchResponse`] (FR-W4b, D55: a launch ticket from the DarkPyonix manager, `{launch_id, path, ticket, ose_commit?}`; 403 outside the roots, 404 for a missing folder, 503 `manager_not_installed` or `ose_not_installed`, 502 `manager_unreachable` or `manager_error`) |
+//! | GET (WS) | `/ide/ose/{launch_id}/relay` | raw byte relay to the manager's endpoint, nothing replaced ([`crate::ose_api`]; 404 for an unknown launch, 429 at the relay limit) |
 //! | POST | `/ide/extensions` | `{id, version?}` → `{installed, id, output}` (FR-W4b: 400 for a bad id, 409 while another install runs, 502 for a failed run, 503 without an OSE binary) |
 //! | GET, POST | `/transfers`, `/transfers/offers`, `/transfers/offers/{id}/accept`, `/transfers/offers/{id}/decline`, `/transfers/{id}/chunks`, `/transfers/{id}/resume-offset/{file}`, `/transfers/{id}/complete`, `/pause`, `/resume`, `/cancel`, `/transfers/history` (GET, DELETE) | the file receiver ([`crate::transfers`], FR-F13): the server's `/api/transfers*` bodies; 507 `no_space` (FR-F16); 409 without a state folder |
 //!
@@ -98,7 +98,7 @@ use crate::git::git_merge;
 use crate::git::git_stash::{self, GitStashEntry, GitStashIndexRequest, GitStashOperation, GitStashPushRequest};
 use crate::git_conflict::{self, GitConflict, GitConflictRequest, GitResolveRequest};
 use crate::jobs::{Jobs, Removal};
-use crate::ose::OseManager;
+use crate::editor_manager::{EditorRelays, ManagerSource};
 use crate::policy::{PathPolicy, PolicyError};
 use crate::proto::*;
 use crate::term::Terms;
@@ -111,9 +111,9 @@ struct Inner {
     egress: Arc<crate::egress::EgressPolicy>,
     /// The file receiver (`FR-F13`).
     transfers: Arc<crate::transfers::Receiver>,
-    /// The OSE of this computer's projects (`FR-W4a`); [`OseManager::disabled`] unless the
-    /// node was built with [`Node::with_ose`].
-    ose: Arc<OseManager>,
+    /// The editor launches and relays of this computer's projects, through the DarkPyonix
+    /// manager (`FR-W4b`, D55).
+    editor: Arc<EditorRelays>,
     /// Serialises writes so a hash precondition and the rename that follows it are atomic with
     /// respect to other writes through this daemon.
     write_lock: tokio::sync::Mutex<()>,
@@ -128,15 +128,15 @@ struct Inner {
 pub struct Node(Arc<Inner>);
 
 impl Node {
-    /// A node without an OSE: its `/ide` routes answer 503 (the server's in-process local node,
-    /// whose OSE the server manages itself, and tests).
+    /// A node whose `/ide` routes ask the DarkPyonix manager named by `<state dir>/manager.json`,
+    /// else by `DARKPYONIX_MANAGER_URL` and `DARKPYONIX_TOKEN` (SPEC FR-W4b, D55).
     pub fn new(config: NodeConfig) -> anyhow::Result<Self> {
-        Self::with_ose(config, Arc::new(OseManager::disabled()))
+        let source = ManagerSource::discover(config.state_dir.clone());
+        Self::with_editor(config, Arc::new(EditorRelays::new(source)))
     }
 
-    /// A node that runs the OSE of its projects through `ose` (SPEC FR-W4a): what the `ember-node`
-    /// daemon builds, with [`OseManager::for_node`].
-    pub fn with_ose(config: NodeConfig, ose: Arc<OseManager>) -> anyhow::Result<Self> {
+    /// A node whose `/ide` routes use `editor` (tests: a fixed or absent manager, other limits).
+    pub fn with_editor(config: NodeConfig, editor: Arc<EditorRelays>) -> anyhow::Result<Self> {
         anyhow::ensure!(!config.token.is_empty(), "token must not be empty");
         let jobs = Jobs::new();
         let terms = Terms::new(config.state_dir.as_deref(), config.pty_keeper.clone(), jobs.clone());
@@ -152,16 +152,16 @@ impl Node {
             terms,
             egress: Arc::new(config.egress),
             transfers,
-            ose,
+            editor,
             write_lock: tokio::sync::Mutex::new(()),
             watch_limits: crate::fs_watch::WatchLimits::default(),
             watch_total: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         })))
     }
 
-    /// The OSE manager of this node (`FR-W4a`).
-    pub fn ose(&self) -> &Arc<OseManager> {
-        &self.0.ose
+    /// The editor launches and relays of this node (`FR-W4b`, D55).
+    pub fn editor(&self) -> &Arc<EditorRelays> {
+        &self.0.editor
     }
 
     pub fn jobs(&self) -> &Arc<Jobs> {

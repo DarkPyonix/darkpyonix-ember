@@ -7,11 +7,11 @@
 //! | DELETE | `/api/computers/{id}/ide/extensions/{publisher.name}` | none | 200 `{uninstalled,id,output}` |
 //! | GET | `/api/ide/extensions/search?q=<text>&offset=<n>` | none | 200 `{offset,total,extensions}` |
 //!
-//! The local computer's OSE is this server's. A registered computer's OSE runs on its node (SPEC
-//! FR-W4c, #896): the install is forwarded to the node's `POST /ide/extensions` and the node's
-//! status and body come back unchanged (502 when the node does not answer; a 401 or 403 of the
-//! node, which refuses this server and not the caller, is 502 `node_auth_failed`). Uninstall is not
-//! forwarded: for a registered computer it still answers 400. An unknown computer is 404. The id and version are
+//! The local computer's OSE is this server's. A registered computer's OSE runs on its node:
+//! install is forwarded to the node's `POST /ide/extensions` and uninstall is forwarded to the
+//! node's `DELETE /ide/extensions/{extension}`, with the node's status and body returned unchanged
+//! (502 when the node does not answer; a 401 or 403 of the node, which refuses this server and not
+//! the caller, is 502 `node_auth_failed`). An unknown computer is 404. The id and version are
 //! checked against a strict pattern (`ose::extension_spec`): no VSIX paths, no URLs, nothing
 //! that starts with `-`. The OSE binary runs directly (no shell) with the computer's data dir;
 //! at most one install or uninstall per computer runs at a time (a second answers 409); a run is
@@ -279,19 +279,8 @@ fn place(st: &St, computer: &str) -> Place {
 /// Longest wait for a forwarded install: the node's own 120 s run limit plus the round trip.
 const NODE_INSTALL_TIMEOUT: Duration = Duration::from_secs(150);
 
-/// Forwards an install to the node of the registered computer `computer` and answers with the
-/// node's status and body (SPEC FR-W4c). The node checks the id, runs one install at a time and
-/// enforces the timeout; nothing runs on this server.
-async fn install_on_node(st: &St, computer: &str, body: &[u8]) -> Response {
-    let request: Value = match serde_json::from_slice(body) {
-        Ok(v) => v,
-        Err(e) => return error(StatusCode::BAD_REQUEST, format!("bad request body: {e}")),
-    };
-    let node = match st.computers.client(computer) {
-        Ok(n) => n.with_deadline(NODE_INSTALL_TIMEOUT),
-        Err(e) => return error(StatusCode::BAD_GATEWAY, format!("node unreachable: {e:#}")),
-    };
-    match node.post_raw("/ide/extensions", &request).await {
+fn node_response(computer: &str, res: Result<(u16, Vec<u8>), ember_node::client::ClientError>) -> Response {
+    match res {
         // The node refused this server (a stale node token), not the caller: never its 401.
         Ok((status, _)) if super::ide::node_refused_server(status) => super::ide::node_auth_failed(computer),
         Ok((status, bytes)) => (
@@ -302,6 +291,36 @@ async fn install_on_node(st: &St, computer: &str, body: &[u8]) -> Response {
             .into_response(),
         Err(e) => error(StatusCode::BAD_GATEWAY, format!("node unreachable: {e}")),
     }
+}
+
+/// Forwards an install to the node of the registered computer `computer` and answers with the
+/// node's status and body. The node checks the id, runs one install at a time and enforces the
+/// timeout; nothing runs on this server.
+async fn install_on_node(st: &St, computer: &str, body: &[u8]) -> Response {
+    let request: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return error(StatusCode::BAD_REQUEST, format!("bad request body: {e}")),
+    };
+    let node = match st.computers.client(computer) {
+        Ok(n) => n.with_deadline(NODE_INSTALL_TIMEOUT),
+        Err(e) => return error(StatusCode::BAD_GATEWAY, format!("node unreachable: {e:#}")),
+    };
+    node_response(computer, node.post_raw("/ide/extensions", &request).await)
+}
+
+/// Forwards an uninstall to the node of the registered computer `computer` and answers with the
+/// node's status and body. The id is validated before building the node path so no path traversal
+/// or query injection can reach the node; nothing runs on this server.
+async fn uninstall_on_node(st: &St, computer: &str, extension: &str) -> Response {
+    if let Err(m) = extension_spec(extension, None) {
+        return error(StatusCode::BAD_REQUEST, m);
+    }
+    let node = match st.computers.client(computer) {
+        Ok(n) => n.with_deadline(NODE_INSTALL_TIMEOUT),
+        Err(e) => return error(StatusCode::BAD_GATEWAY, format!("node unreachable: {e:#}")),
+    };
+    let path = format!("/ide/extensions/{extension}");
+    node_response(computer, node.request_raw(axum::http::Method::DELETE, &path, None).await)
 }
 
 /// The answer for a run that did not succeed. `done` is the body flag of the run (`installed` or
@@ -343,8 +362,7 @@ async fn install(State(st): State<St>, Path(computer): Path<String>, body: Bytes
 async fn uninstall(State(st): State<St>, Path((computer, extension)): Path<(String, String)>) -> Response {
     match place(&st, &computer) {
         Place::Local => {}
-        // Not forwarded: the node has no uninstall route (FR-W4c covers the install).
-        Place::Node => return error(StatusCode::BAD_REQUEST, "OSE server is only available on the local computer"),
+        Place::Node => return uninstall_on_node(&st, &computer, &extension).await,
         Place::Refused(answer) => return answer,
     }
     let ose = st.ose.clone();

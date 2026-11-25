@@ -1,6 +1,10 @@
-//! SPEC FR-W4, FR-N3, FR-T14 (#458, #461): authenticated WebSocket relay for the OSE socket
-//! (`GET /api/computers/{computer}/ide/relay/{launch_id}`) and C2 placeholder-to-real-token
-//! substitution in the first 8 KiB of the client-to-OSE stream.
+//! SPEC FR-W4, FR-W4c, FR-N3, FR-T14 (#458, #461, D55, #1064): the authenticated WebSocket relay
+//! of the local computer (`GET /api/computers/local/ide/relay/{launch_id}`) to the DarkPyonix
+//! manager of this machine. Nothing is replaced: each client message is one write (`FR-N9.1`).
+//!
+//! The manager is a fake: a loopback TCP listener registered as a launch
+//! (`EditorRelays::register_launch_for_test`), or an axum server with the manager's launch route
+//! and a page under `/ide/ose/` that needs the ticket cookie.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -12,13 +16,13 @@ use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use ember_server::agents::scripted::ScriptedAdapter;
 use ember_server::agents::{AgentAdapter, AgentKind};
-use ember_server::api::ide::{self, IdeConfig, RELAY_SUBSTITUTION_WINDOW};
+use ember_server::api::ide::{self, IdeConfig};
 use ember_server::auth::{self, ServerAuth};
 use ember_server::channels::guest::guest_router;
 use ember_server::computers::{self, Computers, Registry};
 use ember_server::devices::Devices;
 use ember_server::guest_door::GuestDoor;
-use ember_server::ose::OseManager;
+use ember_node::editor_manager::{EditorRelays, ManagerEndpoint, ManagerSource};
 use ember_server::session::Sessions;
 use ember_server::store::Store;
 use ember_server::transport::{self as server_transport, SERVER_SERVICE};
@@ -34,28 +38,29 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 use tower::ServiceExt;
 
-const REAL_TOKEN: &str = "1111111111111111222222222222222233333333333333334444444444444444";
+const MANAGER_TOKEN: &str = "manager-master-token";
+const TICKET: &str = "ticket-0123456789abcdef";
 
 struct RelayHarness {
     addr: SocketAddr,
     raw_addr: SocketAddr,
     token: String,
-    ose: Arc<OseManager>,
+    editor: Arc<EditorRelays>,
     store: Arc<Store>,
     app: Router,
     _dir: tempfile::TempDir,
 }
 
-async fn start_harness(ose: Arc<OseManager>) -> RelayHarness {
+async fn start_harness(editor: Arc<EditorRelays>) -> RelayHarness {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open_in_memory().unwrap());
     let sessions = Sessions::new(store.clone(), vec![Arc::new(ScriptedAdapter) as Arc<dyn AgentAdapter>]);
     let computers = Computers::new(Registry::new(store.clone()), computers::default_connector());
-    let raw_app = ide::router_with_computers_and_ose(
+    let raw_app = ide::router_with_computers_and_editor(
         sessions,
         Arc::new(IdeConfig::default()),
         computers,
-        ose.clone(),
+        editor.clone(),
     );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -70,7 +75,7 @@ async fn start_harness(ose: Arc<OseManager>) -> RelayHarness {
     tokio::spawn(async move {
         let _ = axum::serve(raw_listener, raw_app).await;
     });
-    RelayHarness { addr, raw_addr, token, ose, store, app, _dir: dir }
+    RelayHarness { addr, raw_addr, token, editor, store, app, _dir: dir }
 }
 
 async fn try_ws_status(addr: SocketAddr, path: &str, token: Option<&str>, origin: Option<&str>) -> u16 {
@@ -93,7 +98,13 @@ async fn try_ws_status(addr: SocketAddr, path: &str, token: Option<&str>, origin
     }
 }
 
-/// Spawns a fake OSE TCP echo server and returns `(address, connection_counter)`.
+/// Registers a launch whose manager endpoint is `addr` and answers its relay path.
+fn register(editor: &EditorRelays, addr: SocketAddr) -> String {
+    let id = editor.register_launch_for_test(ManagerEndpoint { url: format!("http://{addr}"), token: MANAGER_TOKEN.into() });
+    format!("/api/computers/local/ide/relay/{id}")
+}
+
+/// Spawns a fake manager endpoint (TCP echo) and returns `(address, connection_counter)`.
 async fn start_echo_ose() -> (SocketAddr, Arc<AtomicUsize>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -120,46 +131,124 @@ async fn start_echo_ose() -> (SocketAddr, Arc<AtomicUsize>) {
     (addr, dials)
 }
 
-#[tokio::test]
-async fn fr_w4_ide_json_has_relay_and_placeholder_not_the_real_token() {
-    let dir = tempfile::tempdir().unwrap();
-    let ose = Arc::new(OseManager::with_data_root(None, dir.path().join("ose-data")));
-    let (ose_addr, _) = start_echo_ose().await;
-    let conn = ose.register_launch_for_test("local", dir.path(), ose_addr, REAL_TOKEN);
-    assert_eq!(conn.connection_token.len(), 64);
-    assert_ne!(conn.connection_token, REAL_TOKEN, "JSON must carry a placeholder, never the real token");
-    assert!(conn.relay.as_deref().unwrap_or("").starts_with("/api/computers/local/ide/relay/"));
+/// A fake DarkPyonix manager: `POST /api/editor/{runtime}/launch` with the master token answers a
+/// ticket, and `GET /ide/ose/` answers `editor-ok` only with the ticket cookie. Answers its address
+/// and the number of launches.
+async fn start_fake_manager() -> (SocketAddr, Arc<AtomicUsize>) {
+    use axum::extract::Path as AxPath;
+    use axum::http::HeaderMap;
+    use axum::response::IntoResponse;
+    use axum::routing::{get, post};
+    let launches = Arc::new(AtomicUsize::new(0));
+    let counted = launches.clone();
+    let app = Router::new()
+        .route(
+            "/api/editor/{runtime}/launch",
+            post(move |AxPath(runtime): AxPath<String>, headers: HeaderMap| {
+                let counted = counted.clone();
+                async move {
+                    if headers.get("authorization").and_then(|v| v.to_str().ok()) != Some(&format!("Bearer {MANAGER_TOKEN}")) {
+                        return (StatusCode::UNAUTHORIZED, "bad token").into_response();
+                    }
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    axum::Json(serde_json::json!({
+                        "ticket": TICKET, "path": format!("/ide/{runtime}/"),
+                        "commit": "0123456789abcdef0123456789abcdef01234567", "version": "1.139.1"
+                    }))
+                    .into_response()
+                }
+            }),
+        )
+        .route(
+            "/ide/ose/",
+            get(|headers: HeaderMap| async move {
+                let cookie = headers.get("cookie").and_then(|v| v.to_str().ok()).unwrap_or("");
+                if cookie.contains(&format!("dpx-editor={TICKET}")) {
+                    (StatusCode::OK, "editor-ok").into_response()
+                } else {
+                    (StatusCode::UNAUTHORIZED, "no ticket").into_response()
+                }
+            }),
+        );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (addr, launches)
+}
 
-    let h = start_harness(ose).await;
+/// FR-W4c (D55, #1064): the local computer's Ember target and VS Code pick ask the manager of this
+/// machine and answer `{relay, path, ticket, ose_commit}` with no endpoint, no token and never the
+/// manager token; the relay of that launch reaches the manager's endpoint, which serves the editor
+/// to a request carrying the ticket cookie.
+#[tokio::test]
+async fn fr_w4c_local_launch_asks_the_manager_and_relays_to_its_endpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let (manager_addr, launches) = start_fake_manager().await;
+    let editor = Arc::new(EditorRelays::new(ManagerSource::fixed(format!("http://{manager_addr}"), MANAGER_TOKEN)));
+    let h = start_harness(editor).await;
     let sid = h
         .store
         .create_session("proj", AgentKind::Scripted, &dir.path().to_string_lossy(), None, "t")
         .unwrap()
         .id;
-    let req = Request::builder()
-        .method(Method::GET)
-        .uri(format!("/api/sessions/{sid}/ide"))
-        .header("host", h.addr.to_string())
-        .header("authorization", format!("Bearer {}", h.token))
-        .body(Body::empty())
-        .unwrap();
-    let res = h.app.clone().oneshot(req).await.unwrap();
+    let call = |method: Method, uri: String| {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("host", h.addr.to_string())
+            .header("authorization", format!("Bearer {}", h.token))
+            .body(Body::empty())
+            .unwrap()
+    };
+    let res = h.app.clone().oneshot(call(Method::GET, format!("/api/sessions/{sid}/ide"))).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     let body: Value = serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    let ose_json = &body["targets"][0]["launch"]["ose"];
-    assert_eq!(ose_json["relay"], conn.relay.as_deref().unwrap());
-    assert_eq!(ose_json["connection_token"], conn.connection_token);
-    assert_ne!(ose_json["connection_token"], REAL_TOKEN);
-    assert!(!body.to_string().contains(REAL_TOKEN), "real token leaked in /ide JSON: {body}");
+    assert_eq!(body["targets"][0]["available"], true, "{body}");
+    let ose = body["targets"][0]["launch"]["ose"].clone();
+    let mut keys: Vec<String> = ose.as_object().unwrap().keys().cloned().collect();
+    keys.sort();
+    assert_eq!(keys, ["ose_commit", "path", "relay", "ticket"]);
+    assert_eq!(ose["path"], "/ide/ose/");
+    assert_eq!(ose["ticket"], TICKET);
+    assert!(ose["relay"].as_str().unwrap().starts_with("/api/computers/local/ide/relay/"));
+    assert!(!body.to_string().contains(MANAGER_TOKEN), "the manager token leaked: {body}");
+    assert_eq!(body["targets"][1], serde_json::json!({ "kind": "vscode" }));
+    assert_eq!(launches.load(Ordering::SeqCst), 1, "listing launched more than the Ember target");
+
+    let res = h.app.clone().oneshot(call(Method::POST, format!("/api/sessions/{sid}/ide/vscode"))).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let pick: Value = serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(pick["ose"]["path"], "/ide/ose/");
+    assert_eq!(pick["ose"]["ticket"], TICKET);
+    assert!(pick["ose"].get("endpoint").is_none() && pick["ose"].get("connection_token").is_none(), "{pick}");
+    assert_ne!(pick["ose"]["relay"], ose["relay"], "each launch is its own relay id");
+
+    // Through the relay, an HTTP request with the ticket cookie reaches the manager's editor page.
+    let url = format!("ws://{}{}", h.addr, pick["ose"]["relay"].as_str().unwrap());
+    let mut req = url.into_client_request().unwrap();
+    req.headers_mut().insert("Authorization", format!("Bearer {}", h.token).parse().unwrap());
+    let (mut ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+    let request = format!("GET /ide/ose/ HTTP/1.1\r\nHost: 127.0.0.1\r\nCookie: dpx-editor={TICKET}\r\nConnection: close\r\n\r\n");
+    ws.send(Message::Binary(request.into_bytes().into())).await.unwrap();
+    let mut answer = Vec::new();
+    while !String::from_utf8_lossy(&answer).contains("editor-ok") {
+        match tokio::time::timeout(Duration::from_secs(5), ws.next()).await.expect("no answer in time") {
+            Some(Ok(Message::Binary(b))) => answer.extend_from_slice(&b),
+            other => panic!("the relay ended before the page: {other:?} after {:?}", String::from_utf8_lossy(&answer)),
+        }
+    }
+    assert!(String::from_utf8_lossy(&answer).starts_with("HTTP/1.1 200"), "{}", String::from_utf8_lossy(&answer));
 }
 
 #[tokio::test]
 async fn fr_w4_relay_requires_server_token_on_the_local_listener() {
     let dir = tempfile::tempdir().unwrap();
-    let ose = Arc::new(OseManager::with_data_root(None, dir.path().join("ose-data")));
+    let ose = Arc::new(EditorRelays::new(ManagerSource::none()));
     let (ose_addr, _) = start_echo_ose().await;
-    let conn = ose.register_launch_for_test("local", dir.path(), ose_addr, REAL_TOKEN);
-    let relay_path = conn.relay.unwrap();
+    let conn = register(&ose, ose_addr);
+    let relay_path = conn;
     let h = start_harness(ose).await;
 
     // 1. Missing token, wrong token, and guest token (dpg_) are all 401 before upgrade.
@@ -205,10 +294,10 @@ async fn fr_w4_relay_requires_server_token_on_the_local_listener() {
 #[tokio::test]
 async fn fr_w4_relay_refuses_cross_origin_and_wrong_host() {
     let dir = tempfile::tempdir().unwrap();
-    let ose = Arc::new(OseManager::with_data_root(None, dir.path().join("ose-data")));
+    let ose = Arc::new(EditorRelays::new(ManagerSource::none()));
     let (ose_addr, dials) = start_echo_ose().await;
-    let conn = ose.register_launch_for_test("local", dir.path(), ose_addr, REAL_TOKEN);
-    let relay_path = conn.relay.unwrap();
+    let conn = register(&ose, ose_addr);
+    let relay_path = conn;
     let h = start_harness(ose).await;
     let bearer = format!("Bearer {}", h.token);
 
@@ -240,9 +329,9 @@ async fn fr_w4_relay_refuses_cross_origin_and_wrong_host() {
 #[tokio::test]
 async fn fr_w4_relay_unknown_launch_id_is_404_and_dials_nothing() {
     let dir = tempfile::tempdir().unwrap();
-    let ose = Arc::new(OseManager::with_data_root(None, dir.path().join("ose-data")));
+    let ose = Arc::new(EditorRelays::new(ManagerSource::none()));
     let (ose_addr, dials) = start_echo_ose().await;
-    let _conn = ose.register_launch_for_test("local", dir.path(), ose_addr, REAL_TOKEN);
+    let _conn = register(&ose, ose_addr);
     let h = start_harness(ose).await;
 
     for (path, want) in [
@@ -259,10 +348,10 @@ async fn fr_w4_relay_unknown_launch_id_is_404_and_dials_nothing() {
 #[tokio::test]
 async fn fr_w4_relay_pumps_bytes_both_ways_and_preserves_order() {
     let dir = tempfile::tempdir().unwrap();
-    let ose = Arc::new(OseManager::with_data_root(None, dir.path().join("ose-data")));
+    let ose = Arc::new(EditorRelays::new(ManagerSource::none()));
     let (ose_addr, _) = start_echo_ose().await;
-    let conn = ose.register_launch_for_test("local", dir.path(), ose_addr, REAL_TOKEN);
-    let relay_path = conn.relay.unwrap();
+    let conn = register(&ose, ose_addr);
+    let relay_path = conn;
     let h = start_harness(ose).await;
 
     let url = format!("ws://{}{relay_path}", h.addr);
@@ -270,8 +359,7 @@ async fn fr_w4_relay_pumps_bytes_both_ways_and_preserves_order() {
     req.headers_mut().insert("Authorization", format!("Bearer {}", h.token).parse().unwrap());
     let (ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
 
-    // Send 8 MiB across 64 KiB binary frames (padded past RELAY_SUBSTITUTION_WINDOW first so the
-    // last 63 bytes of the window are flushed immediately) and read them back in exact order.
+    // Send 8 MiB across 64 KiB binary frames and read them back in exact order.
     let total = 8 * 1024 * 1024;
     let chunk_size = 64 * 1024;
     let mut expected = Vec::with_capacity(total);
@@ -318,11 +406,11 @@ async fn fr_w4_relay_backpressure_does_not_buffer_unboundedly() {
     });
 
     let dir = tempfile::tempdir().unwrap();
-    let ose = Arc::new(OseManager::with_data_root(None, dir.path().join("ose-data")));
-    let conn = ose.register_launch_for_test("local", dir.path(), ose_addr, REAL_TOKEN);
+    let ose = Arc::new(EditorRelays::new(ManagerSource::none()));
+    let conn = register(&ose, ose_addr);
     let h = start_harness(ose).await;
 
-    let url = format!("ws://{}{}", h.addr, conn.relay.unwrap());
+    let url = format!("ws://{}{}", h.addr, conn);
     let mut req = url.into_client_request().unwrap();
     req.headers_mut().insert("Authorization", format!("Bearer {}", h.token).parse().unwrap());
     let (mut ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
@@ -351,14 +439,11 @@ async fn fr_w4_relay_idle_timeout_closes_both_sides() {
     });
 
     let dir = tempfile::tempdir().unwrap();
-    let ose = Arc::new(
-        OseManager::with_data_root(None, dir.path().join("ose-data"))
-            .with_relay_idle_timeout(Duration::from_millis(250)),
-    );
-    let conn = ose.register_launch_for_test("local", dir.path(), ose_addr, REAL_TOKEN);
+    let ose = Arc::new(EditorRelays::new(ManagerSource::none()).with_relay_idle_timeout(Duration::from_millis(250)));
+    let conn = register(&ose, ose_addr);
     let h = start_harness(ose).await;
 
-    let url = format!("ws://{}{}", h.addr, conn.relay.unwrap());
+    let url = format!("ws://{}{}", h.addr, conn);
     let mut req = url.into_client_request().unwrap();
     req.headers_mut().insert("Authorization", format!("Bearer {}", h.token).parse().unwrap());
     let (mut ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
@@ -384,12 +469,10 @@ async fn fr_w4_relay_limits_per_launch_and_per_server() {
     std::fs::create_dir_all(&d1).unwrap();
     std::fs::create_dir_all(&d2).unwrap();
     // Limit: 2 per launch, 3 per server.
-    let ose = Arc::new(
-        OseManager::with_data_root(None, dir.path().join("ose-data")).with_relay_limits(2, 3),
-    );
+    let ose = Arc::new(EditorRelays::new(ManagerSource::none()).with_relay_limits(2, 3));
     let (ose_addr, _) = start_echo_ose().await;
-    let c1 = ose.register_launch_for_test("local", &d1, ose_addr, REAL_TOKEN);
-    let c2 = ose.register_launch_for_test("local", &d2, ose_addr, REAL_TOKEN);
+    let c1 = register(&ose, ose_addr);
+    let c2 = register(&ose, ose_addr);
     let h = start_harness(ose).await;
 
     let open_ws = |path: String| {
@@ -403,16 +486,16 @@ async fn fr_w4_relay_limits_per_launch_and_per_server() {
         }
     };
 
-    let (mut ws1, _) = open_ws(c1.relay.clone().unwrap()).await.expect("1st on launch 1");
-    let (mut ws2, _) = open_ws(c1.relay.clone().unwrap()).await.expect("2nd on launch 1");
+    let (mut ws1, _) = open_ws(c1.clone()).await.expect("1st on launch 1");
+    let (mut ws2, _) = open_ws(c1.clone()).await.expect("2nd on launch 1");
 
     // 3rd on launch 1 exceeds per-launch limit (2) -> 429 before upgrade.
-    let status = try_ws_status(h.addr, c1.relay.as_ref().unwrap(), Some(&h.token), None).await;
+    let status = try_ws_status(h.addr, &c1, Some(&h.token), None).await;
     assert_eq!(status, 429, "per-launch cap");
 
     // Launch 2 can still open 1 stream (reaching the server cap of 3), then the next is 429.
-    let (mut ws3, _) = open_ws(c2.relay.clone().unwrap()).await.expect("1st on launch 2 (3rd total)");
-    let status = try_ws_status(h.addr, c2.relay.as_ref().unwrap(), Some(&h.token), None).await;
+    let (mut ws3, _) = open_ws(c2.clone()).await.expect("1st on launch 2 (3rd total)");
+    let status = try_ws_status(h.addr, &c2, Some(&h.token), None).await;
     assert_eq!(status, 429, "per-server cap");
 
     // Closing ws1 releases the RAII permit so launch 1 can open again.
@@ -420,7 +503,7 @@ async fn fr_w4_relay_limits_per_launch_and_per_server() {
     drop(ws1);
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
-        if let Ok((mut ws_new, _)) = open_ws(c1.relay.clone().unwrap()).await {
+        if let Ok((mut ws_new, _)) = open_ws(c1.clone()).await {
             let _ = ws_new.close(None).await;
             break;
         }
@@ -443,11 +526,11 @@ async fn fr_w4_relay_closes_when_the_tcp_side_closes_and_when_the_ws_closes() {
         }
     });
     let dir = tempfile::tempdir().unwrap();
-    let ose = Arc::new(OseManager::with_data_root(None, dir.path().join("ose-data")));
-    let c1 = ose.register_launch_for_test("local", dir.path(), ose_addr, REAL_TOKEN);
+    let ose = Arc::new(EditorRelays::new(ManagerSource::none()));
+    let c1 = register(&ose, ose_addr);
     let h = start_harness(ose).await;
 
-    let url = format!("ws://{}{}", h.addr, c1.relay.unwrap());
+    let url = format!("ws://{}{}", h.addr, c1);
     let mut req = url.into_client_request().unwrap();
     req.headers_mut().insert("Authorization", format!("Bearer {}", h.token).parse().unwrap());
     let (mut ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
@@ -469,8 +552,8 @@ async fn fr_w4_relay_closes_when_the_tcp_side_closes_and_when_the_ws_closes() {
     });
     let d2 = dir.path().join("p2");
     std::fs::create_dir_all(&d2).unwrap();
-    let c2 = h.ose.register_launch_for_test("local", &d2, ose_addr2, REAL_TOKEN);
-    let url2 = format!("ws://{}{}", h.addr, c2.relay.unwrap());
+    let c2 = register(&h.editor, ose_addr2);
+    let url2 = format!("ws://{}{}", h.addr, c2);
     let mut req2 = url2.into_client_request().unwrap();
     req2.headers_mut().insert("Authorization", format!("Bearer {}", h.token).parse().unwrap());
     let (mut ws2, _) = tokio_tungstenite::connect_async(req2).await.unwrap();
@@ -483,8 +566,8 @@ async fn fr_w4_relay_closes_when_the_tcp_side_closes_and_when_the_ws_closes() {
     let (ose_addr3, _) = start_echo_ose().await;
     let d3 = dir.path().join("p3");
     std::fs::create_dir_all(&d3).unwrap();
-    let c3 = h.ose.register_launch_for_test("local", &d3, ose_addr3, REAL_TOKEN);
-    let url3 = format!("ws://{}{}", h.addr, c3.relay.unwrap());
+    let c3 = register(&h.editor, ose_addr3);
+    let url3 = format!("ws://{}{}", h.addr, c3);
     let mut req3 = url3.into_client_request().unwrap();
     req3.headers_mut().insert("Authorization", format!("Bearer {}", h.token).parse().unwrap());
     let (mut ws3, _) = tokio_tungstenite::connect_async(req3).await.unwrap();
@@ -496,93 +579,18 @@ async fn fr_w4_relay_closes_when_the_tcp_side_closes_and_when_the_ws_closes() {
     }
 }
 
-#[tokio::test]
-async fn fr_w4_relay_substitutes_the_placeholder_in_the_first_window() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let ose_addr = listener.local_addr().unwrap();
-    let (got_tx, got_rx) = tokio::sync::oneshot::channel();
-    tokio::spawn(async move {
-        if let Ok((mut s, _)) = listener.accept().await {
-            let mut buf = Vec::new();
-            let _ = s.read_to_end(&mut buf).await;
-            let _ = got_tx.send(buf);
-        }
-    });
-
-    let dir = tempfile::tempdir().unwrap();
-    let ose = Arc::new(OseManager::with_data_root(None, dir.path().join("ose-data")));
-    let conn = ose.register_launch_for_test("local", dir.path(), ose_addr, REAL_TOKEN);
-    let placeholder = conn.connection_token.clone();
-    assert_eq!(placeholder.len(), 64);
-    assert_ne!(placeholder, REAL_TOKEN);
-    let h = start_harness(ose).await;
-
-    let url = format!("ws://{}{}", h.addr, conn.relay.unwrap());
-    let mut req = url.into_client_request().unwrap();
-    req.headers_mut().insert("Authorization", format!("Bearer {}", h.token).parse().unwrap());
-    let (mut ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
-
-    // 1. Send `auth` message with placeholder intact in one frame.
-    let prefix = b"{\"type\":\"auth\",\"auth\":\"";
-    let mid = b"\",\"signedData\":\"";
-    let suffix = b"\"}";
-    let mut first_part = Vec::new();
-    first_part.extend_from_slice(prefix);
-    first_part.extend_from_slice(placeholder.as_bytes());
-    first_part.extend_from_slice(mid);
-    // 2. A placeholder split across two messages is NOT replaced: messages pass whole (#776).
-    first_part.extend_from_slice(&placeholder.as_bytes()[..25]);
-    ws.send(Message::Binary(first_part.clone().into())).await.unwrap();
-
-    let mut second_part = Vec::new();
-    second_part.extend_from_slice(&placeholder.as_bytes()[25..]);
-    second_part.extend_from_slice(suffix);
-    // Also include a wrong 64-hex string inside the window: must pass untouched.
-    let wrong_tok = b"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
-    second_part.extend_from_slice(wrong_tok);
-    ws.send(Message::Binary(second_part.clone().into())).await.unwrap();
-
-    // 3. Pad to the end of RELAY_SUBSTITUTION_WINDOW (8192 bytes), then send the placeholder
-    // AFTER the window: bytes after 8 KiB must pass through untouched!
-    let sent_so_far = first_part.len() + second_part.len();
-    let pad_len = RELAY_SUBSTITUTION_WINDOW - sent_so_far;
-    ws.send(Message::Binary(vec![b'x'; pad_len].into())).await.unwrap();
-    ws.send(Message::Binary(placeholder.as_bytes().to_vec().into())).await.unwrap();
-    ws.close(None).await.unwrap();
-
-    let received = tokio::time::timeout(Duration::from_secs(3), got_rx).await.unwrap().unwrap();
-    let mut expected = Vec::new();
-    expected.extend_from_slice(prefix);
-    expected.extend_from_slice(REAL_TOKEN.as_bytes());
-    expected.extend_from_slice(mid);
-    expected.extend_from_slice(placeholder.as_bytes());
-    expected.extend_from_slice(suffix);
-    expected.extend_from_slice(wrong_tok);
-    expected.extend_from_slice(&vec![b'x'; pad_len]);
-    // After 8 KiB, placeholder is NOT substituted:
-    expected.extend_from_slice(placeholder.as_bytes());
-
-    assert_eq!(received.len(), expected.len());
-    assert_eq!(received, expected);
-    assert!(
-        !std::str::from_utf8(&received[..prefix.len() + 64]).unwrap().contains(&placeholder),
-        "a placeholder whole inside one message in the window must not reach the OSE"
-    );
-}
-
-/// Message boundaries are preserved exactly: N client messages in, N identical messages out,
-/// including messages that end with a prefix of the placeholder (#776: one held tail turned
-/// `still-here` into `still-her` + `e` whenever the random placeholder started with `e`).
+/// Message boundaries are preserved exactly: N client messages in, N identical messages out
+/// (`FR-N9.1`, #776), including messages that end with a prefix of a token-like value.
 #[tokio::test]
 async fn fr_w4_relay_preserves_client_message_boundaries() {
     let dir = tempfile::tempdir().unwrap();
-    let ose = Arc::new(OseManager::with_data_root(None, dir.path().join("ose-data")));
+    let ose = Arc::new(EditorRelays::new(ManagerSource::none()));
     let (ose_addr, _) = start_echo_ose().await;
-    let conn = ose.register_launch_for_test("local", dir.path(), ose_addr, REAL_TOKEN);
-    let placeholder = conn.connection_token.clone();
+    let conn = register(&ose, ose_addr);
+    let placeholder = "e".repeat(32) + &"f".repeat(32);
     let h = start_harness(ose).await;
 
-    let url = format!("ws://{}{}", h.addr, conn.relay.unwrap());
+    let url = format!("ws://{}{}", h.addr, conn);
     let mut req = url.into_client_request().unwrap();
     req.headers_mut().insert("Authorization", format!("Bearer {}", h.token).parse().unwrap());
     let (mut ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
@@ -620,12 +628,12 @@ async fn fr_n3_ide_relay_ends_on_revoke() {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open_in_memory().unwrap());
     let sessions = Sessions::new(store.clone(), vec![Arc::new(ScriptedAdapter) as Arc<dyn AgentAdapter>]);
-    let ose = Arc::new(OseManager::with_data_root(None, dir.path().join("ose-data")));
+    let ose = Arc::new(EditorRelays::new(ManagerSource::none()));
     let (ose_addr, _) = start_echo_ose().await;
-    let conn = ose.register_launch_for_test("local", dir.path(), ose_addr, REAL_TOKEN);
-    let relay_path = conn.relay.unwrap();
+    let conn = register(&ose, ose_addr);
+    let relay_path = conn;
 
-    let app = ember_server::api::router(sessions).merge(ide::router_with_ose(
+    let app = ember_server::api::router(sessions).merge(ide::router_with_editor(
         Sessions::new(store.clone(), vec![Arc::new(ScriptedAdapter) as Arc<dyn AgentAdapter>]),
         Arc::new(IdeConfig::default()),
         ose,

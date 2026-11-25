@@ -3315,7 +3315,8 @@ mod tests {
     fn fr_l10_2_choice_groups_wrap_on_settings_and_agents() {
         let settings = include_str!("settings.rs");
         let settings = settings.split("#[cfg(test)]").next().unwrap();
-        assert!(settings.matches("ChoiceRow(").count() >= 3, "화면 테마, 에디터 단축키 and 기본 IDE wrap");
+        // The device-wide 기본 IDE group is gone (FR-W7b: the pick is per project).
+        assert!(settings.matches("ChoiceRow(").count() >= 2, "화면 테마 and 에디터 단축키 wrap");
         let agents = include_str!("agents.rs");
         let seg = agents.split("fn SegGroup<").nth(1).unwrap();
         let seg = &seg[..seg.find("\n}\n").unwrap()];
@@ -3329,7 +3330,6 @@ mod tests {
         for call in [
             "ChoiceButton(pref.label(), Choice::Radio, current_theme == pref, true, true,",
             "ChoiceButton(km.label(), Choice::Radio, current_keymap == km, true, true,",
-            "ChoiceButton(label, Choice::Radio, selected, true, true,",
         ] {
             assert!(settings.contains(call), "{call}");
         }

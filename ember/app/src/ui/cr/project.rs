@@ -38,7 +38,7 @@ use super::notice;
 use super::shell::{self, NavIcon};
 use super::theme::*;
 use crate::model::status_rank;
-use crate::ide::{open_external, plan, IdeAction, IdeKind};
+use crate::ide::{open_external, open_ide_relay, open_ide_window, plan, IdeAction, IdeKind};
 use crate::server::IdeLaunch;
 use crate::services::{run_shared, services};
 use crate::ui::project::{
@@ -975,6 +975,42 @@ fn launch_ide(ui: &SharedUi, kind: IdeKind, launch: Option<Result<IdeLaunch, Str
     };
     let label = ide_name(kind);
     match plan(kind, target.as_ref()) {
+        IdeAction::OpenIdeWindow(url) => run_shared(
+            async move {
+                tokio::task::spawn_blocking(move || open_ide_window(&url))
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|r| r)
+            },
+            move |r| match r {
+                Ok(()) => notice::post(format!("{label}: 여는 중입니다")),
+                Err(e) => notice::post(format!("{label}: 열지 못했습니다: {e}")),
+            },
+        ),
+        IdeAction::OpenIdeRelay(relay) => run_shared(
+            async move {
+                tokio::task::spawn_blocking(move || open_ide_relay(&relay))
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|r| r)
+            },
+            move |r| match r {
+                Ok(()) => notice::post(format!("{label}: 여는 중입니다")),
+                Err(e) => notice::post(format!("{label}: 열지 못했습니다: {e}")),
+            },
+        ),
+        // VS Code is always offered (FR-W4c (1b)): picking it asks the server for the launch,
+        // whose error is the only VS Code failure shown (FR-W4c (1c), INTENT D55).
+        IdeAction::StartVsCode => {
+            let session = match &launch {
+                Some(Ok(l)) => l.session.clone(),
+                _ => String::new(),
+            };
+            run_shared(crate::ide::start_vscode(session, None), move |r| match r {
+                Ok(()) => notice::post(format!("{label}: 여는 중입니다")),
+                Err(e) => notice::post(format!("{label}: 열지 못했습니다: {e}")),
+            })
+        }
         IdeAction::OpenUrl(url) => run_shared(
             async move {
                 tokio::task::spawn_blocking(move || open_external(&url))
@@ -994,7 +1030,7 @@ fn launch_ide(ui: &SharedUi, kind: IdeKind, launch: Option<Result<IdeLaunch, Str
                 notice::post("Ember 에디터: 서버가 OSE 런타임을 시작하지 못했습니다");
                 return;
             }
-            ui.open_editor_connection(c.project, c.folder, c.endpoint, c.token, c.server_url, c.computer, c.relay, c.vscode_url);
+            ui.open_editor_connection(c);
         }
         IdeAction::Unavailable(why) => notice::post(format!("{label}: 사용할 수 없습니다: {why}")),
     }
@@ -1028,7 +1064,9 @@ fn IdeMenu(b: &ProjectBox, ui: &SharedUi, compact: bool) {
             );
         }
     }
-    let remembered = ui.prefs.get().ide_target.as_deref().and_then(IdeKind::from_key);
+    // This project's pick, else its session's computer's default (FR-W7b, D56).
+    let project = b.id.clone();
+    let remembered = ui.prefs.get().ide_for(&project, computer.get().as_deref());
     let choices = crate::ui::session::ide_choices(remembered);
     let has_session = session.is_some();
     let cwd = session
@@ -1036,7 +1074,7 @@ fn IdeMenu(b: &ProjectBox, ui: &SharedUi, compact: bool) {
         .and_then(|sid| services().client.read(|s| s.session(sid).map(|v| v.record.cwd.clone())))
         .unwrap_or_default();
     // `computer:~/project` (mockup `ideMenu`), not the raw folder (review r8).
-    let ide_sub = crate::ui::session::ide_menu_subtitle(computer.get().as_deref(), &cwd);
+    let ide_sub = crate::ui::session::ide_menu_subtitle(crate::ui::session::ide_menu_computer(ide.get().as_ref(), computer.get().as_deref()).as_deref(), &cwd);
     let rows = crate::ui::cr::session::ide_pop_rows(&choices, remembered);
     let rows = crate::ui::cr::session::with_ember_notice(rows, &choices, ide.get().as_ref());
     let (close, ui2, ide2) = (open.clone(), ui.clone(), ide.clone());
@@ -1054,6 +1092,7 @@ fn IdeMenu(b: &ProjectBox, ui: &SharedUi, compact: bool) {
         move || close.set(false),
         move |i| {
             if let Some(c) = choices.get(i) {
+                crate::ui::cr::session::record_ide_pick(&ui2, &project, c.kind);
                 launch_ide(&ui2, c.kind, ide2.get_untracked());
             }
         },

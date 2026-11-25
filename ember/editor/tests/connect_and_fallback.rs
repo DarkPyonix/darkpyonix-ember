@@ -154,6 +154,51 @@ async fn version_mismatch_commit_falls_back_to_vscode_target_before_upgrade() {
     assert!(target.fallback.message().contains(other_commit));
 }
 
+/// SPEC FR-W4c (1c), INTENT D55: the session's sockets go to the editor server under the
+/// manager's path with the ticket cookie: `GET /ide/ose/version`, then the management upgrade
+/// `GET /ide/ose/?reconnectionToken=...`, each with `Cookie: dpx-editor=<ticket>`.
+#[tokio::test]
+async fn fr_w4c_session_sends_every_request_under_the_manager_path_with_the_ticket() {
+    let heads = Arc::new(Mutex::new(Vec::<String>::new()));
+    let dials = Arc::new(AtomicUsize::new(0));
+    let mut config = SessionConfig::new("localhost", "/workspace/project");
+    config.path = "/ide/ose/".into();
+    config.ticket = ember_editor_conn::handshake::Ticket::new("tk-session");
+    assert!(!format!("{config:?}").contains("tk-session"), "the ticket never reaches a log");
+
+    let (heads_cb, dials_cb) = (Arc::clone(&heads), Arc::clone(&dials));
+    let err = EditorSession::connect(config, move || {
+        let (heads, dials) = (Arc::clone(&heads_cb), Arc::clone(&dials_cb));
+        async move {
+            let n = dials.fetch_add(1, Ordering::SeqCst);
+            let (client, mut server) = tokio::io::duplex(4096);
+            tokio::spawn(async move {
+                let (head, _) = read_http_head(&mut server).await;
+                heads.lock().unwrap().push(head);
+                let resp = if n == 0 {
+                    format!("HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\n\r\n{PINNED_COMMIT}")
+                } else {
+                    "HTTP/1.1 403 Forbidden\r\n\r\n".to_owned()
+                };
+                server.write_all(resp.as_bytes()).await.unwrap();
+            });
+            Ok(client)
+        }
+    })
+    .await
+    .err()
+    .expect("the fake refuses the upgrade");
+    assert!(err.to_string().contains("403"), "{err}");
+
+    let heads = heads.lock().unwrap().clone();
+    assert_eq!(heads.len(), 2, "{heads:?}");
+    assert!(heads[0].starts_with("GET /ide/ose/version HTTP/1.0\r\n"), "{}", heads[0]);
+    assert!(heads[1].starts_with("GET /ide/ose/?reconnectionToken="), "{}", heads[1]);
+    for head in &heads {
+        assert!(head.contains("\r\nCookie: dpx-editor=tk-session"), "{head}");
+    }
+}
+
 #[tokio::test]
 async fn unknown_version_404_or_empty_or_html_falls_back_to_vscode_target() {
     let responses = [

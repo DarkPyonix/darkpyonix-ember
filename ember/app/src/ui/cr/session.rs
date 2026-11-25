@@ -44,7 +44,7 @@ pub use crate::ui::session::{
     view_from_saved, visible_panes,
 };
 
-use crate::ide::{IdeAction, IdeKind, open_external, plan};
+use crate::ide::{IdeAction, IdeKind, open_external, open_ide_relay, open_ide_window, plan};
 use crate::server::{CurrentComputer, IdeLaunch};
 use crate::services::{run_shared, services};
 use crate::ui::coexist::{SharedUi, shared_ui};
@@ -195,6 +195,42 @@ pub fn launch_ide_shared(
     };
     let label = ide_label(kind);
     match plan(kind, target.as_ref()) {
+        IdeAction::OpenIdeWindow(url) => run_shared(
+            async move {
+                tokio::task::spawn_blocking(move || open_ide_window(&url))
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|r| r)
+            },
+            move |r| match r {
+                Ok(()) => notice::post(format!("{label}: 여는 중입니다")),
+                Err(e) => notice::post(format!("{label}: 열지 못했습니다: {e}")),
+            },
+        ),
+        IdeAction::OpenIdeRelay(relay) => run_shared(
+            async move {
+                tokio::task::spawn_blocking(move || open_ide_relay(&relay))
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|r| r)
+            },
+            move |r| match r {
+                Ok(()) => notice::post(format!("{label}: 여는 중입니다")),
+                Err(e) => notice::post(format!("{label}: 열지 못했습니다: {e}")),
+            },
+        ),
+        // VS Code is always offered (FR-W4c (1b)): picking it asks the server for the launch,
+        // whose error is the only VS Code failure shown (FR-W4c (1c), INTENT D55).
+        IdeAction::StartVsCode => {
+            let session = match &launch {
+                Some(Ok(l)) => l.session.clone(),
+                _ => String::new(),
+            };
+            run_shared(crate::ide::start_vscode(session, None), move |r| match r {
+                Ok(()) => notice::post(format!("{label}: 여는 중입니다")),
+                Err(e) => notice::post(format!("{label}: 열지 못했습니다: {e}")),
+            })
+        }
         IdeAction::OpenUrl(url) => run_shared(
             async move {
                 tokio::task::spawn_blocking(move || open_external(&url))
@@ -214,7 +250,7 @@ pub fn launch_ide_shared(
                 notice::post("Ember 에디터: 서버가 OSE 런타임을 시작하지 못했습니다");
                 return;
             }
-            ui.open_editor_connection(c.project, c.folder, c.endpoint, c.token, c.server_url, c.computer, c.relay, c.vscode_url);
+            ui.open_editor_connection(c);
         }
         IdeAction::Unavailable(why) => {
             notice::post(format!("{label}: 사용할 수 없습니다: {why}"));
@@ -489,6 +525,23 @@ pub fn ComposerChips(session: &str) {
         }) };
 }
 
+/// The project of session `sid` (the key of its remembered IDE, FR-W7b); empty when unknown.
+pub fn session_project(sid: &str) -> String {
+    services()
+        .client
+        .read(|s| s.session(sid).map(|v| v.record.project.clone()))
+        .unwrap_or_default()
+}
+
+/// A pick in any header's chooser becomes `project`'s remembered IDE (FR-W7b, INTENT D56), for
+/// this user on this device.
+pub fn record_ide_pick(ui: &SharedUi, project: &str, kind: IdeKind) {
+    if ui.prefs.get_untracked().picked_ide(project) != Some(kind) {
+        let project = project.to_string();
+        ui.update_prefs(move |p| p.set_ide_target(&project, kind));
+    }
+}
+
 /// What the main part of an "IDE 열기" button does (FR-L7): launch the remembered IDE directly,
 /// or open the chooser when none is remembered yet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -691,12 +744,9 @@ pub fn IdeMenu(session: &str) {
         });
     }
 
-    let remembered = ui
-        .prefs
-        .get()
-        .ide_target
-        .as_deref()
-        .and_then(IdeKind::from_key);
+    // The session's project's pick, else its computer's default (FR-W7b, D56).
+    let project = session_project(&sid);
+    let remembered = ui.prefs.get().ide_for(&project, computer.get().as_deref());
     let choices = ide_choices(remembered);
     let cur_label = remembered.map(ide_label);
 
@@ -705,7 +755,7 @@ pub fn IdeMenu(session: &str) {
         .read(|s| s.session(&sid).map(|v| v.record.cwd.clone()))
         .unwrap_or_default();
     // `computer:~/project` (mockup `ideMenu`), not the raw folder (review r8).
-    let ide_sub = crate::ui::session::ide_menu_subtitle(computer.get().as_deref(), &cwd);
+    let ide_sub = crate::ui::session::ide_menu_subtitle(crate::ui::session::ide_menu_computer(ide.get().as_ref(), computer.get().as_deref()).as_deref(), &cwd);
     let rows = ide_pop_rows(&choices, remembered);
     let rows = with_ember_notice(rows, &choices, ide.get().as_ref());
     let o_d = open.clone();
@@ -726,6 +776,7 @@ pub fn IdeMenu(session: &str) {
         move || o_d.set(false),
         move |idx| {
             if let Some(c) = choices_c.get(idx) {
+                record_ide_pick(&ui_c, &project, c.kind);
                 launch_ide_shared(&ui_c, c.kind, launch_now.clone());
             }
         },
@@ -5186,7 +5237,8 @@ mod tests {
                 Some(ember_client::wire::EmberOseConnection {
                     endpoint: "http://127.0.0.1:9000".into(),
                     relay: None,
-                    connection_token: String::new(),
+                    path: String::new(),
+                    ticket: String::new(),
                     ose_commit: Some(commit.to_string()),
                 }),
             ))
@@ -5589,6 +5641,40 @@ mod tests {
         ide_main_click(None, &open, |k| launched.push(k));
         assert!(launched.is_empty(), "nothing is launched without a default");
         assert!(open.get_untracked(), "an unset default opens the chooser");
+    }
+
+    /// SPEC FR-W7b, FR-L7, INTENT D56: every header (session and phone, project, conversation)
+    /// launches its session's project's pick (else the computer's default), and a pick in its
+    /// chooser is recorded for that project; nothing reads a device-wide IDE any more.
+    #[test]
+    fn fr_w7b_every_header_reads_and_records_the_projects_ide() {
+        let _guard = crate::services::test_guard();
+        let ui = crate::ui::coexist::shared_ui().clone();
+        let before = ui.prefs.get_untracked();
+        record_ide_pick(&ui, "proj-a", IdeKind::Gateway);
+        let p = ui.prefs.get_untracked();
+        assert_eq!(p.picked_ide("proj-a"), Some(IdeKind::Gateway));
+        assert_eq!(ide_click(p.ide_for("proj-a", None)), IdeClick::Launch(IdeKind::Gateway));
+        assert_eq!(ide_click(p.ide_for("proj-b", None)), IdeClick::Choose);
+        ui.update_prefs(move |p| *p = before);
+
+        let strip = |src: &'static str| src.split("#[cfg(test)]").next().unwrap();
+        let session = strip(include_str!("session.rs"));
+        let project = strip(include_str!("project.rs"));
+        let conversation = strip(include_str!("conversation.rs"));
+        assert!(session.contains("ui.prefs.get().ide_for(&project, computer.get().as_deref())"));
+        assert!(session.contains("record_ide_pick(&ui_c, &project, c.kind);"));
+        assert!(project.contains("let project = b.id.clone();"));
+        assert!(project.contains("ui.prefs.get().ide_for(&project, computer.get().as_deref())"));
+        assert!(project.contains("record_ide_pick(&ui2, &project, c.kind);"));
+        assert!(conversation.contains("ide_prefs.ide_for("));
+        assert!(conversation.contains("record_ide_pick(&ui_ide, &pick_project, kind);"));
+        for (name, src) in [("session", session), ("project", project), ("conversation", conversation)] {
+            // `.ide_targets` (the chooser's list, the per-project map) is fine; the old
+            // device-wide `ide_target` field is not.
+            let device_wide = src.match_indices(".ide_target").any(|(i, m)| !src[i + m.len()..].starts_with('s'));
+            assert!(!device_wide, "{name} reads no device-wide IDE");
+        }
     }
 
     #[Composable]

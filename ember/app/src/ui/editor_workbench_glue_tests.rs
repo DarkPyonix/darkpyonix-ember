@@ -36,11 +36,17 @@ fn target() -> EditorTarget {
         project: String::new(),
         folder: FOLDER.with(|f| f.borrow().clone()),
         endpoint: String::new(),
-        token: String::new(),
+        ose_path: String::new(),
+        ticket: String::new(),
         server_url: String::new(),
         computer: String::new(),
         relay: String::new(),
         vscode_url: String::new(),
+        vscode_relay: String::new(),
+        vscode_path: String::new(),
+        vscode_ticket: String::new(),
+        vscode_folder: String::new(),
+        vscode_session: String::new(),
     }
 }
 

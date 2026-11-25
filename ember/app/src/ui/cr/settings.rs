@@ -1,7 +1,7 @@
 //! compose-rust settings sheet (#220 phase 8): theme preference (FR-L28), editor keymap and
-//! shortcut reference (FR-L30), remembered default IDE target (FR-L7), archived-session
-//! visibility (FR-L9), this device on the transport (FR-N9), updates (NFR-R2), and server/data
-//! paths.
+//! shortcut reference (FR-L30), archived-session visibility (FR-L9), this device on the
+//! transport (FR-N9), the editor server settings for the owner (FR-W7), updates (NFR-R2), and
+//! server/data paths.
 
 #![allow(non_snake_case)]
 
@@ -59,10 +59,11 @@ pub fn SettingsSheet(open: bool, on_dismiss: impl FnMut() + Clone + 'static) {
     });
 }
 
-/// Body of the settings sheet: theme (FR-L28), keymap (FR-L30), archived sessions (FR-L9), and
-/// server/data paths. There is no device-wide default IDE: the chooser remembers the last pick per
-/// project (FR-W7b), and the default for a project with no pick is the server's editor settings
-/// (`default_ide`, FR-W7, INTENT D56).
+/// Body of the settings sheet: theme (FR-L28), keymap (FR-L30), archived sessions (FR-L9), the
+/// editor server settings (FR-W7), and server/data paths. There is no device-wide default IDE:
+/// the chooser remembers the last pick per project (FR-W7b), and the default for a project with
+/// no pick is the server's editor settings (`default_ide`, FR-W7, INTENT D56), edited in the
+/// "에디터 서버" section by the owner.
 pub fn SettingsContent() {
     let theme = ember_theme();
     let p = theme.palette;
@@ -196,7 +197,16 @@ pub fn SettingsContent() {
 
             { use ::compose_rust::ui::Separator; Separator!(Some(paint(p.line))) };
 
-            // 6. Updates of the installed app (NFR-R2, #880)
+            // 6. The editor server settings, owner only (FR-W7, INTENT D56)
+            SectionBlock(
+                super::editor_settings::TITLE,
+                super::editor_settings::SUBTITLE,
+                super::editor_settings::EditorServerSection,
+            );
+
+            { use ::compose_rust::ui::Separator; Separator!(Some(paint(p.line))) };
+
+            // 7. Updates of the installed app (NFR-R2, #880)
             SectionBlock(
                 super::self_update::TITLE,
                 super::self_update::SUBTITLE,
@@ -205,7 +215,7 @@ pub fn SettingsContent() {
 
             { use ::compose_rust::ui::Separator; Separator!(Some(paint(p.line))) };
 
-            // 7. Connection & local storage info
+            // 8. Connection & local storage info
             SectionBlock("연결 및 저장소", "현재 연결된 메인 서버 주소와 로컬 데이터 폴더입니다.", || {
                 InsetPanel(true, || {
                     { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
@@ -331,6 +341,10 @@ mod tests {
             "저장",
             "닫기",
         ] {
+            assert!(all.iter().any(|t| t == want), "missing {want}: {all:?}");
+        }
+        // FR-W7: the demo is the owner, so the sheet has the editor server section's form.
+        for want in [crate::ui::cr::editor_settings::TITLE, "Code OSE", "직접 스크립트", crate::ui::cr::editor_settings::LICENSE_URL, "IDE 기본값"] {
             assert!(all.iter().any(|t| t == want), "missing {want}: {all:?}");
         }
         // FR-W7b, INTENT D56: no device-wide default IDE; the chooser remembers per project and

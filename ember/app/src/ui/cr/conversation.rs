@@ -1024,12 +1024,9 @@ pub fn ConversationView(id: &str, embedded: bool) {
     // The session's project's pick, else its computer's default (FR-W7b, D56).
     let ide_project = super::session::session_project(&sid);
     let ide_prefs = ui.prefs.get();
-    let remembered = ide_prefs.ide_for(
-        &ide_project,
-        computer.get().as_ref().map(|c| c.computer.id.as_str()),
-    );
-    let ide_choices = crate::ui::session::ide_choices(remembered);
     let ide_now = ide.get();
+    let remembered = ide_prefs.ide_for(&ide_project, crate::ide::effective_default_ide(ide_now.as_ref()));
+    let ide_choices = crate::ui::session::ide_choices(remembered);
     let ide_rows = super::session::with_ember_notice(
         super::session::ide_pop_rows(&ide_choices, remembered),
         &ide_choices,

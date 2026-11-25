@@ -61,14 +61,12 @@ impl IdeKind {
 }
 
 /// The computer's effective `default_ide` (FR-W7, FR-W7b, INTENT D56): the server's editor
-/// settings, unless the node of `computer` overrides it. A project with no pick of its own launches
-/// this one; `None` opens the chooser.
-///
-/// TODO(FR-W7, D56): the editor settings record (`default_ide` on the server, inherited and
-/// overridden per node) is not built yet, so there is no default to read and this is `None`.
-pub fn effective_default_ide(project: &str, computer: Option<&str>) -> Option<IdeKind> {
-    let _ = (project, computer);
-    None
+/// settings, unless the node of the listing's computer overrides it. The server works it out
+/// and sends it with the IDE listing (`GET /api/sessions/{id}/ide`, `default_ide`) the header
+/// already loads, so this reads that listing. A project with no pick of its own launches this
+/// one; `None` (no listing yet, a failed one, or an older server) opens the chooser.
+pub fn effective_default_ide(listing: Option<&Result<crate::server::IdeLaunch, String>>) -> Option<IdeKind> {
+    listing?.as_ref().ok()?.default_ide_kind()
 }
 
 /// What choosing a target does.

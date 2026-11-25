@@ -510,12 +510,36 @@ pub const IDE_WEBVIEW_URL_ENV: &str = "EMBER_IDE_WEBVIEW_URL";
 /// desktop, INTENT D55). The page URL carries the manager's ticket and the gateway's token, so it
 /// goes in [`IDE_WEBVIEW_URL_ENV`], never argv (any process on the machine can read argv,
 /// #1064); the window reads it once and removes it from its environment.
+///
+/// `--exit-on-stdin-eof` makes the window end with this helper (#1128): the helper holds the
+/// write end of the window's stdin pipe ([`run_window_child`]), and the operating system closes
+/// it when the helper ends for any reason (exit, SIGTERM, SIGKILL, a crash), so the window reads
+/// end of file and exits instead of showing a workbench with no gateway behind it.
 pub fn vscode_webview_command(bin: &Path, page_url: &str) -> (PathBuf, Vec<String>, Vec<(&'static str, String)>) {
     (
         bin.to_path_buf(),
-        vec!["--vscode".to_string()],
+        vec!["--vscode".to_string(), WEBVIEW_EXIT_WITH_PARENT_FLAG.to_string()],
         vec![(IDE_WEBVIEW_URL_ENV, page_url.to_string())],
     )
+}
+
+/// The `ember-ide-webview` flag that makes the window exit when its stdin reaches end of file
+/// (its `cli::EXIT_ON_STDIN_EOF_FLAG`; this crate does not link the window crate, so the name is
+/// repeated here).
+pub const WEBVIEW_EXIT_WITH_PARENT_FLAG: &str = "--exit-on-stdin-eof";
+
+/// Spawn `cmd` with its stdin on a pipe whose write end this process holds until the child
+/// exits, and wait for it (#1128). `Child::wait` closes a child's stdin before it waits, so the
+/// handle is taken out first and dropped only after the wait: the child sees end of file exactly
+/// when this process ends (the operating system closes the handle on any exit, SIGKILL
+/// included) and never while it is still waiting. The pipe carries no data.
+pub fn run_window_child(cmd: &mut Command) -> std::io::Result<std::process::ExitStatus> {
+    cmd.stdin(std::process::Stdio::piped());
+    let mut child = cmd.spawn()?;
+    let parent_pipe = child.stdin.take();
+    let status = child.wait();
+    drop(parent_pipe);
+    status
 }
 
 /// Spawn the `--vscode-window` helper (`current_exe`) for `relay` on `server_url`. The window
@@ -610,8 +634,7 @@ pub fn run_vscode_window(args: &VsCodeWindowArgs) -> Result<(), String> {
     for (name, value) in envs {
         cmd.env(name, value);
     }
-    let status = cmd
-        .status()
+    let status = run_window_child(&mut cmd)
         .map_err(|e| format!("failed to launch {} ({}): {e}", IDE_WEBVIEW_BIN_NAME, program.display()))?;
     drop(gateway);
     if status.success() {
@@ -1272,7 +1295,7 @@ mod tests {
         let page = vscode_page_url(addr, "0123abcd", &window_args("/work/ember app"));
         let (prog, args, envs) = vscode_webview_command(Path::new("/opt/ember/ember-ide-webview"), &page);
         assert_eq!(prog, PathBuf::from("/opt/ember/ember-ide-webview"));
-        assert_eq!(args, vec!["--vscode"]);
+        assert_eq!(args, vec!["--vscode", WEBVIEW_EXIT_WITH_PARENT_FLAG]);
         assert_eq!(envs, vec![(IDE_WEBVIEW_URL_ENV, page.clone())]);
         assert!(!args.iter().any(|a| a.contains("/ide/relay/") || a.contains("--relay-path")));
         for name in ["EMBER_SERVER_TOKEN", EDITOR_TICKET_ENV, EDITOR_VSCODE_TICKET_ENV, VSCODE_WINDOW_TICKET_ENV] {
@@ -1281,6 +1304,42 @@ mod tests {
         // The helper itself never builds a webview: this crate links no browser engine.
         let manifest = include_str!("../Cargo.toml");
         assert!(manifest.contains("ember-gateway") && !manifest.contains("wry") && !manifest.contains("tao ="));
+    }
+
+    /// SPEC FR-W5b (#1128): the window ends with its helper. The helper asks the window to exit
+    /// on stdin end of file, spawns it through `run_window_child`, and that gives the child a pipe
+    /// on stdin (not the helper's inherited stdin, not null, which would read end of file at once).
+    #[test]
+    fn fr_w5b_window_ends_with_its_helper_through_a_stdin_pipe() {
+        assert_eq!(WEBVIEW_EXIT_WITH_PARENT_FLAG, "--exit-on-stdin-eof");
+        let cli = include_str!("../../ide-webview/src/cli.rs");
+        assert!(cli.contains("pub const EXIT_ON_STDIN_EOF_FLAG: &str = \"--exit-on-stdin-eof\";"));
+        let src = include_str!("ide.rs");
+        let run = src.split("pub fn run_vscode_window(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(run.contains("run_window_child(&mut cmd)"));
+        assert!(!run.contains(".status()") && !run.contains("Stdio::"));
+        let child = src.split("pub fn run_window_child(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        // The write end is taken out before the wait and dropped after it.
+        let take = child.find("child.stdin.take()").unwrap();
+        let wait = child.find("child.wait()").unwrap();
+        let drop_at = child.find("drop(parent_pipe)").unwrap();
+        assert!(child.contains("Stdio::piped()") && take < wait && wait < drop_at);
+    }
+
+    /// SPEC FR-W5b (#1128): a real child spawned by `run_window_child` has a pipe on stdin
+    /// (`test -p` passes only for a FIFO), and the pipe stays open while the child runs: a
+    /// background `cat` reading the child's stdin (through fd 3, because a background job's own
+    /// stdin is /dev/null in a non-interactive shell) is still alive after a pause, which it would
+    /// not be had it read end of file.
+    #[cfg(unix)]
+    #[test]
+    fn fr_w5b_run_window_child_pipes_stdin_and_holds_it_open() {
+        let mut piped = Command::new("sh");
+        piped.args(["-c", "test -p /dev/stdin"]);
+        assert!(run_window_child(&mut piped).unwrap().success(), "stdin is not a pipe");
+        let mut held = Command::new("sh");
+        held.args(["-c", "exec 3<&0; cat <&3 >/dev/null & pid=$!; sleep 1; kill -0 $pid && kill $pid"]);
+        assert!(run_window_child(&mut held).unwrap().success(), "the helper closed the pipe before the child exited");
     }
 
     /// SPEC FR-L7, INTENT D55 (#1064): the window's first page carries the manager's ticket

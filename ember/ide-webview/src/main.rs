@@ -2,6 +2,7 @@
 
 mod cli;
 mod opener;
+mod parent;
 mod window;
 
 use std::process::ExitCode;

@@ -19,8 +19,9 @@ pub const MAX_CLOSED_EDITORS: usize = 20;
 /// the window does.
 pub fn pending_issue(action: Action) -> Option<u32> {
     match action {
-        // Code-OSS runs these through the debug service (Run Without Debugging, Stop).
-        Action::RunConfig | Action::Stop => Some(445),
+        // Code-OSS runs this through the debug service (Run Without Debugging); the debug layer
+        // has no no-debug start yet.
+        Action::RunConfig => Some(445),
         _ => None,
     }
 }
@@ -131,7 +132,9 @@ mod tests {
     #[test]
     fn fr_l31_15_pending_actions_name_their_issue() {
         assert_eq!(not_ready_notice(Action::RunConfig), "다시 실행: 준비 중입니다 (#445)");
-        assert_eq!(not_ready_notice(Action::Stop), "중지: 준비 중입니다 (#445)");
+        // FR-L31.42: Shift+F5 stops the debug session, else the running task; F5 starts debugging.
+        assert_eq!(pending_issue(Action::Stop), None);
+        assert_eq!(pending_issue(Action::Debug), None);
         assert_eq!(pending_issue(Action::NewTerminal), None);
         // Format Document is built by the language features (FR-L31.13), so it waits for nothing.
         assert_eq!(pending_issue(Action::Format), None);

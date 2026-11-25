@@ -153,7 +153,8 @@ pub enum DebugUpdate {
         configurations: Vec<ConfigInfo>,
         error: Option<String>,
     },
-    /// What a provider offers for a type, answering [`DebugRequest::ProvideConfigurations`].
+    /// What the providers of a type offer, all of them together, answering
+    /// [`DebugRequest::ProvideConfigurations`]; empty when the type has no provider.
     ProvidedConfigurations {
         debug_type: String,
         configurations: Vec<Value>,
@@ -346,10 +347,23 @@ pub struct Env {
 /// An extension-host call whose reply [`DebugState::on_reply`] reads.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pending {
-    Activation { start: u64 },
-    Resolve { start: u64 },
-    StartDa { session: String, handle: i64 },
-    Provide { debug_type: String },
+    Activation {
+        start: u64,
+    },
+    Resolve {
+        start: u64,
+    },
+    StartDa {
+        session: String,
+        handle: i64,
+    },
+    /// An `onDebugInitialConfigurations` activation before the providers of `id` are asked.
+    ProvideActivation {
+        id: u64,
+    },
+    Provide {
+        id: u64,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -540,6 +554,19 @@ pub struct DebugState {
     active: Option<String>,
     /// Sessions the extension host said `$sessionCached` for: it needs only their id.
     cached: HashSet<String>,
+    /// [`DebugRequest::ProvideConfigurations`] in progress, by id.
+    provides: HashMap<u64, Provide>,
+}
+
+/// One [`DebugRequest::ProvideConfigurations`]: the activations, then every provider of the type,
+/// as `debugConfigurationManager.provideDebugConfigurations` runs it after
+/// `activateDebuggers('onDebugInitialConfigurations')`.
+#[derive(Debug)]
+struct Provide {
+    debug_type: String,
+    activating: bool,
+    waiting: usize,
+    configurations: Vec<Value>,
 }
 
 fn str_of(v: &Value, key: &str) -> Option<String> {
@@ -672,6 +699,7 @@ impl DebugState {
             next_handle: 1,
             active: None,
             cached: HashSet::new(),
+            provides: HashMap::new(),
         }
     }
 
@@ -799,6 +827,19 @@ impl DebugState {
         }));
     }
 
+    /// Answer a [`DebugRequest::ProvideConfigurations`] once every provider has, even when the
+    /// type has none (the window then writes only the contribution's `initialConfigurations`).
+    fn finish_provide(&mut self, id: u64, p: Provide, out: &mut Vec<Out>) {
+        if p.activating || p.waiting > 0 {
+            self.provides.insert(id, p);
+            return;
+        }
+        out.push(Out::Ui(DebugUpdate::ProvidedConfigurations {
+            debug_type: p.debug_type,
+            configurations: p.configurations,
+        }));
+    }
+
     fn console(&self, session: Option<&str>, category: &str, text: String, out: &mut Vec<Out>) {
         let entry = ConsoleEntry {
             category: category.to_owned(),
@@ -844,19 +885,26 @@ impl DebugState {
         match request {
             DebugRequest::ListConfigurations => self.begin_list(env, &mut out),
             DebugRequest::ProvideConfigurations { debug_type } => {
-                let folder = self.workspace.clone();
-                let calls: Vec<(i64, String)> = self
-                    .providers
-                    .iter()
-                    .filter(|p| p.has_provide && p.debug_type == debug_type)
-                    .map(|p| (p.handle, p.debug_type.clone()))
-                    .collect();
-                for (handle, debug_type) in calls {
+                let id = self.next_start_id();
+                let events = [
+                    "onDebugInitialConfigurations".to_owned(),
+                    "onDebug".to_owned(),
+                ];
+                for event in &events {
                     out.push(Out::RpcWith(
-                        wire::provide_debug_configurations(handle, folder.as_ref()),
-                        Pending::Provide { debug_type },
+                        exthost::activate_by_event(event),
+                        Pending::ProvideActivation { id },
                     ));
                 }
+                self.provides.insert(
+                    id,
+                    Provide {
+                        debug_type,
+                        activating: true,
+                        waiting: events.len(),
+                        configurations: Vec::new(),
+                    },
+                );
             }
             DebugRequest::Start { selector } => {
                 let origin = self.origin(None, Notify::Nobody, None, false, env);
@@ -1590,13 +1638,40 @@ impl DebugState {
                 (None, Ok(_)) => out.push(Out::Rpc(wire::stop_da_session(handle))),
                 (None, Err(_)) => {}
             },
-            Pending::Provide { debug_type } => {
-                if let Ok(Value::Array(configurations)) = result {
-                    out.push(Out::Ui(DebugUpdate::ProvidedConfigurations {
-                        debug_type,
-                        configurations,
-                    }));
+            Pending::ProvideActivation { id } => {
+                let Some(mut p) = self.provides.remove(&id) else {
+                    return out;
+                };
+                // A failed activation is not fatal, as for a start.
+                p.waiting = p.waiting.saturating_sub(1);
+                if p.waiting == 0 && p.activating {
+                    p.activating = false;
+                    let folder = self.workspace.clone();
+                    let handles: Vec<i64> = self
+                        .providers
+                        .iter()
+                        .filter(|q| q.has_provide && q.debug_type == p.debug_type)
+                        .map(|q| q.handle)
+                        .collect();
+                    p.waiting = handles.len();
+                    for handle in handles {
+                        out.push(Out::RpcWith(
+                            wire::provide_debug_configurations(handle, folder.as_ref()),
+                            Pending::Provide { id },
+                        ));
+                    }
                 }
+                self.finish_provide(id, p, &mut out);
+            }
+            Pending::Provide { id } => {
+                let Some(mut p) = self.provides.remove(&id) else {
+                    return out;
+                };
+                if let Ok(Value::Array(configurations)) = result {
+                    p.configurations.extend(configurations);
+                }
+                p.waiting = p.waiting.saturating_sub(1);
+                self.finish_provide(id, p, &mut out);
             }
         }
         out

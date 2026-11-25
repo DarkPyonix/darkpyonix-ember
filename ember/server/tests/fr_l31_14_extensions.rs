@@ -34,9 +34,12 @@ const LISTEN: &str = "127.0.0.1:8740";
 const RECORDED: &str = include_str!("fixtures/open_vsx/search.json");
 
 /// What the fake gallery answers next, and what it was asked.
+/// A fake gallery answer: status, headers and body.
+type Answer = (u16, Vec<(String, String)>, Vec<u8>);
+
 #[derive(Clone)]
 struct Upstream {
-    answer: Arc<Mutex<(u16, Vec<(String, String)>, Vec<u8>)>>,
+    answer: Arc<Mutex<Answer>>,
     seen: Arc<Mutex<Vec<(String, HeaderMap)>>>,
 }
 

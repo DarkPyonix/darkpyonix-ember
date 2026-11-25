@@ -89,7 +89,7 @@ impl DocumentSymbol {
 /// A `DocumentSymbol[]` reply, in document order.
 pub fn parse_document_symbols(v: &Value) -> Vec<DocumentSymbol> {
     let mut symbols: Vec<DocumentSymbol> = v.as_array().map(|a| a.iter().filter_map(DocumentSymbol::from_json).collect()).unwrap_or_default();
-    symbols.sort_by(|a, b| a.range.start.cmp(&b.range.start));
+    symbols.sort_by_key(|a| a.range.start);
     symbols
 }
 

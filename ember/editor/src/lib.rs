@@ -76,7 +76,9 @@ pub mod webview;
 pub mod widget;
 pub mod writes;
 
-pub use crate::bridge::{apply_text_change, BridgeAction, DocumentWidgetState, SyntaxRuns, WidgetBridge};
+pub use crate::bridge::{
+    apply_text_change, BridgeAction, DebugView, DocumentWidgetState, StoppedLocation, SyntaxRuns, WidgetBridge,
+};
 pub use crate::folding::{compute_indent_folds, merge_folds, parse_provider_folds, FoldRange, FoldRegion};
 pub use crate::semantic::{decode_semantic_tokens, encode_semantic_tokens_dto, overlay_semantic_runs, role_for_semantic_token};
 pub use crate::commands::{parse_contributed_commands, ContributedCommand};

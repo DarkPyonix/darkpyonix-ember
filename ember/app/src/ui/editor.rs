@@ -507,7 +507,13 @@ pub fn syntax_spans(syntax: &ember_editor::SyntaxRuns) -> compose_rust::code::Sy
 pub fn syntax_spans_at(syntax: &ember_editor::SyntaxRuns, version: u32) -> compose_rust::code::SyntaxSpans {
     use compose_rust::code::{CodeRange, SyntaxSpan, SyntaxSpans};
     SyntaxSpans::new(
-        syntax.runs.iter().map(|r| SyntaxSpan::role(version, CodeRange::of(r.line, r.start, r.line, r.end), colour_role(r.role))),
+        // Comments italic and types at weight 500, as the editor mockup draws them (#477): the
+        // toolkit's default style for each colour role.
+        syntax.runs.iter().map(|r| {
+            let role = colour_role(r.role);
+            SyntaxSpan::role(version, CodeRange::of(r.line, r.start, r.line, r.end), role)
+                .with_style(compose_rust::highlight::style_for_role(role))
+        }),
     )
 }
 
@@ -1982,10 +1988,14 @@ pub enum ToolWindow {
     Run,
     Problems,
     Output,
+    /// Run and Debug: variables, watch, call stack and breakpoints (FR-L31.42).
+    Debug,
+    /// The debug console: adapter output and evaluation (FR-L31.42).
+    DebugConsole,
 }
 
 impl ToolWindow {
-    pub const ALL: [ToolWindow; 11] = [
+    pub const ALL: [ToolWindow; 13] = [
         ToolWindow::Project,
         ToolWindow::Search,
         ToolWindow::Commit,
@@ -1997,14 +2007,25 @@ impl ToolWindow {
         ToolWindow::Run,
         ToolWindow::Problems,
         ToolWindow::Output,
+        ToolWindow::Debug,
+        ToolWindow::DebugConsole,
     ];
-    pub const LEFT: [ToolWindow; 6] =
-        [ToolWindow::Project, ToolWindow::Search, ToolWindow::Commit, ToolWindow::Git, ToolWindow::Extensions, ToolWindow::Agent];
+    pub const LEFT: [ToolWindow; 7] = [
+        ToolWindow::Project,
+        ToolWindow::Search,
+        ToolWindow::Commit,
+        ToolWindow::Git,
+        ToolWindow::Extensions,
+        ToolWindow::Agent,
+        ToolWindow::Debug,
+    ];
     pub const RIGHT: [ToolWindow; 1] = [ToolWindow::Notifications];
     /// The buttons of the right stripe: 에이전트 (its window opens in the left slot, #766) and 알림.
     pub const RIGHT_STRIPE: [ToolWindow; 2] = [ToolWindow::Agent, ToolWindow::Notifications];
-    pub const BOTTOM: [ToolWindow; 4] =
-        [ToolWindow::Terminal, ToolWindow::Run, ToolWindow::Problems, ToolWindow::Output];
+    /// The tabs of the bottom tool window. 디버그 콘솔 is a tab like 출력, as Code-OSS puts the
+    /// debug console in the panel (FR-L31.42).
+    pub const BOTTOM: [ToolWindow; 5] =
+        [ToolWindow::Terminal, ToolWindow::Run, ToolWindow::Problems, ToolWindow::Output, ToolWindow::DebugConsole];
 
     /// The buttons of the left stripe, exactly the mockup's (`editor.js:51`): 프로젝트, 커밋, Git.
     /// 검색 opens from the top find pill and ⇧⌘F, 확장 from its shortcut and the palette; their
@@ -2027,6 +2048,8 @@ impl ToolWindow {
             ToolWindow::Run => "실행",
             ToolWindow::Problems => "문제",
             ToolWindow::Output => "출력",
+            ToolWindow::Debug => "실행 및 디버그",
+            ToolWindow::DebugConsole => "디버그 콘솔",
         }
     }
 
@@ -2037,9 +2060,14 @@ impl ToolWindow {
             | ToolWindow::Commit
             | ToolWindow::Git
             | ToolWindow::Extensions
-            | ToolWindow::Agent => Side::Left,
+            | ToolWindow::Agent
+            | ToolWindow::Debug => Side::Left,
             ToolWindow::Notifications => Side::Right,
-            ToolWindow::Terminal | ToolWindow::Run | ToolWindow::Problems | ToolWindow::Output => Side::Bottom,
+            ToolWindow::Terminal
+            | ToolWindow::Run
+            | ToolWindow::Problems
+            | ToolWindow::Output
+            | ToolWindow::DebugConsole => Side::Bottom,
         }
     }
 
@@ -2057,6 +2085,8 @@ impl ToolWindow {
             ToolWindow::Run => Some(Action::Run),
             ToolWindow::Problems => Some(Action::Problems),
             ToolWindow::Output => None,
+            ToolWindow::Debug => Some(Action::DebugView),
+            ToolWindow::DebugConsole => Some(Action::DebugConsole),
         }
     }
 
@@ -2081,6 +2111,8 @@ impl ToolWindow {
             ToolWindow::Run => IconRole::Forward,
             ToolWindow::Problems => IconRole::Close,
             ToolWindow::Output => IconRole::Menu,
+            ToolWindow::Debug => IconRole::Forward,
+            ToolWindow::DebugConsole => IconRole::Menu,
         }
     }
 }
@@ -2186,6 +2218,8 @@ pub fn is_implemented(action: Action) -> bool {
                 | Action::NewTerminal
                 | Action::NextTab
                 | Action::PrevTab
+                | Action::Debug
+                | Action::Stop
         )
 }
 
@@ -2626,6 +2660,22 @@ mod tests {
     }
 
     #[test]
+    fn fr_l31_editor_comments_are_italic_and_types_weight_500() {
+        // #477: the mockup's `.tok-c` is italic and `.tok-t` is 500; other runs keep the body style.
+        use compose_rust::code::SyntaxFontStyle;
+        use ember_editor::textmate::{DocRun, SyntaxRole};
+        let run = |role| DocRun { line: 0, start: 0, end: 3, role };
+        let syntax = ember_editor::SyntaxRuns {
+            version: 1,
+            runs: vec![run(SyntaxRole::Comment), run(SyntaxRole::Type), run(SyntaxRole::Keyword)],
+        };
+        let spans = syntax_spans(&syntax).spans();
+        assert_eq!(spans[0].style, SyntaxFontStyle::NORMAL.italic());
+        assert_eq!(spans[1].style, SyntaxFontStyle::NORMAL.weight(500));
+        assert_eq!(spans[2].style, SyntaxFontStyle::NORMAL);
+    }
+
+    #[test]
     fn fr_l31_6_a3_window_syntax_runs_and_folds_are_written_in_the_widget_numbering() {
         use ember_editor::textmate::{DocRun, SyntaxRole};
         let syntax = ember_editor::SyntaxRuns { version: 12, runs: vec![DocRun { line: 0, start: 0, end: 2, role: SyntaxRole::Keyword }] };
@@ -2694,9 +2744,12 @@ mod tests {
             // Save, maximize and reopen act on the window's session, panel size and close history (FR-L31.15).
             // The settings view and the two settings files open a tab through the window (FR-L31.17).
             // Format document goes to the language features (FR-L31.13), not to a tab or a tool window.
+            // F5 and Shift+F5 go to the debug session or the task runner (FR-L31.42).
             if matches!(
                 action,
-                Action::Palette
+                Action::Debug
+                    | Action::Stop
+                    | Action::Palette
                     | Action::Find
                     | Action::FindInFile
                     | Action::ReplaceInFiles

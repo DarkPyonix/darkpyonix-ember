@@ -840,7 +840,9 @@ async fn fr_c2_poll_with_a_wrong_secret_a_missing_header_a_non_bearer_header_and
     let raw_secret = o.secret.clone();
     let bearer_wrong = format!("Bearer {wrong}");
     let too_long = format!("Bearer dps_{}", "x".repeat(300));
-    let cases: Vec<(&str, String, Vec<(&str, &str)>)> = vec![
+    /// A refused redeem: its label, the session id sent, and the headers.
+    type Case<'a> = (&'a str, String, Vec<(&'a str, &'a str)>);
+    let cases: Vec<Case<'_>> = vec![
         ("wrong secret", id.into(), vec![("authorization", bearer_wrong.as_str())]),
         ("no header", id.into(), vec![]),
         ("basic scheme", id.into(), vec![("authorization", basic.as_str())]),
@@ -1177,7 +1179,7 @@ async fn fr_c2_the_eleventh_redeem_in_a_minute_from_one_address_is_429() {
     // The real limits of the served door: strict 10 a minute, global burst 10.
     let app = f.app();
     assert_eq!(ENROL_ACCEPT_PER_MINUTE, 10);
-    assert!(ENROL_ACCEPT_PER_HOUR >= ENROL_ACCEPT_PER_MINUTE);
+    const { assert!(ENROL_ACCEPT_PER_HOUR >= ENROL_ACCEPT_PER_MINUTE) };
     for i in 0..ENROL_ACCEPT_PER_MINUTE {
         let r = redeem(&app, PEER, &unknown_code('a')).await;
         assert_eq!(r.0, StatusCode::FORBIDDEN, "{i}");

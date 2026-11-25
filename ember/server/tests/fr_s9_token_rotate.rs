@@ -14,7 +14,6 @@ use ember_server::agents::AgentAdapter;
 use ember_server::auth::{self, ServerAuth};
 use ember_server::session::Sessions;
 use ember_server::store::Store;
-use futures::SinkExt;
 use http_body_util::BodyExt;
 use serde_json::Value;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;

@@ -1783,7 +1783,7 @@ mod tests {
         assert!(script.trim_end().ends_with("exit 0"), "{script}");
         assert!(!script.contains(r#""decision":"ask""#), "{script}");
         assert!(script.contains(&format!("--max-time {HOOK_CURL_MAX_SECS}")));
-        assert!(HOOK_CURL_MAX_SECS < HOOK_TIMEOUT_SECS);
+        const { assert!(HOOK_CURL_MAX_SECS < HOOK_TIMEOUT_SECS) };
         assert!(APPROVAL_TIMEOUT < Duration::from_secs(HOOK_CURL_MAX_SECS));
         assert_eq!(hook_fallback_deny()["decision"], "deny");
         // Exactly what the route answers, byte for byte.

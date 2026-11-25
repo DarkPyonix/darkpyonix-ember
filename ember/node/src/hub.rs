@@ -201,11 +201,14 @@ pub fn hub_config_for(reg: &Registration) -> HubConfig {
         .unwrap_or_else(|| HubConfig::new(&reg.hub_url))
 }
 
+/// The hub in use, its token, and the device token ([`hub_in_use`]).
+type HubInUse = (HubConfig, Option<String>, Option<String>);
+
 /// Which hub the node uses now, and the token: the registration's hub, or `EMBER_HUB_URL` when
 /// set explicitly (without a token).
 /// The third value is the device token, for the hub's batched pkarr watch (sent in the header,
 /// never in a URL).
-fn hub_in_use(state_dir: &Path) -> anyhow::Result<Option<(HubConfig, Option<String>, Option<String>)>> {
+fn hub_in_use(state_dir: &Path) -> anyhow::Result<Option<HubInUse>> {
     if let Some(reg) = active_registration(state_dir)? {
         // The resolver URL carries the resolve token, never the device token (NFR-H2).
         let token = reg.directory_token();

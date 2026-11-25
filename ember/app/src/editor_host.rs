@@ -94,6 +94,10 @@ pub enum HostCommand {
     CancelSearch(u64),
     /// A language feature at the caret: completion, definition, rename and the rest (FR-L31.13).
     Language(ember_editor::LanguageRequest),
+    Debug(ember_editor::debugger::DebugRequest),
+    /// Open `.vscode/launch.json`, first writing `text` there when the file does not exist
+    /// (FR-L31.42). An existing file is never overwritten.
+    OpenLaunchJson { text: String },
     Replace { id: u64, request: ember_editor::search::ReplaceRequest },
     /// Discard working-tree changes for a file by reading it through the session, reconstructing
     /// the base text from `diff`, and writing it back only if reading succeeds.
@@ -166,6 +170,8 @@ pub struct HostState {
     pub tasks: Option<crate::ui::editor_tasks::TasksLoad>,
     /// The extensions the OSE has and the ones the extension host runs (FR-L31.14).
     pub extensions: crate::ui::editor_extensions::ExtensionScan,
+    /// The debuggers the running extensions contribute, for creating `launch.json` (FR-L31.42).
+    pub debuggers: Vec<ember_editor::debugger::launch::DebuggerContribution>,
     /// The settings of every scope, the list the settings view shows and the user's key bindings (FR-L31.17).
     pub settings: crate::ui::editor_settings::SettingsState,
     /// The language features' sheet, messages and symbols (FR-L31.13).
@@ -363,6 +369,28 @@ async fn finish_edit(session: &ember_editor::EditorSession, shared: &Arc<Mutex<H
     shared.lock().unwrap().set_dir_listing(parent, listed);
 }
 
+/// The path of `.vscode/launch.json` in `folder`.
+pub fn launch_json_path(folder: &str) -> String {
+    format!("{}/{}", folder.trim_end_matches('/'), ember_editor::debugger::launch::LAUNCH_JSON)
+}
+
+/// `.vscode/launch.json` of `folder`, written with `text` when it is not there (FR-L31.42). An
+/// existing file is kept as it is, as Code-OSS opens it instead of writing it again.
+async fn ensure_launch_json(session: &ember_editor::EditorSession, folder: &str, text: &str) -> Result<String, ember_editor::Error> {
+    let path = launch_json_path(folder);
+    if session.stat(&session.uri(&path)).await.is_ok() {
+        return Ok(path);
+    }
+    let vscode = format!("{}/.vscode", folder.trim_end_matches('/'));
+    if session.stat(&session.uri(&vscode)).await.is_err() {
+        session.create_dir(folder, ".vscode").await?;
+    }
+    // `create_file` never overwrites, so a file made since the stat above is kept.
+    session.create_file(&vscode, "launch.json").await?;
+    session.write_file(&path, text.as_bytes()).await?;
+    Ok(path)
+}
+
 /// While the connection is lost: wait for 다시 연결. Other commands have no session to go to and are
 /// dropped. False when the window is gone.
 async fn wait_for_reconnect(rx: &mut mpsc::UnboundedReceiver<HostCommand>, shared: &Arc<Mutex<HostState>>, mut revision: SyncSignal<u64>) -> bool {
@@ -476,10 +504,12 @@ impl EditorHost {
                     state.settings = crate::ui::editor_settings::start_state(&session, &user_files, user_error);
                     // The scan of this connection, on the first one and after a reconnect (FR-L31.14).
                     state.extensions.connected(session.installed_extensions().to_vec(), session.running_extensions());
+                    state.debuggers = session.debuggers().to_vec();
                     if attempt == 1 && crate::ui::editor_extensions::capture_hook().is_some_and(|c| c.adds_samples()) {
                         state.extensions.add_capture_samples();
                     }
                 }
+                let _ = session.debug(ember_editor::debugger::DebugRequest::ListConfigurations);
                 *revision.write() += 1;
                 let mut index_task: Option<tokio::task::JoinHandle<()>> = None;
                 // The newest search the window asked for: a debounced one that is no longer it is dropped.
@@ -653,6 +683,21 @@ impl EditorHost {
                             }
                             Some(HostCommand::Replace { id, request }) => { let _ = session.replace(id, request); }
                             Some(HostCommand::Language(request)) => { let _ = session.language(request); }
+                            Some(HostCommand::Debug(request)) => { let _ = session.debug(request); }
+                            Some(HostCommand::OpenLaunchJson { text }) => {
+                                match ensure_launch_json(&session, &root, &text).await {
+                                    Ok(path) => {
+                                        let uri = session.document_uri(&path);
+                                        let _ = session.open(uri.clone());
+                                        let _ = session.focus(uri);
+                                        let _ = session.debug(ember_editor::debugger::DebugRequest::ListConfigurations);
+                                    }
+                                    Err(error) => {
+                                        tracing::warn!("launch.json: {error}");
+                                        shared.lock().unwrap().edit_errors.push(format!("launch.json을 만들지 못했습니다: {error}"));
+                                    }
+                                }
+                            }
                             Some(HostCommand::AnswerMessage { id, handle }) => { let _ = session.answer_message(id, handle); }
                             Some(HostCommand::ActiveOutputChannel(id)) => { let _ = session.set_active_output_channel(id); }
                             Some(HostCommand::LoadTasks) => {
@@ -738,7 +783,7 @@ impl EditorHost {
                             }
                             None => {
                                 // The session ended without saying why.
-                                shared.lock().unwrap().connection_lost("session ended");
+                                shared.lock().unwrap().apply_update(SessionUpdate::ConnectionLost { reason: "session ended".into() });
                                 lost = true;
                                 break;
                             }

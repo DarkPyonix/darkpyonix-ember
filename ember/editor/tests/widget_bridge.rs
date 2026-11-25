@@ -730,3 +730,77 @@ fn fr_l31_6_bridge_keeps_document_state_on_a_repeated_opened() {
     assert_eq!(doc.version, 0);
     assert_eq!(doc.generation, 8);
 }
+
+// FR-L31.42: debug updates are not dropped on the way to the window. The bridge passes each one on
+// and keeps the shown session, where it is stopped and the threads a pause goes to.
+#[test]
+fn fr_l31_42_bridge_passes_debug_updates_and_follows_the_shown_session() {
+    use ember_editor::debugger::{DebugUpdate, FrameInfo, SessionInfo, SessionState, ThreadInfo};
+
+    let session = |id: &str, state: SessionState, thread_id: Option<i64>| SessionInfo {
+        id: id.into(),
+        name: "Python".into(),
+        debug_type: "debugpy".into(),
+        request: "launch".into(),
+        parent: None,
+        state,
+        thread_id,
+        frame_id: None,
+    };
+    let stopped = || SessionState::Stopped { reason: "breakpoint".into(), thread_id: Some(7), description: None, text: None };
+    let frame = |uri: Option<UriComponents>| FrameInfo {
+        id: 70,
+        name: "main".into(),
+        uri,
+        source_name: Some("main.py".into()),
+        line: 4,
+        column: 3,
+        hint: None,
+    };
+    let stack = |session: &str, uri: Option<UriComponents>| {
+        SessionUpdate::Debug(DebugUpdate::CallStack { session: session.into(), thread_id: 7, frames: vec![frame(uri)], total_frames: Some(1) })
+    };
+    let main = uri("/w/main.py");
+    let mut bridge = WidgetBridge::new();
+
+    // Running, with no thread chosen yet: a pause goes to the first listed thread.
+    let running = DebugUpdate::Sessions { sessions: vec![session("a", SessionState::Running, None)], active: Some("a".into()) };
+    assert_eq!(bridge.apply(SessionUpdate::Debug(running.clone())), BridgeAction::Debug(running));
+    assert_eq!(bridge.debug().pause_thread(), None);
+    bridge.apply(SessionUpdate::Debug(DebugUpdate::Threads {
+        session: "a".into(),
+        threads: vec![ThreadInfo { id: 5, name: "MainThread".into(), stopped: false }, ThreadInfo { id: 6, name: "worker".into(), stopped: false }],
+    }));
+    assert_eq!(bridge.debug().pause_thread(), Some(5));
+
+    // A call stack of a session that is not stopped, or not shown, marks nothing.
+    bridge.apply(stack("a", Some(main.clone())));
+    assert_eq!(bridge.debug().stopped_line(&main), None);
+    bridge.apply(SessionUpdate::Debug(DebugUpdate::Sessions {
+        sessions: vec![session("a", stopped(), Some(7)), session("b", stopped(), Some(7))],
+        active: Some("a".into()),
+    }));
+    bridge.apply(stack("b", Some(main.clone())));
+    assert_eq!(bridge.debug().stopped_line(&main), None);
+    // The shown session's top frame is the stopped line; a frame without a file leaves none.
+    bridge.apply(stack("a", None));
+    assert_eq!(bridge.debug().stopped_at, None);
+    bridge.apply(stack("a", Some(main.clone())));
+    assert_eq!(bridge.debug().stopped_line(&main), Some(4));
+    assert_eq!(bridge.debug().pause_thread(), Some(7));
+
+    // Showing the other session takes the mark away.
+    bridge.apply(SessionUpdate::Debug(DebugUpdate::Sessions {
+        sessions: vec![session("a", stopped(), Some(7)), session("b", stopped(), Some(7))],
+        active: Some("b".into()),
+    }));
+    assert_eq!(bridge.debug().stopped_at, None);
+
+    // Updates the bridge keeps nothing of still reach the window.
+    let failed = DebugUpdate::StartFailed { message: "no launch.json".into() };
+    assert_eq!(bridge.apply(SessionUpdate::Debug(failed.clone())), BridgeAction::Debug(failed));
+
+    // A lost connection ends every session with it.
+    bridge.apply(SessionUpdate::ConnectionLost { reason: "gone".into() });
+    assert_eq!(*bridge.debug(), ember_editor::DebugView::default());
+}

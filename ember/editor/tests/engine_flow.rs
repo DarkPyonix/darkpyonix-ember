@@ -1013,7 +1013,7 @@ fn fr_l31_16_a_hidden_logger_is_not_a_channel() {
     let mut c = core(t0);
     let fx = register_logger(&mut c, t0, 1, "quiet.log", "Quiet", true);
     assert!(fx.contains(&Effect::Respond { req: 1, result: Ok(Reply::Empty) }));
-    assert!(channel_list(&fx).map_or(true, |l| l.is_empty()));
+    assert!(channel_list(&fx).is_none_or(|l| l.is_empty()));
     assert!(channel_reads(&fx).is_empty());
     assert!(c.next_wake().is_none());
 }

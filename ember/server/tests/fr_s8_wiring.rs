@@ -536,7 +536,7 @@ async fn fr_s8_codex_mid_turn_output_drained_and_persisted_after_server_crash() 
         .collect();
     assert!(text.contains("tick 25 "), "the last delta arrived: {text}");
     assert!(
-        events.iter().any(|e| *e == AgentEvent::TurnEnded { outcome: TurnOutcome::Completed }),
+        events.contains(&AgentEvent::TurnEnded { outcome: TurnOutcome::Completed }),
         "{events:?}"
     );
     assert_eq!(store.session(&id).unwrap().unwrap().status, SessionStatus::Finished);
@@ -611,7 +611,7 @@ async fn fr_s8_acp_mid_turn_output_drained_and_persisted_after_server_crash() {
         "the message was completed: {events:?}"
     );
     assert!(
-        events.iter().any(|e| *e == AgentEvent::TurnEnded { outcome: TurnOutcome::Completed }),
+        events.contains(&AgentEvent::TurnEnded { outcome: TurnOutcome::Completed }),
         "{events:?}"
     );
     assert_eq!(store.session(&id).unwrap().unwrap().status, SessionStatus::Finished);
@@ -691,7 +691,7 @@ async fn fr_s8_acp_drain_stores_each_tool_call_once() {
     assert_eq!(calls(&events, "t2"), 1, "the call that started during the drain is stored once: {events:?}");
     assert_eq!(results(&events, "t2"), vec![("two".to_string(), false)], "{events:?}");
     assert!(
-        events.iter().any(|e| *e == AgentEvent::TurnEnded { outcome: TurnOutcome::Completed }),
+        events.contains(&AgentEvent::TurnEnded { outcome: TurnOutcome::Completed }),
         "{events:?}"
     );
     assert_eq!(store.session(&id).unwrap().unwrap().status, SessionStatus::Finished);
@@ -850,7 +850,7 @@ async fn fr_s8_per_session_memory_limit_from_the_start_request_ends_only_that_se
     let _store = install(shims.path());
 
     let hog = spawn_agent(memhog_cmd("s-hog", work.path(), Some(1))).await.unwrap();
-    let mut free = spawn_agent(memhog_cmd("s-free", work.path(), None)).await.unwrap();
+    let free = spawn_agent(memhog_cmd("s-free", work.path(), None)).await.unwrap();
     let ProcHandle::Shim { exited: hog_exited, .. } = &hog.handle else { panic!("runs under a shim") };
     let mut hog_exited = hog_exited.clone();
     tokio::time::timeout(Duration::from_secs(20), hog_exited.wait_for(|v| *v))
@@ -1015,7 +1015,7 @@ async fn fr_s8_recovery_drains_a_running_acp_session_in_the_background_and_guard
         "the message was completed: {events:?}"
     );
     assert!(
-        events.iter().any(|e| *e == AgentEvent::TurnEnded { outcome: TurnOutcome::Completed }),
+        events.contains(&AgentEvent::TurnEnded { outcome: TurnOutcome::Completed }),
         "{events:?}"
     );
     assert_eq!(status_of(&store, &id), SessionStatus::Finished);

@@ -695,13 +695,13 @@ fn page_box(page: &Page, node: NodeId) -> (f32, f32, f32, f32) {
     (x, y, size.width, size.height)
 }
 
-// FR-L31.40 (#301): the code editor's box is the editor pane under the breadcrumb row less the
-// 8 px above the first line (FR-L31.27), and ends where the pane does, above the bottom panel: the
+// FR-L31.40 (#301): the code editor's box is the editor pane under the breadcrumb row (the 8 px
+// above the first line is the editor's own content padding since #477, FR-L31.27), and ends where the pane does, above the bottom panel: the
 // box `use_widget_box` hands the editor is the area the reader sees, so a line the editor counts
 // as on screen is drawn there. The window measured the same (pane 1054x456 at 337,135 and box
 // 1054x448 at 1440x900); this keeps the stylesheet and the pane's inline sizes from drifting.
 #[test]
-fn fr_l31_40_the_code_editor_box_is_the_pane_under_the_breadcrumb_less_the_top_room() {
+fn fr_l31_40_the_code_editor_box_is_the_pane_under_the_breadcrumb() {
     let _guard = crate::services::test_guard();
     let mut page = Page::open_styled();
     page.click_row();
@@ -718,7 +718,7 @@ fn fr_l31_40_the_code_editor_box_is_the_pane_under_the_breadcrumb_less_the_top_r
         assert!(p.3 > 0.0 && w.3 > 0.0, "laid out {at}");
         assert!(close(p.1, c.1 + c.3), "the pane starts under the breadcrumb row {at}");
         assert!(close(w.0, p.0) && close(w.2, p.2), "the box is the pane's width {at}");
-        assert!(close(w.1, p.1 + 8.0), "8 px above the box {at}");
+        assert!(close(w.1, p.1), "the box starts at the pane's top; the 8 px is padding inside the editor {at}");
         assert!(close(w.1 + w.3, p.1 + p.3), "the box ends where the pane does {at}");
         assert!(w.1 + w.3 <= b.1 + 0.5, "the box ends above the bottom panel {at}");
     }
@@ -1903,4 +1903,98 @@ fn fr_l31_6_b3_window_a_stale_save_is_shown_in_korean() {
     let text = posted_notice().expect("the failed save is shown");
     assert!(text.contains("a.rs") && text.contains("디스크에서 바뀌어"), "{text}");
     assert!(!text.contains("nothing was written") && !text.contains("알 수 없는 오류"), "{text}");
+}
+
+/// The modifiers and key of a keymap chord, as a key event carries them.
+fn chord_event(chord: &Chord) -> (Key, Modifiers) {
+    let Chord::Keys { ctrl, shift, alt, meta, key } = chord else {
+        panic!("a key chord, not {chord:?}");
+    };
+    let mut modifiers = Modifiers::empty();
+    if *ctrl { modifiers |= Modifiers::CONTROL; }
+    if *shift { modifiers |= Modifiers::SHIFT; }
+    if *alt { modifiers |= Modifiers::ALT; }
+    if *meta { modifiers |= Modifiers::META; }
+    let key = if key.chars().count() == 1 { Key::Character(key.to_lowercase()) } else { Key::Character(key.clone()) };
+    (key, modifiers)
+}
+
+// FR-L31.21 (#1133): with the code editor focused, the keys the terminal keeps for the shell still run
+// their page actions: 최근 파일 (JetBrains ⌘E / Ctrl+E, VS Code ⌃R / Ctrl+R) opens its list from the page.
+#[test]
+fn fr_l31_21_terminal_keys_still_run_their_actions_from_the_code_editor() {
+    use crate::ui::keymap::Keymap;
+    use dioxus_compose::html::prelude::dioxus_signals::WritableExt;
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open();
+    for keymap in Keymap::ALL {
+        let (mut keymap_sig, mut palette_open) = (super::shared().keymap, super::shared().palette_open);
+        keymap_sig.set(keymap);
+        palette_open.set(false);
+        page.redraw();
+        let chord = keymap.chord(Action::Recent, Os::current()).expect("최근 파일 has a chord");
+        let (key, modifiers) = chord_event(&chord);
+        let root = page.find("class", "ed").expect("the page's key listener (.ed)");
+        page.dom.key_down(root, key, Code::Unidentified, modifiers);
+        page.dom.render();
+        assert!(*super::shared().palette_open.read(), "{keymap:?}: {chord:?} opens 최근 파일 from the code editor");
+        assert_eq!(*super::shared().palette_mode.read(), crate::ui::palette::Mode::Recent, "{keymap:?}");
+    }
+}
+
+// FR-L31.21 (#1133): the terminal asks the page what a key would run, through the page's own keymap and
+// keybindings.json: 최근 파일, an unbound Ctrl+D and Ctrl+R/Ctrl+E stay with the shell; the palette, quick
+// open and Shift+F5 (중지, Code-OSS debug.stop) go on to the page.
+#[test]
+fn fr_l31_21_the_terminal_keeps_shell_keys_and_passes_the_palette() {
+    use crate::ui::keymap::{terminal_keeps_key, Keymap, PageKey};
+    use dioxus_compose::html::prelude::dioxus_signals::WritableExt;
+    let _guard = crate::services::test_guard();
+    let _page = Page::open();
+    let s = super::shared();
+    for keymap in Keymap::ALL {
+        let mut keymap_sig = s.keymap;
+        keymap_sig.set(keymap);
+        // The shell's bytes for the chord, as the terminal handler computes them.
+        let keeps = |chord: &Chord| {
+            let Chord::Keys { key, ctrl, alt, shift, meta } = chord else { panic!("{chord:?}") };
+            let (_, modifiers) = chord_event(chord);
+            let (k, c, page) = super::page::terminal_page_key(&s, key, modifiers);
+            let bytes = super::page::terminal_input(key, *ctrl, *alt, *shift, *meta).is_some();
+            (page.clone(), terminal_keeps_key(k, &c, &page, bytes))
+        };
+        if let Some(chord @ Chord::Keys { .. }) = keymap.chord(Action::Recent, Os::current()) {
+            let (page, kept) = keeps(&chord);
+            assert_eq!(page, PageKey::Action(Action::Recent), "{keymap:?} {chord:?}");
+            // ⌘E on macOS has no shell bytes and goes on, as in Code-OSS; Ctrl+R / Ctrl+E stay.
+            let meta = matches!(chord, Chord::Keys { meta: true, .. });
+            assert_eq!(kept, !meta, "{keymap:?} {chord:?}");
+        }
+        for key in ["R", "E", "D"] {
+            let chord = Chord::Keys { ctrl: true, shift: false, alt: false, meta: false, key: key.into() };
+            assert!(keeps(&chord).1, "{keymap:?}: Ctrl+{key} reaches the shell");
+        }
+        for action in [Action::Palette, Action::Find, Action::Stop] {
+            if let Some(chord @ Chord::Keys { .. }) = keymap.chord(action, Os::current()) {
+                let (page, kept) = keeps(&chord);
+                assert_eq!(page, PageKey::Action(action), "{keymap:?} {chord:?}");
+                assert!(!kept, "{keymap:?}: {action:?} runs from the terminal");
+            }
+        }
+    }
+}
+
+// FR-L31.21 (#1133): the terminal's key handler asks `terminal_keeps_key` before it stops a key, and a key
+// it does not keep is left to bubble to the page unsent.
+#[test]
+fn fr_l31_21_terminal_key_handler_consults_the_one_rule() {
+    let src = include_str!("editor_workbench.rs");
+    let term = &src[src.find("fn terminal_body(").expect("terminal_body")..src.find("fn problems_body(").expect("problems_body")];
+    let keys = &term[term.find("let bytes = terminal_input(").expect("terminal key bytes")..term.find("oncompositionstart").expect("ime")];
+    assert!(keys.contains("terminal_page_key(&term_key_s, &name, m)"), "the terminal asks what the page would run");
+    let rule = keys.find("crate::ui::keymap::terminal_keeps_key(").expect("the terminal consults the rule");
+    let stop = keys.find("event.stop_propagation();").expect("the terminal stops the keys it keeps");
+    let send = keys.find("send_input(").expect("the terminal sends the shell its bytes");
+    assert!(rule < stop && stop < send, "the rule is asked before the key is stopped or sent");
+    assert!(keys[rule..stop].contains("return;"), "a key the terminal does not keep goes on unsent");
 }

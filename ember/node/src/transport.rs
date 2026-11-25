@@ -25,7 +25,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use ember_transport::http::HttpListener;
-use ember_transport::{PeerGate, PeerId, SecretKey, Transport};
+use ember_transport::{PeerGate, PeerId, Transport};
 
 use crate::api::{self, Node};
 pub use crate::client::NODE_SERVICE;
@@ -158,6 +158,7 @@ pub fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ember_transport::SecretKey;
 
     #[test]
     fn modes_and_peer_lists_parse() {

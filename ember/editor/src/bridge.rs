@@ -10,6 +10,7 @@ use ember_editor_conn::uri::UriComponents;
 use crate::codelens::CommandDto;
 use crate::coords::{utf16_to_byte, WidgetPos, WidgetRange};
 use crate::engine::{ExternalChange, SessionUpdate};
+use crate::debugger::{DebugUpdate, SessionInfo, SessionState, SourceBreakpoint, ThreadInfo};
 use crate::folding::{compute_indent_folds, merge_folds, FoldRegion};
 use crate::hover::HoverPopup;
 use crate::widget::{Decoration, HoverPhase, WidgetCommand, WidgetEvent};
@@ -125,6 +126,110 @@ pub enum BridgeAction {
     /// An extension webview changed (FR-E8): pass it to the window's `WebviewDriver`. The bridge has
     /// already updated its placeholder panes ([`WidgetBridge::webview_panes`]).
     Webview(crate::webview::WebviewUpdate),
+    /// A debugging update (FR-L31.42). The bridge has already folded what the editor controls show
+    /// into [`WidgetBridge::debug`]; the update itself is for what the bridge does not keep, such as
+    /// the configurations of the launch picker and a start that failed.
+    Debug(DebugUpdate),
+}
+
+/// Where the shown session is stopped: the top frame of the stopped thread's call stack, which
+/// Code-OSS marks in the glyph margin and reveals (`debugEditorDecorations`, `focusStackFrame`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoppedLocation {
+    pub session: String,
+    pub thread_id: i64,
+    pub frame_id: i64,
+    pub uri: UriComponents,
+    /// 1-based, as the debugger reports it.
+    pub line: u32,
+    /// 1-based.
+    pub column: u32,
+}
+
+/// What the editor's debug controls show (FR-L31.42), kept from the session's [`DebugUpdate`]s:
+/// the sessions for the debug toolbar, the stopped location for the gutter, and the source
+/// breakpoints with what the adapters said about them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DebugView {
+    pub sessions: Vec<SessionInfo>,
+    /// The session the window shows.
+    pub active: Option<String>,
+    /// The threads of each live session, as last listed.
+    pub threads: HashMap<String, Vec<ThreadInfo>>,
+    pub stopped_at: Option<StoppedLocation>,
+    /// The whole source breakpoint registry; `verified` and `adapter_line` are the adapters' answer.
+    pub breakpoints: Vec<SourceBreakpoint>,
+}
+
+impl DebugView {
+    /// The session the window shows, while it has not ended.
+    pub fn active_session(&self) -> Option<&SessionInfo> {
+        let id = self.active.as_ref()?;
+        self.sessions.iter().find(|s| &s.id == id && s.state != SessionState::Terminated)
+    }
+
+    /// The thread a pause of the shown session goes to: the one it shows, else the first one listed
+    /// (Code-OSS pauses the focused thread).
+    pub fn pause_thread(&self) -> Option<i64> {
+        let session = self.active_session()?;
+        session.thread_id.or_else(|| self.threads.get(&session.id)?.first().map(|t| t.id))
+    }
+
+    /// The source breakpoints in the document `uri`.
+    pub fn breakpoints_in<'a>(&'a self, uri: &'a UriComponents) -> impl Iterator<Item = &'a SourceBreakpoint> + 'a {
+        self.breakpoints.iter().filter(move |bp| bp.uri == *uri)
+    }
+
+    /// The 1-based line the shown session is stopped at in `uri`.
+    pub fn stopped_line(&self, uri: &UriComponents) -> Option<u32> {
+        self.stopped_at.as_ref().filter(|at| at.uri == *uri).map(|at| at.line)
+    }
+
+    fn apply(&mut self, update: &DebugUpdate) {
+        match update {
+            DebugUpdate::Sessions { sessions, active } => {
+                self.sessions.clone_from(sessions);
+                self.active.clone_from(active);
+                let live = |id: &str| sessions.iter().any(|s| s.id == id && s.state != SessionState::Terminated);
+                self.threads.retain(|id, _| live(id.as_str()));
+                // The mark goes when its thread runs on, its session ends or another one is shown.
+                let still_stopped = |at: &StoppedLocation| {
+                    active.as_deref() == Some(at.session.as_str())
+                        && sessions.iter().any(|s| {
+                            s.id == at.session
+                                && matches!(s.state, SessionState::Stopped { .. })
+                                && s.thread_id.is_none_or(|t| t == at.thread_id)
+                        })
+                };
+                if self.stopped_at.as_ref().is_some_and(|at| !still_stopped(at)) {
+                    self.stopped_at = None;
+                }
+            }
+            DebugUpdate::Threads { session, threads } => {
+                self.threads.insert(session.clone(), threads.clone());
+            }
+            DebugUpdate::CallStack { session, thread_id, frames, .. } => {
+                let shown = self.active.as_deref() == Some(session.as_str())
+                    && self.sessions.iter().any(|s| &s.id == session && matches!(s.state, SessionState::Stopped { .. }));
+                if !shown {
+                    return;
+                }
+                // A frame without a file (a native or generated one) leaves nothing to mark.
+                self.stopped_at = frames.first().and_then(|top| {
+                    Some(StoppedLocation {
+                        session: session.clone(),
+                        thread_id: *thread_id,
+                        frame_id: top.id,
+                        uri: top.uri.clone()?,
+                        line: top.line,
+                        column: top.column,
+                    })
+                });
+            }
+            DebugUpdate::Breakpoints { source, .. } => self.breakpoints.clone_from(source),
+            _ => {}
+        }
+    }
 }
 
 impl BridgeAction {
@@ -178,6 +283,7 @@ pub struct WidgetBridge {
     output_channels: Vec<crate::output::OutputChannel>,
     active_output_channel: Option<String>,
     webview_panes: crate::webview::host::WebviewPanes,
+    debug: DebugView,
 }
 
 impl WidgetBridge {
@@ -189,6 +295,11 @@ impl WidgetBridge {
     /// the webview host node exists.
     pub fn webview_panes(&self) -> &crate::webview::host::WebviewPanes {
         &self.webview_panes
+    }
+
+    /// What the debug controls show, as the session last reported it (FR-L31.42).
+    pub fn debug(&self) -> &DebugView {
+        &self.debug
     }
 
     /// The problems list as the session last reported it.
@@ -380,7 +491,11 @@ impl WidgetBridge {
                 }
                 BridgeAction::None
             }
-            SessionUpdate::ConnectionLost { reason } => BridgeAction::ConnectionLost(reason),
+            SessionUpdate::ConnectionLost { reason } => {
+                // The sessions lived in the extension host that is gone; the next one lists them again.
+                self.debug = DebugView::default();
+                BridgeAction::ConnectionLost(reason)
+            }
             SessionUpdate::Problems { problems } => {
                 self.problems = problems;
                 BridgeAction::None
@@ -419,8 +534,12 @@ impl WidgetBridge {
             SessionUpdate::SearchHits { .. } | SessionUpdate::SearchDone { .. } | SessionUpdate::ReplaceDone { .. } => BridgeAction::None,
             // Language feature answers are the window's lists and boxes, not a document's props (FR-L31.13).
             SessionUpdate::Language(_) => BridgeAction::None,
-            // Sessions, stacks, variables and breakpoints are the Run and Debug tool window's.
-            SessionUpdate::Debug(_) => BridgeAction::None,
+            // The editor's controls read the sessions, the stopped frame and the breakpoints from
+            // here; the window takes the rest (configurations, variables, console) from the action.
+            SessionUpdate::Debug(update) => {
+                self.debug.apply(&update);
+                BridgeAction::Debug(update)
+            }
             SessionUpdate::Webview(update) => {
                 self.webview_panes.apply(&update);
                 BridgeAction::Webview(update)

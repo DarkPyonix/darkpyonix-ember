@@ -369,6 +369,9 @@ struct ReplaceWrite {
     open: Option<(u64, String)>,
 }
 
+/// TextMate runs of one document: the version they were made for, the line window, and the runs.
+type TextmateRuns = (u32, (u32, u32), Vec<crate::textmate::DocRun>);
+
 pub struct SessionCore {
     opts: CoreOptions,
     /// The window's settings (FR-L31.17); `None` until the session has read them.
@@ -386,7 +389,7 @@ pub struct SessionCore {
     diagnostics: Diagnostics,
     lenses: CodeLenses,
     highlights: Highlights,
-    textmate_runs: HashMap<String, (u32, (u32, u32), Vec<crate::textmate::DocRun>)>,
+    textmate_runs: HashMap<String, TextmateRuns>,
     folds: HashMap<String, DocFolds>,
     folding_due: HashMap<String, inline::Debouncer>,
     folding_inflight: HashMap<(String, i64), Token>,
@@ -1427,7 +1430,7 @@ impl SessionCore {
     /// `MainThreadLanguages.$changeLanguage(resource, languageId)` (`languages.setTextDocumentLanguage`):
     /// refused for an id no extension contributes, as Code-OSS does.
     fn on_change_language_request(&mut self, req: u32, uri: UriComponents, id: String) {
-        if !self.language_ids.iter().any(|l| *l == id) {
+        if !self.language_ids.contains(&id) {
             self.respond(req, Err(Some(js_error("Error", &format!("Unknown language id: {id}")))));
             return;
         }

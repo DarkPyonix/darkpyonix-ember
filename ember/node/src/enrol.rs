@@ -620,6 +620,9 @@ pub fn preflight(lock: &EnrolLock, replace: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The previous enrol file's bytes and mode, kept to restore it.
+type PreviousEnrol = Option<(Vec<u8>, u32)>;
+
 /// Every check and the staging of both files, under the lock. Anything that fails here changed
 /// nothing (staged temps are removed).
 fn prepare(
@@ -627,7 +630,7 @@ fn prepare(
     e: &Enrolment,
     allow_peer: Option<&str>,
     replace: bool,
-) -> anyhow::Result<(Staged, Option<(Vec<u8>, u32)>)> {
+) -> anyhow::Result<(Staged, PreviousEnrol)> {
     validate(e)?;
     let dir = lock.dir();
     let enrol_dst = dir.join(ENROL_FILE);
@@ -1353,10 +1356,14 @@ mod tests {
         assert!(!names(d.path()).iter().any(|n| n.contains("preflight")));
     }
 
+    /// A preflight case: its name, how it breaks the state directory, and the expected error.
+    #[cfg(unix)]
+    type PreflightCase = (&'static str, Box<dyn Fn(&Path)>, &'static str);
+
     #[cfg(unix)]
     #[test]
     fn fr_c2_node_preflight_refuses_a_bad_allowed_peers() {
-        let cases: Vec<(&str, Box<dyn Fn(&Path)>, &str)> = vec![
+        let cases: Vec<PreflightCase> = vec![
             (
                 "symlink",
                 Box::new(|d: &Path| {

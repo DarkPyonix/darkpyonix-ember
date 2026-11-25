@@ -16,15 +16,15 @@ use compose_rust::{Alignment, ButtonVariant, SpaceRole};
 use ember_client::wire::SessionPatch;
 
 use super::compat::{Badge, StatusDot, StatusPill};
-use super::components::{pressable, AppButton, ButtonKind, EmberCard, EmberField, EmberSheet, FieldOptions, Label, OptionSheet, SheetFooter};
+use super::components::{
+    pressable, AppButton, ButtonKind, EmberCard, EmberField, EmberSheet, FieldOptions, Label,
+    PopKind, PopMenu, PopRow, PopoverMenu, SheetFooter,
+};
 use super::notice;
 use super::theme::*;
 use crate::model::{self, SessionRow, Tone};
 use crate::services::{run_shared, services};
 use crate::ui::coexist::shared_ui;
-
-/// Width of the row menu popup.
-const MENU_WIDTH: f32 = 200.0;
 
 /// The push connection's state, when it is not simply "connected" (PR-1): an info icon, the
 /// message, and a retry button.
@@ -132,37 +132,62 @@ pub fn SessionRowWith(row: &SessionRow, menu_start_open: bool) {
             }
             StatusPill(row.status);
             Label(&when, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
-            let open = menu_open.clone();
-            { use ::compose_rust::ui::Button; Button!("", move || open.set(true), icon = compose_rust::IconRole::More, variant = ButtonVariant::Text, color = paint(p.text_2), 
-// A bare glyph with no ring, which no shared button draws; it still sends the
-// shared press values (FR-L34.5, #250).
-modifier = pressable(Modifier::new().size(H_CTL, H_CTL))) };
+            // Anchored popover menu for row actions (FR-L9, FR-L10.4): hangs below the More
+            // button on desktop and becomes a bottom sheet on compact phone width.
+            let pop_rows = [
+                PopRow { title: pin_label.to_string(), ..Default::default() },
+                PopRow { title: "이름 변경".to_string(), ..Default::default() },
+                PopRow { title: archive_label.to_string(), ..Default::default() },
+                PopRow { title: "내보내기".to_string(), ..Default::default() },
+            ];
+            let expanded = menu_open.get();
+            let (dismiss, toggle, rename_open, title_state) = (
+                menu_open.clone(),
+                menu_open.clone(),
+                renaming.clone(),
+                new_title.clone(),
+            );
+            let (id, title) = (row.id.clone(), row.title.clone());
+            PopoverMenu(
+                expanded,
+                PopMenu {
+                    name: super::a11y::SESSION_MENU,
+                    kind: PopKind::Mode,
+                    head: "",
+                    sub: None,
+                    rows: &pop_rows,
+                    align: compose_rust::PopoverAlign::End,
+                },
+                move || dismiss.set(false),
+                move |i| match i {
+                    0 => patch_session(id.clone(), pin_patch(pinned)),
+                    1 => {
+                        title_state.set(title.clone());
+                        rename_open.set(true);
+                    }
+                    2 => patch_session(id.clone(), archive_patch(archived)),
+                    _ => export(id.clone(), title.clone()),
+                },
+                move || {
+                    { use ::compose_rust::ui::Button; Button!(
+                        "",
+                        move || toggle.set(!toggle.get_untracked()),
+                        icon = compose_rust::IconRole::More,
+                        variant = ButtonVariant::Text,
+                        color = paint(p.text_2),
+                        accessible_name = super::a11y::MORE,
+                        // A bare glyph with no ring, which no shared button draws; it still sends
+                        // the shared press values (FR-L34.5, #250).
+                        modifier = pressable(Modifier::new().size(H_CTL, H_CTL).expanded(expanded)),
+                    ) };
+                },
+                None,
+            );
         }) };
     });
-    // The row menu is a modal list: the toolkit `Menu` cannot be placed below its anchor.
-    let labels: Vec<String> = [pin_label, "이름 변경", archive_label, "내보내기"].iter().map(|s| s.to_string()).collect();
-    let (dismiss, open, rename_open, title_state) = (menu_open.clone(), menu_open.clone(), renaming.clone(), new_title.clone());
-    let (id, title) = (row.id.clone(), row.title.clone());
-    OptionSheet(
-        open.get(),
-        &labels,
-        None,
-        MENU_WIDTH,
-        move || dismiss.set(false),
-        move |i| match i {
-            0 => patch_session(id.clone(), pin_patch(pinned)),
-            1 => {
-                title_state.set(String::new());
-                rename_open.set(true);
-            }
-            2 => patch_session(id.clone(), archive_patch(archived)),
-            _ => export(id.clone(), title.clone()),
-        },
-    );
 
-    // FR-L9 rename, on the main server. v0.0.7: #374 fixed (`TextField::text`); workaround kept
-    // until checked on a display (a controlled value must not move the caret while typing), so
-    // the current title is the placeholder; an empty entry keeps it.
+    // FR-L9 rename, on the main server: pre-filled with the session's current title so the user
+    // edits it directly; an empty entry leaves the title as it is.
     let dismiss = renaming.clone();
     EmberSheet("세션 이름 변경", renaming.get(), move || dismiss.set(false), None, || {
         { use ::compose_rust::ui::Column; Column!(space_role = SpaceRole::Md, modifier = Modifier::new().fill_max_width().padding(SP[4]), {
@@ -170,6 +195,7 @@ modifier = pressable(Modifier::new().size(H_CTL, H_CTL))) };
             EmberField(FieldOptions {
                 fill_max_width: true,
                 placeholder: row.title.clone(),
+                text: Some(new_title.get()),
                 on_value_change: Some(Box::new(move |v| title.set(v))),
                 on_submit: Some(Box::new(move |v| {
                     rename(id.clone(), v);
@@ -257,10 +283,122 @@ pub fn export(id: String, title: String) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
-    use compose_rust::protocol::{decode_batch, Mutation, PropertyValue};
-    use compose_rust::{Host, Recomposer};
+    use compose_rust::protocol::{decode_batch, HostEvent, Mutation, PropertyValue};
+    use compose_rust::{EventPayload, Host, PropertyKind, Recomposer, WidgetKind};
     use ember_client::LauncherStatus;
+
+    struct TestNode {
+        widget: WidgetKind,
+        parent: Option<u32>,
+        open: bool,
+        on_click: Option<u64>,
+        text: Option<String>,
+    }
+
+    struct TestTree {
+        host: Host,
+        nodes: HashMap<u32, TestNode>,
+    }
+
+    impl TestTree {
+        fn new(f: impl Fn() + Send + Sync + 'static) -> Self {
+            let f = std::sync::Arc::new(f);
+            let host = Host::new(move || {
+                let f = f.clone();
+                Box::new(Recomposer::new(move || f()))
+            });
+            let mut tree = Self { host, nodes: HashMap::new() };
+            let bytes = tree.host.rebuild().expect("rebuild").to_vec();
+            tree.apply(&bytes);
+            tree
+        }
+
+        fn apply(&mut self, bytes: &[u8]) {
+            for m in decode_batch(bytes).expect("decode") {
+                match m {
+                    Mutation::Create { node_id, widget } => {
+                        self.nodes.insert(
+                            node_id,
+                            TestNode {
+                                widget,
+                                parent: None,
+                                open: false,
+                                on_click: None,
+                                text: None,
+                            },
+                        );
+                    }
+                    Mutation::Insert { parent_id, node_id, .. } => {
+                        if let Some(n) = self.nodes.get_mut(&node_id) {
+                            n.parent = Some(parent_id);
+                        }
+                    }
+                    Mutation::Remove { node_id } => {
+                        self.remove_subtree(node_id);
+                    }
+                    Mutation::SetProp { node_id, property: PropertyKind::Open, value: PropertyValue::Bool(b) } => {
+                        if let Some(n) = self.nodes.get_mut(&node_id) {
+                            n.open = b;
+                        }
+                    }
+                    Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
+                        if let Some(n) = self.nodes.get_mut(&node_id) {
+                            n.on_click = Some(h as u64);
+                        }
+                    }
+                    Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                        if let Some(n) = self.nodes.get_mut(&node_id) {
+                            n.text = Some(s.to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        fn remove_subtree(&mut self, root: u32) {
+            let kids: Vec<u32> = self
+                .nodes
+                .iter()
+                .filter_map(|(&id, n)| (n.parent == Some(root)).then_some(id))
+                .collect();
+            for k in kids {
+                self.remove_subtree(k);
+            }
+            self.nodes.remove(&root);
+        }
+
+        fn click_text(&mut self, label: &str) {
+            let mut found = None;
+            for (&id, n) in &self.nodes {
+                if n.text.as_deref() != Some(label) {
+                    continue;
+                }
+                let mut cur = Some(id);
+                while let Some(nid) = cur {
+                    let Some(node) = self.nodes.get(&nid) else { break };
+                    if let Some(h) = node.on_click {
+                        found = Some((nid, h));
+                        break;
+                    }
+                    cur = node.parent;
+                }
+                if found.is_some() {
+                    break;
+                }
+            }
+            let (node_id, handler_id) = found.unwrap_or_else(|| panic!("no clickable text {label}"));
+            let (bytes, _) = self
+                .host
+                .dispatch(HostEvent::new(node_id, handler_id, EventPayload::Clicked))
+                .expect("click");
+            let bytes = bytes.to_vec();
+            self.apply(&bytes);
+        }
+    }
 
     fn row() -> SessionRow {
         SessionRow {
@@ -317,5 +455,66 @@ mod tests {
         for want in ["Fix the sidebar", "Done, tests pass", "고정", "이름 변경", "보관", "내보내기"] {
             assert!(all.iter().any(|t| t == want), "missing {want}: {all:?}");
         }
+    }
+
+    #[test]
+    fn fr_l9_fr_l10_4_session_row_menu_uses_anchored_popover_not_option_sheet() {
+        let _guard = crate::services::test_guard();
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+        let tree = TestTree::new(|| SessionRowWith(&row(), true));
+        assert!(
+            tree.nodes.values().any(|n| matches!(n.widget, WidgetKind::Popover) && n.open),
+            "session row menu opens as an anchored Popover on desktop"
+        );
+        assert!(
+            !tree.nodes.values().any(|n| matches!(n.widget, WidgetKind::Dialog) && n.open),
+            "session row menu must not open as a centred OptionSheet Dialog"
+        );
+        let texts: Vec<&str> = tree.nodes.values().filter_map(|n| n.text.as_deref()).collect();
+        for want in ["고정", "이름 변경", "보관", "내보내기"] {
+            assert!(texts.contains(&want), "missing row action {want}: {texts:?}");
+        }
+
+        crate::ui::window_size::set_opened_for_test(Some((390.0, 844.0)));
+        let phone = TestTree::new(|| SessionRowWith(&row(), true));
+        assert!(
+            phone.nodes.values().any(|n| matches!(n.widget, WidgetKind::Sheet) && n.open),
+            "session row menu becomes a bottom Sheet on compact phone width"
+        );
+        assert!(
+            !phone.nodes.values().any(|n| matches!(n.widget, WidgetKind::Popover)),
+            "compact phone width uses a bottom Sheet rather than a Popover"
+        );
+        crate::ui::window_size::set_opened_for_test(None);
+
+        let prod = include_str!("launcher.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(!prod.contains("OptionSheet("), "no centred OptionSheet left in launcher");
+    }
+
+    #[test]
+    fn fr_l9_opening_rename_prefills_text_field_with_current_title() {
+        let _guard = crate::services::test_guard();
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+        let mut tree = TestTree::new(|| SessionRowWith(&row(), true));
+        tree.click_text("이름 변경");
+        assert!(
+            !tree.nodes.values().any(|n| matches!(n.widget, WidgetKind::Popover) && n.open),
+            "row menu popover closes when opening rename"
+        );
+        assert!(
+            tree.nodes.values().any(|n| matches!(n.widget, WidgetKind::Dialog) && n.open),
+            "rename sheet opens after clicking 이름 변경"
+        );
+        let field_texts: Vec<&str> = tree
+            .nodes
+            .values()
+            .filter(|n| matches!(n.widget, WidgetKind::TextField))
+            .filter_map(|n| n.text.as_deref())
+            .collect();
+        assert!(
+            field_texts.contains(&"Fix the sidebar"),
+            "expected rename TextField pre-filled with current title, got {field_texts:?}"
+        );
+        crate::ui::window_size::set_opened_for_test(None);
     }
 }

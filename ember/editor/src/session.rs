@@ -947,6 +947,9 @@ async fn read_user_file(path: std::path::PathBuf) -> Result<Vec<u8>, String> {
     read.await.unwrap_or_else(|e| Err(e.to_string()))
 }
 
+/// How long shutdown waits for file writes already started.
+pub const SHUTDOWN_WRITE_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// Writes one of the caller's settings files on the client machine, making its folder first.
 async fn write_user_file(path: std::path::PathBuf, bytes: Vec<u8>) -> Result<(), String> {
     let write = tokio::task::spawn_blocking(move || {
@@ -1328,6 +1331,10 @@ impl Driver {
             exthost::send_terminate(self.peer.connection());
         }
         self.drain_shutdown(&internal_tx, &mut internal_rx, &mut rpc_events, exthost_alive).await;
+        // A save still on the wire (one the drain above started too) finishes before the connections close under it.
+        if !crate::writes::wait_settled(SHUTDOWN_WRITE_WAIT).await {
+            tracing::warn!("ember-editor: {} file write(s) still unfinished at shutdown", crate::writes::in_flight());
+        }
         self.peer.connection().close();
         self.ipc.connection().close();
     }
@@ -1522,7 +1529,9 @@ impl Driver {
                 Effect::WriteFile { uri, bytes, token, expect } => {
                     if let Some(local) = self.user_file(&uri) {
                         let tx = internal.clone();
+                        let guard = crate::writes::WriteGuard::new();
                         tokio::spawn(async move {
+                            let _guard = guard;
                             let result = match local {
                                 Ok(path) => write_user_file(path, bytes).await,
                                 Err(refused) => Err(refused),
@@ -1532,7 +1541,9 @@ impl Driver {
                         continue;
                     }
                     let (fs, tx) = (Arc::clone(&self.fs), internal.clone());
+                    let guard = crate::writes::WriteGuard::new();
                     tokio::spawn(async move {
+                        let _guard = guard;
                         // A save writes over whatever is there: first see that it is what the buffer was
                         // based on. A file that is gone passes (the save makes it again).
                         if let Some(base) = &expect {

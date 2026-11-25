@@ -1056,7 +1056,7 @@ async fn run_withdraw_script(script: Vec<AgentEvent>) -> (Arc<Sessions>, axum::R
         .id;
     s.send(&id, "go").await.unwrap();
     // UserMessage plus the script (plus nothing else: no turn end).
-    wait_until("the script is stored", || stored_kinds(&s, &id).len() >= n + 1).await;
+    wait_until("the script is stored", || stored_kinds(&s, &id).len() > n).await;
     (s, app, id)
 }
 

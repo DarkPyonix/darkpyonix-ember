@@ -537,7 +537,7 @@ async fn a_mention_delivers_a_copy_with_the_users_text() {
     wait_for("the user's message, unchanged", || user_messages(&w.sessions, &a).last().is_some_and(|m| m == text)).await;
     wait_for("mention delivery", || user_messages(&w.sessions, &b).len() == 1).await;
     let got = &user_messages(&w.sessions, &b)[0];
-    assert!(got.starts_with(&format!("[ember a2a] Message msg_")) && got.contains(&format!("from session {a} \"alpha\"")), "{got}");
+    assert!(got.starts_with("[ember a2a] Message msg_") && got.contains(&format!("from session {a} \"alpha\"")), "{got}");
     assert!(got.contains(&format!("The user mentioned this session in session {a} (\"alpha\") and wrote:\n\n{text}")), "{got}");
     assert!(got.contains(&format!("ember-a2a send {a} --reply-to")), "{got}");
     let n = notices(&w.sessions, &a);
@@ -756,9 +756,8 @@ async fn fr_t7_leader_is_told_once_when_a_teammate_falls_back() {
     assert_eq!(got.matches(said).count(), 1, "{got}");
     assert!(got.contains("stopped answering") && !got.to_lowercase().contains("invalid"), "{got}");
     let team = loop {
-        match pushes.recv().await.unwrap() {
-            Push::TeamUpdated { team } => break team,
-            _ => {}
+        if let Push::TeamUpdated { team } = pushes.recv().await.unwrap() {
+            break team;
         }
     };
     let alice_view = team.members.iter().find(|m| m.name == "alice").unwrap();

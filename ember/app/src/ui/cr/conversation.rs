@@ -36,6 +36,10 @@ use std::time::Duration;
 use ember_client::wire::{ApprovalDecision, MentionCandidate, Question, SessionPatch, TurnOutcome};
 use ember_client::LauncherStatus;
 
+use crate::ui::conversation::{
+    ConversationDisplayItem, group_shell_calls, shell_group_key, shell_group_label,
+};
+
 pub fn item_key(item: &TranscriptItem) -> String {
     crate::ui::conversation::item_key(item)
 }
@@ -339,6 +343,64 @@ pub fn tail_start_index(
             _ => false,
         };
         let h = estimate_item_height(item, open) + 8.0;
+        if used + h > budget && start < items.len() {
+            break;
+        }
+        used += h;
+        start = idx;
+    }
+    start
+}
+
+/// Estimate the rendered height (dp) of a [`ConversationDisplayItem`] (FR-L5, #1075).
+pub fn estimate_display_item_height(
+    item: &ConversationDisplayItem,
+    expanded: &HashSet<String>,
+) -> f32 {
+    match item {
+        ConversationDisplayItem::Single(inner) => {
+            let open = match inner {
+                TranscriptItem::ToolCall { call_id, .. } => expanded.contains(call_id),
+                _ => false,
+            };
+            estimate_item_height(inner, open)
+        }
+        ConversationDisplayItem::ShellGroup(calls) => {
+            let key = shell_group_key(calls);
+            if !expanded.contains(&key) {
+                CMD_ROW_H
+            } else {
+                let inner_h: f32 = calls
+                    .iter()
+                    .map(|c| {
+                        let open = match c {
+                            TranscriptItem::ToolCall { call_id, .. } => expanded.contains(call_id),
+                            _ => false,
+                        };
+                        estimate_item_height(c, open) + SP[1]
+                    })
+                    .sum();
+                CMD_ROW_H + SP[0] + inner_h
+            }
+        }
+    }
+}
+
+/// Return the starting index of grouped `items` so the tail slice fits within `avail_h` dp
+/// (FR-L5, #1075).
+pub fn tail_display_start_index(
+    items: &[ConversationDisplayItem],
+    expanded: &HashSet<String>,
+    avail_h: f32,
+) -> usize {
+    if items.len() <= 1 || avail_h <= 0.0 {
+        return 0;
+    }
+    let budget = (avail_h - 16.0).max(160.0);
+    let mut used = 0.0;
+    let mut start = items.len();
+    for (idx, item) in items.iter().enumerate().rev() {
+        let h = estimate_display_item_height(item, expanded) + 8.0;
         if used + h > budget && start < items.len() {
             break;
         }
@@ -905,7 +967,7 @@ pub fn ConversationView(id: &str, embedded: bool) {
         })
     };
     // Review captures: `EMBER_CR_QUESTION=single|multi|secret|answered` adds a sample question.
-    let (items, keys) = match qv::debug_sample(
+    let (items, _keys) = match qv::debug_sample(
         std::env::var("EMBER_CR_QUESTION").ok().as_deref(),
         cfg!(debug_assertions),
         s.client.read(|st| st.transcript(&sid).map_or(0, |t| t.last_seq)) + 1_000_000,
@@ -1169,9 +1231,9 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                     })
                                     - (if window.width_dp <= 560.0 { 112.0 } else { 0.0 });
                                 let exp_set = expanded.get();
-                                let start_idx = tail_start_index(&items, &exp_set, avail_h);
-                                let items_row = items[start_idx..].to_vec();
-                                let _keys_row = keys[start_idx..].to_vec();
+                                let display_items = group_shell_calls(&items);
+                                let start_idx = tail_display_start_index(&display_items, &exp_set, avail_h);
+                                let items_row = display_items[start_idx..].to_vec();
                                 let sid_row = sid.clone();
                                 let agent_row = agent.clone();
                                 let exp_row = expanded.clone();
@@ -1183,7 +1245,7 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                                     .fill_max_width()
                                                     .padding(SP[1]), content = move || {
                                                 for item in items_row.iter() {
-                                                    TranscriptRow(
+                                                    TranscriptDisplayRow(
                                                         &sid_row,
                                                         &agent_row,
                                                         item,
@@ -1749,6 +1811,127 @@ pub fn QuestionCard(
                 }
             }) };
     });
+}
+
+/// A collapsible summary row for 2 or more consecutive shell tool calls (FR-L5, #1075).
+///
+/// Collapsed by default (`명령 N개 실행`); pressing the row toggles expansion and renders each
+/// individual shell tool call inside.
+pub fn ShellGroupRow(
+    session: &str,
+    agent: &str,
+    calls: &[TranscriptItem],
+    expanded: &MutableState<HashSet<String>>,
+    answering: &MutableState<HashSet<String>>,
+    computer: Option<&str>,
+    pane: bool,
+) {
+    let p = ember_theme().palette;
+    let group_key = shell_group_key(calls);
+    let open = expanded.get().contains(&group_key);
+    let label = shell_group_label(calls.len());
+    let any_running = calls
+        .iter()
+        .any(|c| matches!(c, TranscriptItem::ToolCall { result: None, .. }));
+    let any_error = calls.iter().any(|c| {
+        matches!(c, TranscriptItem::ToolCall { result: Some(r), .. } if r.is_error)
+    });
+    let exp_toggle = expanded.clone();
+    let key_toggle = group_key.clone();
+    let calls_owned = calls.to_vec();
+    let sid = session.to_string();
+    let agent_name = agent.to_string();
+    let exp_children = expanded.clone();
+    let ans_children = answering.clone();
+    let computer_owned = computer.map(str::to_string);
+
+    { use ::compose_rust::ui::Column; Column!(spacing = SP[0], modifier = Modifier::new().fill_max_width(), content = move || {
+        let label_row = label.clone();
+        Clickable(
+            Modifier::new()
+                .fill_max_width()
+                .height(CMD_ROW_H)
+                .role(cu::Role::Button)
+                .expanded(open)
+                .click_action(true),
+            Alignment::CenterStart,
+            move || {
+                exp_toggle.update(|set| {
+                    if !set.remove(&key_toggle) {
+                        set.insert(key_toggle.clone());
+                    }
+                });
+            },
+            move || {
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = CMD_ROW_GAP, modifier = Modifier::new().fill_max_width(), content = move || {
+                        if any_running {
+                            Spinner(12.0);
+                        } else {
+                            NavIcon(ICON_TERMINAL_SVG, p.text_2.to_argb(), 16.0);
+                        }
+                        Label(
+                            &label_row,
+                            Fs::Sm,
+                            Weight::Medium,
+                            Some(paint(p.text_2)),
+                            Some(1),
+                        );
+                        if any_error {
+                            Pill("오류", PillTone::Red, false);
+                        }
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
+                        NavIcon(
+                            if open {
+                                super::shell::ICON_CHEVRON_DOWN_SVG
+                            } else {
+                                super::session::ICON_CHEVRON_RIGHT_SVG
+                            },
+                            p.muted.to_argb(),
+                            16.0,
+                        );
+                    }) };
+            },
+        );
+        if open {
+            { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width(), content = move || {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
+                { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().width(0.0).weight(1.0), content = move || {
+                    for call in calls_owned.iter() {
+                        TranscriptRow(
+                            &sid,
+                            &agent_name,
+                            call,
+                            &exp_children,
+                            &ans_children,
+                            computer_owned.as_deref(),
+                            pane,
+                        );
+                    }
+                }) };
+            }) };
+        }
+    }) };
+}
+
+/// Render one [`ConversationDisplayItem`]: either a single transcript row or a collapsible
+/// group of consecutive shell calls (FR-L5, #1075).
+pub fn TranscriptDisplayRow(
+    session: &str,
+    agent: &str,
+    item: &ConversationDisplayItem,
+    expanded: &MutableState<HashSet<String>>,
+    answering: &MutableState<HashSet<String>>,
+    computer: Option<&str>,
+    pane: bool,
+) {
+    match item {
+        ConversationDisplayItem::Single(inner) => {
+            TranscriptRow(session, agent, inner, expanded, answering, computer, pane);
+        }
+        ConversationDisplayItem::ShellGroup(calls) => {
+            ShellGroupRow(session, agent, calls, expanded, answering, computer, pane);
+        }
+    }
 }
 
 /// One transcript entry (FR-L5..FR-L7, FR-S5).
@@ -2844,5 +3027,106 @@ mod tests {
         let idle_nodes = emitted(host_conversation_s2_embedded);
         assert!(idle_nodes.iter().any(is_send), "SendCircleButton when idle");
         assert!(!idle_nodes.iter().any(is_stop), "no StopCircleButton when idle");
+    }
+
+    fn shell_call_item(seq: i64, call_id: &str, cmd: &str) -> TranscriptItem {
+        TranscriptItem::ToolCall {
+            seq,
+            call_id: call_id.into(),
+            name: "Bash".into(),
+            input: serde_json::json!({ "command": cmd }),
+            result: Some(ember_client::transcript::ToolOutput {
+                output: String::new(),
+                is_error: false,
+            }),
+        }
+    }
+
+    fn consecutive_shell_rows() {
+        let expanded = remember(|| mutable_state_of(HashSet::<String>::new()));
+        let answering = remember(|| mutable_state_of(HashSet::<String>::new()));
+        let items = vec![
+            shell_call_item(1, "s1", "cargo fmt --check"),
+            shell_call_item(2, "s2", "cargo clippy"),
+            shell_call_item(3, "s3", "cargo test --locked"),
+        ];
+        let grouped = group_shell_calls(&items);
+        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), content = move || {
+            for item in grouped.iter() {
+                TranscriptDisplayRow("demo-s1", "claude", item, &expanded, &answering, None, false);
+            }
+        }) };
+    }
+
+    #[test]
+    fn fr_l5_consecutive_shell_calls_fold_into_collapsible_group_row() {
+        use compose_rust::PropertyKind;
+        use std::collections::HashMap;
+
+        let _guard = crate::services::test_guard();
+        let mut host = Host::new(|| Box::new(Recomposer::new(consecutive_shell_rows)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let initial_texts = texts(&batch);
+        assert!(
+            initial_texts.iter().any(|t| t == "명령 3개 실행"),
+            "missing grouped header in initial render: {initial_texts:?}"
+        );
+        for cmd in ["cargo fmt --check", "cargo clippy", "cargo test --locked"] {
+            assert!(
+                !initial_texts.iter().any(|t| t.contains(cmd)),
+                "individual command {cmd:?} should be hidden while collapsed: {initial_texts:?}"
+            );
+        }
+
+        // Locate the clickable ancestor of the "명령 3개 실행" label and click it.
+        let mut parents: HashMap<u32, u32> = HashMap::new();
+        let mut handlers: HashMap<u32, u64> = HashMap::new();
+        let mut label_node: Option<u32> = None;
+        for m in &batch {
+            match m {
+                Mutation::Insert { parent_id, node_id, .. } => {
+                    parents.insert(*node_id, *parent_id);
+                }
+                Mutation::SetProp {
+                    node_id,
+                    property: PropertyKind::OnClick,
+                    value: PropertyValue::Integer(h),
+                } => {
+                    handlers.insert(*node_id, *h as u64);
+                }
+                Mutation::SetProp {
+                    node_id,
+                    property: PropertyKind::Text,
+                    value: PropertyValue::String(s),
+                } if *s == "명령 3개 실행" => {
+                    label_node = Some(*node_id);
+                }
+                _ => {}
+            }
+        }
+        let mut cursor = label_node.expect("group label node");
+        let (click_node, handler_id) = loop {
+            if let Some(&h) = handlers.get(&cursor) {
+                break (cursor, h);
+            }
+            cursor = *parents
+                .get(&cursor)
+                .expect("group label has a clickable ancestor");
+        };
+
+        let (bytes, _) = host
+            .dispatch(HostEvent::new(
+                click_node,
+                handler_id,
+                EventPayload::Clicked,
+            ))
+            .expect("click group row");
+        let expanded_texts = texts(&decode_batch(bytes).expect("decode expanded"));
+        for cmd in ["cargo fmt --check", "cargo clippy", "cargo test --locked"] {
+            assert!(
+                expanded_texts.iter().any(|t| t.contains(cmd)),
+                "missing expanded command {cmd:?}: {expanded_texts:?}"
+            );
+        }
     }
 }

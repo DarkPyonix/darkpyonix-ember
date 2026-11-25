@@ -242,6 +242,9 @@ jobs:
         # load timing against real dpx-ose-server + ember/proxy rewrite. Not a gate until its first
         # green run (gates change in their own PR).
         continue-on-error: true
+        # A pass takes about 20 s; the limit keeps a hang from eating the job's hour (run
+        # 45501476287 hung here after a pass because child processes kept the script alive).
+        timeout-minutes: 5
         run: node ember/proxy/tests/live_detach_cdp.mjs
 
       - name: Extension regression (NFR-W1)

@@ -2,7 +2,9 @@
 //!
 //! Every agent process gets runtime credentials in its environment (`EMBER_URL`,
 //! `EMBER_SESSION_ID`, `EMBER_RUNTIME_TOKEN`) and instructions for the `ember-a2a` command, which
-//! calls the API in [`api`] (FR-T2). A message is stored first, then delivered through
+//! calls the API in [`api`] (FR-T2). A harness with an MCP client also gets the `ember` MCP server
+//! ([`mcp_native`], `list_agents` and `send_message` over the same API), and its instructions name
+//! those tools first. A message is stored first, then delivered through
 //! [`Sessions::send`], so it enters the target exactly like a user message, behind a header
 //! naming the sender (FR-T3). A target that is mid-turn gets its queued messages at the next turn
 //! boundary; an idle or released target is woken by the delivery; undelivered messages survive a
@@ -16,6 +18,7 @@ pub mod api;
 pub mod channel;
 pub mod client;
 pub mod mcp;
+pub mod mcp_native;
 pub mod mention;
 pub mod report;
 pub mod store;
@@ -47,6 +50,17 @@ pub const CHANNEL_MCP_SERVER: &str = "ember-channels";
 /// be concatenated; a unit test builds it from [`CHANNEL_MCP_SERVER`] and [`mcp::TOOL_NAME`] and
 /// compares, so the three cannot drift apart. It is the one tool the allow rule names.
 pub const CHANNEL_POST_TOOL: &str = "mcp__ember-channels__channel_post";
+
+/// Name of the MCP server that carries `list_agents` and `send_message` (FR-T2, #1045).
+pub const NATIVE_MCP_SERVER: &str = mcp_native::SERVER_NAME;
+/// `list_agents` as Claude Code names it (`mcp__<server>__<tool>`); a unit test builds it from its
+/// parts, like [`CHANNEL_POST_TOOL`].
+pub const NATIVE_LIST_TOOL: &str = "mcp__ember__list_agents";
+/// `send_message` as Claude Code names it.
+pub const NATIVE_SEND_TOOL: &str = "mcp__ember__send_message";
+
+/// The one notice a session gets when its start skipped the `ember` server (FR-T2).
+const NATIVE_FALLBACK_NOTICE: &str = "The Ember agent tools (list_agents, send_message) could not be registered because a MCP server named ember is already configured, or the configuration could not be checked; messaging other sessions uses the ember-a2a command.";
 
 /// The one notice a session gets when its start skipped the channel tool (FR-T12).
 const CHANNEL_FALLBACK_NOTICE: &str = "The channel tool could not be registered because a MCP server named ember-channels is already configured; replies use the ember-a2a command.";
@@ -214,6 +228,10 @@ pub struct A2a {
     /// session's start finds the name free, when the session's team membership ends (end hook)
     /// and when the session moves to another computer.
     channel_fallback: StdMutex<HashSet<String>>,
+    /// Sessions whose last start skipped the `ember` server (FR-T2, #1045): the user's own
+    /// configuration names a server `ember`, or it could not be checked. Read by the reply hint
+    /// of delivered messages ([`A2a::native_reply`]); kept like `channel_fallback`.
+    native_fallback: StdMutex<HashSet<String>>,
     /// Where the collision check looks outside the session directory.
     claude_sources: StdMutex<ClaudeConfigSources>,
 }
@@ -554,12 +572,93 @@ fn unescape_ascii(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
-/// The first file of `files` that mentions the server name or cannot be checked decides.
-fn text_name_check(files: Vec<(PathBuf, &'static str)>) -> NameCheck {
+/// The syntax of a configuration file searched as text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigSyntax {
+    /// Codex `config.toml`.
+    Toml,
+    /// Antigravity `mcp_config.json` (JSON that may hold comments and trailing commas).
+    Jsonc,
+}
+
+/// Whether `bytes` define an MCP server `name`. For [`CHANNEL_MCP_SERVER`] this is the plain text
+/// search [`mentions_channel_server`], unchanged. A short name such as [`NATIVE_MCP_SERVER`]
+/// (`ember`) appears in ordinary paths (`[projects."/src/ember"]`), so a text search would always
+/// fail closed; it is matched as a key instead ([`toml_names_server`], [`jsonc_names_server`]),
+/// still failing closed on anything that looks like one.
+fn config_names_server(bytes: &[u8], name: &str, syntax: ConfigSyntax) -> bool {
+    if name.eq_ignore_ascii_case(CHANNEL_MCP_SERVER) {
+        return mentions_channel_server(bytes);
+    }
+    match syntax {
+        ConfigSyntax::Toml => toml_names_server(bytes, name),
+        ConfigSyntax::Jsonc => jsonc_names_server(bytes, name),
+    }
+}
+
+/// Whether the TOML text `bytes` has a key path with the segments `mcp_servers` and `name` in a
+/// row, ignoring ASCII case, whitespace and quotes: a table header (`[mcp_servers.ember]`,
+/// `[profiles.p.mcp_servers.ember.env]`), a dotted key (`mcp_servers.ember.command = ...`, or
+/// `ember.command = ...` under `[mcp_servers]`), or an inline table (`mcp_servers = { ember = ...
+/// }`). No parser: escapes are decoded first ([`unescape_ascii`]), and a line inside a multi-line
+/// string that looks like such a key counts too (fails closed).
+fn toml_names_server(bytes: &[u8], name: &str) -> bool {
+    let text = String::from_utf8_lossy(&unescape_ascii(bytes)).to_ascii_lowercase();
+    let name = name.to_ascii_lowercase();
+    let in_path = |path: &str| {
+        let segs: Vec<&str> = path.split('.').collect();
+        segs.windows(2).any(|w| w[0] == "mcp_servers" && w[1] == name)
+    };
+    let inline = |value: &str| {
+        ["{", ","].iter().any(|open| [".", "="].iter().any(|close| value.contains(&format!("{open}{name}{close}"))))
+    };
+    let mut table = String::new();
+    for raw in text.lines() {
+        let line: String = raw.chars().filter(|c| !c.is_whitespace() && *c != '"' && *c != '\'').collect();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(header) = line.strip_prefix('[') {
+            let header = header.trim_start_matches('[');
+            table = header[..header.find(']').unwrap_or(header.len())].to_string();
+            if in_path(&table) {
+                return true;
+            }
+            continue;
+        }
+        let Some(eq) = line.find('=') else { continue };
+        let key = &line[..eq];
+        let path = if table.is_empty() { key.to_string() } else { format!("{table}.{key}") };
+        let value = &line[eq + 1..];
+        if in_path(&path) {
+            return true;
+        }
+        let names_servers = path.rsplit('.').next() == Some("mcp_servers") || value.contains("mcp_servers");
+        if names_servers && inline(value) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether the JSON text `bytes` defines `mcpServers.<name>` (ignoring ASCII case). A file that
+/// does not parse as plain JSON (comments, trailing commas) is searched as text for a key `"name"`
+/// followed by `:`, escapes decoded, which fails closed.
+fn jsonc_names_server(bytes: &[u8], name: &str) -> bool {
+    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(bytes) {
+        return names_server(v.get("mcpServers"), name);
+    }
+    let text = String::from_utf8_lossy(&unescape_ascii(bytes)).to_ascii_lowercase();
+    let key = format!("\"{}\"", name.to_ascii_lowercase());
+    text.match_indices(&key).any(|(i, _)| text[i + key.len()..].trim_start().starts_with(':'))
+}
+
+/// The first file of `files` that names the server or cannot be checked decides.
+fn text_name_check(files: Vec<(PathBuf, &'static str)>, name: &str, syntax: ConfigSyntax) -> NameCheck {
     for (file, kind) in files {
         match read_config_bytes(&file) {
             Err(why) => return NameCheck::Unsure { kind, why },
-            Ok(Some(bytes)) if mentions_channel_server(&bytes) => return NameCheck::Taken { kind },
+            Ok(Some(bytes)) if config_names_server(&bytes, name, syntax) => return NameCheck::Taken { kind },
             Ok(_) => {}
         }
     }
@@ -589,6 +688,11 @@ fn session_dirs(cwd: &Path) -> Vec<PathBuf> {
 /// the `system` files. A `-c mcp_servers.ember-channels.…` override would merge into such an
 /// entry, so the registration steps aside. Fails closed like [`channel_server_name_taken`].
 pub fn codex_channel_name_taken(cwd: &Path, codex_home: Option<&Path>, system: &[PathBuf]) -> NameCheck {
+    codex_server_name_taken(cwd, codex_home, system, CHANNEL_MCP_SERVER)
+}
+
+/// [`codex_channel_name_taken`] for the server `name` ([`config_names_server`]).
+pub fn codex_server_name_taken(cwd: &Path, codex_home: Option<&Path>, system: &[PathBuf], name: &str) -> NameCheck {
     let mut files: Vec<(PathBuf, &'static str)> = session_dirs(cwd)
         .into_iter()
         .map(|d| (d.join(".codex").join("config.toml"), KIND_CODEX_PROJECT))
@@ -597,7 +701,7 @@ pub fn codex_channel_name_taken(cwd: &Path, codex_home: Option<&Path>, system: &
         files.push((home.join("config.toml"), KIND_CODEX_USER));
     }
     files.extend(system.iter().map(|f| (f.clone(), KIND_CODEX_SYSTEM)));
-    text_name_check(files)
+    text_name_check(files, name, ConfigSyntax::Toml)
 }
 
 /// Whether the user's own Antigravity configuration mentions an MCP server named
@@ -606,6 +710,11 @@ pub fn codex_channel_name_taken(cwd: &Path, codex_home: Option<&Path>, system: &
 /// `.gemini/antigravity/mcp_config.json` (agy has no variable that moves `~/.gemini`). Fails
 /// closed like [`channel_server_name_taken`].
 pub fn agy_channel_name_taken(cwd: &Path, home: Option<&Path>) -> NameCheck {
+    agy_server_name_taken(cwd, home, CHANNEL_MCP_SERVER)
+}
+
+/// [`agy_channel_name_taken`] for the server `name` ([`config_names_server`]).
+pub fn agy_server_name_taken(cwd: &Path, home: Option<&Path>, name: &str) -> NameCheck {
     let mut files: Vec<(PathBuf, &'static str)> = session_dirs(cwd)
         .into_iter()
         .map(|d| (d.join(".agents").join("mcp_config.json"), KIND_AGY_PROJECT))
@@ -615,15 +724,14 @@ pub fn agy_channel_name_taken(cwd: &Path, home: Option<&Path>) -> NameCheck {
         files.push((gemini.join("config").join("mcp_config.json"), KIND_AGY_USER));
         files.push((gemini.join("antigravity").join("mcp_config.json"), KIND_AGY_USER));
     }
-    text_name_check(files)
+    text_name_check(files, name, ConfigSyntax::Jsonc)
 }
 
-/// Whether the `mcpServers` object `servers` has a key equal to [`CHANNEL_MCP_SERVER`], ignoring
-/// ASCII case.
-fn names_channel_server(servers: Option<&serde_json::Value>) -> bool {
+/// Whether the `mcpServers` object `servers` has a key equal to `name`, ignoring ASCII case.
+fn names_server(servers: Option<&serde_json::Value>, name: &str) -> bool {
     servers
         .and_then(|v| v.as_object())
-        .is_some_and(|m| m.keys().any(|k| k.eq_ignore_ascii_case(CHANNEL_MCP_SERVER)))
+        .is_some_and(|m| m.keys().any(|k| k.eq_ignore_ascii_case(name)))
 }
 
 /// Whether the user's own Claude Code configuration already defines an MCP server named
@@ -642,11 +750,22 @@ pub fn channel_server_name_taken(
     config_dir: Option<&Path>,
     managed: &[PathBuf],
 ) -> NameCheck {
+    claude_server_name_taken(cwd, home, config_dir, managed, CHANNEL_MCP_SERVER)
+}
+
+/// [`channel_server_name_taken`] for the server `name`.
+pub fn claude_server_name_taken(
+    cwd: &Path,
+    home: Option<&Path>,
+    config_dir: Option<&Path>,
+    managed: &[PathBuf],
+    name: &str,
+) -> NameCheck {
     let dirs = session_dirs(cwd);
     for d in &dirs {
         match read_config_json(&d.join(".mcp.json")) {
             Err(why) => return NameCheck::Unsure { kind: KIND_PROJECT, why },
-            Ok(Some(v)) if names_channel_server(v.get("mcpServers")) => {
+            Ok(Some(v)) if names_server(v.get("mcpServers"), name) => {
                 return NameCheck::Taken { kind: KIND_PROJECT };
             }
             Ok(_) => {}
@@ -658,13 +777,13 @@ pub fn channel_server_name_taken(
             Err(why) => return NameCheck::Unsure { kind: KIND_USER, why },
             Ok(None) => {}
             Ok(Some(v)) => {
-                if names_channel_server(v.get("mcpServers")) {
+                if names_server(v.get("mcpServers"), name) {
                     return NameCheck::Taken { kind: KIND_USER };
                 }
                 if let Some(projects) = v.get("projects").and_then(|p| p.as_object()) {
                     for d in &dirs {
                         let hit = d.to_str().and_then(|k| projects.get(k));
-                        if names_channel_server(hit.and_then(|p| p.get("mcpServers"))) {
+                        if names_server(hit.and_then(|p| p.get("mcpServers")), name) {
                             return NameCheck::Taken { kind: KIND_LOCAL };
                         }
                     }
@@ -675,7 +794,7 @@ pub fn channel_server_name_taken(
     for file in managed {
         match read_config_json(file) {
             Err(why) => return NameCheck::Unsure { kind: KIND_MANAGED, why },
-            Ok(Some(v)) if names_channel_server(v.get("mcpServers")) => {
+            Ok(Some(v)) if names_server(v.get("mcpServers"), name) => {
                 return NameCheck::Taken { kind: KIND_MANAGED };
             }
             Ok(_) => {}
@@ -711,6 +830,7 @@ impl A2a {
             placement: StdMutex::new(None),
             channel_posts: StdMutex::new(HashMap::new()),
             channel_fallback: StdMutex::new(HashSet::new()),
+            native_fallback: StdMutex::new(HashSet::new()),
             claude_sources: StdMutex::new(ClaudeConfigSources::from_env()),
         })
     }
@@ -765,6 +885,16 @@ impl A2a {
         self.sessions.add_start_config_hook(Arc::new(move |rec: &SessionRecord, req: &mut StartRequest| {
             if let Some(a) = weak.upgrade() {
                 a.channel_tool_config(rec, req);
+            }
+            Ok(())
+        }));
+        // FR-T2 (#1045): the same harnesses get the `ember` server with `list_agents` and
+        // `send_message`, loaded upfront. Registered after the channel hook, which rewrites the
+        // whole instructions text; this one rewrites only the messaging section.
+        let weak = Arc::downgrade(self);
+        self.sessions.add_start_config_hook(Arc::new(move |rec: &SessionRecord, req: &mut StartRequest| {
+            if let Some(a) = weak.upgrade() {
+                a.native_tool_config(rec, req);
             }
             Ok(())
         }));
@@ -917,6 +1047,7 @@ impl A2a {
         self.sessions.add_end_hook(Arc::new(move |id: &str| {
             if let Some(a) = weak.upgrade() {
                 a.channel_fallback.lock().unwrap().remove(id);
+                a.native_fallback.lock().unwrap().remove(id);
                 // FR-T2a: a session ended for good keeps no token.
                 a.revoke_tokens(id, "its session ended");
             }
@@ -1040,8 +1171,11 @@ impl A2a {
             let first = self.channel_fallback.lock().unwrap().insert(rec.id.clone());
             // The instructions hook ran before this one and named the tool: put the command back.
             if let Some(text) = req.instructions.as_mut() {
-                *text = text
-                    .replace(&self.instructions_with(harness.reply()), &self.instructions_with(ChannelReply::Command));
+                let native = self.native_reply(rec);
+                *text = text.replace(
+                    &self.instructions_parts(harness.reply(), native),
+                    &self.instructions_parts(ChannelReply::Command, native),
+                );
             }
             if first {
                 let event = AgentEvent::Notice { message: notice };
@@ -1054,8 +1188,11 @@ impl A2a {
         if self.channel_fallback.lock().unwrap().remove(&rec.id) {
             // The instructions hook ran with the fallback still set: name the tool again.
             if let Some(text) = req.instructions.as_mut() {
-                *text = text
-                    .replace(&self.instructions_with(ChannelReply::Command), &self.instructions_with(harness.reply()));
+                let native = self.native_reply(rec);
+                *text = text.replace(
+                    &self.instructions_parts(ChannelReply::Command, native),
+                    &self.instructions_parts(harness.reply(), native),
+                );
             }
         }
         req.mcp_servers.push(McpServer {
@@ -1063,6 +1200,7 @@ impl A2a {
             command: cli.to_string_lossy().into_owned(),
             args: vec!["mcp".to_string()],
             startup_timeout_secs: Some(10),
+            always_load: false,
             env: vec![("EMBER_URL".to_string(), url), ("EMBER_RUNTIME_TOKEN".to_string(), token)],
         });
         // A Codex layer the name check does not read may define its own `ember-channels`: the call
@@ -1120,12 +1258,15 @@ impl A2a {
     /// How the agent uses A2A. Stable across restarts (no per-process values), so it does not
     /// disturb prompt caching on resume.
     pub fn instructions(&self) -> String {
-        self.instructions_with(ChannelReply::Command)
+        self.instructions_parts(ChannelReply::Command, ChannelReply::Command)
     }
 
     /// [`A2a::instructions`]; with a tool `how` it names the `channel_post` MCP tool as the way to
-    /// answer a channel mention (with the command as a fallback) instead of the command alone.
-    fn instructions_with(&self, how: ChannelReply) -> String {
+    /// answer a channel mention (with the command as a fallback) instead of the command alone, and
+    /// with a tool `native` the messaging section ([`A2a::messaging_section`]) names the `ember`
+    /// server's `list_agents` and `send_message` first (FR-T2).
+    fn instructions_parts(&self, how: ChannelReply, native: ChannelReply) -> String {
+        let messaging = self.messaging_section(native);
         let channel_answer = match how {
             ChannelReply::ClaudeTool => format!(
                 "call the tool `{CHANNEL_POST_TOOL}` with `channel` set to the channel id and \
@@ -1143,24 +1284,10 @@ impl A2a {
                  from stdin)"
             ),
         };
-        let path_note = match &self.config.cli_path {
-            Some(p) => format!(" (also at `{}`, or `$EMBER_A2A_BIN`)", p.display()),
-            None => String::new(),
-        };
         format!(
             "# Messaging other agent sessions (Ember A2A)\n\
              \n\
-             You are running inside Ember, which hosts several agent sessions (Claude Code, Codex, \
-             ...) for the user. You can message those sessions with the `{CLI_NAME}` shell \
-             command{path_note}:\n\
-             \n\
-             - `{CLI_NAME} list` shows the sessions you can message (id, agent, status, project, \
-             title).\n\
-             - `{CLI_NAME} send <session-id> \"message\"` sends a message. It reaches that \
-             session as a user message; a busy session gets it when its current turn ends, a \
-             sleeping one is woken up.\n\
-             - `{CLI_NAME} send <session-id> --reply-to <message-id> \"reply\"` answers a \
-             message you received.\n\
+             {messaging}\n\
              \n\
              Terminal access is separate from messaging. Use `{CLI_NAME} terminal read <session-id> \
              [--lines <n>] [--since <seq>] [--wait-ms <ms>] [--json]` to inspect output; \
@@ -1220,9 +1347,189 @@ impl A2a {
         )
     }
 
+    /// The messaging section of the instructions (FR-T2). With a tool `native` it names the
+    /// `ember` server's `list_agents` and `send_message` first, says what they reach that the
+    /// built-ins do not, and keeps the `ember-a2a` command as the fallback; with
+    /// [`ChannelReply::Command`] it is the command text alone, byte for byte as before #1045. The
+    /// start hook swaps one for the other when the server is not registered, so it must occur in
+    /// the instructions exactly once.
+    fn messaging_section(&self, native: ChannelReply) -> String {
+        let path_note = match &self.config.cli_path {
+            Some(p) => format!(" (also at `{}`, or `$EMBER_A2A_BIN`)", p.display()),
+            None => String::new(),
+        };
+        let commands = format!(
+            "- `{CLI_NAME} list` shows the sessions you can message (id, agent, status, project, \
+             title).\n\
+             - `{CLI_NAME} send <session-id> \"message\"` sends a message. It reaches that \
+             session as a user message; a busy session gets it when its current turn ends, a \
+             sleeping one is woken up.\n\
+             - `{CLI_NAME} send <session-id> --reply-to <message-id> \"reply\"` answers a \
+             message you received."
+        );
+        let (list, send) = match native {
+            ChannelReply::Command => {
+                return format!(
+                    "You are running inside Ember, which hosts several agent sessions (Claude Code, Codex, \
+                     ...) for the user. You can message those sessions with the `{CLI_NAME}` shell \
+                     command{path_note}:\n\
+                     \n\
+                     {commands}"
+                );
+            }
+            ChannelReply::ClaudeTool => (format!("`{NATIVE_LIST_TOOL}`"), format!("`{NATIVE_SEND_TOOL}`")),
+            ChannelReply::McpTool => (
+                format!("the `{}` tool of the MCP server `{NATIVE_MCP_SERVER}`", mcp_native::LIST_TOOL),
+                format!("the `{}` tool of the MCP server `{NATIVE_MCP_SERVER}`", mcp_native::SEND_TOOL),
+            ),
+        };
+        format!(
+            "You are running inside Ember, which hosts several agent sessions (Claude Code, Codex, \
+             ...) for the user, on this computer and on the user's other computers. To ask, \
+             consult or tell another agent or session, or to see which ones are running, use the \
+             Ember tools first:\n\
+             \n\
+             - {list} shows the sessions you can message (id, agent, status, project, title).\n\
+             - {send} with `to` set to a session id and `message` set to your text sends a \
+             message; add `reply_to` with a message id to answer a message you received. It \
+             reaches that session as a user message; a busy session gets it when its current turn \
+             ends, a sleeping one is woken up.\n\
+             \n\
+             These reach every Ember session, on any Ember computer and any model; your built-in \
+             agent, subagent or teammate tools reach only your own helpers. If the Ember tools are \
+             not available, use the `{CLI_NAME}` shell command{path_note}:\n\
+             \n\
+             {commands}"
+        )
+    }
+
+    /// How the messaging section and the reply hint of delivered messages name A2A for `rec`:
+    /// the `ember` server's tools under the name its harness gives them, or the command. Every
+    /// harness the channel tool reaches gets the server ([`A2a::channel_reply_eligible`]), unless
+    /// its last start found the name `ember` taken ([`A2a::native_fallback`]).
+    fn native_reply(&self, rec: &SessionRecord) -> ChannelReply {
+        match ToolHarness::of(rec.agent) {
+            Some(harness)
+                if self.channel_reply_eligible(rec) && !self.native_fallback.lock().unwrap().contains(&rec.id) =>
+            {
+                harness.reply()
+            }
+            _ => ChannelReply::Command,
+        }
+    }
+
+    /// Start-config hook (FR-T2, #1045): register the `ember` MCP server (`ember-a2a mcp ember`)
+    /// with `list_agents` and `send_message`, loaded upfront (`alwaysLoad` for Claude Code), for
+    /// the sessions that get the channel tool, with the same `EMBER_URL` and `EMBER_RUNTIME_TOKEN`
+    /// as the CLI. Claude Code and Codex get the two allow rules, so a call is not refused for a
+    /// missing approval (Codex's elicitation for any server but `ember-channels` is not answered).
+    /// The user's own server named `ember` is never overridden: when any configuration source of
+    /// the harness names one, or a source cannot be checked, or (Codex) a layer the check does not
+    /// read exists, nothing is registered, the messaging section of this start names the command
+    /// again, and the session gets one notice. Built-in peer tools are untouched. Never logs the
+    /// token or a file's contents.
+    fn native_tool_config(&self, rec: &SessionRecord, req: &mut StartRequest) {
+        let Some(harness) = ToolHarness::of(rec.agent) else { return };
+        let registered = self.register_native(rec, harness, req);
+        if let Some(text) = req.instructions.as_mut() {
+            let (tool, command) = (self.messaging_section(harness.reply()), self.messaging_section(ChannelReply::Command));
+            if registered {
+                *text = text.replace(&command, &tool);
+            } else {
+                *text = text.replace(&tool, &command);
+            }
+        }
+    }
+
+    /// [`A2a::native_tool_config`] without the instructions: whether the server was registered.
+    fn register_native(&self, rec: &SessionRecord, harness: ToolHarness, req: &mut StartRequest) -> bool {
+        if !self.channel_reply_eligible(rec) || req.remote.is_some() || req.computer.is_some() {
+            self.native_fallback.lock().unwrap().remove(&rec.id);
+            return false;
+        }
+        let Some(cli) = self.config.cli_path.as_ref() else { return false };
+        let env_value = |name: &str| {
+            req.env.iter().rev().find(|(k, v)| k == name && !v.is_empty()).map(|(_, v)| v.clone())
+        };
+        let (Some(url), Some(token)) = (env_value("EMBER_URL"), env_value("EMBER_RUNTIME_TOKEN")) else {
+            return false;
+        };
+        let sources = self.claude_sources.lock().unwrap().clone();
+        let codex_home = env_value("CODEX_HOME")
+            .map(PathBuf::from)
+            .or(sources.codex_home.clone())
+            .or(sources.home.as_ref().map(|h| h.join(".codex")));
+        let mut check = if req.mcp_servers.iter().any(|s| s.name.eq_ignore_ascii_case(NATIVE_MCP_SERVER)) {
+            NameCheck::Taken { kind: KIND_REQUEST }
+        } else {
+            match harness {
+                ToolHarness::Claude => {
+                    let config_dir =
+                        env_value("CLAUDE_CONFIG_DIR").map(PathBuf::from).or(sources.config_dir.clone());
+                    claude_server_name_taken(
+                        &req.cwd,
+                        sources.home.as_deref(),
+                        config_dir.as_deref(),
+                        &sources.managed,
+                        NATIVE_MCP_SERVER,
+                    )
+                }
+                ToolHarness::Codex => {
+                    codex_server_name_taken(&req.cwd, codex_home.as_deref(), &sources.codex_system, NATIVE_MCP_SERVER)
+                }
+                ToolHarness::Antigravity => agy_server_name_taken(&req.cwd, sources.home.as_deref(), NATIVE_MCP_SERVER),
+                // Where an ACP agent keeps its own MCP servers is not known to Ember.
+                ToolHarness::Acp => NameCheck::Free,
+            }
+        };
+        // A Codex layer the check does not read may define its own `ember`, and without the
+        // approval override Codex would ask through an elicitation Ember does not answer.
+        if check == NameCheck::Free && harness == ToolHarness::Codex {
+            if let Some(layer) = codex_unread_layer(&codex_layer_paths(codex_home.as_deref(), &sources.codex_managed)) {
+                check = NameCheck::Unsure { kind: layer.kind, why: if layer.unreadable { WHY_UNREADABLE } else { "present" } };
+            }
+        }
+        // Never the file contents: `kind`, `why` and the reason are static strings.
+        match check {
+            NameCheck::Free => {}
+            NameCheck::Taken { kind } => {
+                tracing::warn!(session = %rec.id, source = kind, "not registering {NATIVE_MCP_SERVER}: {REASON_TAKEN}");
+            }
+            NameCheck::Unsure { kind, why } => {
+                tracing::warn!(session = %rec.id, source = kind, "not registering {NATIVE_MCP_SERVER}: the configuration could not be checked ({why})");
+            }
+        }
+        if check != NameCheck::Free {
+            if self.native_fallback.lock().unwrap().insert(rec.id.clone()) {
+                let event = AgentEvent::Notice { message: NATIVE_FALLBACK_NOTICE.to_string() };
+                if let Err(e) = self.sessions.record_event(&rec.id, &event) {
+                    tracing::warn!(session = %rec.id, "recording the ember fallback notice failed: {e:#}");
+                }
+            }
+            return false;
+        }
+        self.native_fallback.lock().unwrap().remove(&rec.id);
+        req.mcp_servers.push(McpServer {
+            name: NATIVE_MCP_SERVER.to_string(),
+            command: cli.to_string_lossy().into_owned(),
+            args: vec!["mcp".to_string(), NATIVE_MCP_SERVER.to_string()],
+            startup_timeout_secs: Some(10),
+            env: vec![("EMBER_URL".to_string(), url), ("EMBER_RUNTIME_TOKEN".to_string(), token)],
+            always_load: true,
+        });
+        if harness.allow_rule() {
+            for tool in [NATIVE_LIST_TOOL, NATIVE_SEND_TOOL] {
+                if !req.allowed_tools.iter().any(|t| t == tool) {
+                    req.allowed_tools.push(tool.to_string());
+                }
+            }
+        }
+        true
+    }
+
     /// [`A2a::instructions`] plus, for an active teammate, its team role.
     pub fn instructions_for(&self, rec: &SessionRecord) -> String {
-        let base = self.instructions_with(self.channel_reply(rec));
+        let base = self.instructions_parts(self.channel_reply(rec), self.native_reply(rec));
         match self.teammate_instructions(rec) {
             Some(team) => format!("{base}\n\n{team}"),
             None => base,
@@ -1563,6 +1870,7 @@ impl A2a {
     /// The user-message text for a batch of messages to one target (FR-T3).
     fn render(&self, rec: &SessionRecord, msgs: &[A2aMessage]) -> anyhow::Result<String> {
         let how = self.channel_reply(rec);
+        let native = self.native_reply(rec);
         let mut parts = Vec::new();
         for m in msgs {
             if let (Some(channel_id), Some(until)) = (&m.origin_channel, m.origin_guest_until) {
@@ -1620,10 +1928,19 @@ impl A2a {
             if let Some(r) = &m.reply_to {
                 header.push_str(&format!("\nIn reply to message {r}."));
             }
-            header.push_str(&format!(
-                "\nTo reply: {CLI_NAME} send {} --reply-to {} \"<your reply>\"",
-                m.from_session, m.id
-            ));
+            let command = format!("{CLI_NAME} send {} --reply-to {} \"<your reply>\"", m.from_session, m.id);
+            let tool = match native {
+                ChannelReply::Command => None,
+                ChannelReply::ClaudeTool => Some(NATIVE_SEND_TOOL.to_string()),
+                ChannelReply::McpTool => Some(format!("the {} tool of the MCP server {NATIVE_MCP_SERVER}", mcp_native::SEND_TOOL)),
+            };
+            header.push_str(&match tool {
+                None => format!("\nTo reply: {command}"),
+                Some(tool) => format!(
+                    "\nTo reply: call {tool} with to \"{}\" and reply_to \"{}\" (or run {command})",
+                    m.from_session, m.id
+                ),
+            });
             parts.push(format!("{header}\n\n{}", m.text));
         }
         Ok(parts.join("\n\n---\n\n"))
@@ -1925,9 +2242,11 @@ mod channel_tool_tests {
             let text = a.instructions_for(r);
             assert!(text.ends_with(OLD_CHANNEL_PARAGRAPH), "{:?}: {text}", r.agent);
             assert_eq!(text, a.instructions(), "{:?}", r.agent);
-            // Everything before the channel answer is shared with Claude Code.
-            let cut = "To answer there, ";
-            assert_eq!(text[..text.find(cut).unwrap()], claude[..claude.find(cut).unwrap()]);
+            // Everything between the messaging section (FR-T2: Claude Code names the `ember` tools)
+            // and the channel answer is shared with Claude Code.
+            let (from, cut) = ("\n\nTerminal access is separate", "To answer there, ");
+            let shared = |s: &str| s[s.find(from).unwrap()..s.find(cut).unwrap()].to_string();
+            assert_eq!(shared(&text), shared(&claude));
         }
         // Without the binary every harness keeps the old text as well.
         let b = world(None);
@@ -2479,10 +2798,11 @@ mod channel_tool_tests {
             assert!(text.contains("for 30 minutes after a person mentioned you there"));
             assert!(text.contains(&format!("at most {CHANNEL_POSTS_PER_MINUTE} posts a minute")));
             assert!(text.contains("Your post is shown to the people in the channel"));
-            // Everything before the channel answer is the shared text.
-            let cut = "To answer there, ";
-            let old = a.instructions();
-            assert_eq!(text[..text.find(cut).unwrap()], old[..old.find(cut).unwrap()], "{agent:?}");
+            // Everything between the messaging section (FR-T2) and the channel answer is the
+            // shared text.
+            let (from, cut) = ("\n\nTerminal access is separate", "To answer there, ");
+            let shared = |s: &str| s[s.find(from).unwrap()..s.find(cut).unwrap()].to_string();
+            assert_eq!(shared(&text), shared(&a.instructions()), "{agent:?}");
         }
     }
 
@@ -2670,8 +2990,11 @@ mod channel_tool_tests {
             assert!(req.mcp_servers.is_empty() && req.allowed_tools.is_empty(), "{agent:?}");
             assert!(a.channel_fallback.lock().unwrap().contains(&r.id), "{agent:?}");
             assert_eq!(a.channel_reply(&r), ChannelReply::Command, "{agent:?}");
-            // The prompt of this very start is the old text again.
-            assert_eq!(req.instructions.unwrap(), a.instructions(), "{agent:?}");
+            // The prompt of this very start names the command for channels again; its messaging
+            // section still names the `ember` tools (FR-T2), whose server this hook does not touch.
+            let text = req.instructions.unwrap();
+            assert_eq!(text, a.instructions_for(&r), "{agent:?}");
+            assert!(text.contains("run `ember-a2a channel post <channel-id> \"<text>\"` (use `-`"), "{agent:?}");
             let n = a.sessions.store().events_after(&r.id, 0).unwrap().iter()
                 .filter(|e| matches!(&e.event, AgentEvent::Notice { message } if message == CHANNEL_FALLBACK_NOTICE))
                 .count();
@@ -2860,5 +3183,368 @@ mod channel_tool_tests {
             .filter(|x| x.contains("approval_mode"))
             .collect();
         assert_eq!(approvals, ["mcp_servers.ember-channels.tools.channel_post.approval_mode=\"approve\""]);
+    }
+
+    // ---- FR-T2 (#1045): the `ember` MCP server with `list_agents` and `send_message` ----
+
+    /// Both start-config hooks, in the order `install_hooks` registers them, on a request whose
+    /// instructions the instructions hook made.
+    fn start(a: &A2a, r: &SessionRecord, req: &mut StartRequest) {
+        req.instructions = Some(a.instructions_for(r));
+        a.channel_tool_config(r, req);
+        a.native_tool_config(r, req);
+    }
+
+    fn ember_entry(req: &StartRequest) -> Option<&McpServer> {
+        req.mcp_servers.iter().find(|s| s.name == NATIVE_MCP_SERVER)
+    }
+
+    fn all_harnesses() -> [AgentKind; 4] {
+        [AgentKind::ClaudeCode, AgentKind::Codex, AgentKind::Antigravity, acp()]
+    }
+
+    #[test]
+    fn fr_t2_the_native_constants_are_built_from_each_other() {
+        assert_eq!(NATIVE_MCP_SERVER, "ember");
+        assert_eq!(NATIVE_LIST_TOOL, format!("mcp__{NATIVE_MCP_SERVER}__{}", mcp_native::LIST_TOOL));
+        assert_eq!(NATIVE_SEND_TOOL, format!("mcp__{NATIVE_MCP_SERVER}__{}", mcp_native::SEND_TOOL));
+    }
+
+    #[test]
+    fn fr_t2_every_harness_gets_the_ember_server_upfront_with_the_session_credentials() {
+        let a = world(Some(CLI));
+        for agent in all_harnesses() {
+            let r = rec(&a, agent);
+            let mut req = request(&a, &r);
+            let token = env_of(&req, "EMBER_RUNTIME_TOKEN");
+            start(&a, &r, &mut req);
+            let names: Vec<&str> = req.mcp_servers.iter().map(|s| s.name.as_str()).collect();
+            assert_eq!(names, ["ember-channels", "ember"], "{agent:?}");
+            let s = ember_entry(&req).unwrap();
+            assert_eq!(s.command, CLI, "{agent:?}");
+            assert_eq!(s.args, ["mcp", "ember"], "{agent:?}");
+            assert_eq!(s.startup_timeout_secs, Some(10));
+            assert!(s.always_load, "{agent:?}: loaded upfront");
+            assert_eq!(
+                s.env,
+                [("EMBER_URL".to_string(), "http://127.0.0.1:8740".to_string()), ("EMBER_RUNTIME_TOKEN".to_string(), token.clone())],
+                "{agent:?}: the CLI's credentials and nothing else"
+            );
+            // No second token was issued.
+            assert_eq!(a.store.session_for_token(&token).unwrap().as_deref(), Some(r.id.as_str()));
+            // The channel entry stays as it was.
+            let ch = req.mcp_servers.iter().find(|s| s.name == CHANNEL_MCP_SERVER).unwrap();
+            assert!(!ch.always_load && ch.args == ["mcp"], "{agent:?}");
+            assert_eq!(a.native_reply(&r), ToolHarness::of(agent).unwrap().reply(), "{agent:?}");
+        }
+    }
+
+    #[test]
+    fn fr_t2_claude_and_codex_get_the_two_allow_rules_and_nothing_is_denied() {
+        let a = world(Some(CLI));
+        for agent in all_harnesses() {
+            let r = rec(&a, agent);
+            let mut req = request(&a, &r);
+            start(&a, &r, &mut req);
+            let native: Vec<&String> = req.allowed_tools.iter().filter(|t| t.starts_with("mcp__ember__")).collect();
+            match agent {
+                AgentKind::ClaudeCode | AgentKind::Codex => {
+                    assert_eq!(native, [NATIVE_LIST_TOOL, NATIVE_SEND_TOOL], "{agent:?}")
+                }
+                _ => assert!(native.is_empty(), "{agent:?}: the person is asked through Ember"),
+            }
+            // Only exact Ember MCP tool names are allowed; no built-in is named anywhere.
+            assert!(req.allowed_tools.iter().all(|t| t.starts_with("mcp__ember")), "{:?}", req.allowed_tools);
+        }
+        let r = rec(&a, AgentKind::ClaudeCode);
+        let mut req = request(&a, &r);
+        start(&a, &r, &mut req);
+        let args = ClaudeCodeAdapter::args_with(&req, Some(Path::new("/private/ember-mcp.json")));
+        let joined = args.join("\n");
+        for built_in in ["ListAgents", "SendMessage", "--disallowedTools", "--strict-mcp-config", "--tools"] {
+            assert!(!joined.contains(built_in), "{built_in}: {args:?}");
+        }
+    }
+
+    #[test]
+    fn fr_t2_claude_code_launch_config_has_the_ember_server_with_always_load() {
+        let a = world(Some(CLI));
+        let r = rec(&a, AgentKind::ClaudeCode);
+        let mut req = request(&a, &r);
+        let token = env_of(&req, "EMBER_RUNTIME_TOKEN");
+        start(&a, &r, &mut req);
+        assert!(mcp_needs_file(&req), "the entries carry the token, so they go through the private file");
+        let config: serde_json::Value = serde_json::from_str(&mcp_config(&req.mcp_servers).unwrap()).unwrap();
+        let ember = &config["mcpServers"]["ember"];
+        assert_eq!(ember["type"], "stdio");
+        assert_eq!(ember["command"], CLI);
+        assert_eq!(ember["args"], serde_json::json!(["mcp", "ember"]));
+        assert_eq!(ember["alwaysLoad"], true);
+        assert_eq!(ember["env"]["EMBER_RUNTIME_TOKEN"], token.as_str());
+        assert!(config["mcpServers"]["ember-channels"].get("alwaysLoad").is_none(), "other entries are unchanged");
+        let args = ClaudeCodeAdapter::args_with(&req, Some(Path::new("/private/ember-mcp.json")));
+        assert!(!args.join("\n").contains(&token), "{args:?}");
+        let i = args.iter().position(|x| x == "--allowedTools").unwrap();
+        assert_eq!(args[i + 1..i + 4], [CHANNEL_POST_TOOL, NATIVE_LIST_TOOL, NATIVE_SEND_TOOL]);
+        assert_eq!(args[i + 4], "--mcp-config=/private/ember-mcp.json", "a flag follows the tools: {args:?}");
+    }
+
+    #[test]
+    fn fr_t2_codex_launch_config_has_the_ember_server_and_its_two_approvals() {
+        let a = world(Some(CLI));
+        let r = rec(&a, AgentKind::Codex);
+        let mut req = request(&a, &r);
+        let token = env_of(&req, "EMBER_RUNTIME_TOKEN");
+        start(&a, &r, &mut req);
+        let args = crate::agents::codex::app_server_args(&req);
+        let has = |want: &str| assert!(args.iter().any(|x| x == want), "{want} not in {args:?}");
+        has("mcp_servers.ember.command=\"/opt/ember/ember-a2a\"");
+        has("mcp_servers.ember.args=[\"mcp\", \"ember\"]");
+        has("mcp_servers.ember.startup_timeout_sec=10");
+        has("mcp_servers.ember.env_vars=[\"EMBER_URL\", \"EMBER_RUNTIME_TOKEN\"]");
+        has("mcp_servers.ember.tools.list_agents.approval_mode=\"approve\"");
+        has("mcp_servers.ember.tools.send_message.approval_mode=\"approve\"");
+        has("mcp_servers.ember-channels.command=\"/opt/ember/ember-a2a\"");
+        assert!(!args.join("\n").contains(&token), "{args:?}");
+        // Both servers want the same two variables with the same values: neither is left out.
+        let (env, skipped) = crate::agents::codex::mcp_process_env(&req);
+        assert!(skipped.is_empty());
+        assert_eq!(env.len(), 2);
+    }
+
+    #[test]
+    fn fr_t2_antigravity_and_acp_configs_carry_the_ember_server() {
+        let a = world(Some(CLI));
+        let r = rec(&a, AgentKind::Antigravity);
+        let mut req = request(&a, &r);
+        start(&a, &r, &mut req);
+        let cfg = crate::agents::antigravity::mcp_config(&req.mcp_servers).unwrap();
+        assert_eq!(cfg["mcpServers"]["ember"]["args"], serde_json::json!(["mcp", "ember"]));
+        let r = rec(&a, acp());
+        let mut req = request(&a, &r);
+        start(&a, &r, &mut req);
+        let param = crate::agents::acp::mcp_servers_param(&req.mcp_servers);
+        let names: Vec<&str> = param.as_array().unwrap().iter().map(|s| s["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["ember-channels", "ember"]);
+    }
+
+    #[test]
+    fn fr_t2_no_ember_server_where_the_channel_tool_is_not_given() {
+        let a = world(Some(CLI));
+        let scripted = rec(&a, AgentKind::Scripted);
+        let mut req = request(&a, &scripted);
+        start(&a, &scripted, &mut req);
+        assert!(ember_entry(&req).is_none());
+        let elsewhere = rec(&a, AgentKind::ClaudeCode);
+        move_to(&a, &elsewhere, "pi-1");
+        let mut req = request(&a, &elsewhere);
+        start(&a, &elsewhere, &mut req);
+        assert!(ember_entry(&req).is_none());
+        assert_eq!(req.instructions.as_deref(), Some(a.instructions().as_str()), "the command text, byte for byte");
+        let r = rec(&a, AgentKind::Codex);
+        let mut req = request(&a, &r);
+        req.remote = Some(crate::agents::RemoteExec { environment_id: "ember-x".into(), exec_server_url: "ws://x".into() });
+        start(&a, &r, &mut req);
+        assert!(ember_entry(&req).is_none());
+        assert!(!req.instructions.unwrap().contains("MCP server `ember`"), "the messaging section names the command");
+        let b = world(None);
+        let r = rec(&b, AgentKind::ClaudeCode);
+        let mut req = request(&b, &r);
+        start(&b, &r, &mut req);
+        assert!(ember_entry(&req).is_none());
+    }
+
+    #[test]
+    fn fr_t2_claude_prompt_names_the_ember_tools_first_and_keeps_the_cli_fallback() {
+        let a = world(Some(CLI));
+        let text = a.instructions_for(&rec(&a, AgentKind::ClaudeCode));
+        let tool = text.find(NATIVE_SEND_TOOL).expect("names send_message");
+        let list = text.find(NATIVE_LIST_TOOL).expect("names list_agents");
+        let cli = text.find("`ember-a2a send <session-id> \"message\"`").expect("keeps the command");
+        assert!(list < cli && tool < cli, "the tools come first: {text}");
+        assert!(text.contains("use the Ember tools first"), "{text}");
+        assert!(text.contains("with `to` set to a session id and `message` set to your text"), "{text}");
+        assert!(text.contains("your built-in agent, subagent or teammate tools reach only your own helpers"), "{text}");
+        assert!(text.contains("If the Ember tools are not available, use the `ember-a2a` shell command"), "{text}");
+        assert!(text.contains("ember-a2a send <session-id> --reply-to"), "{text}");
+        assert_eq!(text.matches(&a.messaging_section(ChannelReply::ClaudeTool)).count(), 1);
+        for agent in tool_harnesses() {
+            let text = a.instructions_for(&rec(&a, agent));
+            assert!(text.contains("- the `list_agents` tool of the MCP server `ember` shows"), "{agent:?}: {text}");
+            assert!(text.contains("- the `send_message` tool of the MCP server `ember` with `to`"), "{agent:?}");
+            assert!(!text.contains(NATIVE_SEND_TOOL), "{agent:?}: only Claude Code's combined name is measured");
+        }
+        // The command text is what it was before #1045.
+        let old = a.instructions();
+        assert!(old.contains(
+            "You are running inside Ember, which hosts several agent sessions (Claude Code, Codex, ...) for the user. You can message those sessions with the `ember-a2a` shell command (also at `/opt/ember/ember-a2a`, or `$EMBER_A2A_BIN`):\n\n- `ember-a2a list` shows"
+        ), "{old}");
+        assert!(!old.contains("list_agents"));
+    }
+
+    #[test]
+    fn fr_t2_the_reply_hint_names_send_message_first() {
+        let a = world(Some(CLI));
+        let sender = rec(&a, AgentKind::Codex);
+        let m = A2aMessage {
+            id: "msg_1".into(),
+            from_session: sender.id.clone(),
+            to_session: "x".into(),
+            reply_to: None,
+            text: "can you review?".into(),
+            created_at: 0,
+            delivered_at: None,
+            origin_channel: None,
+            origin_label: None,
+            origin_guest_until: None,
+            kind: None,
+        };
+        let cli = format!("ember-a2a send {} --reply-to msg_1 \"<your reply>\"", sender.id);
+        let claude = a.render(&rec(&a, AgentKind::ClaudeCode), std::slice::from_ref(&m)).unwrap();
+        assert!(
+            claude.contains(&format!("To reply: call {NATIVE_SEND_TOOL} with to \"{}\" and reply_to \"msg_1\" (or run {cli})", sender.id)),
+            "{claude}"
+        );
+        let codex = a.render(&rec(&a, AgentKind::Codex), std::slice::from_ref(&m)).unwrap();
+        assert!(codex.contains("To reply: call the send_message tool of the MCP server ember with to"), "{codex}");
+        let scripted = a.render(&rec(&a, AgentKind::Scripted), std::slice::from_ref(&m)).unwrap();
+        assert!(scripted.contains(&format!("To reply: {cli}\n\n")), "unchanged without the server: {scripted}");
+    }
+
+    #[test]
+    fn fr_t2_the_users_own_ember_server_is_never_overridden() {
+        let d = tempfile::tempdir().unwrap();
+        let a = world(Some(CLI));
+        set_sources(&a, d.path());
+        let cwd = d.path().join("proj");
+        put(&cwd.join(".mcp.json"), &with_server("ember"));
+        put(&d.path().join(".codex/config.toml"), "[mcp_servers.ember]\ncommand = \"mine\"\n");
+        put(&d.path().join(".gemini/config/mcp_config.json"), "{\n  // mine\n  \"mcpServers\": { \"ember\": { \"command\": \"mine\" }, },\n}\n");
+        for agent in [AgentKind::ClaudeCode, AgentKind::Codex, AgentKind::Antigravity] {
+            let r = rec(&a, agent);
+            let mut req = request(&a, &r);
+            req.cwd = cwd.clone();
+            start(&a, &r, &mut req);
+            assert!(ember_entry(&req).is_none(), "{agent:?}: {:?}", req.mcp_servers);
+            assert!(!req.allowed_tools.iter().any(|t| t.starts_with("mcp__ember__")), "{agent:?}");
+            // The channel tool is not affected by the name `ember`.
+            assert!(req.mcp_servers.iter().any(|s| s.name == CHANNEL_MCP_SERVER), "{agent:?}");
+            // This start's prompt names the command for messaging, and later prompts agree.
+            let text = req.instructions.clone().unwrap();
+            assert!(!text.contains("list_agents") && text.contains("You can message those sessions with the `ember-a2a` shell"), "{agent:?}: {text}");
+            assert_eq!(text, a.instructions_for(&r), "{agent:?}");
+            assert_eq!(a.native_reply(&r), ChannelReply::Command, "{agent:?}");
+            // ONE notice, even when the check runs again.
+            let mut again = request(&a, &r);
+            again.cwd = cwd.clone();
+            start(&a, &r, &mut again);
+            let n = a.sessions.store().events_after(&r.id, 0).unwrap().iter()
+                .filter(|e| matches!(&e.event, AgentEvent::Notice { message } if message == NATIVE_FALLBACK_NOTICE))
+                .count();
+            assert_eq!(n, 1, "{agent:?}");
+        }
+        // Once the name is free again, the next start registers and names the tools again.
+        std::fs::remove_file(cwd.join(".mcp.json")).unwrap();
+        let r = rec(&a, AgentKind::ClaudeCode);
+        a.native_fallback.lock().unwrap().insert(r.id.clone());
+        let mut req = request(&a, &r);
+        req.cwd = cwd.clone();
+        start(&a, &r, &mut req);
+        assert!(ember_entry(&req).is_some());
+        assert!(req.instructions.unwrap().contains(NATIVE_SEND_TOOL), "the prompt names the tools again");
+        assert!(!a.native_fallback.lock().unwrap().contains(&r.id));
+    }
+
+    #[test]
+    fn fr_t2_a_server_named_ember_in_the_request_is_kept() {
+        let a = world(Some(CLI));
+        for agent in all_harnesses() {
+            let r = rec(&a, agent);
+            let mut req = request(&a, &r);
+            req.mcp_servers.push(McpServer { name: "Ember".into(), command: "/usr/bin/mine".into(), ..Default::default() });
+            start(&a, &r, &mut req);
+            let mine: Vec<&McpServer> = req.mcp_servers.iter().filter(|s| s.name.eq_ignore_ascii_case("ember")).collect();
+            assert_eq!(mine.len(), 1, "{agent:?}");
+            assert_eq!(mine[0].command, "/usr/bin/mine", "{agent:?}");
+            assert!(!req.allowed_tools.iter().any(|t| t.starts_with("mcp__ember__")), "{agent:?}");
+        }
+    }
+
+    #[test]
+    fn fr_t2_a_codex_layer_the_check_does_not_read_skips_the_ember_server() {
+        let d = tempfile::tempdir().unwrap();
+        let a = world(Some(CLI));
+        let r = rec(&a, AgentKind::Codex);
+        let plist = d.path().join("com.openai.codex.plist");
+        put(&plist, "");
+        a.claude_sources.lock().unwrap().codex_managed = vec![plist.clone()];
+        let mut req = request(&a, &r);
+        start(&a, &r, &mut req);
+        assert!(ember_entry(&req).is_none(), "an unanswered elicitation would fail every call");
+        assert!(!req.instructions.unwrap().contains("MCP server `ember`"));
+    }
+
+    #[test]
+    fn fr_t2_toml_check_matches_server_keys_not_paths() {
+        let yes = [
+            "[mcp_servers.ember]\ncommand = \"x\"\n",
+            "[mcp_servers.\"ember\"]\n",
+            "[ mcp_servers . 'ember' . env ]\nA = \"1\"\n",
+            "mcp_servers.ember.command = \"x\"\n",
+            "[mcp_servers]\nember = { command = \"x\" }\n",
+            "[mcp_servers]\nember.command = \"x\"\n",
+            "mcp_servers = { github = { command = \"g\" }, ember = { command = \"x\" } }\n",
+            "[profiles.work]\nmcp_servers = { ember = { command = \"x\" } }\n",
+            "[profiles.work.mcp_servers.ember]\n",
+            "[mcp_servers.EMBER]\n",
+            "[mcp_servers.\"\\u0065mber\"]\n",
+        ];
+        for t in yes {
+            assert!(toml_names_server(t.as_bytes(), "ember"), "{t:?}");
+            assert!(codex_check_text(t), "{t:?}");
+        }
+        let no = [
+            "[projects.\"/Users/me/src/darkpyonix-ember\"]\ntrust_level = \"trusted\"\n",
+            "[projects.\"/src/ember\"]\ntrust_level = \"trusted\"\n",
+            "[mcp_servers.ember-channels]\ncommand = \"x\"\n",
+            "[mcp_servers.embers]\n",
+            "model = \"ember\"\n",
+            "[mcp_servers.github]\ncommand = \"/opt/ember/bin\"\nargs = [\"--name\", \"ember\"]\n",
+            "# [mcp_servers.ember] is mine\n",
+            "",
+        ];
+        for t in no {
+            assert!(!toml_names_server(t.as_bytes(), "ember"), "{t:?}");
+        }
+    }
+
+    /// [`codex_server_name_taken`] on a user `config.toml` holding `text`.
+    fn codex_check_text(text: &str) -> bool {
+        let d = tempfile::tempdir().unwrap();
+        put(&d.path().join("config.toml"), text);
+        let cwd = d.path().join("proj");
+        matches!(codex_server_name_taken(&cwd, Some(d.path()), &[], "ember"), NameCheck::Taken { .. })
+    }
+
+    #[test]
+    fn fr_t2_json_check_matches_the_server_key() {
+        for t in [
+            r#"{"mcpServers":{"ember":{"command":"x"}}}"#,
+            r#"{"mcpServers":{"Ember":{}}}"#,
+            "{ // comment\n \"mcpServers\": { \"ember\" : { \"command\": \"x\" }, }, }",
+            "{ \"mcpServers\": { \"\\u0065mber\": {} }, }",
+        ] {
+            assert!(jsonc_names_server(t.as_bytes(), "ember"), "{t:?}");
+        }
+        for t in [
+            r#"{"mcpServers":{"ember-channels":{"command":"x"}}}"#,
+            r#"{"mcpServers":{"github":{"command":"/opt/ember/bin","args":["ember"]}}}"#,
+            r#"{"ember":{"command":"x"}}"#,
+            "{ // uses ember\n \"mcpServers\": { \"github\": {}, }, }",
+        ] {
+            assert!(!jsonc_names_server(t.as_bytes(), "ember"), "{t:?}");
+        }
+        // The channel server keeps its plain text search.
+        assert!(config_names_server(b"# ember-channels", CHANNEL_MCP_SERVER, ConfigSyntax::Toml));
     }
 }

@@ -7,6 +7,16 @@
 #   out      out of scope; the actor's `note` says why and who decided;
 #   todo     not built yet: answered with the fallback reply; a call that returns a value is recorded
 #            (actor, method, count, and the extension when an argument names it).
+# A method line may be an inline table that also sets the method's fallback reply (Q-E8 (c), decided
+# per method from the FR-E9 records): `answer = '<JSON>'` (a TOML literal string) answers with that
+# value, `error = "<message>"` rejects the call with an Error. A method without either answers by its
+# declared result: `[]` for an array, `undefined` otherwise. A `bridged` method's answer is what the
+# fallback reply gives when the session cannot answer from its state (a call it cannot decode, the
+# shutdown drain, the live test without a session).
+#   MainThreadAuthentication $getSession / $getAccounts: rejected, as Code-OSS's AuthenticationService
+#     rejects for a provider that is not registered (Ember does not bridge provider registration yet).
+#   MainThreadPower: the constants of Code-OSS's BrowserPowerService (services/power/browser).
+#   MainThreadWindow $getInitialState: focused and active.
 # `fr_e9_ledger_covers_generated_protocol` fails when the generated protocol has an actor or method
 # this file lacks, or this file names one the protocol does not have. A pin bump adds new methods
 # here as `todo` or `out` (docs/design/POST-1-0-EDITOR-CORE.md 4.4).
@@ -16,8 +26,8 @@
 "$unregisterAuthenticationProvider" = "todo"
 "$ensureProvider" = "todo"
 "$sendDidChangeSessions" = "todo"
-"$getSession" = "todo"
-"$getAccounts" = "todo"
+"$getSession" = { status = "todo", error = "No authentication provider is currently registered." }
+"$getAccounts" = { status = "todo", error = "No authentication provider is currently registered." }
 "$removeSession" = "todo"
 "$waitForUriHandler" = "todo"
 "$showContinueNotification" = "todo"
@@ -105,7 +115,7 @@ note = "owner, 2026-11-23 (Q-E7, INTENT D54): VS Code AI chat is not supported f
 "$unregisterCommand" = "bridged"
 "$fireCommandActivationEvent" = "todo"
 "$executeCommand" = "bridged"
-"$getCommands" = "todo"
+"$getCommands" = "bridged"
 
 [MainThreadComments]
 "$registerCommentController" = "todo"
@@ -422,7 +432,7 @@ note = "leader, 2026-11-23 (Q2): Ember sends no telemetry, so the empty answer i
 [MainThreadWorkspace]
 "$startFileSearch" = "todo"
 "$startTextSearch" = "todo"
-"$checkExists" = "todo"
+"$checkExists" = { status = "bridged", answer = 'false' }
 "$save" = "todo"
 "$saveAll" = "todo"
 "$updateWorkspaceFolders" = "todo"
@@ -431,8 +441,8 @@ note = "leader, 2026-11-23 (Q2): Ember sends no telemetry, so the empty answer i
 "$lookupKerberosAuthorization" = "todo"
 "$loadCertificates" = "todo"
 "$requestResourceTrust" = "bridged"
-"$requestWorkspaceTrust" = "bridged"
-"$isResourceTrusted" = "bridged"
+"$requestWorkspaceTrust" = { status = "bridged", answer = 'true' }
+"$isResourceTrusted" = { status = "bridged", answer = 'true' }
 "$registerEditSessionIdentityProvider" = "todo"
 "$unregisterEditSessionIdentityProvider" = "todo"
 "$registerCanonicalUriProvider" = "todo"
@@ -490,11 +500,11 @@ note = "leader, 2026-11-23 (Q2): activation notices and timing marks have no vis
 "$onDidChangeArtifacts" = "todo"
 
 [MainThreadSearch]
-"$registerFileSearchProvider" = "todo"
+"$registerFileSearchProvider" = "bridged"
 "$registerAITextSearchProvider" = "todo"
 "$registerTextSearchProvider" = "bridged"
 "$unregisterProvider" = "bridged"
-"$handleFileMatch" = "todo"
+"$handleFileMatch" = "bridged"
 "$handleTextMatch" = "bridged"
 "$handleKeywordResult" = "todo"
 "$handleTelemetry" = "todo"
@@ -516,18 +526,18 @@ note = "leader, 2026-11-23 (Q2): activation notices and timing marks have no vis
 "$registerSupportedExecutions" = "todo"
 
 [MainThreadWindow]
-"$getInitialState" = "todo"
+"$getInitialState" = { status = "todo", answer = '{"isFocused": true, "isActive": true}' }
 "$openUri" = "todo"
 "$asExternalUri" = "todo"
 
 [MainThreadPower]
-"$getSystemIdleState" = "todo"
-"$getSystemIdleTime" = "todo"
-"$getCurrentThermalState" = "todo"
-"$isOnBatteryPower" = "todo"
-"$startPowerSaveBlocker" = "todo"
-"$stopPowerSaveBlocker" = "todo"
-"$isPowerSaveBlockerStarted" = "todo"
+"$getSystemIdleState" = { status = "todo", answer = '"unknown"' }
+"$getSystemIdleTime" = { status = "todo", answer = '0' }
+"$getCurrentThermalState" = { status = "todo", answer = '"unknown"' }
+"$isOnBatteryPower" = { status = "todo", answer = 'false' }
+"$startPowerSaveBlocker" = { status = "todo", answer = '-1' }
+"$stopPowerSaveBlocker" = { status = "todo", answer = 'false' }
+"$isPowerSaveBlockerStarted" = { status = "todo", answer = 'false' }
 
 [MainThreadLabelService]
 "$registerResourceLabelFormatter" = "todo"

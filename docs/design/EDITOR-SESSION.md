@@ -177,7 +177,8 @@ Registration: `$registerInlineCompletionsSupport` (17 args; Ember reads `support
 
 ## 5. The extension host's other requests
 
-Answered by `replies::session_reply` = `exthost::default_reply` plus what `live_ose.rs` learned:
+Answered by `replies::session_reply` = `exthost::default_reply` (the answer the coverage ledger gives
+the method, `FR-E9`) plus what `live_ose.rs` learned:
 `MainThreadLanguages.$getLanguages` → every contributed language id; `MainThreadOutputService.$register`
 → a channel id string. With state, in the core:
 
@@ -187,6 +188,12 @@ Answered by `replies::session_reply` = `exthost::default_reply` plus what `live_
 - `MainThreadCommands.$executeCommand(id, args)`: the extension host runs its own commands locally,
   so what arrives is a workbench command → `RunCommand` to the UI (except `setContext` and `_setContext`, no-ops),
   reply `undefined`.
+- `MainThreadCommands.$getCommands()`: every command id the main thread knows, as Code-OSS answers
+  with its `CommandsRegistry`: `_setContext` and the extension host's `$registerCommand` ids, sorted.
+- `MainThreadWorkspace.$checkExists(folders, includes)` (`workspaceContains:` activation): an `exists`
+  file search through the extension host's file search provider (`$registerFileSearchProvider`), as
+  Code-OSS's `checkGlobFileExists`; `true` when the reply says `limitHit`, `false` without a provider
+  or when cancelled, rejected on any other failure.
 - `$registerCommand` / `$unregisterCommand`, `$register…Provider` / `$unregister`: tracked in
   `registry.rs`, with selector matching ported from `languageSelector.ts` `score()` (scheme,
   language, `*` → 5, glob or relative patterns, notebook filters never match text).

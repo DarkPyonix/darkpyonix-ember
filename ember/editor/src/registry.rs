@@ -273,6 +273,11 @@ impl Registry {
     pub fn has_command(&self, id: &str) -> bool {
         self.commands.contains(id)
     }
+
+    /// The commands the extension host registered (`$registerCommand`), in no order.
+    pub fn commands(&self) -> impl Iterator<Item = &str> {
+        self.commands.iter().map(String::as_str)
+    }
 }
 
 #[cfg(test)]

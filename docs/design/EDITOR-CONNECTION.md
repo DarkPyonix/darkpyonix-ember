@@ -276,7 +276,8 @@ The extension host has no other source for default values.
 
 **Activation the extension host does on its own:** `*`, `workspaceContains:`, and
 `onStartupFinished` (`extHostExtensionService.ts` L671-687). `workspaceContains:` calls back into
-`MainThreadWorkspace.$checkExists`.
+`MainThreadWorkspace.$checkExists`, which the session answers with an `exists` file search through
+the extension host's own file search provider, as Code-OSS's `checkGlobFileExists` does (`FR-E9`).
 
 **Activation the renderer must send:** `$activateByEvent("onLanguage:<id>")` when a document
 opens (`services/language/common/languageService.ts` L289), `onCommand:<id>` before running a
@@ -367,7 +368,7 @@ Read "→EH" as Ember calling the extension host, and "EH→" as the extension h
 | →EH | `ExtHostWorkspace.$initializeWorkspace` | Workspace folders as `vscode-remote` URIs |
 | →EH | `ExtHostExtensionService.$activateByEvent` | `onLanguage:`, `onCommand:`, … |
 | EH→ | `MainThreadStorage.$initializeExtensionStorage` / `$setValue` / `$registerExtensionStorageKeysToSync` | Persisted per extension (`globalState` under `globalStorageHome/ember-storage`, `workspaceState` under `workspaceStorageHome/ember-storage/<workspace-hash>`, or local `storage_dir` keyed with canonicalized authority); returns stored JSON string or `undefined` when absent, retries transient read errors with backoff before rejecting, quarantines corrupt files to `*.corrupt.<millis>-<seq>`, serializes/coalesces/retries writes with backoff, drains `deactivate()` writes after `MSG_TERMINATE` on shutdown, and propagates `shared=true` updates via `ExtHostStorage.$acceptValue` (in-process per-server `StorageHub` with lag resync plus cross-process `RemoteFs`/local directory watch) |
-| EH→ | everything else | Reply per `exthost::default_reply` (mostly `undefined`) so the extension host never stalls |
+| EH→ | everything else | Reply per `exthost::default_reply`, chosen per method from `coverage.toml` (`FR-E9`, Q-E8 (c)): the method's `answer` or `error`, else `[]` for an array result and `undefined` otherwise, so the extension host never stalls |
 
 **Documents (FR-E1 bridge)**
 
@@ -415,7 +416,6 @@ Read "→EH" as Ember calling the extension host, and "EH→" as the extension h
 | ---- | ------------ |
 | `ExtHostEditors.$acceptEditorPropertiesChanged` (selections, visible ranges) | Many extensions read `activeTextEditor.selection`. Needed soon after FR-E4. |
 | `$acceptConfigurationChanged` | Needed once settings can change at runtime. |
-| `MainThreadWorkspace.$checkExists` | `workspaceContains:` activation. Answers `false` for now. |
 | Implicit activation events beyond commands, languages and views | Covered by the generator work in §6 step 5. |
 | Webviews (FR-E5) | Separate design. |
 

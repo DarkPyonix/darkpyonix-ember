@@ -66,6 +66,9 @@ Channels (FR-T12):
       most). Use `-` (or no text) to read the text from stdin. `channel_post` is accepted too.
   ember-a2a mcp
       The stdio MCP server exposing the tool `channel_post`, started by the harness, not for people.
+  ember-a2a mcp ember
+      The stdio MCP server `ember` exposing `list_agents` and `send_message` (the same calls as
+      `list` and `send`), started by the harness, not for people.
 
 Environment (set by Ember for every agent session):
   EMBER_URL, EMBER_RUNTIME_TOKEN";
@@ -456,11 +459,14 @@ fn dechunk(mut data: &[u8]) -> anyhow::Result<Vec<u8>> {
 pub fn run(args: &[String]) -> i32 {
     // `mcp` owns stdout for protocol frames, so it never goes through the `println!` below.
     if args.first().map(String::as_str) == Some("mcp") {
-        if args.len() > 1 {
-            eprintln!("ember-a2a: mcp takes no arguments\n\n{USAGE}");
-            return 2;
-        }
-        return super::mcp::run_stdio();
+        return match &args[1..] {
+            [] => super::mcp::run_stdio(),
+            [server] if server == super::mcp_native::SERVER_NAME => super::mcp_native::run_stdio(),
+            _ => {
+                eprintln!("ember-a2a: mcp takes no argument or `ember`\n\n{USAGE}");
+                2
+            }
+        };
     }
     match run_inner(args) {
         Ok(out) => {
@@ -900,7 +906,7 @@ fn format_schedules(v: &Value) -> String {
         .join("\n")
 }
 
-fn format_targets(v: &Value) -> String {
+pub(crate) fn format_targets(v: &Value) -> String {
     let rows = v.as_array().cloned().unwrap_or_default();
     if rows.is_empty() {
         return "No other sessions to message.".into();
@@ -1060,6 +1066,12 @@ mod tests {
         assert!(matches!(run_inner(&args(&["channel"])), Err(CliError::Usage(_))));
         assert!(matches!(run_inner(&args(&["channel", "shout"])), Err(CliError::Usage(_))));
         assert!(matches!(run_inner(&args(&["channel", "post"])), Err(CliError::Usage(_))));
+    }
+
+    #[test]
+    fn fr_t2_mcp_usage_names_the_ember_server() {
+        assert!(USAGE.contains("ember-a2a mcp ember\n"));
+        assert!(USAGE.contains("`list_agents` and `send_message`"));
     }
 
     #[test]

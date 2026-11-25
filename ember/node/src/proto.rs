@@ -77,6 +77,9 @@ pub enum ErrorCode {
     ManagerUnreachable,
     /// The editor launch: the manager refused for another reason (502).
     ManagerError,
+    /// `/exec-server` (FR-X5, #1047): no codex binary on this computer, neither
+    /// `EMBER_NODE_CODEX_BIN` nor `codex` on `PATH` (503).
+    CodexNotInstalled,
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -18,12 +18,9 @@ pub const MAX_CLOSED_EDITORS: usize = 20;
 /// The open issue an action waits for, when the window cannot do it yet. `None` for an action
 /// the window does.
 pub fn pending_issue(action: Action) -> Option<u32> {
-    match action {
-        // Code-OSS runs this through the debug service (Run Without Debugging); the debug layer
-        // has no no-debug start yet.
-        Action::RunConfig => Some(445),
-        _ => None,
-    }
+    // Every action is built; an action that is not names its issue here.
+    let _ = action;
+    None
 }
 
 /// The notice an action that is not ready posts: its label, the not-ready text and the issue.
@@ -131,7 +128,9 @@ mod tests {
 
     #[test]
     fn fr_l31_15_pending_actions_name_their_issue() {
-        assert_eq!(not_ready_notice(Action::RunConfig), "다시 실행: 준비 중입니다 (#445)");
+        // FR-L31.42: Ctrl+F5 is Run Without Debugging, a start with `noDebug`.
+        assert_eq!(pending_issue(Action::RunConfig), None);
+        assert_eq!(not_ready_notice(Action::RunConfig), "디버깅 없이 실행: 준비 중입니다");
         // FR-L31.42: Shift+F5 stops the debug session, else the running task; F5 starts debugging.
         assert_eq!(pending_issue(Action::Stop), None);
         assert_eq!(pending_issue(Action::Debug), None);

@@ -15,8 +15,15 @@
 //! 3. `$resolveDebugConfiguration` through the providers of the type, then the `*` providers,
 //!    again for a type the result changed to (`debugConfigurationManager.resolveConfigurationByProviders`);
 //! 4. the variables Ember can answer are substituted ([`launch::VarContext`]);
-//! 5. `$resolveDebugConfigurationWithSubstitutedVariables` through the same chain;
-//! 6. `$startDASession`: the extension host creates and starts the adapter.
+//! 5. `preLaunchTask`, through the window's task runner ([`DebugUpdate::RunTask`]); a task that
+//!    fails asks whether to debug anyway ([`DebugUpdate::TaskFailed`]), as
+//!    `debugTaskRunner.runTaskAndCheckErrors` does;
+//! 6. `$resolveDebugConfigurationWithSubstitutedVariables` through the same chain;
+//! 7. `$startDASession`: the extension host creates and starts the adapter.
+//!
+//! `postDebugTask` runs when the session ends, and nothing waits for it. A start with `noDebug`
+//! (Run Without Debugging) sends no breakpoints, as `debugService.sendBreakpoints` skips such
+//! sessions.
 //!
 //! **DAP**, in the order `debugSession.ts` drives it: `initialize`; `launch` or `attach`; on the
 //! `initialized` event `setBreakpoints` per file, `setFunctionBreakpoints`,
@@ -27,8 +34,10 @@
 //!
 //! **What is not done.** The visualizer methods of the actor stay unimplemented (the actor
 //! router counts them). There is no terminal in this window, so `runInTerminal` is refused and
-//! the adapter has to use its internal console. `preLaunchTask` is reported and not run, and
-//! the platform-specific blocks of a configuration (`windows`, `osx`, `linux`) are not merged.
+//! the adapter has to use its internal console. The `preLaunchTask` of a compound, and the
+//! `preRestartTask` and `postRestartTask` of a restart, are not run; the setting
+//! `debug.onTaskErrors` is not read (the question is always asked). The platform-specific blocks
+//! of a configuration (`windows`, `osx`, `linux`) are not merged.
 
 pub mod breakpoints;
 pub mod launch;
@@ -79,6 +88,11 @@ pub struct SessionInfo {
     /// The thread and frame the window shows.
     pub thread_id: Option<i64>,
     pub frame_id: Option<i64>,
+    /// The adapter can change a variable's value (`supportsSetVariable`, or `supportsSetExpression`
+    /// for a variable with an `evaluateName`), so the Variables view offers to edit one.
+    pub can_set_variables: bool,
+    /// Run Without Debugging: the configuration has `noDebug`.
+    pub no_debug: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -117,6 +131,8 @@ pub struct VariableInfo {
     /// Non-zero when the variable has children to request.
     pub variables_reference: i64,
     pub evaluate_name: Option<String>,
+    /// `presentationHint.attributes` has `readOnly`: Code-OSS does not offer to edit it.
+    pub read_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -144,6 +160,33 @@ pub struct ConfigInfo {
     pub request: String,
     /// A compound starts several configurations together.
     pub compound: bool,
+}
+
+/// How a task the session layer asked for ended ([`DebugUpdate::RunTask`]): what
+/// `debugTaskRunner.runTask` resolves with, and the errors the problems view holds after it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TaskOutcome {
+    /// The task's process ended. `code` is `None` when it ended without one (stopped by the user
+    /// or a signal), which Code-OSS takes as a cancelled task.
+    Exited { code: Option<i64>, errors: usize },
+    /// A background task went inactive: its problem matcher saw the end of its first pass.
+    Ready { errors: usize },
+    /// The task could not be found, run or tracked: the message, Code-OSS's error dialog.
+    Failed { message: String },
+}
+
+/// The buttons of the question a failed `preLaunchTask` asks ([`DebugUpdate::TaskFailed`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskChoice {
+    DebugAnyway,
+    /// Open the problems view; the start is abandoned.
+    ShowErrors,
+    /// Open `tasks.json`; the start is abandoned.
+    ConfigureTask,
+    /// The cancel button of the warning (Code-OSS labels it Abort).
+    Abort,
+    /// The cancel button of the error dialog (Code-OSS labels it Cancel).
+    Cancel,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -204,6 +247,28 @@ pub enum DebugUpdate {
     },
     /// A session could not start: the message to show.
     StartFailed { message: String },
+    /// Run the task `label` of `tasks.json` through the window's task runner: a `preLaunchTask`
+    /// when `start` is set (answer with [`DebugRequest::TaskDone`]), else a `postDebugTask`,
+    /// which nothing waits for (a failure is only shown).
+    RunTask { label: String, start: Option<u64> },
+    /// The `preLaunchTask` of start `start` failed: ask the question of `debugTaskRunner` with
+    /// these buttons, the last one the cancel button. `error` is the error dialog (a task that
+    /// could not run), else the warning (a task that ended badly). Answer with
+    /// [`DebugRequest::AnswerTask`].
+    TaskFailed {
+        start: u64,
+        message: String,
+        choices: Vec<TaskChoice>,
+        error: bool,
+    },
+    /// The answer to [`DebugRequest::SetVariable`]: the new value, or why it was refused. The
+    /// window loads the variables again either way, as Code-OSS's `updateViews` does.
+    VariableSet {
+        session: String,
+        reference: i64,
+        name: String,
+        result: Result<String, String>,
+    },
 }
 
 // ---- what the window asks ---------------------------------------------------------------------
@@ -247,8 +312,31 @@ pub enum DebugRequest {
     ProvideConfigurations {
         debug_type: String,
     },
+    /// `no_debug`: Run Without Debugging (Ctrl+F5, `workbench.action.debug.run`), the
+    /// configuration starts with `noDebug: true`.
     Start {
         selector: ConfigSelector,
+        no_debug: bool,
+    },
+    /// How the `preLaunchTask` of start `start` ended ([`DebugUpdate::RunTask`]).
+    TaskDone {
+        start: u64,
+        outcome: TaskOutcome,
+    },
+    /// The button chosen in the question of [`DebugUpdate::TaskFailed`].
+    AnswerTask {
+        start: u64,
+        choice: TaskChoice,
+    },
+    /// Set the variable `name` of container `reference` to `value` (DAP `setVariable`, or
+    /// `setExpression` on `evaluate_name` in frame `frame_id` for an adapter with only that).
+    SetVariable {
+        session: String,
+        reference: i64,
+        name: String,
+        value: String,
+        evaluate_name: Option<String>,
+        frame_id: Option<i64>,
     },
     /// Stop a session, or every session with `None`.
     Stop {
@@ -413,6 +501,10 @@ enum Phase {
     Activate,
     Activating,
     Resolve,
+    /// The `preLaunchTask` runs in the window's task runner.
+    Task,
+    /// The `preLaunchTask` failed and the window asks whether to debug anyway.
+    TaskAsk,
     Adapter,
     Done,
 }
@@ -482,6 +574,11 @@ enum Dap {
     Evaluate {
         id: u64,
     },
+    /// `setVariable` or `setExpression` of variable `name` in container `reference`.
+    SetVariable {
+        reference: i64,
+        name: String,
+    },
     /// `continue`, `next`, `stepIn` or `stepOut` sent while the session was stopped at `epoch`.
     Step {
         epoch: u64,
@@ -538,6 +635,14 @@ impl Session {
     fn cap(&self, key: &str) -> bool {
         self.caps.get(key).and_then(Value::as_bool).unwrap_or(false)
     }
+
+    /// Run Without Debugging: no breakpoints go to the adapter.
+    fn no_debug(&self) -> bool {
+        self.configuration
+            .get("noDebug")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
 }
 
 pub struct DebugState {
@@ -571,6 +676,73 @@ struct Provide {
 
 fn str_of(v: &Value, key: &str) -> Option<String> {
     v.get(key).and_then(Value::as_str).map(str::to_owned)
+}
+
+/// A DAP `Variable` or `EvaluateResponse` body whose `presentationHint` says `readOnly`.
+fn is_read_only(v: &Value) -> bool {
+    v.get("presentationHint")
+        .and_then(|h| h.get("attributes"))
+        .and_then(Value::as_array)
+        .is_some_and(|a| a.iter().any(|x| x == "readOnly"))
+}
+
+/// What a `preLaunchTask` outcome means for the start (`runTaskAndCheckErrors`).
+#[derive(Debug, PartialEq)]
+enum TaskCheck {
+    Go,
+    /// Cancelled: the start ends without a question.
+    Abandon,
+    Ask {
+        message: String,
+        choices: Vec<TaskChoice>,
+        error: bool,
+    },
+}
+
+fn check_task(label: &str, outcome: &TaskOutcome) -> TaskCheck {
+    let (errors, code) = match outcome {
+        TaskOutcome::Failed { message } => {
+            return TaskCheck::Ask {
+                message: message.clone(),
+                choices: vec![
+                    TaskChoice::DebugAnyway,
+                    TaskChoice::ConfigureTask,
+                    TaskChoice::Cancel,
+                ],
+                error: true,
+            }
+        }
+        // `exitCode === undefined`: the user cancelled the task.
+        TaskOutcome::Exited { code: None, .. } => return TaskCheck::Abandon,
+        TaskOutcome::Exited {
+            code: Some(code),
+            errors,
+        } => (*errors, Some(*code)),
+        TaskOutcome::Ready { errors } => (*errors, None),
+    };
+    // `successExitCode || (errorCount === 0 && !failureExitCode)`; a background task has no
+    // summary, so only its errors count.
+    if code == Some(0) || (errors == 0 && code.is_none()) {
+        return TaskCheck::Go;
+    }
+    let message = if errors > 1 {
+        format!("Errors exist after running preLaunchTask '{label}'.")
+    } else if errors == 1 {
+        format!("Error exists after running preLaunchTask '{label}'.")
+    } else if let Some(code) = code {
+        format!("The preLaunchTask '{label}' terminated with exit code {code}.")
+    } else {
+        format!("The preLaunchTask '{label}' terminated.")
+    };
+    TaskCheck::Ask {
+        message,
+        choices: vec![
+            TaskChoice::DebugAnyway,
+            TaskChoice::ShowErrors,
+            TaskChoice::Abort,
+        ],
+        error: false,
+    }
 }
 
 fn u32_of(v: &Value, key: &str) -> Option<u32> {
@@ -780,6 +952,9 @@ impl DebugState {
                 state: s.state.clone(),
                 thread_id: s.thread_id,
                 frame_id: s.frame_id,
+                can_set_variables: s.cap("supportsSetVariable")
+                    || s.cap("supportsSetExpression"),
+                no_debug: s.no_debug(),
             })
             .collect()
     }
@@ -906,10 +1081,30 @@ impl DebugState {
                     },
                 );
             }
-            DebugRequest::Start { selector } => {
-                let origin = self.origin(None, Notify::Nobody, None, false, env);
+            DebugRequest::Start { selector, no_debug } => {
+                let origin = self.origin(None, Notify::Nobody, None, no_debug, env);
                 self.begin_selected(selector, origin, &mut out);
             }
+            DebugRequest::TaskDone { start, outcome } => self.task_done(start, outcome, &mut out),
+            DebugRequest::AnswerTask { start, choice } => {
+                self.answer_task(start, choice, &mut out)
+            }
+            DebugRequest::SetVariable {
+                session,
+                reference,
+                name,
+                value,
+                evaluate_name,
+                frame_id,
+            } => self.set_variable(
+                &session,
+                reference,
+                name,
+                value,
+                evaluate_name,
+                frame_id,
+                &mut out,
+            ),
             DebugRequest::Stop { session: Some(id) } => {
                 self.disconnect(&id, None, None, None, &mut out)
             }
@@ -1163,7 +1358,11 @@ impl DebugState {
             out.push(Out::Rpc(wire::accept_breakpoints_delta(&delta)));
         }
         for s in &mut self.sessions {
-            if !s.ready || s.state == SessionState::Terminated || s.ending.is_some() {
+            if !s.ready
+                || s.state == SessionState::Terminated
+                || s.ending.is_some()
+                || s.no_debug()
+            {
                 continue;
             }
             for file in &touched.files {
@@ -1421,7 +1620,11 @@ impl DebugState {
     fn advance(&mut self, st: &mut Start, out: &mut Vec<Out>) {
         loop {
             match st.phase {
-                Phase::Reading | Phase::Activating | Phase::Done => return,
+                Phase::Reading
+                | Phase::Activating
+                | Phase::Task
+                | Phase::TaskAsk
+                | Phase::Done => return,
                 Phase::Activate => {
                     let ty = config_type(&st.config);
                     if ty.is_empty() {
@@ -1488,6 +1691,35 @@ impl DebugState {
                             st.current_type = ty;
                         }
                         st.group = 0;
+                        // `debugService.createSession` runs the task after the substitution and
+                        // before the second chain of providers.
+                        // A label, or `Err` for a task identifier (`{ "type": ..., ... }`): the
+                        // task runner finds tasks by label only.
+                        let task = match st.config.get("preLaunchTask") {
+                            None | Some(Value::Null) => None,
+                            Some(Value::String(label)) if label.is_empty() => None,
+                            Some(Value::String(label)) => Some(Ok(label.clone())),
+                            Some(_) => Some(Err(())),
+                        };
+                        match task {
+                            None => {}
+                            Some(Ok(label)) => {
+                                out.push(Out::Ui(DebugUpdate::RunTask {
+                                    label,
+                                    start: Some(st.id),
+                                }));
+                                st.phase = Phase::Task;
+                                return;
+                            }
+                            Some(Err(())) => {
+                                st.phase = Phase::Task;
+                                let outcome = TaskOutcome::Failed {
+                                    message: "Could not find the specified task.".to_owned(),
+                                };
+                                self.task_checked(st, outcome, out);
+                                return;
+                            }
+                        }
                         continue;
                     }
                     st.phase = Phase::Adapter;
@@ -1519,11 +1751,6 @@ impl DebugState {
             let message = format!("Configured debug type '{debug_type}' is not supported. Install an extension that provides a debugger for it.");
             self.start_failed(notify, message, out);
             return;
-        }
-        if let Some(task) = str_of(&configuration, "preLaunchTask") {
-            let text =
-                format!("The preLaunchTask '{task}' was not run: this window has no task runner.");
-            self.console(None, "important", text, out);
         }
         let id = uuid::Uuid::new_v4().to_string();
         let handle = self.next_handle;
@@ -1580,6 +1807,114 @@ impl DebugState {
             },
         ));
         self.emit_sessions(out);
+    }
+
+    // ---- the preLaunchTask ---------------------------------------------------------------------
+
+    /// What the `preLaunchTask` of `st` ended with: the start goes on, asks, or is abandoned.
+    fn task_checked(&mut self, st: &mut Start, outcome: TaskOutcome, out: &mut Vec<Out>) {
+        let label = str_of(&st.config, "preLaunchTask").unwrap_or_default();
+        match check_task(&label, &outcome) {
+            TaskCheck::Go => {
+                st.phase = Phase::Resolve;
+                self.advance(st, out);
+            }
+            TaskCheck::Abandon => self.abandon(st, out),
+            TaskCheck::Ask {
+                message,
+                choices,
+                error,
+            } => {
+                st.phase = Phase::TaskAsk;
+                out.push(Out::Ui(DebugUpdate::TaskFailed {
+                    start: st.id,
+                    message,
+                    choices,
+                    error,
+                }));
+            }
+        }
+    }
+
+    /// The start ends without a session: whoever waits for it hears `false`, as
+    /// `createSession` returns false on `TaskRunResult.Failure`.
+    fn abandon(&self, st: &mut Start, out: &mut Vec<Out>) {
+        let notify = std::mem::take(&mut st.origin.notify);
+        self.resolve_notify(notify, false, out);
+        st.phase = Phase::Done;
+    }
+
+    fn task_done(&mut self, start: u64, outcome: TaskOutcome, out: &mut Vec<Out>) {
+        let Some(mut st) = self.starts.remove(&start) else {
+            return;
+        };
+        if st.phase == Phase::Task {
+            self.task_checked(&mut st, outcome, out);
+        }
+        self.keep(st);
+    }
+
+    fn answer_task(&mut self, start: u64, choice: TaskChoice, out: &mut Vec<Out>) {
+        let Some(mut st) = self.starts.remove(&start) else {
+            return;
+        };
+        if st.phase == Phase::TaskAsk {
+            if choice == TaskChoice::DebugAnyway {
+                st.phase = Phase::Resolve;
+                self.advance(&mut st, out);
+            } else {
+                // Show Errors and Configure Task are the window's to open; the start ends.
+                self.abandon(&mut st, out);
+            }
+        }
+        self.keep(st);
+    }
+
+    // ---- setting a variable -------------------------------------------------------------------
+
+    /// `Variable.setVariable` of Code-OSS: `setVariable` when the adapter supports it, else
+    /// `setExpression` on the variable's `evaluateName` when the adapter supports that.
+    #[allow(clippy::too_many_arguments)]
+    fn set_variable(
+        &mut self,
+        sid: &str,
+        reference: i64,
+        name: String,
+        value: String,
+        evaluate_name: Option<String>,
+        frame_id: Option<i64>,
+        out: &mut Vec<Out>,
+    ) {
+        let refuse = |why: &str, out: &mut Vec<Out>| {
+            out.push(Out::Ui(DebugUpdate::VariableSet {
+                session: sid.to_owned(),
+                reference,
+                name: name.clone(),
+                result: Err(why.to_owned()),
+            }))
+        };
+        let Some(i) = self.idx(sid) else {
+            refuse("debug session not found", out);
+            return;
+        };
+        let s = &mut self.sessions[i];
+        let tag = Dap::SetVariable {
+            reference,
+            name: name.clone(),
+        };
+        let by_expression = s.cap("supportsSetExpression");
+        if s.cap("supportsSetVariable") {
+            let args = json!({ "variablesReference": reference, "name": name, "value": value });
+            send_dap(s, "setVariable", args, tag, out);
+        } else if let Some(expression) = evaluate_name.filter(|_| by_expression) {
+            let mut args = json!({ "expression": expression, "value": value });
+            if let Some(frame) = frame_id {
+                args["frameId"] = json!(frame);
+            }
+            send_dap(s, "setExpression", args, tag, out);
+        } else {
+            refuse("The debug adapter cannot change the value of a variable.", out);
+        }
     }
 
     // ---- replies of the extension host --------------------------------------------------------
@@ -1950,6 +2285,7 @@ impl DebugState {
                                         .and_then(Value::as_i64)
                                         .unwrap_or(0),
                                     evaluate_name: str_of(v, "evaluateName"),
+                                    read_only: is_read_only(v),
                                 })
                                 .collect()
                         })
@@ -1981,6 +2317,19 @@ impl DebugState {
                 out.push(Out::Ui(DebugUpdate::Evaluated {
                     id,
                     session: sid.to_owned(),
+                    result,
+                }));
+            }
+            Dap::SetVariable { reference, name } => {
+                let result = if success {
+                    Ok(str_of(&body, "value").unwrap_or_default())
+                } else {
+                    Err(error)
+                };
+                out.push(Out::Ui(DebugUpdate::VariableSet {
+                    session: sid.to_owned(),
+                    reference,
+                    name,
                     result,
                 }));
             }
@@ -2045,6 +2394,11 @@ impl DebugState {
             "initialized" => {
                 let s = &mut self.sessions[i];
                 s.ready = true;
+                if s.no_debug() {
+                    // Run Without Debugging: `sendAllBreakpoints` sends none.
+                    Self::configuration_done(s, out);
+                    return;
+                }
                 let mut wait = 0;
                 for file in self.breakpoints.files() {
                     send_file(s, &self.breakpoints, &file, true, out);
@@ -2370,8 +2724,14 @@ impl DebugState {
             s.folder.clone(),
             s.vars.clone(),
         );
+        let post_task = str_of(&s.configuration, "postDebugTask").filter(|t| !t.is_empty());
         if da_started {
             out.push(Out::Rpc(wire::stop_da_session(handle)));
+        }
+        // `onDidEndAdapter` runs the `postDebugTask` and waits for nothing but its failure; a
+        // restart runs it too (`restartSession`), before the start runs the `preLaunchTask`.
+        if let Some(label) = post_task.filter(|_| da_started) {
+            out.push(Out::Ui(DebugUpdate::RunTask { label, start: None }));
         }
         if let Some(r) = terminated_ref {
             out.push(Out::Rpc(wire::accept_debug_session_terminated(&r)));
@@ -2481,11 +2841,15 @@ impl DebugState {
                 return out;
             }
         };
-        let no_debug = options
-            .get("noDebug")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
         let parent = str_of(options, "parentSessionID");
+        // `createSession`: without `noDebug` in the options, a child runs as its parent does.
+        let no_debug = match options.get("noDebug").and_then(Value::as_bool) {
+            Some(no_debug) => no_debug,
+            None => parent
+                .as_deref()
+                .and_then(|p| self.idx(p))
+                .is_some_and(|i| self.sessions[i].no_debug()),
+        };
         let origin = self.origin(parent, Notify::Ext { req }, folder, no_debug, env);
         self.begin_selected(selector, origin, &mut out);
         out

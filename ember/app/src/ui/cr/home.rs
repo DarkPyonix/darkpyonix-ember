@@ -934,9 +934,9 @@ impl Composer {
     /// 2026-11-21], #888). The rows are a list named 모델, each a list item that says it is
     /// selected when it is the active row Ember draws, the honest stand-in for the mockup's
     /// listbox, options and `aria-activedescendant`, which the toolkit cannot express (no
-    /// combobox, listbox or option role and no relation from the field to a row). Not built:
-    /// scrolling the active row into view (a `ScrollColumn` cannot be scrolled to a child from
-    /// the Host).
+    /// combobox, listbox or option role and no relation from the field to a row). When `shown` is
+    /// true and `active` changes, a `launched_effect` scrolls the list's `ScrollState` via
+    /// `model_row_scroll_target` so the active row stays in view (FR-L15, #1080).
     fn model_body(&self, ui: &SharedUi, sel: &Selection, phone: bool, shown: bool, close: impl FnMut() + Clone + 'static) {
         let p = ember_theme().palette;
         // The search takes the focus when the picker opens. The request runs as an effect,
@@ -972,6 +972,27 @@ impl Composer {
         // `st.act`: where the arrows left it, else the chosen row (the first match once
         // something is typed).
         let active = self.model_act.get().filter(|i| *i < rows.len()).or_else(|| model_active_row(&rows, sel.option, &query));
+        let scroll_state = cu::remember_scroll_state();
+        {
+            let scroll = scroll_state.clone();
+            let row_h = pop_metrics(PopKind::Mode).row_min_h;
+            let window_h = crate::ui::window_size::current_window_size().height_dp;
+            // The list's viewport is what the picker's height leaves under the search: the
+            // popover's box has a 1 dp line above and below (the sheet has none), then SP[1],
+            // the 40 dp search with its underline and SP[0]. The list's own SP[1] padding is
+            // inside the scrolled content, so the first row starts SP[1] down.
+            let body_h = if phone { model_sheet_height(window_h) } else { model_popover_height(window_h) - 2.0 };
+            let viewport_h = (body_h - SP[1] - MODEL_SEARCH_H - SP[0]).max(0.0);
+            compose_rust::runtime::launched_effect((shown, active), move || async move {
+                if shown {
+                    if let Some(idx) = active {
+                        if let Some(target) = model_row_scroll_target(idx, SP[1], row_h, 0.0, scroll.offset(), viewport_h) {
+                            scroll.scroll_to(target);
+                        }
+                    }
+                }
+            });
+        }
         let blocks: Vec<Option<&'static str>> = rows.iter().map(|o| harness_block(o.harness, &agents, &limited)).collect();
         // Choosing row `i` by a tap, Enter or `Ctrl+number`: a blocked row says why and the
         // picker stays open.
@@ -1076,7 +1097,7 @@ impl Composer {
             { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[0])) };
             // `.mp-body{flex:1 1 auto;overflow:auto;padding:4px 8px 8px}`: the list takes what
             // the fixed height leaves under the search.
-            { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().fill_max_width().weight(1.0), {
+            { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(scroll_state = &scroll_state, modifier = Modifier::new().fill_max_width().weight(1.0), {
                 { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width().padding(SP[1]).role(Role::List).label(super::a11y::MODEL_LIST), {
                     if rows.is_empty() {
                         // `.mp-empty`.
@@ -1092,6 +1113,32 @@ impl Composer {
                 }) };
             }) };
         }) };
+    }
+}
+
+/// Scroll offset needed to keep `active_index` inside the visible list viewport (FR-L15, #1080).
+/// Row `i` starts at `list_top + i * (row_height + row_gap)` in the scrolled content. Returns `Some(new_offset)` when the active row is above `current_offset` or below
+/// `current_offset + viewport_height`, and `None` when the row is already fully visible.
+pub(crate) fn model_row_scroll_target(
+    active_index: usize,
+    list_top: f32,
+    row_height: f32,
+    row_gap: f32,
+    current_offset: f32,
+    viewport_height: f32,
+) -> Option<f32> {
+    if viewport_height <= 0.0 || row_height <= 0.0 {
+        return None;
+    }
+    let step = row_height + row_gap.max(0.0);
+    let row_top = list_top.max(0.0) + active_index as f32 * step;
+    let row_bottom = row_top + row_height;
+    if row_top < current_offset {
+        Some(row_top.max(0.0))
+    } else if row_bottom > current_offset + viewport_height {
+        Some((row_bottom - viewport_height).min(row_top).max(0.0))
+    } else {
+        None
     }
 }
 
@@ -3504,6 +3551,43 @@ mod design_review_tests {
         let body = &src[src.find("fn model_popover").expect("model_popover")..src.find("fn RailEntry").expect("RailEntry")];
         assert!(!body.contains(concat!("equal_height", "(true)")));
         assert!(body.contains("model_popover_height("));
+    }
+
+    #[test]
+    fn fr_l15_model_row_scroll_target_keeps_active_row_in_view() {
+        // #1080: already visible rows need no scroll.
+        assert_eq!(model_row_scroll_target(0, 0.0, 56.0, 0.0, 0.0, 200.0), None);
+        assert_eq!(model_row_scroll_target(1, 0.0, 56.0, 0.0, 0.0, 200.0), None);
+        assert_eq!(model_row_scroll_target(2, 0.0, 56.0, 4.0, 60.0, 200.0), None);
+        // Below viewport: scroll down to reveal the bottom of the active row.
+        assert_eq!(model_row_scroll_target(4, 0.0, 56.0, 0.0, 0.0, 200.0), Some(80.0));
+        assert_eq!(model_row_scroll_target(3, 0.0, 56.0, 0.0, 0.0, 200.0), Some(24.0));
+        assert_eq!(model_row_scroll_target(3, 0.0, 56.0, 4.0, 0.0, 150.0), Some(86.0));
+        // Above viewport: scroll up to the top of the active row.
+        assert_eq!(model_row_scroll_target(1, 0.0, 56.0, 0.0, 100.0, 200.0), Some(56.0));
+        assert_eq!(model_row_scroll_target(2, 0.0, 56.0, 4.0, 180.0, 200.0), Some(120.0));
+        // Index 0 when scrolled down returns to top (0.0).
+        assert_eq!(model_row_scroll_target(0, 0.0, 56.0, 0.0, 120.0, 200.0), Some(0.0));
+        // Degenerate sizes never scroll.
+        assert_eq!(model_row_scroll_target(2, 0.0, 56.0, 0.0, 0.0, 0.0), None);
+        assert_eq!(model_row_scroll_target(2, 0.0, 0.0, 0.0, 0.0, 200.0), None);
+        // The list's top padding moves every row down: row 3 of 56 under 8 ends at 232.
+        assert_eq!(model_row_scroll_target(3, 8.0, 56.0, 0.0, 0.0, 200.0), Some(32.0));
+        assert_eq!(model_row_scroll_target(0, 8.0, 56.0, 0.0, 40.0, 200.0), Some(8.0));
+    }
+
+    #[test]
+    fn fr_l15_model_body_scrolls_active_row_into_view() {
+        // #1080: model_body attaches ScrollState to the list ScrollColumn and scrolls on active change.
+        let src = include_str!("home.rs");
+        let start = src.find("fn model_body(").expect("model_body");
+        let end = src[start..].find("pub(crate) fn model_row_scroll_target(").expect("end of model_body") + start;
+        let body = &src[start..end];
+        assert!(body.contains("let scroll_state = cu::remember_scroll_state();"), "model_body remembers a ScrollState");
+        assert!(body.contains("ScrollColumn!(scroll_state = &scroll_state,"), "model list ScrollColumn attaches scroll_state");
+        assert!(body.contains("launched_effect((shown, active),"), "scroll effect tracks (shown, active)");
+        assert!(body.contains("model_row_scroll_target("), "scroll effect calls model_row_scroll_target");
+        assert!(body.contains("scroll.scroll_to(target);"), "scroll effect calls scroll_to(target)");
     }
 
     #[test]

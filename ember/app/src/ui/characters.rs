@@ -1054,6 +1054,90 @@ pub fn apply_character_override(
     CharSpec { style, name: base.name, agent, state, lead, role, dark: base.dark, pin }
 }
 
+/// The editor's editable fields for one member (FR-L22, #489).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EditorFields {
+    pub harness_idx: usize,
+    pub role_idx: usize,
+    pub style: Option<CharStyle>,
+    pub state: CharState,
+    pub pin: Option<usize>,
+}
+
+impl Default for EditorFields {
+    fn default() -> Self {
+        Self {
+            harness_idx: 0,
+            role_idx: 0,
+            style: None,
+            state: CharState::Idle,
+            pin: None,
+        }
+    }
+}
+
+/// Derive the editor's initial fields for a member from its saved override (if any) and live
+/// member record (if any), resetting unset fields to the member's defaults (FR-L22, #489).
+pub fn editor_fields_from_override(
+    ov: Option<&ember_client::wire::CharacterOverride>,
+    member: Option<&crate::ui::project::Member>,
+    team_style: CharStyle,
+) -> EditorFields {
+    let default_harness = member
+        .map(|m| match family_of(&m.agent) {
+            Family::Claude => 0,
+            Family::Codex => 1,
+            Family::Gemini => 2,
+        })
+        .unwrap_or(0);
+    let default_role = match member {
+        Some(m) if m.leader => 0,
+        Some(_) => 1,
+        None => 0,
+    };
+    let default_state = member
+        .map(|m| CharState::from_status(m.status))
+        .unwrap_or(CharState::Idle);
+    let Some(ov) = ov else {
+        return EditorFields {
+            harness_idx: default_harness,
+            role_idx: default_role,
+            style: None,
+            state: default_state,
+            pin: None,
+        };
+    };
+    let harness_idx = ov
+        .harness
+        .as_deref()
+        .and_then(|h| EDITOR_HARNESSES.iter().position(|(id, _)| *id == h))
+        .unwrap_or(default_harness);
+    let role_idx = ov
+        .role
+        .as_deref()
+        .and_then(|r| EDITOR_ROLES.iter().position(|&x| x == r))
+        .unwrap_or(default_role);
+    let style = ov.style.as_deref().and_then(CharStyle::from_id);
+    let state = ov
+        .state
+        .as_deref()
+        .and_then(CharState::from_id)
+        .unwrap_or(default_state);
+    let effective_style = style.unwrap_or(team_style);
+    let pin = if supports_pin(effective_style) {
+        ov.silhouette.filter(|&i| i < SILHOUETTES.len())
+    } else {
+        None
+    };
+    EditorFields {
+        harness_idx,
+        role_idx,
+        style,
+        state,
+        pin,
+    }
+}
+
 /// Build the [`ember_client::wire::CharacterOverride`] for the editor's current selection
 /// (FR-L22, #489).
 pub fn build_character_override(
@@ -1541,5 +1625,81 @@ mod tests {
     fn fr_l22_style_names_take_the_right_topic_particle() {
         let got: Vec<String> = CharStyle::ALL.iter().map(|s| with_topic(s.label())).collect();
         assert_eq!(got, ["몽글은", "말랑은", "크루는", "포켓은", "크림은", "키링은"]);
+    }
+
+    #[test]
+    fn fr_l22_character_override_round_trips_and_validates_silhouette_for_blob_styles_only() {
+        let fields = EditorFields {
+            harness_idx: 1,
+            role_idx: 2,
+            style: Some(CharStyle::Malang),
+            state: CharState::Run,
+            pin: Some(3),
+        };
+        let ov = build_character_override(
+            fields.harness_idx,
+            fields.role_idx,
+            fields.style,
+            fields.state,
+            fields.pin,
+            CharStyle::Mongle,
+        );
+        assert_eq!(ov.harness.as_deref(), Some("codex"));
+        assert_eq!(ov.role.as_deref(), Some("리뷰어"));
+        assert_eq!(ov.style.as_deref(), Some("malang"));
+        assert_eq!(ov.state.as_deref(), Some("run"));
+        assert_eq!(ov.silhouette, Some(3));
+        assert_eq!(editor_fields_from_override(Some(&ov), None, CharStyle::Mongle), fields);
+
+        // Keyring also keeps a valid silhouette, while out-of-range pins are stripped.
+        let keyring_ok = build_character_override(2, 0, Some(CharStyle::Keyring), CharState::Done, Some(7), CharStyle::Mongle);
+        assert_eq!(keyring_ok.silhouette, Some(7));
+        let keyring_oob = build_character_override(2, 0, Some(CharStyle::Keyring), CharState::Done, Some(SILHOUETTES.len()), CharStyle::Mongle);
+        assert_eq!(keyring_oob.silhouette, None);
+
+        // Non-blob styles (mongle, crew, pocket, cream) always strip silhouette on build and load.
+        for s in [CharStyle::Mongle, CharStyle::Crew, CharStyle::Pocket, CharStyle::Cream] {
+            let built = build_character_override(0, 1, Some(s), CharState::Idle, Some(2), CharStyle::Malang);
+            assert_eq!(built.silhouette, None, "{s:?} must not emit a silhouette pin");
+            let raw = ember_client::wire::CharacterOverride {
+                style: Some(s.id().to_string()),
+                silhouette: Some(2),
+                ..Default::default()
+            };
+            assert_eq!(editor_fields_from_override(Some(&raw), None, CharStyle::Malang).pin, None);
+            let applied = apply_character_override(spec(CharStyle::Malang, "ember-리더", "claude"), "ember", Some(&raw));
+            assert_eq!(applied.pin, None);
+        }
+
+        // Switching to a member without an override resets to that member's defaults.
+        let member = real_member("ember-구현", false, LauncherStatus::Running);
+        let reset = editor_fields_from_override(None, Some(&member), CharStyle::Crew);
+        assert_eq!(reset, EditorFields { harness_idx: 1, role_idx: 1, style: None, state: CharState::Run, pin: None });
+    }
+
+    #[test]
+    fn fr_l22_override_maps_prefer_server_and_track_save_or_reset() {
+        let mut device = std::collections::BTreeMap::new();
+        let dev_ov = build_character_override(0, 0, Some(CharStyle::Crew), CharState::Idle, None, CharStyle::Mongle);
+        device.insert("ember-리더".to_string(), dev_ov.clone());
+        let empty = std::collections::BTreeMap::new();
+        assert_eq!(effective_character_overrides(None, Some(&device)), device);
+        assert_eq!(effective_character_overrides(Some(&empty), Some(&device)), device);
+
+        let mut server = std::collections::BTreeMap::new();
+        let srv_ov = build_character_override(2, 3, Some(CharStyle::Malang), CharState::Wait, Some(4), CharStyle::Mongle);
+        server.insert("ember-리더".to_string(), srv_ov.clone());
+        assert_eq!(effective_character_overrides(Some(&server), Some(&device)), server);
+
+        assert!(!editor_save_needed("ember-리더", &srv_ov, &server));
+        assert!(editor_save_needed("ember-리더", &dev_ov, &server));
+        assert!(!editor_save_needed("   ", &dev_ov, &server));
+        assert!(!editor_save_needed("bad\nname", &dev_ov, &server));
+
+        let saved = updated_character_overrides(&server, "ember-구현", Some(dev_ov.clone()));
+        assert_eq!(saved.get("ember-리더"), Some(&Some(srv_ov.clone())));
+        assert_eq!(saved.get("ember-구현"), Some(&Some(dev_ov)));
+        let cleared = updated_character_overrides(&server, "ember-리더", None);
+        assert!(!cleared.contains_key("ember-리더"));
     }
 }

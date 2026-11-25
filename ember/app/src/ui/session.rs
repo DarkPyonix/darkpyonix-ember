@@ -581,6 +581,37 @@ pub fn web_tap(load: &WebPagesLoad, idx: usize) -> WebTap {
     }
 }
 
+/// Caption under the direct-port input in the 웹 페이지 menu (FR-L18, #1076). The mockup's line
+/// (`같은 네트워크가 아니면 Ember 터널로 엽니다`) promises a tunnel the app does not have yet: a
+/// typed port opens at the computer's address directly, so the caption says only that.
+pub const WEB_MENU_TUNNEL_HINT: &str = "같은 네트워크에 있을 때 열립니다. Ember 터널로 여는 기능은 아직 없습니다.";
+
+/// Why a typed port cannot be opened: the computer's address is not known here.
+pub const DIRECT_PORT_NO_HOST: &str = "이 컴퓨터의 주소를 알 수 없어 포트를 열 수 없습니다";
+
+/// Parses a direct port input (`1..=65535`, trimmed) for the 웹 페이지 menu (FR-L18, #1076).
+pub fn parse_direct_port(input: &str) -> Result<u16, &'static str> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("포트 번호를 입력해 주세요");
+    }
+    match trimmed.parse::<u16>() {
+        Ok(port) if port > 0 => Ok(port),
+        _ => Err("1부터 65535 사이의 포트 번호를 입력해 주세요"),
+    }
+}
+
+/// The browser address for a typed port on the session's computer (FR-L18, #1076): its `host`
+/// when known, loopback when the computer is this machine, otherwise [`DIRECT_PORT_NO_HOST`]
+/// (never this machine's loopback for another computer's port).
+pub fn direct_port_url(computer: &ComputerHost, port: u16) -> Result<String, &'static str> {
+    match (&computer.host, computer.local) {
+        (Some(h), _) => Ok(format!("http://{}:{port}", web_host_text(h))),
+        (None, true) => Ok(format!("http://127.0.0.1:{port}")),
+        (None, false) => Err(DIRECT_PORT_NO_HOST),
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Views
 // ---------------------------------------------------------------------------------------------
@@ -2681,6 +2712,29 @@ mod tests {
         );
         assert_eq!(web_menu_items(&WebPagesLoad::Loading).len(), web_menu_lines(&WebPagesLoad::Loading).len());
         assert!(web_menu_items(&WebPagesLoad::Loading)[0].loading, "the loading row carries the spinner");
+    }
+
+    #[test]
+    fn fr_l18_parse_direct_port_accepts_valid_ports_and_rejects_invalid_ones() {
+        assert_eq!(parse_direct_port("80"), Ok(80));
+        assert_eq!(parse_direct_port(" 3000 "), Ok(3000));
+        assert_eq!(parse_direct_port("65535"), Ok(65535));
+        for bad in ["", "   ", "0", "65536", "abc", "-1"] {
+            let err = parse_direct_port(bad).expect_err(&format!("expected error for {bad:?}"));
+            assert!(!err.is_empty(), "error message must not be empty for {bad:?}");
+            assert!(!err.contains('\u{2014}'), "no em-dash in error message");
+        }
+    }
+
+    #[test]
+    fn fr_l18_direct_port_url_uses_the_computer_host_or_loopback_only_when_local() {
+        assert_eq!(direct_port_url(&remote("192.168.0.10"), 8080), Ok("http://192.168.0.10:8080".to_string()));
+        assert_eq!(direct_port_url(&remote("fd00::2"), 5173), Ok("http://[fd00::2]:5173".to_string()));
+        assert_eq!(direct_port_url(&local_host(), 4000), Ok("http://127.0.0.1:4000".to_string()));
+        // Another computer with no known address: never this machine's loopback.
+        assert_eq!(direct_port_url(&no_host(NoHost::PeerComputer), 3000), Err(DIRECT_PORT_NO_HOST));
+        assert_eq!(direct_port_url(&ComputerHost::default(), 3000), Err(DIRECT_PORT_NO_HOST));
+        assert!(!WEB_MENU_TUNNEL_HINT.contains('\u{2014}'));
     }
 
     #[test]

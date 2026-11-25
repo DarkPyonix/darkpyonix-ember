@@ -6,8 +6,9 @@
 //! | POST | `/ide/ose` | [`OseLaunchRequest`] | 200 [`OseLaunchResponse`] |
 //! | GET (WS) | `/ide/ose/{launch_id}/relay` | binary frames | binary frames |
 //! | POST | `/ide/extensions` | `{"id":"publisher.name","version":"1.2.3"}` | 200 `{installed,id,output}` |
+//! | DELETE | `/ide/extensions/{extension}` | none | 200 `{uninstalled,id,output}` |
 //!
-//! All three sit behind the node's bearer token (and the peer allow-list over the transport), like
+//! All four sit behind the node's bearer token (and the peer allow-list over the transport), like
 //! every route but `/health`. The folder of a launch is checked by the path policy first (400 for a
 //! relative path or a file, 403 outside the roots, 404 when missing). A node with no OSE binary
 //! answers 503, a start that fails 500, both with the reason.
@@ -27,7 +28,7 @@ use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -73,6 +74,7 @@ pub(crate) fn routes() -> Router<Node> {
         .route("/ide/ose", post(launch))
         .route("/ide/ose/{launch_id}/relay", get(relay))
         .route("/ide/extensions", post(install_extension))
+        .route("/ide/extensions/{extension}", delete(uninstall_extension))
 }
 
 fn internal(e: impl std::fmt::Display) -> ApiError {
@@ -140,6 +142,31 @@ fn install_error(status: StatusCode, code: ErrorCode, msg: impl Into<String>) ->
     ApiError::new(status, code, msg).into_response()
 }
 
+/// The answer for an extension run that did not succeed. `done` is the body flag (`installed` or
+/// `uninstalled`), false in a 502.
+fn extension_failure(err: InstallError, id: &str, done: &str) -> Response {
+    match err {
+        InstallError::Bad(m) => install_error(StatusCode::BAD_REQUEST, ErrorCode::BadRequest, m),
+        InstallError::NotInstalled => {
+            install_error(StatusCode::SERVICE_UNAVAILABLE, ErrorCode::Internal, NOT_INSTALLED)
+        }
+        InstallError::Busy => {
+            install_error(StatusCode::CONFLICT, ErrorCode::Conflict, "an install is already running on this computer")
+        }
+        InstallError::Failed { message, output } => {
+            let mut body: Value = json!({
+                "code": ErrorCode::Internal,
+                "error": message,
+                "id": id,
+                "output": output,
+            });
+            body[done] = Value::Bool(false);
+            (StatusCode::BAD_GATEWAY, Json(body)).into_response()
+        }
+        InstallError::Io(m) => install_error(StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal, m),
+    }
+}
+
 async fn install_extension(State(n): State<Node>, body: Bytes) -> Response {
     let req: InstallRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
@@ -151,25 +178,21 @@ async fn install_extension(State(n): State<Node>, body: Bytes) -> Response {
         tokio::task::spawn_blocking(move || ose.install_extension(LOCAL_COMPUTER, &id, version.as_deref())).await;
     match ran {
         Ok(Ok(output)) => Json(json!({ "installed": true, "id": req.id, "output": output })).into_response(),
-        Ok(Err(InstallError::Bad(m))) => install_error(StatusCode::BAD_REQUEST, ErrorCode::BadRequest, m),
-        Ok(Err(InstallError::NotInstalled)) => {
-            install_error(StatusCode::SERVICE_UNAVAILABLE, ErrorCode::Internal, NOT_INSTALLED)
-        }
-        Ok(Err(InstallError::Busy)) => {
-            install_error(StatusCode::CONFLICT, ErrorCode::Conflict, "an install is already running on this computer")
-        }
-        Ok(Err(InstallError::Failed { message, output })) => {
-            let body: Value = json!({
-                "code": ErrorCode::Internal,
-                "error": message,
-                "id": req.id,
-                "output": output,
-                "installed": false,
-            });
-            (StatusCode::BAD_GATEWAY, Json(body)).into_response()
-        }
-        Ok(Err(InstallError::Io(m))) => install_error(StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal, m),
+        Ok(Err(e)) => extension_failure(e, &req.id, "installed"),
         Err(e) => install_error(StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal, format!("install task failed: {e}")),
+    }
+}
+
+async fn uninstall_extension(State(n): State<Node>, Path(extension): Path<String>) -> Response {
+    let ose = n.ose().clone();
+    let id = extension.clone();
+    let ran = tokio::task::spawn_blocking(move || ose.uninstall_extension(LOCAL_COMPUTER, &id)).await;
+    match ran {
+        Ok(Ok(output)) => Json(json!({ "uninstalled": true, "id": extension, "output": output })).into_response(),
+        Ok(Err(e)) => extension_failure(e, &extension, "uninstalled"),
+        Err(e) => {
+            install_error(StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal, format!("uninstall task failed: {e}"))
+        }
     }
 }
 

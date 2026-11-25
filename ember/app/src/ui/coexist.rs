@@ -36,6 +36,12 @@ pub struct SharedLive {
     pub outbox: MutableState<u64>,
     /// Any team (members, tasks: FR-T7).
     pub teams: MutableState<u64>,
+    /// A channel got a message, or push reconnected (PR-1, FR-L12, #1049): the channels screen
+    /// reads the open room after its last seq and the list's unread counts again.
+    pub channels: MutableState<u64>,
+    /// A schedule or a run changed, or push reconnected (PR-1, FR-L25, #1049): the routines
+    /// screen reads the schedules again.
+    pub schedules: MutableState<u64>,
     pub accounts: MutableState<Vec<Account>>,
     /// ChatGPT plan accounts (FR-U4); empty when sign-in is off.
     pub chatgpt: MutableState<Vec<ChatGptAccount>>,
@@ -71,6 +77,8 @@ impl SharedLive {
             transcripts: mutable_state_of(0),
             outbox: mutable_state_of(0),
             teams: mutable_state_of(0),
+            channels: mutable_state_of(0),
+            schedules: mutable_state_of(0),
             accounts: mutable_state_of(Vec::new()),
             chatgpt: mutable_state_of(Vec::new()),
             agents: mutable_state_of(Vec::new()),
@@ -94,6 +102,8 @@ impl SharedLive {
         Self::bump(&self.transcripts);
         Self::bump(&self.outbox);
         Self::bump(&self.teams);
+        Self::bump(&self.channels);
+        Self::bump(&self.schedules);
     }
 }
 

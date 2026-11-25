@@ -85,6 +85,9 @@ async fn send(router: Router, method: &str, uri: &str, host: &str, origin: Optio
     (parts.status, names, allow)
 }
 
+// The harness captures `print!`; only a write to the real stdout reaches the CI log (see the
+// module doc), so `writeln!(stdout())` is meant here.
+#[allow(clippy::explicit_write)]
 async fn measure(kind: Kind, out: &mut Vec<(String, String, &'static str, StatusCode)>) {
     let d = door();
     let paths = ["/ok", ACCEPT_PATH, "/echo", "/nothing"];

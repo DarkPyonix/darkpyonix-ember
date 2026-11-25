@@ -211,8 +211,7 @@ fn server_choice_from_env(prefs: &prefs::Prefs) -> Result<Option<device_link::Pe
 fn open_window() {
     if let Some(target) = ide::parse_editor_args(std::env::args()) {
         // Separate IDE window (FR-L31): `--editor <project> <folder>` opens the editor as its own
-        // HTML-mode window in its own process. The `Window` element (dioxus-compose#152) is in the
-        // pin; an HTML page under the shell's Compose root waits for dioxus-compose#161.
+        // window in its own process: a Compose root with the HTML page in an `HtmlView`.
         // `EMBER_CR_SIZE=1100x400` opens a check window of that size beside the owner's.
         let (w, h): (u16, u16) = std::env::var("EMBER_CR_SIZE")
             .ok()
@@ -231,11 +230,12 @@ fn open_window() {
         if claims_owner(Launch::Editor) {
             start_owner_claim(owner_handoff::claim_name(owner_handoff::own_token()));
         }
-        // TODO(dioxus-compose#161): HtmlView inside a Compose root aborts the real renderer, so the editor runs in HTML mode.
+        // A Compose root holding the editor page in an `HtmlView` (#301): the window's chrome and
+        // size come from the Compose side, and the code editor and diff editor (WidgetViews inside
+        // the page) get their events through the root since dioxus-compose a64f3b92 (#161).
         launch_builder()
-            .with_html(ui::editor_workbench::page::config)
             .with_window(ui::cr::shell::window_chrome(Window::new().with_title(title).with_size(w, h)))
-            .launch(ui::editor_workbench::page::app);
+            .launch(ui::editor_workbench::view::EditorRoot);
     } else if let Some(pref) = ui::cr::gallery::requested() {
         // Phase 1 review window (#220): the compose-rust components, no app.
         if claims_owner(Launch::Gallery) {
@@ -335,6 +335,10 @@ pub(crate) fn shutdown() -> i32 {
     // The unsaved buffers of an editor window first (hot exit, FR-L31.6a): nothing else here needs them.
     editor_backup::flush_on_exit();
     let s = services();
+    // A save still on the wire finishes (bounded) before the process ends and cuts it off.
+    if !s.rt.block_on(ember_editor::writes::wait_settled(ember_editor::session::SHUTDOWN_WRITE_WAIT)) {
+        tracing::warn!("a file save was still unfinished at exit");
+    }
     let _guard = services::prefs_write_lock();
     let prefs = s.ui.prefs.get_untracked();
     let path = s.config.prefs_path();

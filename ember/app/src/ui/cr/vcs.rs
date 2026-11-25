@@ -12,9 +12,9 @@
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
-use compose_rust::runtime::{key, launched_effect, mutable_state_of, remember, remember_with_key, MutableState};
+use compose_rust::runtime::{delay, key, launched_effect, mutable_state_of, remember, remember_with_key, MutableState};
 use crate::ui::window_size::current_window_size;
-use crate::ui::vcs::{can_approve_pr, merge_method_text, pr_created_notice, pr_merge_method_label, pr_review_notice, PR_DELETE_BRANCH_LABEL, PR_DELETE_BRANCH_NOTE, PR_MERGE_METHODS, PR_SELF_APPROVAL_DISALLOWED, copy_sha_to_clipboard, filter_history_entries, HistoryFilter, branch_switch_allowed, branch_matches, branch_bar_text, BRANCH_SWITCH_NOTE, BRANCH_CREATE_NOTE, STASH_NOW_NOTE, commit_action_branch_line, commit_failure_reloads_snapshot, commit_action_gate, commit_action_key, commit_detail_from, commit_detail_view, commit_files_shown, fetch_commit_detail, file_stat_text, run_branch_from, run_commit_cherry_pick, run_commit_revert, snapshot_dirty, CommitAction, CommitDetailLoad, CommitDetailView, choice_label, fetch_conflict, run_resolve, ConflictChoice, ConflictStep, cancel_preview, confirm, ResolveTap, ConflictFile, ConflictLoad, ConflictSegment, fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, fetch_prs, prs_from, PrEntry, PrFilter, PrLoad, section_count_with, section_count_with_branches, fetch_branches, branches_from, split_branches, branch_bar_fractions, worktree_tail, branch_create_body, stash_now_gate, stash_now_error, BranchEntry, BranchLoad, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text, CONFLICT_PREVIEW_LINES, amend_warning, amend_button_label, amend_tap, AmendTap, armed_label_visible, delete_tap, stash_button_label, stash_button_text, stash_tap, stash_tap_key, DeleteTap, STASH_DIRTY_WARNING, STASH_POP_NOTE, section_count_with_team, team_rows, team_rows_with_pr_load, resolve_team_pr_load, apply_team_row_snapshot_and_mode, MemberCwd, TeamMember, TeamRow, TeamPrStatus, fetch_pr_detail, pr_detail_from, run_pr_review, run_pr_merge, run_pr_create, review_request_gate, pr_create_gate, review_tap, ReviewTap, pr_action_key, review_button_label, review_draft_key, is_stale_head, clean_body, merge_button_state, merge_button_text, MERGE_METHOD_TEXT, PrDetailLoad, PrDetailView, CheckClass, ReviewerState, banner_sub, banner_title, fetch_merge_state, banner_button_text, merge_tap, merge_tap_key, run_merge_abort, run_merge_commit, MergeAction, MergeLoad, MergeView, MERGE_ABORT_NOTE, MERGE_COMMIT_NOTE, merge_answer_reloads, pick_all_key, pick_all_note, pick_all_text};
+use crate::ui::vcs::{can_approve_pr, merge_method_text, pr_created_notice, pr_merge_method_label, pr_review_notice, PR_DELETE_BRANCH_LABEL, PR_DELETE_BRANCH_NOTE, PR_MERGE_METHODS, PR_SELF_APPROVAL_DISALLOWED, copy_sha_to_clipboard, filter_history_entries, HistoryFilter, branch_switch_allowed, branch_matches, branch_bar_text, BRANCH_SWITCH_NOTE, BRANCH_CREATE_NOTE, STASH_NOW_NOTE, commit_action_branch_line, commit_failure_reloads_snapshot, commit_action_gate, commit_action_key, commit_detail_from, commit_detail_view, commit_files_shown, fetch_commit_detail, file_stat_text, run_branch_from, run_commit_cherry_pick, run_commit_revert, snapshot_dirty, CommitAction, CommitDetailLoad, CommitDetailView, choice_label, fetch_conflict, run_resolve, ConflictChoice, ConflictStep, cancel_preview, confirm, ResolveTap, ConflictFile, ConflictLoad, ConflictSegment, fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, fetch_prs, prs_from, PrEntry, PrFilter, PrLoad, section_count_with, section_count_with_branches, fetch_branches, branches_from, split_branches, branch_bar_fractions, worktree_tail, branch_create_body, stash_now_gate, stash_now_error, BranchEntry, BranchLoad, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text, CONFLICT_PREVIEW_LINES, amend_warning, amend_button_label, amend_tap, AmendTap, armed_label_visible, delete_tap, disarm_if_matches, stash_button_label, stash_button_text, stash_tap, stash_tap_key, DeleteTap, STASH_ARM_TIMEOUT_MS, STASH_DIRTY_WARNING, STASH_POP_NOTE, section_count_with_team, team_rows, team_rows_with_pr_load, resolve_team_pr_load, apply_team_row_snapshot_and_mode, MemberCwd, TeamMember, TeamRow, TeamPrStatus, fetch_pr_detail, pr_detail_from, run_pr_review, run_pr_merge, run_pr_create, review_request_gate, pr_create_gate, review_tap, ReviewTap, pr_action_key, review_button_label, review_draft_key, is_stale_head, clean_body, merge_button_state, merge_button_text, MERGE_METHOD_TEXT, PrDetailLoad, PrDetailView, CheckClass, ReviewerState, banner_sub, banner_title, fetch_merge_state, banner_button_text, merge_tap, merge_tap_key, run_merge_abort, run_merge_commit, MergeAction, MergeLoad, MergeView, MERGE_ABORT_NOTE, MERGE_COMMIT_NOTE, merge_answer_reloads, pick_all_key, pick_all_note, pick_all_text};
 use ember_client::api::{GitPrMergeMethod, GitPrReviewAction};
 use serde_json::{json, Value};
 use compose_rust::ui as cu;
@@ -2041,10 +2041,10 @@ fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<P
 
     match layout {
         PaneLayout::Two => {
-            // The panes scroll independently inside a bounded row. Keeping each pane in its own
-            // `ScrollColumn` (rather than one outer page scroll with `equal_height`) keeps the
-            // files card in view while a long diff is read, matching the mockup's sticky
-            // `.vcs-files`.
+            // The panes scroll independently inside a bounded `intrinsic_size = true` row
+            // (`Row::equal_height`, compose-rust#389), so both panes stretch to the same height
+            // while each keeps its own `ScrollColumn` and the files card stays in view while a
+            // long diff is read (matching the mockup's sticky `.vcs-files`).
             let d_files = diffs.clone();
             let st_files = staging.clone();
             let fold_files = folded.clone();
@@ -2055,7 +2055,7 @@ fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<P
             let body_files = body.clone();
             let am_files = amend.clone();
 
-            { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width().fill_max_height(), alignment = Alignment::TopStart, spacing = GAP_CARD, content = move || {
+            { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width().fill_max_height(), alignment = Alignment::TopStart, spacing = GAP_CARD, intrinsic_size = true, content = move || {
                     // One card, as the mockup's `.vcs-files`: the header, the tree (no taller than
                     // its cap, scrolling inside it) and the commit box under a rule on
                     // `surface-2`. The column still scrolls, for a pane shorter than the card.
@@ -2210,6 +2210,23 @@ fn sample_merge() -> MergeLoad {
     MergeLoad::Ready(Some(MergeView { from: "origin/main".into(), into: "feat/session-shim".into(), remaining: SAMPLE_CONFLICT_COUNT, can_commit: false }))
 }
 
+/// Schedules a one-shot timer for [`STASH_ARM_TIMEOUT_MS`] whenever an armed confirmation state
+/// holds a token, clearing it automatically via [`disarm_if_matches`] if the same token is still
+/// armed when the timer fires (FR-L19).
+fn auto_disarm_effect(armed: &MutableState<Option<(usize, i64)>>) {
+    let token = armed.get();
+    let state = armed.clone();
+    launched_effect(token, move || async move {
+        let Some(token) = token else { return };
+        delay(std::time::Duration::from_millis(STASH_ARM_TIMEOUT_MS as u64)).await;
+        let current = state.get_untracked();
+        let next = disarm_if_matches(current, token);
+        if next != current {
+            state.set(next);
+        }
+    });
+}
+
 /// 충돌 with the merge banner (FR-G16, FR-G17, #382): the banner card above the list or editor
 /// while a merge is in progress, with 병합 취소 and 병합 커밋 (each asks twice). A conflict list
 /// without a merge (a stash pop, a cherry-pick) shows no banner. `actions` is `None` for the
@@ -2219,6 +2236,7 @@ fn ConflictsPane(paths: &[String], actions: Option<Actions>, layout: PaneLayout)
     let mlocal = remember(|| mutable_state_of(0_u64));
     let mbusy = remember(|| mutable_state_of(false));
     let armed = remember(|| mutable_state_of(None::<(usize, i64)>));
+    auto_disarm_effect(&armed);
     let generation = remember(|| mutable_state_of(0_u64));
 
     if let Some(a) = actions.clone() {
@@ -2380,6 +2398,7 @@ fn ConflictsBody(paths: &[String], actions: Option<Actions>, layout: PaneLayout)
     // The armed pick-all button (key, arm time). It lives in the body, which the pane remounts
     // with `key(generation)` after a merge answer, so a reload starts it unarmed.
     let pick_armed = remember(|| mutable_state_of(None::<(usize, i64)>));
+    auto_disarm_effect(&pick_armed);
 
     if !use_sample {
         if let (Some(a), Some(path)) = (actions.clone(), open.get()) {
@@ -2986,6 +3005,7 @@ fn HistoryPane(actions: Option<Actions>, layout: PaneLayout, dirty: bool, branch
     let busy = remember(|| mutable_state_of(false));
     // The armed button as (key from `commit_action_key`, arm time in ms); cleared by a reload or a timeout.
     let armed = remember(|| mutable_state_of(None::<(usize, i64)>));
+    auto_disarm_effect(&armed);
     let form_open = remember(|| mutable_state_of(false));
     let name = remember(|| mutable_state_of(String::new()));
     let name_gen = remember(|| mutable_state_of(0_u64));
@@ -3712,6 +3732,7 @@ fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>
     let busy = remember(|| mutable_state_of(false));
     // The merge button as (pull request number, arm time in ms); cleared by a reload or a timeout.
     let armed = remember(|| mutable_state_of(None::<(usize, i64)>));
+    auto_disarm_effect(&armed);
     let form_open = remember(|| mutable_state_of(false));
     let f_title = remember(|| mutable_state_of(String::new()));
     let f_body = remember(|| mutable_state_of(String::new()));
@@ -3746,6 +3767,7 @@ fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>
     let effective = selected.get().or(first);
     // 승인 and 변경 요청 as (key of the action, arm time in ms); only one is armed, and 병합 clears it.
     let review_armed = remember(|| mutable_state_of(None::<(usize, i64)>));
+    auto_disarm_effect(&review_armed);
     let prev_effective = remember(|| mutable_state_of(effective));
     if prev_effective.get() != effective {
         prev_effective.set(effective);
@@ -4885,6 +4907,7 @@ fn StashPane(actions: Option<Actions>, count: MutableState<Option<usize>>, layou
     let busy = remember(|| mutable_state_of(false));
     // The armed button as (key from `stash_tap_key`, arm time in ms); cleared by a timeout, another tap or a reload.
     let armed = remember(|| mutable_state_of(None::<(usize, i64)>));
+    auto_disarm_effect(&armed);
     let message = remember(|| mutable_state_of(String::new()));
     let untracked = remember(|| mutable_state_of(false));
     let generation = remember(|| mutable_state_of(0_u64));
@@ -5026,10 +5049,10 @@ pub fn stash_actions_inline(layout: PaneLayout) -> bool {
 
 /// One stash: message, meta line and the 적용, 꺼내기, 삭제 buttons. 삭제 needs a second tap on
 /// the same button, which then reads "정말 삭제합니다"; 적용 and 꺼내기 ask the same way when
-/// `dirty`, under a line that says why. The armed label shows only while `armed_label_visible`
-/// holds at composition: nothing re-renders on a timer, so it may stay on screen until the next
-/// recomposition after 4 seconds, and `stash_tap` decides what a tap does. Each button has an
-/// accessible name with the index and message (visible text stays 적용, 꺼내기, 삭제).
+/// `dirty`, under a line that says why. The armed label shows while `armed_label_visible` holds,
+/// and `auto_disarm_effect` in `StashPane` clears the armed state automatically after 4 seconds
+/// without another user tap; `stash_tap` decides what a tap does. Each button has an accessible
+/// name with the index and message (visible text stays 적용, 꺼내기, 삭제).
 fn StashRow(e: &StashEntry, layout: PaneLayout, busy: bool, dirty: bool, armed: MutableState<Option<(usize, i64)>>, run: impl Fn(StashAction, u32) + Clone + 'static) {
     let p = ember_theme().palette;
     let index = e.index;
@@ -9089,5 +9112,73 @@ mod tests {
         let body = &src[start..start + 1800];
         assert!(body.contains("actions.is_none() || crate::demo::active_from_env()"), "{body}");
         assert!(body.contains("ConflictLoad::Ready(sample_conflict())"), "{body}");
+    }
+
+    fn row_equal_height_props(equal: bool) -> Vec<String> {
+        fn on() {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::TopStart, spacing = GAP_CARD, intrinsic_size = true, {}) };
+        }
+        fn off() {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::TopStart, spacing = GAP_CARD, intrinsic_size = false, {}) };
+        }
+        let nodes = nodes_of(if equal { on as fn() } else { off as fn() });
+        nodes.iter().find(|n| n.widget == "Row").expect("row").props.clone()
+    }
+
+    #[test]
+    fn fr_l19_changes_two_pane_row_uses_equal_height() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let (on, off) = (row_equal_height_props(true), row_equal_height_props(false));
+        let marks: Vec<&String> = on.iter().filter(|p| !off.contains(p)).collect();
+        assert!(!marks.is_empty(), "intrinsic_size = true emits a Row prop: {on:?} against {off:?}");
+
+        let nodes = nodes_of(changes_two_pane_probe);
+        let row = nodes
+            .iter()
+            .find(|n| {
+                n.widget == "Row" && {
+                    let children = kids(&nodes, n.id);
+                    children.len() == 2 && children.iter().all(|c| c.widget == "ScrollColumn")
+                }
+            })
+            .expect("ChangesPane in PaneLayout::Two renders a Row with two ScrollColumn panes");
+        assert!(
+            marks.iter().all(|p| row.props.contains(p)),
+            "two-pane ChangesPane Row emits equal_height (intrinsic_size = true): {:?}",
+            row.props
+        );
+        let panes = kids(&nodes, row.id);
+        assert!(panes[0].mods.iter().any(|m| m == "FillMaxHeight"), "left pane fills row height: {:?}", panes[0].mods);
+        assert!(panes[1].mods.iter().any(|m| m == "FillMaxHeight"), "right pane fills row height: {:?}", panes[1].mods);
+    }
+
+    #[test]
+    fn fr_l19_armed_delete_wires_auto_disarm_timer() {
+        let production = include_str!("vcs.rs").split("#[cfg(test)]").next().unwrap();
+        let helper = production
+            .split("fn auto_disarm_effect(")
+            .nth(1)
+            .and_then(|s| s.split("\n/// ").next())
+            .expect("auto_disarm_effect exists");
+        assert!(helper.contains("launched_effect("), "{helper}");
+        assert!(helper.contains("delay("), "{helper}");
+        assert!(helper.contains("STASH_ARM_TIMEOUT_MS"), "{helper}");
+        assert!(helper.contains("disarm_if_matches("), "{helper}");
+
+        for fn_name in [
+            "fn StashPane(",
+            "fn ConflictsPane(",
+            "fn ConflictsBody(",
+            "fn HistoryPane(",
+            "fn PullRequestsPane(",
+        ] {
+            let body = production
+                .split(fn_name)
+                .nth(1)
+                .and_then(|s| s.split("\nfn ").next())
+                .unwrap_or_else(|| panic!("missing {fn_name}"));
+            assert!(body.contains("auto_disarm_effect("), "{fn_name} wires auto_disarm_effect");
+        }
     }
 }

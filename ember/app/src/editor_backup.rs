@@ -9,9 +9,12 @@
 //! - [`view`] is the small part the window calls: it feeds the tracker, sends the restore commands
 //!   and starts the debounced write. [`flush_on_exit`] is called on the exit path of `FR-L31.1`.
 //!
-//! As in Code-OSS, the backup is written while the window is open (after a pause in typing), not
-//! only on close: the toolkit gives the editor's single window no close-request event, and a quit
-//! ends the process inside its run loop.
+//! As in Code-OSS, the backup is written while the window is open, not only on close: the toolkit
+//! gives the editor's single window no close-request event (the `Window` element has one, but the
+//! editor is the application's root, and no application-will-terminate hook exists), and a quit ends
+//! the process inside its run loop. So the write follows the edit closely ([`WriteSchedule`]): a
+//! short pause after the last change, and never later than [`BACKUP_DEBOUNCE_MS`] after the first
+//! change that is not in the file yet, so continuous typing cannot push the write out.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -25,8 +28,46 @@ use crate::ui::editor_states::{reopen_plan, Reopen};
 pub const BACKUP_VERSION: u32 = 1;
 /// How long a backup is kept when the prefs say nothing (`Prefs::hot_exit_backup_days`).
 pub const DEFAULT_BACKUP_DAYS: u32 = 30;
-/// The pause after the last change before the backup is written.
+/// The longest the backup file may be behind the window: the write is due this long after the first
+/// change that is not in the file, however long the typing goes on.
 pub const BACKUP_DEBOUNCE_MS: u64 = 1000;
+/// The pause after the last change before the backup is written (a burst of keys is one write).
+pub const BACKUP_QUIET_MS: u64 = 200;
+
+/// When the next backup write is due. A pure clock-free core: callers pass `now_ms`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WriteSchedule {
+    /// When the first change not yet written happened.
+    first: Option<u64>,
+    last: u64,
+    /// A task is waiting for the write to come due.
+    running: bool,
+}
+
+impl WriteSchedule {
+    /// A change happened. True when the caller has to start the waiting task (none is running).
+    pub fn note_change(&mut self, now_ms: u64) -> bool {
+        self.first.get_or_insert(now_ms);
+        self.last = now_ms;
+        !std::mem::replace(&mut self.running, true)
+    }
+
+    /// Milliseconds until the write is due, `Some(0)` when it is due now, `None` when nothing is
+    /// waiting (the task ends, and is started again by the next change).
+    pub fn due_in(&mut self, now_ms: u64) -> Option<u64> {
+        let Some(first) = self.first else {
+            self.running = false;
+            return None;
+        };
+        let due = (self.last + BACKUP_QUIET_MS).min(first + BACKUP_DEBOUNCE_MS);
+        Some(due.saturating_sub(now_ms))
+    }
+
+    /// The write is starting: what it covers is no longer waiting. A change during the write is a new wait.
+    pub fn written(&mut self) {
+        self.first = None;
+    }
+}
 
 const DAY_MS: u64 = 86_400_000;
 
@@ -140,8 +181,57 @@ pub fn backup_dir(data_dir: &Path) -> PathBuf {
 /// The file name of a window's backup: the project's name for a person reading the folder, and a
 /// hash of computer, project and folder so each of them has its own file.
 pub fn backup_file_name(key: &BackupKey) -> String {
+    format!("{}.json", backup_stem(key))
+}
+
+/// The part of every backup file name that belongs to one (computer, project, folder).
+fn backup_stem(key: &BackupKey) -> String {
     let id = format!("{}\u{0}{}\u{0}{}", key.computer, key.project, key.folder);
-    format!("{}-{:016x}.json", crate::config::safe_file_stem(&key.project), fnv1a64(id.as_bytes()))
+    format!("{}-{:016x}", crate::config::safe_file_stem(&key.project), fnv1a64(id.as_bytes()))
+}
+
+/// The file name of one editor process's backup. Two windows on the same folder are two processes
+/// and must not write one file: the one that quit last would leave only its own buffers behind.
+pub fn window_file_name(key: &BackupKey, pid: u32) -> String {
+    format!("{}.{pid}.json", backup_stem(key))
+}
+
+/// The name of the file a running window touches to say it is alive.
+pub fn live_marker_name(key: &BackupKey, pid: u32) -> String {
+    format!("{}.{pid}.live", backup_stem(key))
+}
+
+/// How long ago a window's marker may have been touched for the window to count as running.
+pub const LIVE_WINDOW_MS: u64 = 20_000;
+/// How often a running window touches its marker.
+pub const HEARTBEAT_MS: u64 = 5_000;
+
+/// Whether the window that owns `marker` is running: its marker was touched within [`LIVE_WINDOW_MS`].
+pub fn marker_is_live(marker: &Path, now: std::time::SystemTime) -> bool {
+    let Ok(modified) = std::fs::metadata(marker).and_then(|m| m.modified()) else { return false };
+    now.duration_since(modified).map(|age| age.as_millis() as u64 <= LIVE_WINDOW_MS).unwrap_or(true)
+}
+
+/// Removes the markers in `dir` nobody touched for a day: windows that were killed.
+pub fn prune_markers(dir: &Path, now: std::time::SystemTime) {
+    let Ok(read) = std::fs::read_dir(dir) else { return };
+    for path in read.flatten().map(|e| e.path()) {
+        if path.extension().and_then(|e| e.to_str()) != Some("live") {
+            continue;
+        }
+        let old = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .is_ok_and(|t| now.duration_since(t).is_ok_and(|age| age.as_millis() as u64 > DAY_MS));
+        if old {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+/// Marks this window as running (creates or touches its marker).
+pub fn touch_marker(dir: &Path, key: &BackupKey, pid: u32) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(dir.join(live_marker_name(key, pid)), b"")
 }
 
 /// Whether a backup written at `written_at_ms` is older than `days`.
@@ -221,6 +311,71 @@ pub fn load(path: &Path, key: &BackupKey, now_ms: u64, days: u32) -> Loaded {
         return Loaded::None;
     }
     Loaded::Restored(file)
+}
+
+/// The backups other (finished) windows left for one folder, put together for a window that opens.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Collected {
+    /// Every buffer of those files; a path in more than one keeps its newest text.
+    pub merged: Option<BackupFile>,
+    /// The files `merged` was made from. They are removed once `merged` is in the opening window's own file.
+    pub sources: Vec<PathBuf>,
+    /// Files that were not read, as [`load`] reports them.
+    pub unreadable: Vec<(String, Option<PathBuf>)>,
+}
+
+/// Puts several backups of one folder into one, the newest first: its tab is the current one, and a
+/// path that is in more than one keeps the newest file's text.
+pub fn merge_backups(mut files: Vec<BackupFile>) -> Option<BackupFile> {
+    files.sort_by(|a, b| b.written_at_ms.cmp(&a.written_at_ms));
+    let mut files = files.into_iter();
+    let mut merged = files.next()?;
+    for next in files {
+        for entry in next.entries {
+            if !merged.entries.iter().any(|e| e.path == entry.path) {
+                merged.entries.push(entry);
+            }
+        }
+    }
+    Some(merged)
+}
+
+/// Reads the backups of the windows that are not running for `key`: every `<stem>.<pid>.json`
+/// whose owner `is_live` does not name (a process ends without a final write when it is killed),
+/// and the `<stem>.json` older builds wrote. A running window's file is left alone; it is that
+/// window's. `own_pid` is this window: a file under its number is left over from a process that
+/// had the number before.
+pub fn collect_for_key(dir: &Path, key: &BackupKey, own_pid: u32, now_ms: u64, days: u32, is_live: impl Fn(u32) -> bool) -> Collected {
+    let stem = backup_stem(key);
+    let mut out = Collected::default();
+    let Ok(read) = std::fs::read_dir(dir) else { return out };
+    let mut paths: Vec<PathBuf> = read.flatten().map(|e| e.path()).collect();
+    paths.sort();
+    let mut files = Vec::new();
+    for path in paths {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+        let Some(rest) = name.strip_prefix(stem.as_str()).and_then(|r| r.strip_suffix(".json")) else { continue };
+        let owner = match rest {
+            "" => None,
+            r => match r.strip_prefix('.').and_then(|p| p.parse::<u32>().ok()) {
+                Some(pid) => Some(pid),
+                None => continue,
+            },
+        };
+        if owner.is_some_and(|pid| pid != own_pid && is_live(pid)) {
+            continue;
+        }
+        match load(&path, key, now_ms, days) {
+            Loaded::Restored(file) => {
+                out.sources.push(path);
+                files.push(file);
+            }
+            Loaded::Unreadable { reason, kept_as } => out.unreadable.push((reason, kept_as)),
+            Loaded::None | Loaded::Expired => {}
+        }
+    }
+    out.merged = merge_backups(files);
+    out
 }
 
 /// Removes every backup in `dir` older than `days`, whichever project it belongs to, and returns
@@ -316,6 +471,8 @@ pub struct Tracker {
     clean: HashMap<String, (Stamp, BaseMark)>,
     seq: u64,
     written: u64,
+    /// The file this window writes in the backup folder.
+    file_name: String,
 }
 
 impl Tracker {
@@ -328,7 +485,24 @@ impl Tracker {
             ),
             None => (Vec::new(), None),
         };
-        Self { key, restoring, current, planned: false, tracked: Vec::new(), clean: HashMap::new(), seq: 0, written: 0 }
+        let file_name = backup_file_name(&key);
+        Self { key, restoring, current, planned: false, tracked: Vec::new(), clean: HashMap::new(), seq: 0, written: 0, file_name }
+    }
+
+    /// Writes this window's backup under `name` instead of the shared name of older builds.
+    pub fn with_file_name(mut self, name: String) -> Self {
+        self.file_name = name;
+        self
+    }
+
+    pub fn file_name(&self) -> &str {
+        &self.file_name
+    }
+
+    /// Asks the next flush to write even though nothing changed, for a window that took over the
+    /// buffers of other windows' files and has to own them before those files go.
+    pub fn mark_changed(&mut self) {
+        self.seq += 1;
     }
 
     pub fn key(&self) -> &BackupKey {
@@ -515,7 +689,7 @@ impl Tracker {
         if self.written == self.seq {
             return Ok(Flush::Unchanged);
         }
-        let path = dir.join(backup_file_name(&self.key));
+        let path = dir.join(&self.file_name);
         let done = match self.snapshot(now_ms) {
             Some(file) => {
                 write_atomic(&path, &encode(&file))?;
@@ -554,6 +728,9 @@ pub fn restore_failed_notice(name: &str, reason: &str) -> String {
 struct Live {
     tracker: Tracker,
     dir: PathBuf,
+    /// Files of finished windows whose buffers this window took over; removed once its own file holds them.
+    sources: Vec<PathBuf>,
+    pid: u32,
 }
 
 /// The tracker of this process's editor window. Global, not window state: the exit path of
@@ -581,7 +758,17 @@ fn flush_live(only_seq: Option<u64>) {
     }
     match live.tracker.flush(&live.dir, unix_ms()) {
         Ok(Flush::Unchanged) => {}
-        Ok(done) => tracing::debug!(?done, "editor backup"),
+        Ok(done) => {
+            tracing::debug!(?done, "editor backup");
+            // The buffers of the finished windows are in this window's own file now (or were all dealt with).
+            for source in std::mem::take(&mut live.sources) {
+                if let Err(error) = std::fs::remove_file(&source) {
+                    if error.kind() != std::io::ErrorKind::NotFound {
+                        tracing::warn!("could not remove the editor backup {}: {error}", source.display());
+                    }
+                }
+            }
+        }
         Err(error) => tracing::warn!("could not write the editor backup in {}: {error}", live.dir.display()),
     }
 }
@@ -591,6 +778,10 @@ fn flush_live(only_seq: Option<u64>) {
 /// window.
 pub fn flush_on_exit() {
     flush_live(None);
+    // This window is finished: its file is no longer a running window's.
+    if let Some(live) = live().as_ref() {
+        let _ = std::fs::remove_file(live.dir.join(live_marker_name(live.tracker.key(), live.pid)));
+    }
 }
 
 pub mod view {
@@ -600,11 +791,14 @@ pub mod view {
 
     use dioxus_compose::html::prelude::dioxus_signals::{ReadableExt, WritableExt};
 
-    use super::{backup_dir, backup_file_name, live, load, prune_dir, restore_failed_notice, unix_ms, unreadable_notice, BackupKey, DocView, Live, Loaded, Tracker, BACKUP_DEBOUNCE_MS};
+    use super::{backup_dir, collect_for_key, live, live_marker_name, marker_is_live, prune_dir, restore_failed_notice, touch_marker, unix_ms, unreadable_notice, window_file_name, BackupKey, DocView, Live, Tracker, WriteSchedule, HEARTBEAT_MS};
     use crate::editor_host::HostCommand;
     use crate::ui::editor::{base_name, display_name, file_failure_reason};
     use crate::ui::editor_states::Reopen;
     use crate::ui::editor_workbench::Shared;
+
+    /// When the next write is due; the waiting task runs on the app runtime.
+    static SCHEDULE: std::sync::Mutex<WriteSchedule> = std::sync::Mutex::new(WriteSchedule { first: None, last: 0, running: false });
 
     thread_local! {
         /// The backup of this window was looked for (once per process: one editor window each).
@@ -630,18 +824,34 @@ pub mod view {
         for path in prune_dir(&dir, now, days) {
             tracing::info!("removed an editor backup older than {days} days: {}", path.display());
         }
+        super::prune_markers(&dir, std::time::SystemTime::now());
         let key = BackupKey::new(&s.computer, &s.project, &s.folder);
-        let path = dir.join(backup_file_name(&key));
-        let loaded = match load(&path, &key, now, days) {
-            Loaded::Restored(file) => Some(file),
-            Loaded::Unreadable { reason, kept_as } => {
-                tracing::warn!("ignoring the editor backup {}: {reason}", path.display());
-                notice(unreadable_notice(kept_as.as_deref()));
-                None
+        let pid = std::process::id();
+        // Say this window is running before looking at the others, so one opening at the same moment leaves its file alone.
+        if let Err(error) = touch_marker(&dir, &key, pid) {
+            tracing::warn!("could not mark the editor window as running in {}: {error}", dir.display());
+        }
+        let rt = services.rt.handle().clone();
+        let heartbeat = (dir.clone(), key.clone());
+        rt.spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(HEARTBEAT_MS)).await;
+                let _ = touch_marker(&heartbeat.0, &heartbeat.1, pid);
             }
-            Loaded::Expired | Loaded::None => None,
-        };
-        *live() = Some(Live { tracker: Tracker::new(key, loaded), dir });
+        });
+        let now_system = std::time::SystemTime::now();
+        let collected = collect_for_key(&dir, &key, pid, now, days, |other| marker_is_live(&dir.join(live_marker_name(&key, other)), now_system));
+        for (reason, kept_as) in &collected.unreadable {
+            tracing::warn!("ignoring an editor backup of {}: {reason}", key.folder);
+            notice(unreadable_notice(kept_as.as_deref()));
+        }
+        let mut tracker = Tracker::new(key.clone(), collected.merged).with_file_name(window_file_name(&key, pid));
+        if !collected.sources.is_empty() {
+            // Own the taken-over buffers in this window's file before the files they came from go.
+            tracker.mark_changed();
+        }
+        *live() = Some(Live { tracker, dir, sources: collected.sources, pid });
+        super::flush_live(None);
     }
 
     /// One session update, before the window applies it: an open tells whether a restored buffer's
@@ -702,7 +912,7 @@ pub mod view {
                 }
             }
         }
-        let (observed, seq) = {
+        let observed = {
             let tab_paths: Vec<String> = s.tabs.read().paths().into_iter().map(str::to_owned).collect();
             let current = s.tabs.read().current_path().map(str::to_owned);
             let bridge = s.bridge.borrow();
@@ -720,8 +930,7 @@ pub mod view {
                 .collect();
             let mut guard = live();
             let Some(live) = guard.as_mut() else { return };
-            let observed = live.tracker.observe(&docs, current.as_deref());
-            (observed, live.tracker.seq())
+            live.tracker.observe(&docs, current.as_deref())
         };
         for path in &observed.conflicts {
             let Some(uri) = s.uris.borrow().get(path).cloned() else { continue };
@@ -731,10 +940,19 @@ pub mod view {
                 let _ = s.bridge.borrow_mut().apply(ember_editor::SessionUpdate::ExternalChange { uri, change: ember_editor::ExternalChange::ChangedWhileDirty });
             }
         }
-        if observed.changed {
+        if observed.changed && SCHEDULE.lock().unwrap_or_else(|e| e.into_inner()).note_change(unix_ms()) {
             crate::services::services().rt.spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(BACKUP_DEBOUNCE_MS)).await;
-                super::flush_live(Some(seq));
+                loop {
+                    let wait = SCHEDULE.lock().unwrap_or_else(|e| e.into_inner()).due_in(unix_ms());
+                    match wait {
+                        None => break,
+                        Some(0) => {
+                            SCHEDULE.lock().unwrap_or_else(|e| e.into_inner()).written();
+                            super::flush_live(None);
+                        }
+                        Some(ms) => tokio::time::sleep(std::time::Duration::from_millis(ms)).await,
+                    }
+                }
             });
         }
     }

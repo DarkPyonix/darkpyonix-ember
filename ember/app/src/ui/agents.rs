@@ -510,10 +510,13 @@ pub fn seed_profiles(accounts: &[AccountInfo], default_ids: &[String]) -> Vec<Pr
     out
 }
 
-/// Whether a harness can run through a model proxy (FR-U6): only Claude Code, until the other
-/// CLIs' proxy settings are verified one by one.
+/// Whether a harness can run through a model proxy (FR-U6): Claude Code, Codex (#145) and
+/// Antigravity (#146) have verified proxy routes; Gemini CLI and ACP do not yet.
 pub fn proxy_supported(h: AgentHarness) -> bool {
-    h == AgentHarness::ClaudeCode
+    matches!(
+        h,
+        AgentHarness::ClaudeCode | AgentHarness::Codex | AgentHarness::Antigravity
+    )
 }
 
 /// The default profile shown for a harness: the one set, else the first profile of that
@@ -1893,10 +1896,12 @@ mod tests {
     // ---- additions -----------------------------------------------------------------------
 
     #[test]
-    fn fr_u6_only_claude_code_takes_a_proxy_for_now() {
+    fn fr_u6_verified_harnesses_support_model_proxy() {
         assert!(proxy_supported(AgentHarness::ClaudeCode));
-        assert!(!proxy_supported(AgentHarness::Codex));
-        assert!(!proxy_supported(AgentHarness::Antigravity));
+        assert!(proxy_supported(AgentHarness::Codex));
+        assert!(proxy_supported(AgentHarness::Antigravity));
+        assert!(!proxy_supported(AgentHarness::Gemini));
+        assert!(!proxy_supported(AgentHarness::Acp));
     }
 
     #[test]

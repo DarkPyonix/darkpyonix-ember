@@ -252,6 +252,45 @@ pub fn reopen_plan(tabs: &[(String, Option<String>)], current: Option<&str>) -> 
     plan
 }
 
+/// What the window holds for one tab when the connection came back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TabBuffer {
+    /// The tab has unsaved edits.
+    pub dirty: bool,
+    pub text: String,
+    /// The file text the buffer is based on (what the window last saw on disk).
+    pub base: Option<String>,
+}
+
+/// One step of putting the tabs back after a reconnect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reconnect {
+    /// Show this buffer in the file, with the file text it was based on, so a file that changed while the
+    /// window was away raises the conflict instead of being overwritten unnoticed.
+    Restore { path: String, text: String, base: Option<String> },
+    /// Open the file: a tab without unsaved edits shows the file as it is now.
+    Open(String),
+    /// Make this tab the session's active editor again.
+    Focus(String),
+}
+
+/// The steps after a reconnect: every tab in order, then the current tab focused. Only a tab with
+/// unsaved edits has anything the new session lacks; a clean tab shows the file again, so a file that
+/// changed on the server meanwhile is not covered by the old text.
+pub fn reconnect_plan(tabs: &[(String, Option<TabBuffer>)], current: Option<&str>) -> Vec<Reconnect> {
+    let mut plan: Vec<Reconnect> = tabs
+        .iter()
+        .map(|(path, buffer)| match buffer {
+            Some(b) if b.dirty => Reconnect::Restore { path: path.clone(), text: b.text.clone(), base: b.base.clone() },
+            _ => Reconnect::Open(path.clone()),
+        })
+        .collect();
+    if let Some(current) = current.filter(|c| tabs.iter().any(|(p, _)| p == c)) {
+        plan.push(Reconnect::Focus(current.to_owned()));
+    }
+    plan
+}
+
 /// Which side a compare row comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompareKind {
@@ -401,8 +440,8 @@ pub mod view {
     use dioxus_compose::html::prelude::*;
 
     use super::{
-        compare_rows, compare_title, connection_banner, doc_bar, manual_save_gate, reopen_plan, should_auto_save, visible_compare_rows,
-        AutoSave, AutoSaveTimer, BarTone, CompareKind, CompareView, DocAction, Reopen, SaveTrigger, AUTO_SAVE_DELAY_MS, LOST_SAVE_NOTICE,
+        compare_rows, compare_title, connection_banner, doc_bar, manual_save_gate, reconnect_plan, should_auto_save, visible_compare_rows,
+        AutoSave, AutoSaveTimer, BarTone, CompareKind, CompareView, DocAction, Reconnect, SaveTrigger, TabBuffer, AUTO_SAVE_DELAY_MS, LOST_SAVE_NOTICE,
     };
     use crate::editor_host::HostCommand;
     use crate::ui::editor::base_name;
@@ -504,21 +543,24 @@ pub mod view {
             (state.reconnects, std::mem::take(&mut state.autosave_due), state.compare.take())
         };
         if RECONNECTS_SEEN.with(|c| c.replace(reconnects)) != reconnects && reconnects > 0 {
-            let tabs: Vec<(String, Option<String>)> = {
+            let tabs: Vec<(String, Option<TabBuffer>)> = {
                 let bridge = s.bridge.borrow();
                 let uris = s.uris.borrow();
                 s.tabs
                     .read()
                     .paths()
                     .into_iter()
-                    .map(|p| (p.to_owned(), uris.get(p).and_then(|u| bridge.document(u)).map(|d| d.text.clone())))
+                    .map(|p| {
+                        let buffer = uris.get(p).and_then(|u| bridge.document(u)).map(|d| TabBuffer { dirty: d.dirty, text: d.text.clone(), base: d.disk_base.clone() });
+                        (p.to_owned(), buffer)
+                    })
                     .collect()
             };
-            for step in reopen_plan(&tabs, current) {
+            for step in reconnect_plan(&tabs, current) {
                 match step {
-                    Reopen::Restore { path, text } => s.host.send(HostCommand::Restore { path, text }),
-                    Reopen::Open(path) => s.host.send(HostCommand::Open(path)),
-                    Reopen::Focus(path) => s.host.send(HostCommand::Focus(path)),
+                    Reconnect::Restore { path, text, base } => s.host.send(HostCommand::RestoreWithBase { path, text, base }),
+                    Reconnect::Open(path) => s.host.send(HostCommand::Open(path)),
+                    Reconnect::Focus(path) => s.host.send(HostCommand::Focus(path)),
                 };
             }
         }

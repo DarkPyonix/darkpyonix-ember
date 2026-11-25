@@ -525,7 +525,7 @@ async fn fr_t14_char_retry_after_rounds_a_fractional_wait_up_to_whole_seconds() 
 
 #[test]
 fn fr_t14_char_startup_error_texts() {
-    let err = |extra: &[(&str, &str)]| door_with(extra).err().expect("a startup error");
+    let err = |extra: &[(&str, &str)]| door_with(extra).expect_err("a startup error");
     // Trusted proxies: the entry is trimmed, shown with Debug quotes; empty entries are skipped.
     assert_eq!(
         err(&[("EMBER_GUEST_LISTEN", LISTEN), ("EMBER_GUEST_TRUSTED_PROXIES", "10.0.0.1, banana ,10.0.0.2")]),
@@ -655,9 +655,8 @@ async fn fr_t14_char_graceful_shutdown_lets_an_in_flight_request_finish_and_refu
     // New connections are refused once the listener is dropped: poll with a deadline, no fixed sleep.
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        match tokio::time::timeout(Duration::from_millis(500), tokio::net::TcpStream::connect(addr)).await {
-            Ok(Err(_)) => break,
-            _ => {}
+        if let Ok(Err(_)) = tokio::time::timeout(Duration::from_millis(500), tokio::net::TcpStream::connect(addr)).await {
+            break;
         }
         assert!(Instant::now() < deadline, "new connections are still accepted after shutdown");
         tokio::time::sleep(Duration::from_millis(10)).await;

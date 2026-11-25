@@ -197,7 +197,7 @@ pub fn extension_spec(id: &str, version: Option<&str>) -> Result<String, String>
     let nums: Vec<&str> = core.split('.').collect();
     let nums_ok = nums.len() == 3
         && nums.iter().all(|n| !n.is_empty() && n.len() <= 9 && n.bytes().all(|b| b.is_ascii_digit()));
-    let rest_ok = rest.map_or(true, |r| {
+    let rest_ok = rest.is_none_or(|r| {
         !r.is_empty() && r.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
     });
     if v.len() > 64 || !nums_ok || !rest_ok {
@@ -452,8 +452,11 @@ impl Drop for BusyGuard {
     }
 }
 
+/// A captured stream: the bytes read so far, and whether the reader reached the end.
+type Captured = (Arc<Mutex<Vec<u8>>>, Arc<AtomicBool>);
+
 /// Reads a pipe to its end on a thread, keeping at most `OUTPUT_CAP` bytes.
-fn capture<R: Read + Send + 'static>(mut r: R) -> (Arc<Mutex<Vec<u8>>>, Arc<AtomicBool>) {
+fn capture<R: Read + Send + 'static>(mut r: R) -> Captured {
     let buf = Arc::new(Mutex::new(Vec::new()));
     let done = Arc::new(AtomicBool::new(false));
     let (b, d) = (buf.clone(), done.clone());
@@ -472,7 +475,7 @@ fn capture<R: Read + Send + 'static>(mut r: R) -> (Arc<Mutex<Vec<u8>>>, Arc<Atom
     (buf, done)
 }
 
-fn collect(parts: &[(Arc<Mutex<Vec<u8>>>, Arc<AtomicBool>)], wait: bool) -> String {
+fn collect(parts: &[Captured], wait: bool) -> String {
     if wait {
         let until = Instant::now() + Duration::from_secs(2);
         while Instant::now() < until && !parts.iter().all(|(_, d)| d.load(Ordering::SeqCst)) {

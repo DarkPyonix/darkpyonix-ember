@@ -1329,7 +1329,7 @@ curl -s -m 10 -X "$1" -H "Authorization: Bearer $T" -H 'content-type: applicatio
     assert_eq!(code, 200);
     let routes = owner_routes();
     for (method, path) in &routes {
-        let (code, body) = shell(*method, format!("http://{addr}{path}")).await.unwrap();
+        let (code, body) = shell(method, format!("http://{addr}{path}")).await.unwrap();
         assert_eq!(code, 403, "{method} {path}: {body}");
         assert_eq!(body["code"], "owner_required", "{method} {path}: {body}");
     }

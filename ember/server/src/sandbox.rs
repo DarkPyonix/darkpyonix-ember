@@ -383,7 +383,7 @@ mod tests {
         let d = tmp.path().join("data");
         let acct = d.join("accounts/x");
         std::fs::create_dir_all(&acct).unwrap();
-        let (prog, args) = wrap_with(&Tool::Bwrap(p("/usr/bin/bwrap")), &[d.clone()], &[acct.clone()], &p("/bin/omp"), &["acp".into()]);
+        let (prog, args) = wrap_with(&Tool::Bwrap(p("/usr/bin/bwrap")), std::slice::from_ref(&d), std::slice::from_ref(&acct), &p("/bin/omp"), &["acp".into()]);
         assert_eq!(prog, p("/usr/bin/bwrap"));
         let joined = args.join(" ");
         assert!(joined.starts_with("--dev-bind / / --tmpfs "), "{joined}");

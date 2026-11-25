@@ -567,7 +567,7 @@ async fn fr_w4_fs_relay_request_body_is_capped_and_read_is_bounded_by_the_node()
         assert_eq!(v["eof"], false);
         assert_eq!(v["size"], MAX_READ + 1024 * 1024);
         let b64 = v["data"].as_str().unwrap().len() as u64;
-        assert!(b64 >= MAX_READ * 4 / 3 - 4 && b64 <= MAX_READ * 4 / 3 + 4, "{b64}");
+        assert!((MAX_READ * 4 / 3 - 4..=MAX_READ * 4 / 3 + 4).contains(&b64), "{b64}");
     })
     .await;
 }

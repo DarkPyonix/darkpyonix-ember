@@ -436,7 +436,7 @@ async fn fr_t16_a_fragment_longer_than_the_window_is_skipped_untouched() {
     let (store, _, core, _, _) = fixture(dir.path()).await;
     post(&store, &core, "one");
     let mut content = b"{\"seq\":1}\n".to_vec();
-    content.extend(std::iter::repeat(b'x').take(1_200_000));
+    content.extend(std::iter::repeat_n(b'x', 1_200_000));
     write_file(dir.path(), &core, &content);
     let report = JsonlLog::new(dir.path()).recover(&store);
     assert_eq!((report.skipped, report.repaired_lines, report.truncated_bytes), (1, 0, 0));

@@ -988,7 +988,7 @@ mod tests {
             )
             .unwrap();
         store.append(&done, &AgentEvent::TurnEnded { outcome: crate::events::TurnOutcome::Completed }).unwrap();
-        assert_eq!(store.reset_live_statuses_except(&[kept.clone()]).unwrap(), 2);
+        assert_eq!(store.reset_live_statuses_except(std::slice::from_ref(&kept)).unwrap(), 2);
         let status = |id: &str| store.session(id).unwrap().unwrap().status;
         assert_eq!(status(&kept), SessionStatus::Running);
         assert_eq!(status(&waiting), SessionStatus::Idle);

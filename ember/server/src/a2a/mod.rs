@@ -1956,7 +1956,7 @@ mod channel_tool_tests {
     fn fr_t12_person_mention_footer_per_recipient() {
         let a = world(Some(CLI));
         let m = mention("m1", "chan1", None);
-        let claude = a.render(&rec(&a, AgentKind::ClaudeCode), &[m.clone()]).unwrap();
+        let claude = a.render(&rec(&a, AgentKind::ClaudeCode), std::slice::from_ref(&m)).unwrap();
         assert!(
             claude.contains(&format!(
                 "To reply in the channel: call the tool {CHANNEL_POST_TOOL} with channel \"chan1\" and text \"...\"\n\nhi there"
@@ -1964,9 +1964,9 @@ mod channel_tool_tests {
             "{claude}"
         );
         assert!(!claude.contains("ember-a2a channel post"));
-        let scripted = a.render(&rec(&a, AgentKind::Scripted), &[m.clone()]).unwrap();
+        let scripted = a.render(&rec(&a, AgentKind::Scripted), std::slice::from_ref(&m)).unwrap();
         for agent in [AgentKind::Codex, AgentKind::Antigravity, acp()] {
-            let text = a.render(&rec(&a, agent), &[m.clone()]).unwrap();
+            let text = a.render(&rec(&a, agent), std::slice::from_ref(&m)).unwrap();
             assert!(
                 text.ends_with(
                     "To reply in the channel: call the channel_post tool of the MCP server ember-channels with channel \"chan1\" and text \"...\"\n\nhi there"
@@ -1989,14 +1989,14 @@ mod channel_tool_tests {
     fn fr_t12_guest_footer_per_recipient_keeps_the_untrusted_block() {
         let a = world(Some(CLI));
         let m = mention("m2", "chan1", Some(0));
-        let codex = a.render(&rec(&a, AgentKind::Scripted), &[m.clone()]).unwrap();
+        let codex = a.render(&rec(&a, AgentKind::Scripted), std::slice::from_ref(&m)).unwrap();
         assert_eq!(
             codex,
             channel::guest_message_text("m2", "Mina", None, "chan1", 0, "hi there"),
             "unchanged for a session that keeps the command"
         );
         for agent in [AgentKind::Codex, AgentKind::Antigravity, acp()] {
-            let text = a.render(&rec(&a, agent), &[m.clone()]).unwrap();
+            let text = a.render(&rec(&a, agent), std::slice::from_ref(&m)).unwrap();
             assert!(
                 text.ends_with(
                     "To reply in the channel: call the channel_post tool of the MCP server ember-channels with channel \"chan1\" and text \"...\""
@@ -2083,7 +2083,7 @@ mod channel_tool_tests {
         std::fs::create_dir_all(&cwd).unwrap();
         let m = d.path().join("managed-mcp.json");
         put(&m, &with_server("EMBER-CHANNELS"));
-        assert_eq!(taken(&cwd, None, None, &[m.clone()]), NameCheck::Taken { kind: KIND_MANAGED });
+        assert_eq!(taken(&cwd, None, None, std::slice::from_ref(&m)), NameCheck::Taken { kind: KIND_MANAGED });
         put(&cwd.join(".mcp.json"), &with_server("Ember-Channels"));
         assert_eq!(taken(&cwd, None, None, &[]), NameCheck::Taken { kind: KIND_PROJECT });
     }
@@ -2095,7 +2095,7 @@ mod channel_tool_tests {
         std::fs::create_dir_all(&cwd).unwrap();
         let (home, cfg) = (d.path().join("home"), d.path().join("cfg"));
         let m = d.path().join("none.json");
-        assert_eq!(taken(&cwd, Some(home.as_path()), Some(&cfg), &[m.clone()]), NameCheck::Free, "absent files");
+        assert_eq!(taken(&cwd, Some(home.as_path()), Some(&cfg), std::slice::from_ref(&m)), NameCheck::Free, "absent files");
         put(&cwd.join(".mcp.json"), &with_server("github"));
         put(&home.join(".claude.json"), &with_server("ember-channels-2"));
         let other = d.path().join("elsewhere");
@@ -2153,7 +2153,7 @@ mod channel_tool_tests {
         let pad = |n: usize| format!(r#"{{"pad":"{}"}}"#, "x".repeat(n - 10));
         put(&m, &pad(MAX_CONFIG_BYTES as usize));
         assert_eq!(std::fs::metadata(&m).unwrap().len(), MAX_CONFIG_BYTES);
-        assert_eq!(taken(&cwd, None, None, &[m.clone()]), NameCheck::Free);
+        assert_eq!(taken(&cwd, None, None, std::slice::from_ref(&m)), NameCheck::Free);
         put(&m, &pad(MAX_CONFIG_BYTES as usize + 1));
         assert_eq!(taken(&cwd, None, None, &[m]), unsure(KIND_MANAGED, WHY_TOO_BIG));
     }
@@ -2767,7 +2767,7 @@ mod channel_tool_tests {
         let plist = d.path().join("Managed Preferences/com.openai.codex.plist");
         put(&plist, "");
         assert_eq!(
-            codex_unread_layer(&layer_paths(&home, &[plist.clone()])),
+            codex_unread_layer(&layer_paths(&home, std::slice::from_ref(&plist))),
             Some(UnreadLayer { kind: KIND_CODEX_MANAGED, unreadable: false })
         );
         // A managed directory counts as well.

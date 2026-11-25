@@ -57,7 +57,7 @@ fn save(c: &mut SessionCore, t0: Instant, u: &UriComponents, generation: u64) ->
 }
 
 /// The updates that change the buffer or its dirty state (not overlays).
-fn buffer_updates<'a>(effects: &'a [Effect]) -> Vec<&'a SessionUpdate> {
+fn buffer_updates(effects: &[Effect]) -> Vec<&SessionUpdate> {
     updates(effects).into_iter().filter(|u| matches!(u, SessionUpdate::Command { .. } | SessionUpdate::Dirty { .. })).collect()
 }
 

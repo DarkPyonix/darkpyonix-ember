@@ -417,6 +417,10 @@ mod at {
 }
 
 /// [`Stat`] from a raw `stat` (an entry read with `fstatat`, Unix).
+// The `libc::stat` field types differ by target (`st_mode` is u16 on macOS and u32 on Linux,
+// `st_nlink` u16 on macOS, u32 on Linux arm64 and u64 on Linux x64, `st_size` and the time fields
+// narrower on 32-bit Android), so the casts are needed on some targets and no-ops on others.
+#[allow(clippy::unnecessary_cast)]
 #[cfg(unix)]
 fn stat_raw(path: PathBuf, st: &libc::stat) -> Stat {
     let mode = st.st_mode as u32;

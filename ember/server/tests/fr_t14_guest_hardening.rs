@@ -24,7 +24,6 @@ struct Fx {
     channel: String,
     session_id: String,
     guest: Router,
-    path: std::path::PathBuf,
 }
 
 fn fixture(dir: &Path) -> Fx {
@@ -34,7 +33,7 @@ fn fixture(dir: &Path) -> Fx {
     let channel = store.channels(None).unwrap().remove(0).id;
     let sessions = Sessions::new(store.clone(), vec![Arc::new(ScriptedAdapter) as Arc<dyn AgentAdapter>]);
     let guest = guest_router(store.clone(), sessions.clone());
-    Fx { store, sessions, channel, session_id, guest, path }
+    Fx { store, sessions, channel, session_id, guest }
 }
 
 async fn call(app: &Router, method: &str, uri: &str, bearer: Option<&str>, body: Option<Value>) -> (StatusCode, Value) {

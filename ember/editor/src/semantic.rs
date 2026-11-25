@@ -87,7 +87,7 @@ pub fn decode_semantic_tokens(
         return None;
     }
     let data_len = read_u32_le(buf, 2)? as usize;
-    if data_len % 5 != 0 {
+    if !data_len.is_multiple_of(5) {
         return None;
     }
     let tuple_count = (data_len / 5).min(MAX_SEMANTIC_TOKENS);

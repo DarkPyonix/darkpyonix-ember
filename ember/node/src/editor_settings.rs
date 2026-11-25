@@ -158,7 +158,7 @@ pub fn validate_parts(
             return Err(format!("script must be at most {SCRIPT_MAX} bytes"));
         }
     }
-    if editor_server == EditorServer::ManualScript && script.map_or(true, |s| s.trim().is_empty()) {
+    if editor_server == EditorServer::ManualScript && script.is_none_or(|s| s.trim().is_empty()) {
         return Err("manual_script needs a script".into());
     }
     Ok(())

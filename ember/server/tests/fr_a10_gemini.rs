@@ -13,7 +13,7 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use ember_server::agents::acp::{AcpAdapter, AcpConfig};
-use ember_server::agents::{AgentAdapter, AgentKind};
+use ember_server::agents::AgentAdapter;
 use ember_server::computers::{default_connector, Computers, Registry};
 use ember_server::events::{AgentEvent, SessionStatus, TurnOutcome};
 use ember_server::session::{NewSession, Sessions};

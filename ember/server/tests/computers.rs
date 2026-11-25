@@ -189,7 +189,10 @@ impl NodeApi for HashNode {
     }
 }
 
-fn hash_fixture(states: BTreeMap<(String, String), FileState>) -> (Fixture, Arc<Mutex<Vec<(String, String)>>>) {
+/// The calls a hash fixture recorded.
+type Calls = Arc<Mutex<Vec<(String, String)>>>;
+
+fn hash_fixture(states: BTreeMap<(String, String), FileState>) -> (Fixture, Calls) {
     let states = Arc::new(states);
     let calls = Arc::new(Mutex::new(Vec::new()));
     let recorded = calls.clone();
@@ -389,10 +392,8 @@ async fn chained_switches_before_a_message_keep_the_computer_the_agent_observed(
     assert!(notice.contains("now working on \"gamma\" (moved from \"alpha\")"), "{notice}");
     let ev = turn(s, &id, "go").await;
     assert_eq!(assistant_text(&ev), format!("echo: {notice}\n\ngo"));
-    let starts = f.starts.lock().unwrap();
-    let instr = starts.last().unwrap().instructions.clone().unwrap();
+    let instr = f.starts.lock().unwrap().last().unwrap().instructions.clone().unwrap();
     assert!(instr.contains("hostname gamma") && !instr.contains("hostname alpha"), "{instr}");
-    drop(starts);
 
     // C -> A -> C with no message between: what it observed is valid again, no notice.
     c.switch(s, &id, &a.id).await.unwrap();

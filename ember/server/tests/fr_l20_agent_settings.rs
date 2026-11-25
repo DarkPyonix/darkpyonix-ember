@@ -296,7 +296,8 @@ async fn fr_s8_new_session_gets_the_stored_limit_and_a_live_one_keeps_its_own() 
     let cwd = work.path().to_str().unwrap().to_string();
     let store = Arc::new(Store::open_in_memory().unwrap());
     let s = sessions_on(store.clone());
-    let starts: Arc<std::sync::Mutex<Vec<(String, Option<u64>)>>> = Arc::default();
+    type Starts = Arc<std::sync::Mutex<Vec<(String, Option<u64>)>>>;
+    let starts: Starts = Arc::default();
     {
         let starts = starts.clone();
         s.add_start_config_hook(Arc::new(move |rec, req| {

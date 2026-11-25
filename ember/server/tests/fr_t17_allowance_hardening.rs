@@ -21,8 +21,6 @@ use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-const HOUR: i64 = 3_600_000;
-
 struct World {
     store: Arc<Store>,
     sessions: Arc<Sessions>,
@@ -32,10 +30,6 @@ struct World {
     channel: String,
     alpha: String,
     beta: String,
-    /// Same project, not a member of the channel.
-    gamma: String,
-    /// A session of another project.
-    delta: String,
 }
 
 async fn call(app: &Router, method: &str, uri: &str, bearer: Option<&str>, body: Option<Value>) -> (StatusCode, Value) {
@@ -78,8 +72,10 @@ async fn world() -> World {
     let guest = guest_router_with_a2a(store.clone(), sessions.clone(), &dir, a2a.clone());
     let alpha = new_session(&sessions, "core", "alpha");
     let beta = new_session(&sessions, "core", "beta");
-    let gamma = new_session(&sessions, "core", "gamma");
-    let delta = new_session(&sessions, "other", "delta");
+    // A session of the same project that is not a member of the channel, and one of another
+    // project: they exist in the store, and no test reads their ids.
+    new_session(&sessions, "core", "gamma");
+    new_session(&sessions, "other", "delta");
     let (_, c) = call(
         &owner,
         "POST",
@@ -89,7 +85,7 @@ async fn world() -> World {
     )
     .await;
     let channel = c["id"].as_str().unwrap().to_string();
-    World { store, sessions, a2a, owner, guest, channel, alpha, beta, gamma, delta }
+    World { store, sessions, a2a, owner, guest, channel, alpha, beta }
 }
 
 impl World {

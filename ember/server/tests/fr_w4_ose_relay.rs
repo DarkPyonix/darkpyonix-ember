@@ -244,7 +244,6 @@ async fn fr_w4c_local_launch_asks_the_manager_and_relays_to_its_endpoint() {
 
 #[tokio::test]
 async fn fr_w4_relay_requires_server_token_on_the_local_listener() {
-    let dir = tempfile::tempdir().unwrap();
     let ose = Arc::new(EditorRelays::new(ManagerSource::none()));
     let (ose_addr, _) = start_echo_ose().await;
     let conn = register(&ose, ose_addr);
@@ -293,7 +292,6 @@ async fn fr_w4_relay_requires_server_token_on_the_local_listener() {
 
 #[tokio::test]
 async fn fr_w4_relay_refuses_cross_origin_and_wrong_host() {
-    let dir = tempfile::tempdir().unwrap();
     let ose = Arc::new(EditorRelays::new(ManagerSource::none()));
     let (ose_addr, dials) = start_echo_ose().await;
     let conn = register(&ose, ose_addr);
@@ -328,7 +326,6 @@ async fn fr_w4_relay_refuses_cross_origin_and_wrong_host() {
 
 #[tokio::test]
 async fn fr_w4_relay_unknown_launch_id_is_404_and_dials_nothing() {
-    let dir = tempfile::tempdir().unwrap();
     let ose = Arc::new(EditorRelays::new(ManagerSource::none()));
     let (ose_addr, dials) = start_echo_ose().await;
     let _conn = register(&ose, ose_addr);
@@ -347,7 +344,6 @@ async fn fr_w4_relay_unknown_launch_id_is_404_and_dials_nothing() {
 
 #[tokio::test]
 async fn fr_w4_relay_pumps_bytes_both_ways_and_preserves_order() {
-    let dir = tempfile::tempdir().unwrap();
     let ose = Arc::new(EditorRelays::new(ManagerSource::none()));
     let (ose_addr, _) = start_echo_ose().await;
     let conn = register(&ose, ose_addr);
@@ -405,7 +401,6 @@ async fn fr_w4_relay_backpressure_does_not_buffer_unboundedly() {
         }
     });
 
-    let dir = tempfile::tempdir().unwrap();
     let ose = Arc::new(EditorRelays::new(ManagerSource::none()));
     let conn = register(&ose, ose_addr);
     let h = start_harness(ose).await;
@@ -438,7 +433,6 @@ async fn fr_w4_relay_idle_timeout_closes_both_sides() {
         }
     });
 
-    let dir = tempfile::tempdir().unwrap();
     let ose = Arc::new(EditorRelays::new(ManagerSource::none()).with_relay_idle_timeout(Duration::from_millis(250)));
     let conn = register(&ose, ose_addr);
     let h = start_harness(ose).await;
@@ -583,7 +577,6 @@ async fn fr_w4_relay_closes_when_the_tcp_side_closes_and_when_the_ws_closes() {
 /// (`FR-N9.1`, #776), including messages that end with a prefix of a token-like value.
 #[tokio::test]
 async fn fr_w4_relay_preserves_client_message_boundaries() {
-    let dir = tempfile::tempdir().unwrap();
     let ose = Arc::new(EditorRelays::new(ManagerSource::none()));
     let (ose_addr, _) = start_echo_ose().await;
     let conn = register(&ose, ose_addr);
@@ -625,7 +618,6 @@ async fn fr_w4_relay_preserves_client_message_boundaries() {
 #[tokio::test]
 async fn fr_n3_ide_relay_ends_on_revoke() {
     let net = MemNetwork::new();
-    let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open_in_memory().unwrap());
     let sessions = Sessions::new(store.clone(), vec![Arc::new(ScriptedAdapter) as Arc<dyn AgentAdapter>]);
     let ose = Arc::new(EditorRelays::new(ManagerSource::none()));

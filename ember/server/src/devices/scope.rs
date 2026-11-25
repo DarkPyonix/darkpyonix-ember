@@ -230,7 +230,7 @@ mod tests {
                 continue;
             }
             let method = Method::from_bytes(m.as_bytes()).unwrap();
-            let path = template.replace('{', "").replace('}', "");
+            let path = template.replace(['{', '}'], "");
             assert!(crate::owner::owner_route(&method, &path), "{m} {path}");
             assert!(Scope::Full.allows(&method, &path), "{m} {path}");
             for s in [Scope::ReadOnly, Scope::ChatOnly] {

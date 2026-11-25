@@ -746,7 +746,7 @@ pub fn IdeMenu(session: &str) {
 
     // The session's project's pick, else its computer's default (FR-W7b, D56).
     let project = session_project(&sid);
-    let remembered = ui.prefs.get().ide_for(&project, computer.get().as_deref());
+    let remembered = ui.prefs.get().ide_for(&project, crate::ide::effective_default_ide(ide.get().as_ref()));
     let choices = ide_choices(remembered);
     let cur_label = remembered.map(ide_label);
 
@@ -5662,12 +5662,14 @@ mod tests {
         let session = strip(include_str!("session.rs"));
         let project = strip(include_str!("project.rs"));
         let conversation = strip(include_str!("conversation.rs"));
-        assert!(session.contains("ui.prefs.get().ide_for(&project, computer.get().as_deref())"));
+        // The computer's default is the one the header's IDE listing carries (FR-W7b).
+        let read = "ui.prefs.get().ide_for(&project, crate::ide::effective_default_ide(ide.get().as_ref()))";
+        assert!(session.contains(read));
         assert!(session.contains("record_ide_pick(&ui_c, &project, c.kind);"));
         assert!(project.contains("let project = b.id.clone();"));
-        assert!(project.contains("ui.prefs.get().ide_for(&project, computer.get().as_deref())"));
+        assert!(project.contains(read));
         assert!(project.contains("record_ide_pick(&ui2, &project, c.kind);"));
-        assert!(conversation.contains("ide_prefs.ide_for("));
+        assert!(conversation.contains("ide_prefs.ide_for(&ide_project, crate::ide::effective_default_ide(ide_now.as_ref()))"));
         assert!(conversation.contains("record_ide_pick(&ui_ide, &pick_project, kind);"));
         for (name, src) in [("session", session), ("project", project), ("conversation", conversation)] {
             // `.ide_targets` (the chooser's list, the per-project map) is fine; the old
@@ -5675,6 +5677,63 @@ mod tests {
             let device_wide = src.match_indices(".ide_target").any(|(i, m)| !src[i + m.len()..].starts_with('s'));
             assert!(!device_wide, "{name} reads no device-wide IDE");
         }
+    }
+
+    /// The IDE listing of a session on a computer whose effective `default_ide` is `default`.
+    fn listing_with_default(default: Option<&str>) -> Option<Result<crate::server::IdeLaunch, String>> {
+        let mut l = crate::demo::ide_launch_with("s", "p", "/w", None);
+        l.default_ide = default.map(str::to_string);
+        Some(Ok(l))
+    }
+
+    /// SPEC FR-W7b acceptance: with `default_ide = vscode` in the listing and no pick, the
+    /// header's button launches VS Code at once (the VS Code plan asks the server for its launch);
+    /// a listing from a node that overrides it to `ember` opens the Ember 에디터. No listing yet,
+    /// a failed one, or an older server's opens the chooser.
+    #[test]
+    fn fr_w7b_the_listings_default_ide_launches_with_no_pick() {
+        use crate::ide::{effective_default_ide, plan, IdeAction};
+        let _guard = crate::services::test_guard();
+        let p = crate::prefs::Prefs::default();
+        let vscode = listing_with_default(Some("vscode"));
+        let remembered = p.ide_for("A", effective_default_ide(vscode.as_ref()));
+        assert_eq!(remembered, Some(IdeKind::VsCode));
+        let open = mutable_state_of(false);
+        let mut launched = Vec::new();
+        ide_main_click(remembered, &open, |k| launched.push(k));
+        assert_eq!(launched, vec![IdeKind::VsCode]);
+        assert!(!open.get_untracked(), "a default launches without the chooser");
+        let target = vscode.as_ref().and_then(|r| r.as_ref().ok()).and_then(|l| l.target("vscode"));
+        assert_eq!(plan(IdeKind::VsCode, target), IdeAction::StartVsCode);
+
+        let node = listing_with_default(Some("ember"));
+        assert_eq!(ide_click(p.ide_for("A", effective_default_ide(node.as_ref()))), IdeClick::Launch(IdeKind::Ember));
+
+        for none in [None, listing_with_default(None), Some(Err("down".to_string()))] {
+            assert_eq!(ide_click(p.ide_for("A", effective_default_ide(none.as_ref()))), IdeClick::Choose);
+        }
+    }
+
+    /// SPEC FR-W7b acceptance: after the user picks Gateway in project A, A opens Gateway and B,
+    /// with no pick, still follows the listing's `default_ide`.
+    #[test]
+    fn fr_w7b_a_pick_in_project_a_wins_and_b_follows_the_listing() {
+        use crate::ide::effective_default_ide;
+        let _guard = crate::services::test_guard();
+        let ui = crate::ui::coexist::shared_ui().clone();
+        let before = ui.prefs.get_untracked();
+        ui.update_prefs(|p| p.ide_targets.clear());
+        let listing = listing_with_default(Some("vscode"));
+        let default = effective_default_ide(listing.as_ref());
+        record_ide_pick(&ui, "proj-a", IdeKind::Gateway);
+        let p = ui.prefs.get_untracked();
+        assert_eq!(ide_click(p.ide_for("proj-a", default)), IdeClick::Launch(IdeKind::Gateway));
+        assert_eq!(ide_click(p.ide_for("proj-b", default)), IdeClick::Launch(IdeKind::VsCode));
+        // The listing changes (the owner set another default): B follows it, A keeps its pick.
+        let later = effective_default_ide(listing_with_default(Some("ember")).as_ref());
+        assert_eq!(p.ide_for("proj-a", later), Some(IdeKind::Gateway));
+        assert_eq!(p.ide_for("proj-b", later), Some(IdeKind::Ember));
+        ui.update_prefs(move |p| *p = before);
     }
 
     #[Composable]

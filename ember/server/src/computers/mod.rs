@@ -520,6 +520,8 @@ impl Registry {
         let tx = conn.transaction()?;
         // Its project assignments go with it (FR-L4); the API pushes the affected projects.
         tx.execute("DELETE FROM project_computers WHERE computer_id = ?1", params![id])?;
+        // Its editor settings overrides and last report too (FR-W7a).
+        tx.execute("DELETE FROM computer_editor_settings WHERE computer_id = ?1", params![id])?;
         let removed = tx.execute("DELETE FROM computers WHERE id = ?1", params![id])? > 0;
         tx.commit()?;
         Ok(removed)
@@ -864,6 +866,11 @@ pub struct CurrentComputer {
 /// back from the designated computer to the main server (true) or a return (false).
 pub type MoveListener = Arc<dyn Fn(&SwitchOutcome, bool) + Send + Sync>;
 
+/// Called with a computer's id right after its row is created ([`Computers::register`],
+/// [`Computers::register_peer`]), so the computer gets its editor settings at enrolment (FR-W7a).
+/// It runs on the caller's thread and must not block.
+pub type RegisterListener = Arc<dyn Fn(&str) + Send + Sync>;
+
 pub struct Computers {
     registry: Registry,
     connector: Connector,
@@ -887,6 +894,8 @@ pub struct Computers {
     flap: Mutex<HashMap<String, u32>>,
     /// Called after the watcher moved a session (FR-X3), so teams can tell the leader (#82).
     move_listeners: Mutex<Vec<MoveListener>>,
+    /// Called after a computer is registered (FR-W7a).
+    register_listeners: Mutex<Vec<RegisterListener>>,
     /// This machine's in-process node, started on first use of the local computer's terminals
     /// (FR-W4, #455). Dropping it closes the loopback port.
     local_node: Mutex<Option<local_node::LocalNode>>,
@@ -958,6 +967,7 @@ impl Computers {
             watch_secs: std::sync::atomic::AtomicU64::new(fallback_env().1),
             flap: Mutex::new(HashMap::new()),
             move_listeners: Mutex::new(Vec::new()),
+            register_listeners: Mutex::new(Vec::new()),
             local_node: Mutex::new(None),
             local_node_options: Mutex::new(local_node::LocalNodeOptions::default()),
         })
@@ -1133,7 +1143,21 @@ impl Computers {
         }
         // Validates the URL form the client accepts.
         NodeClient::new(url, token).map_err(|e| ComputerError::BadRequest(e.to_string()))?;
-        self.registry.insert(name, url.trim_end_matches('/'), token)
+        let c = self.registry.insert(name, url.trim_end_matches('/'), token)?;
+        self.registered(&c.id);
+        Ok(c)
+    }
+
+    /// Adds a listener called with the id of every computer registered from now on (FR-W7a).
+    pub fn add_register_listener(&self, listener: RegisterListener) {
+        self.register_listeners.lock().unwrap().push(listener);
+    }
+
+    fn registered(&self, id: &str) {
+        let listeners = self.register_listeners.lock().unwrap().clone();
+        for l in listeners {
+            l(id);
+        }
     }
 
     /// Register a node reached over the transport (`FR-N1`) by its peer address. The node must
@@ -1157,6 +1181,7 @@ impl Computers {
         if !peer.is_empty() {
             dialer.transport().add_peer_addr(peer.clone());
         }
+        self.registered(&c.id);
         Ok(c)
     }
 

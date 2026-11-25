@@ -2277,6 +2277,7 @@ mod tests {
                 folder: "/w/demo".into(),
                 computer: crate::server::IdeComputer { name: "3759f352".into(), local: false, computer_name: computer_name.map(str::to_string) },
                 targets: vec![],
+                default_ide: None,
             })
         };
         assert_eq!(ide_menu_computer(Some(&launch(Some("mac-node"))), Some("this server")).as_deref(), Some("mac-node"));

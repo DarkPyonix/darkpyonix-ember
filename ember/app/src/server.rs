@@ -292,11 +292,21 @@ pub struct IdeLaunch {
     pub folder: String,
     pub computer: IdeComputer,
     pub targets: Vec<IdeTarget>,
+    /// The effective `default_ide` of the listing's computer (`ember`, `vscode` or `gateway`,
+    /// FR-W7b, INTENT D56): the server's editor settings unless that node overrides it. An older
+    /// server sends none.
+    #[serde(default)]
+    pub default_ide: Option<String>,
 }
 
 impl IdeLaunch {
     pub fn target(&self, kind: &str) -> Option<&IdeTarget> {
         self.targets.iter().find(|t| t.kind == kind)
+    }
+
+    /// [`IdeLaunch::default_ide`] as an IDE this app knows; `None` when absent or unknown.
+    pub fn default_ide_kind(&self) -> Option<crate::ide::IdeKind> {
+        self.default_ide.as_deref().and_then(crate::ide::IdeKind::from_key)
     }
 
     /// The `(project, folder)` the Ember editor opens (FR-L31); empty until the launch data arrives.
@@ -396,6 +406,7 @@ mod editor_connection_tests {
             project: "p".into(),
             folder: "/w".into(),
             computer: IdeComputer { name: "c".into(), local: true, computer_name: None },
+            default_ide: None,
             targets: vec![IdeTarget {
                 kind: "ember".into(),
                 available: true,
@@ -946,6 +957,226 @@ fn extensions_path(computer: &str) -> String {
     format!("/computers/{}/ide/extensions", seg(computer))
 }
 
+// --- editor settings (FR-W7, FR-W7a, FR-W7b, INTENT D56) -----------------------------------
+
+/// The editor server a computer runs: `code_ose` (the pinned OSE release, the default),
+/// `vscode` (the user's own Microsoft `code serve-web`, D10) or `manual_script` (the owner's
+/// script).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EditorServerKind {
+    #[default]
+    CodeOse,
+    Vscode,
+    ManualScript,
+}
+
+impl EditorServerKind {
+    pub const ALL: [EditorServerKind; 3] = [EditorServerKind::CodeOse, EditorServerKind::Vscode, EditorServerKind::ManualScript];
+
+    /// The choice's label in the settings.
+    pub fn label(self) -> &'static str {
+        match self {
+            EditorServerKind::CodeOse => "Code OSE",
+            EditorServerKind::Vscode => "VS Code",
+            EditorServerKind::ManualScript => "직접 스크립트",
+        }
+    }
+}
+
+/// The IDE a project with no pick of its own launches (`default_ide`, FR-W7b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EditorDefaultIde {
+    #[default]
+    Ember,
+    Vscode,
+    Gateway,
+}
+
+impl EditorDefaultIde {
+    pub const ALL: [EditorDefaultIde; 3] = [EditorDefaultIde::Ember, EditorDefaultIde::Vscode, EditorDefaultIde::Gateway];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            EditorDefaultIde::Ember => "Ember 에디터",
+            EditorDefaultIde::Vscode => "VS Code",
+            EditorDefaultIde::Gateway => "Gateway",
+        }
+    }
+
+    /// The same IDE as the chooser names it.
+    pub fn kind(self) -> crate::ide::IdeKind {
+        match self {
+            EditorDefaultIde::Ember => crate::ide::IdeKind::Ember,
+            EditorDefaultIde::Vscode => crate::ide::IdeKind::VsCode,
+            EditorDefaultIde::Gateway => crate::ide::IdeKind::Gateway,
+        }
+    }
+}
+
+/// One extension pre-installed into the editor server: `publisher.name`, and a version when
+/// one is pinned.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct EditorExtension {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+/// The theme a fresh server sets as `workbench.colorTheme` (FR-W6).
+pub const DEFAULT_EDITOR_THEME: &str = "DarkPyonix Dark";
+
+fn default_editor_theme() -> String {
+    DEFAULT_EDITOR_THEME.to_string()
+}
+
+/// The server's editor settings record (`GET`/`PUT /api/editor/settings`, FR-W7). Every field
+/// defaults, so an older or newer server's answer still parses.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EditorSettings {
+    pub editor_server: EditorServerKind,
+    /// The manual script's text, shown to the owner before it is saved; required for
+    /// `manual_script`.
+    pub script: Option<String>,
+    /// The owner accepted the VS Code Server licence; required for `vscode`.
+    pub vscode_license_accepted: bool,
+    /// Who accepted it, set by the server; never sent back.
+    #[serde(skip_serializing)]
+    pub vscode_license_accepted_by: Option<String>,
+    /// When it was accepted (ms since the epoch), set by the server; never sent back.
+    #[serde(skip_serializing)]
+    pub vscode_license_accepted_at: Option<i64>,
+    pub extensions: Vec<EditorExtension>,
+    pub theme: String,
+    pub default_ide: EditorDefaultIde,
+    /// Room for later editor defaults, passed on to the manager's presets.
+    pub settings: serde_json::Map<String, serde_json::Value>,
+}
+
+impl Default for EditorSettings {
+    fn default() -> Self {
+        EditorSettings {
+            editor_server: EditorServerKind::default(),
+            script: None,
+            vscode_license_accepted: false,
+            vscode_license_accepted_by: None,
+            vscode_license_accepted_at: None,
+            extensions: Vec::new(),
+            theme: default_editor_theme(),
+            default_ide: EditorDefaultIde::default(),
+            settings: serde_json::Map::new(),
+        }
+    }
+}
+
+/// A node's overrides (FR-W7a): the record's fields, each absent (or `null`) to inherit the
+/// server's value. Only the present ones are sent.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EditorOverrides {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub editor_server: Option<EditorServerKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub script: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vscode_license_accepted: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<Vec<EditorExtension>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub theme: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_ide: Option<EditorDefaultIde>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settings: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+/// One field of an [`ApplyReport`]: applied, or why not.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(default)]
+pub struct FieldApply {
+    pub applied: bool,
+    pub reason: Option<String>,
+}
+
+/// What the node reported after applying its effective settings through its manager
+/// (FR-W7a): per field (`editor_server`, `extensions`, `theme`, `settings`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(default)]
+pub struct ApplyReport {
+    pub applied_at: Option<i64>,
+    pub fields: std::collections::BTreeMap<String, FieldApply>,
+}
+
+/// The fields an [`ApplyReport`] names, in the order the computer's page shows them.
+pub const APPLY_FIELDS: [&str; 4] = ["editor_server", "extensions", "theme", "settings"];
+
+fn reachable_when_absent() -> bool {
+    true
+}
+
+/// `GET`/`PUT /api/computers/{id}/editor/settings`: the node's overrides, its effective record
+/// and the last apply report. `reachable: false` when the node could not be asked for a
+/// fresher report (an older server sends none, which reads as reachable).
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+pub struct ComputerEditorSettings {
+    #[serde(default)]
+    pub overrides: EditorOverrides,
+    #[serde(default)]
+    pub effective: EditorSettings,
+    #[serde(default)]
+    pub applied: Option<ApplyReport>,
+    #[serde(default = "reachable_when_absent")]
+    pub reachable: bool,
+}
+
+/// The editor settings routes (FR-W7, FR-W7a). The PUTs are owner routes (FR-S12).
+impl ServerApi {
+    /// `GET /api/editor/settings`.
+    pub async fn editor_settings(&self) -> ServerResult<EditorSettings> {
+        self.json(reqwest::Method::GET, EDITOR_SETTINGS_PATH, None, false).await
+    }
+
+    /// `PUT /api/editor/settings`: the whole record; answers the saved one. A 400 carries the
+    /// server's reason.
+    pub async fn put_editor_settings(&self, settings: &EditorSettings) -> ServerResult<EditorSettings> {
+        let body = serde_json::to_value(settings).map_err(|e| ServerError::Client(e.to_string()))?;
+        self.json(reqwest::Method::PUT, EDITOR_SETTINGS_PATH, Some(body), true).await
+    }
+
+    /// `GET /api/computers/{id}/editor/settings` (`local` is this server's own machine).
+    pub async fn computer_editor_settings(&self, id: &str) -> ServerResult<ComputerEditorSettings> {
+        self.json(reqwest::Method::GET, &computer_editor_settings_path(id), None, false).await
+    }
+
+    /// `PUT /api/computers/{id}/editor/settings`: the node's overrides; the server applies them
+    /// to that computer and answers the GET body.
+    pub async fn put_computer_editor_settings(
+        &self,
+        id: &str,
+        overrides: &EditorOverrides,
+    ) -> ServerResult<ComputerEditorSettings> {
+        let body = serde_json::to_value(overrides).map_err(|e| ServerError::Client(e.to_string()))?;
+        self.json(reqwest::Method::PUT, &computer_editor_settings_path(id), Some(body), true).await
+    }
+}
+
+const EDITOR_SETTINGS_PATH: &str = "/editor/settings";
+
+fn computer_editor_settings_path(id: &str) -> String {
+    format!("/computers/{}/editor/settings", seg(id))
+}
+
+/// What the settings show for a failed editor settings call: the server's own message (its
+/// `error` text) for a refusal, else the error as it reads.
+pub fn editor_error_text(e: &ServerError) -> String {
+    match e {
+        ServerError::Status { message, .. } => message.clone(),
+        other => other.to_string(),
+    }
+}
+
 /// How many characters of a failed command's output the message keeps (its end, where the
 /// reason is).
 const EXTENSION_OUTPUT_TAIL: usize = 600;
@@ -1074,6 +1305,113 @@ mod tests {
         assert!(page.extensions[0].verified);
         assert_eq!(page.extensions[1], GalleryExtension { id: "a.b".into(), ..Default::default() });
         assert_eq!(serde_json::from_value::<GallerySearch>(json!({})).unwrap(), GallerySearch::default());
+    }
+
+    /// SPEC FR-W7: the record's paths, the defaults of a fresh server, a full round trip, and an
+    /// older server's partial answer. The server's licence fields are read, never sent.
+    #[test]
+    fn fr_w7_editor_settings_paths_defaults_and_round_trip() {
+        assert_eq!(EDITOR_SETTINGS_PATH, "/editor/settings");
+        assert_eq!(computer_editor_settings_path("local"), "/computers/local/editor/settings");
+        assert_eq!(computer_editor_settings_path("a/b"), "/computers/a%2Fb/editor/settings");
+
+        let fresh = EditorSettings::default();
+        assert_eq!(
+            serde_json::to_value(&fresh).unwrap(),
+            json!({ "editor_server": "code_ose", "script": null, "vscode_license_accepted": false,
+                "extensions": [], "theme": "DarkPyonix Dark", "default_ide": "ember", "settings": {} })
+        );
+        assert_eq!(serde_json::from_value::<EditorSettings>(json!({})).unwrap(), fresh, "an older server's empty answer");
+
+        let wire = json!({
+            "editor_server": "manual_script", "script": "#!/bin/sh\nexec my-serve-web\n",
+            "vscode_license_accepted": true, "vscode_license_accepted_by": "brew",
+            "vscode_license_accepted_at": 1795559536184_i64,
+            "extensions": [{ "id": "rust-lang.rust-analyzer", "version": "0.4.1" }, { "id": "a.b" }],
+            "theme": "Default Dark Modern", "default_ide": "gateway", "settings": { "editor.fontSize": 14 },
+            "later_field": 1
+        });
+        let rec: EditorSettings = serde_json::from_value(wire).unwrap();
+        assert_eq!(rec.editor_server, EditorServerKind::ManualScript);
+        assert_eq!(rec.script.as_deref(), Some("#!/bin/sh\nexec my-serve-web\n"));
+        assert_eq!(rec.vscode_license_accepted_by.as_deref(), Some("brew"));
+        assert_eq!(rec.vscode_license_accepted_at, Some(1795559536184));
+        assert_eq!(rec.extensions[1], EditorExtension { id: "a.b".into(), version: None });
+        assert_eq!(rec.default_ide.kind(), crate::ide::IdeKind::Gateway);
+        let sent = serde_json::to_value(&rec).unwrap();
+        assert!(sent.get("vscode_license_accepted_by").is_none() && sent.get("vscode_license_accepted_at").is_none(), "{sent}");
+        assert_eq!(sent["extensions"], json!([{ "id": "rust-lang.rust-analyzer", "version": "0.4.1" }, { "id": "a.b" }]));
+        assert_eq!(sent["settings"], json!({ "editor.fontSize": 14 }));
+        let back: EditorSettings = serde_json::from_value(sent).unwrap();
+        assert_eq!(back, EditorSettings { vscode_license_accepted_by: None, vscode_license_accepted_at: None, ..rec });
+        for (k, want) in [("code_ose", EditorServerKind::CodeOse), ("vscode", EditorServerKind::Vscode), ("manual_script", EditorServerKind::ManualScript)] {
+            assert_eq!(serde_json::from_value::<EditorServerKind>(json!(k)).unwrap(), want);
+        }
+    }
+
+    /// SPEC FR-W7: the two PUTs carry the owner key and the GETs do not (FR-S12); a refusal shows
+    /// the server's message.
+    #[test]
+    fn fr_w7_the_editor_settings_puts_are_owner_routes() {
+        use ember_client::owner::OwnerKey;
+        use reqwest::Method;
+        let api = ServerApi::with_token("http://127.0.0.1:1", None).unwrap();
+        assert!(api.set_owner_key(Some(&OwnerKey::new("eok_app_key"))));
+        assert!(api.owner_header(&Method::PUT, EDITOR_SETTINGS_PATH).is_some());
+        assert!(api.owner_header(&Method::PUT, &computer_editor_settings_path("c1")).is_some());
+        assert!(api.owner_header(&Method::GET, EDITOR_SETTINGS_PATH).is_none());
+        assert!(api.owner_header(&Method::GET, &computer_editor_settings_path("c1")).is_none());
+        let e = status_error(400, json!({ "error": "manual_script needs a script" }).to_string());
+        assert_eq!(editor_error_text(&e), "manual_script needs a script");
+        let e = status_error(403, r#"{"code":"owner_required","error":"this route needs owner presence"}"#.into());
+        assert!(e.is_owner_required());
+    }
+
+    /// SPEC FR-W7a: overrides send only their present fields, `null` inherits, and the computer's
+    /// answer carries the per-field report; `reachable` reads true when an older server leaves it out.
+    #[test]
+    fn fr_w7_computer_editor_settings_overrides_and_report() {
+        assert_eq!(serde_json::to_value(EditorOverrides::default()).unwrap(), json!({}));
+        let o = EditorOverrides { theme: Some("Light".into()), default_ide: Some(EditorDefaultIde::Ember), ..Default::default() };
+        assert_eq!(serde_json::to_value(&o).unwrap(), json!({ "theme": "Light", "default_ide": "ember" }));
+        let parsed: EditorOverrides = serde_json::from_value(json!({ "theme": null, "extensions": [] })).unwrap();
+        assert_eq!(parsed, EditorOverrides { extensions: Some(vec![]), ..Default::default() });
+
+        let c: ComputerEditorSettings = serde_json::from_value(json!({
+            "overrides": { "default_ide": "ember" },
+            "effective": { "editor_server": "vscode", "default_ide": "ember" },
+            "applied": { "applied_at": 1795559536184_i64, "fields": {
+                "editor_server": { "applied": true },
+                "extensions": { "applied": false, "reason": "VS Code의 확장은 사용자가 직접 설치합니다" } } },
+            "reachable": false
+        }))
+        .unwrap();
+        assert_eq!(c.overrides.default_ide, Some(EditorDefaultIde::Ember));
+        assert_eq!(c.effective.editor_server, EditorServerKind::Vscode);
+        assert_eq!(c.effective.theme, DEFAULT_EDITOR_THEME, "an absent field is the default");
+        let r = c.applied.as_ref().unwrap();
+        assert_eq!(r.applied_at, Some(1795559536184));
+        assert!(r.fields["editor_server"].applied);
+        assert_eq!(r.fields["extensions"].reason.as_deref(), Some("VS Code의 확장은 사용자가 직접 설치합니다"));
+        assert!(!c.reachable);
+        let older: ComputerEditorSettings = serde_json::from_value(json!({ "overrides": {}, "effective": {}, "applied": null })).unwrap();
+        assert!(older.reachable && older.applied.is_none());
+    }
+
+    /// SPEC FR-W7b: the IDE listing's `default_ide`, and an older server's listing without it.
+    #[test]
+    fn fr_w7b_the_ide_listing_carries_the_default_ide() {
+        let base = json!({ "session": "s", "project": "p", "folder": "/w", "computer": { "name": "c" }, "targets": [] });
+        let mut with = base.clone();
+        with["default_ide"] = json!("vscode");
+        let l: IdeLaunch = serde_json::from_value(with).unwrap();
+        assert_eq!(l.default_ide_kind(), Some(crate::ide::IdeKind::VsCode));
+        let old: IdeLaunch = serde_json::from_value(base.clone()).unwrap();
+        assert_eq!(old.default_ide, None);
+        assert_eq!(old.default_ide_kind(), None);
+        let mut unknown = base;
+        unknown["default_ide"] = json!("cursor");
+        assert_eq!(serde_json::from_value::<IdeLaunch>(unknown).unwrap().default_ide_kind(), None);
     }
 
     #[test]

@@ -196,6 +196,7 @@ const MIGRATIONS: &[&str] = &[
     crate::devices::schema::SCOPE_MIGRATION,
     PROMPT_EVENTS_INDEX_MIGRATION,
     crate::projects::schema::LEADER_SESSION_MIGRATION,
+    crate::editor_settings::MIGRATION,
 ];
 
 /// The position of a registered migration (tests locate migrations by position, never by length).

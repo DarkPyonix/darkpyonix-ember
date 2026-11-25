@@ -86,6 +86,9 @@ async fn serve() -> anyhow::Result<()> {
     // FR-W4b (D55): the editor server is the DarkPyonix manager's; the node only asks it for
     // launches and relays bytes to it.
     let node = Node::new(cfg)?;
+    // FR-W7a (D56): the editor settings the server sent last are applied again at start, once the
+    // manager answers.
+    let _reapply = ember_node::editor_settings::spawn_reapply(&node);
     if let Some(socks) = std::env::var("EMBER_NODE_SOCKS_LISTEN").ok().filter(|s| !s.is_empty()) {
         let listener = tokio::net::TcpListener::bind(socks.parse::<std::net::SocketAddr>()?).await?;
         tracing::info!("SOCKS5 egress listening on {}", listener.local_addr()?);

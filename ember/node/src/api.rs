@@ -60,6 +60,8 @@
 //! | POST | `/terms/{id}/kill` | [`KillRequest`] → 204 (default SIGHUP, then SIGKILL) |
 //! | DELETE | `/terms/{id}` | → 204 (409 while running) |
 //! | POST | `/ide/ose` | [`crate::ose_api::OseLaunchRequest`] → [`crate::ose_api::OseLaunchResponse`] (FR-W4b, D55: a launch ticket from the DarkPyonix manager, `{launch_id, path, ticket, ose_commit?}`; 403 outside the roots, 404 for a missing folder, 503 `manager_not_installed` or `ose_not_installed`, 502 `manager_unreachable` or `manager_error`) |
+//! | PUT | `/editor/settings` | [`crate::editor_settings::NodeEditorSettings`] → [`crate::editor_settings::ApplyReport`] (FR-W7a, D56: applied through the DarkPyonix manager; 400 for a bad body) |
+//! | GET | `/editor/settings` | → [`crate::editor_settings::EditorSettingsState`] `{settings, applied}` |
 //! | GET (WS) | `/ide/ose/{launch_id}/relay` | raw byte relay to the manager's endpoint, nothing replaced ([`crate::ose_api`]; 404 for an unknown launch, 429 at the relay limit) |
 //! | POST | `/ide/extensions` | `{id, version?}` → `{installed, id, output}` (FR-W4b: 400 for a bad id, 409 while another install runs, 502 for a failed run, 503 without an OSE binary) |
 //! | GET, POST | `/transfers`, `/transfers/offers`, `/transfers/offers/{id}/accept`, `/transfers/offers/{id}/decline`, `/transfers/{id}/chunks`, `/transfers/{id}/resume-offset/{file}`, `/transfers/{id}/complete`, `/pause`, `/resume`, `/cancel`, `/transfers/history` (GET, DELETE) | the file receiver ([`crate::transfers`], FR-F13): the server's `/api/transfers*` bodies; 507 `no_space` (FR-F16); 409 without a state folder |
@@ -114,6 +116,8 @@ struct Inner {
     /// The editor launches and relays of this computer's projects, through the DarkPyonix
     /// manager (`FR-W4b`, D55).
     editor: Arc<EditorRelays>,
+    /// The editor settings the server sent and the last apply (`FR-W7a`, D56).
+    editor_settings: Arc<crate::editor_settings::EditorSettingsHost>,
     /// Serialises writes so a hash precondition and the rename that follows it are atomic with
     /// respect to other writes through this daemon.
     write_lock: tokio::sync::Mutex<()>,
@@ -145,6 +149,10 @@ impl Node {
             config.received_dir.as_deref(),
             config.receive,
         )?);
+        let editor_settings = Arc::new(crate::editor_settings::EditorSettingsHost::new(
+            config.state_dir.clone(),
+            crate::editor_settings::Cli::from_env(),
+        ));
         Ok(Self(Arc::new(Inner {
             token: config.token,
             policy: PathPolicy::with_denied(config.roots, config.denied)?,
@@ -153,6 +161,7 @@ impl Node {
             egress: Arc::new(config.egress),
             transfers,
             editor,
+            editor_settings,
             write_lock: tokio::sync::Mutex::new(()),
             watch_limits: crate::fs_watch::WatchLimits::default(),
             watch_total: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -162,6 +171,21 @@ impl Node {
     /// The editor launches and relays of this node (`FR-W4b`, D55).
     pub fn editor(&self) -> &Arc<EditorRelays> {
         &self.0.editor
+    }
+
+    /// The editor settings of this node (`FR-W7a`, D56).
+    pub fn editor_settings(&self) -> &Arc<crate::editor_settings::EditorSettingsHost> {
+        &self.0.editor_settings
+    }
+
+    /// The same node running `bin` as the DarkPyonix CLI instead of [`crate::editor_settings::ENV_BIN`]
+    /// or `darkpyonix` on `PATH` (tests). Call it before the node is cloned.
+    pub fn with_darkpyonix_bin(mut self, bin: impl Into<std::path::PathBuf>) -> Self {
+        let inner = Arc::get_mut(&mut self.0).expect("with_darkpyonix_bin before the node is shared");
+        let state_dir = inner.editor_settings.state_dir().map(std::path::Path::to_path_buf);
+        let cli = crate::editor_settings::Cli::new(bin);
+        inner.editor_settings = Arc::new(crate::editor_settings::EditorSettingsHost::new(state_dir, cli));
+        self
     }
 
     pub fn jobs(&self) -> &Arc<Jobs> {
@@ -287,6 +311,8 @@ pub fn router(node: Node) -> Router {
         .merge(transfer_routes())
         // FR-W4b: the OSE of this computer's projects.
         .merge(crate::ose_api::routes())
+        // FR-W7a: the editor settings the server sends, applied through the manager.
+        .merge(crate::editor_settings::routes())
         .route_layer(middleware::from_fn_with_state(node.clone(), auth));
     Router::new()
         .route("/health", get(health))

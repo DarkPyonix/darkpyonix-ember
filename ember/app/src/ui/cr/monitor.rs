@@ -6,6 +6,8 @@
 //! are `ui::monitor`'s. An offline computer is not asked and says so; a failed request keeps the
 //! last values dimmed (the cards at 55 percent opacity). The temperature meter runs on a fixed
 //! 0 to 100 degree Celsius scale (hottest sensor). Demo mode takes its samples from `demo::metrics_sample`.
+//! Under the metrics, the computer's editor settings (FR-W7a, `editor_settings`): each field
+//! inherited or overridden, and the node's last apply report.
 
 #![allow(non_snake_case)]
 
@@ -180,6 +182,9 @@ pub fn MonitorSheet(chip: Option<&ComputerChip>, boxes: &[ProjectBox], on_close:
                             Label(note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
                         }
                     }) };
+                    // The computer's editor settings (FR-W7a): not dimmed with the metrics, since
+                    // the last apply report is what an unreachable computer still has.
+                    super::editor_settings::ComputerEditorSection(&c.id);
                 }) };
             }) };
     });

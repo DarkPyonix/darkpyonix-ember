@@ -497,7 +497,7 @@ fn fr_l31_42_the_stopped_line_is_tinted_over_the_document_decorations() {
     let running = showing(running_session());
     assert_eq!(
         stopped_line_decorations(&uri(), 4, &running, own()).decorations(),
-        [diff],
+        [diff.clone()],
         "no stop, no tint"
     );
 }

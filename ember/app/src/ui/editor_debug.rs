@@ -6,17 +6,19 @@
 //! and the breakpoints come from the widget bridge ([`ember_editor::DebugView`]), which keeps
 //! them from the session's debug updates.
 //!
-//! F5 and Shift+F5 also come from the focused code editor ([`code_key_action`]), which keeps
-//! the keys it does not pass on.
+//! A thread that stops opens the file of its top frame, scrolls to the line and tints it
+//! ([`stopped_line_decorations`]), as Code-OSS's `focusStackFrame` and its
+//! `debug-top-stack-frame-line` decoration do. F5 and Shift+F5 also come from the focused code
+//! editor ([`code_key_action`]), which keeps the keys it does not pass on.
 
-use compose_rust::code::{GutterDecoration, GutterDecorations};
+use compose_rust::code::{Decoration, Decorations, GutterDecoration, GutterDecorations};
 use compose_rust::schema::ColorRole;
 use dioxus_compose::html::prelude::*;
 use dioxus_compose::prelude::{Props, component};
 use dioxus_core::{EventHandler, use_hook};
 use dioxus_signals::{ReadableExt, Signal, WritableExt};
 use ember_editor::settings::KeybindingRule;
-use ember_editor::DebugView;
+use ember_editor::{DebugView, StoppedLocation};
 use ember_editor::debugger::{
     ConfigInfo, ConfigSelector, DebugRequest, DebugUpdate, SessionInfo, SessionState,
     SourceBreakpoint,
@@ -118,7 +120,46 @@ pub(crate) fn on_debug(s: &Shared, update: &DebugUpdate) {
     }
     let view = s.bridge.borrow().debug().clone();
     let mut debug = s.debug;
+    let before = debug.peek().view.stopped_at.clone();
     debug.write().apply(update, &view);
+    if let Some(at) = reveal_target(before.as_ref(), view.stopped_at.as_ref()) {
+        super::editor_debug_view::reveal(s, &at.uri, at.line, at.column);
+    }
+}
+
+/// The stopped location to open and scroll to: a new one, each time a thread stops (Code-OSS
+/// `focusStackFrame` with `debug.focusEditorOnBreak`). The same stop reported again, by a later
+/// call stack or a session list, is not revealed again, so the reader's own scrolling is kept.
+fn reveal_target<'a>(
+    before: Option<&StoppedLocation>,
+    after: Option<&'a StoppedLocation>,
+) -> Option<&'a StoppedLocation> {
+    after.filter(|at| before != Some(*at))
+}
+
+/// The document's own decorations with the stopped line's tint after them, so it covers a diff
+/// tint on the same line (the renderer draws the last line background sent). Code-OSS draws the
+/// line in `editor.stackFrameHighlightBackground`; here it is the role of the gutter's arrow.
+fn stopped_line_decorations(
+    uri: &UriComponents,
+    version: u32,
+    view: &DebugView,
+    existing: Decorations,
+) -> Decorations {
+    let Some(line) = view.stopped_line(uri).and_then(|line| line.checked_sub(1)) else {
+        return existing;
+    };
+    let tint = Decoration::line_background(version, line, line, ColorRole::Tertiary);
+    Decorations::new(existing.decorations().into_iter().chain([tint]))
+}
+
+pub(crate) fn decorations(
+    s: &Shared,
+    uri: &UriComponents,
+    version: u32,
+    existing: Decorations,
+) -> Decorations {
+    stopped_line_decorations(uri, version, &s.debug.read().view, existing)
 }
 
 /// The name a key offered by the focused code editor has in the keymap table: the function keys

@@ -462,6 +462,67 @@ fn fr_l31_42_breakpoint_editor_saves_conditions_and_log_messages() {
     );
 }
 
+fn stopped_at(line: u32, column: u32) -> StoppedLocation {
+    StoppedLocation {
+        session: "session".into(),
+        thread_id: 7,
+        frame_id: 1,
+        uri: uri(),
+        line,
+        column,
+    }
+}
+
+// Code-OSS's `debug-top-stack-frame-line`: the stopped line is tinted in the document it is in,
+// after the document's own decorations so it covers a diff tint there.
+#[test]
+fn fr_l31_42_the_stopped_line_is_tinted_over_the_document_decorations() {
+    let diff = Decoration::line_background(4, 1, 3, ColorRole::DiffModified);
+    let own = || Decorations::new([diff.clone()]);
+    let view = DebugView {
+        stopped_at: Some(stopped_at(3, 5)),
+        ..showing(stopped_session())
+    };
+    let tinted = stopped_line_decorations(&uri(), 4, &view, own()).decorations();
+    assert_eq!(
+        tinted,
+        [diff.clone(), Decoration::line_background(4, 2, 2, ColorRole::Tertiary)]
+    );
+    let other = UriComponents::remote("sample", "/work/other.py");
+    assert_eq!(
+        stopped_line_decorations(&other, 4, &view, own()).decorations(),
+        [diff.clone()],
+        "another document keeps its own decorations"
+    );
+    let running = showing(running_session());
+    assert_eq!(
+        stopped_line_decorations(&uri(), 4, &running, own()).decorations(),
+        [diff],
+        "no stop, no tint"
+    );
+}
+
+// `focusStackFrame` with `debug.focusEditorOnBreak`: each new stop opens its file at the line;
+// the same stop reported again does not move the reader.
+#[test]
+fn fr_l31_42_a_new_stop_is_revealed_once() {
+    let first = stopped_at(3, 5);
+    assert_eq!(reveal_target(None, Some(&first)), Some(&first));
+    assert_eq!(reveal_target(Some(&first), Some(&first)), None, "the same stop again");
+    let next = stopped_at(4, 1);
+    assert_eq!(reveal_target(Some(&first), Some(&next)), Some(&next), "a step");
+    let other_frame = StoppedLocation {
+        frame_id: 2,
+        ..first.clone()
+    };
+    assert_eq!(
+        reveal_target(Some(&first), Some(&other_frame)),
+        Some(&other_frame),
+        "a new stop on the same line after continuing"
+    );
+    assert_eq!(reveal_target(Some(&first), None), None, "running again");
+}
+
 // The focused code editor passes F5 and Shift+F5 on (compose-rust#554), read from the keymap and
 // keybindings.json as the page's key handler reads them; other keys stay with the editor.
 #[test]

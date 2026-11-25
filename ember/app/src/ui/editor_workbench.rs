@@ -458,6 +458,8 @@ fn editor_pane() -> Element {
         }
     };
     let gutter_decorations = super::editor_debug::gutter(&s, &uri, &doc.text, version, gutter_decorations);
+    // FR-L31.42: the line a thread is stopped at is tinted over the document's own decorations.
+    let decorations = super::editor_debug::decorations(&s, &uri, version, compose_rust::code::Decorations::from_bytes(doc.decoration_bytes.clone()));
     let change_s = s.clone(); let change_uri = uri.clone();
     let save_s = s.clone(); let save_uri = uri.clone();
     let hover_s = s.clone(); let hover_uri = uri.clone();
@@ -468,7 +470,7 @@ fn editor_pane() -> Element {
     let syntax_spans = crate::ui::editor::syntax_spans_at(&doc.syntax, doc.widget_version_of(doc.syntax.version));
     rsx! { CodeEditor {
         key: "{generation}", width: Some(box_w), height: Some(box_h), handle,
-        text: doc.text, decorations: compose_rust::code::Decorations::from_bytes(doc.decoration_bytes), syntax_spans, folds: crate::ui::editor::folds_from(&doc.folds, doc.widget_base), tab_width: Some(doc.tab_width),
+        text: doc.text, decorations, syntax_spans, folds: crate::ui::editor::folds_from(&doc.folds, doc.widget_base), tab_width: Some(doc.tab_width),
         gutter_decorations,
         // FR-L31.27: the mockup's code type, row pitch and line number column (`editor.css:2`, `:71`).
         font_size: Some(crate::ui::fonts::CODE_FONT_SIZE), line_height: Some(crate::ui::fonts::CODE_LINE_HEIGHT),

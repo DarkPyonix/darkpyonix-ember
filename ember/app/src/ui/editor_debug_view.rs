@@ -922,6 +922,12 @@ fn open_launch_json(s: &Shared, text: String) {
 }
 
 fn goto(s: &Shared, uri: &UriComponents, line: u32) {
+    reveal(s, uri, line, 1);
+}
+
+/// Open `uri`, put the caret at the 1-based `line` and `column` and scroll it into the middle
+/// of the editor, as Code-OSS opens a stack frame (`openStackFrame`).
+pub(crate) fn reveal(s: &Shared, uri: &UriComponents, line: u32, column: u32) {
     let path = uri.path.clone();
     super::editor_workbench::page::open_tab_file(s, &path);
     let mut next_goto_id = s.next_goto_id;
@@ -932,7 +938,7 @@ fn goto(s: &Shared, uri: &UriComponents, line: u32) {
         id,
         path,
         line: line.saturating_sub(1),
-        col: 0,
+        col: column.saturating_sub(1),
     }));
 }
 

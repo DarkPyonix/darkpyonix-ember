@@ -5,8 +5,8 @@
 use std::path::{Path, PathBuf};
 
 use ember_app::editor_backup::{
-    backup_dir, backup_file_name, decode, encode, expired, load, prune_dir, restore_failed_notice, unreadable_notice, write_atomic,
-    BackupEntry, BackupError, BackupFile, BackupKey, BaseMark, DocView, Flush, Loaded, Tracker, BACKUP_DEBOUNCE_MS, BACKUP_VERSION,
+    backup_dir, backup_file_name, collect_for_key, decode, live_marker_name, marker_is_live, merge_backups, touch_marker, window_file_name, encode, expired, load, prune_dir, restore_failed_notice, unreadable_notice, write_atomic,
+    BackupEntry, BackupError, BackupFile, BackupKey, BaseMark, DocView, Flush, Loaded, Tracker, WriteSchedule, BACKUP_DEBOUNCE_MS, BACKUP_QUIET_MS, BACKUP_VERSION,
     DEFAULT_BACKUP_DAYS,
 };
 use ember_app::prefs::{self, Prefs};
@@ -476,4 +476,96 @@ fn fr_l31_hot_exit_the_limit_is_kept_per_device_and_reads_30_days_from_older_fil
     let p = Prefs { hot_exit_backup_days: 7, ..Prefs::default() };
     prefs::save(&path, &p).unwrap();
     assert_eq!(prefs::load(&path).hot_exit_backup_days, 7);
+}
+
+/// One window's tracker writing under its own process number, with one dirty file.
+fn window_writes(dir: &Path, pid: u32, path: &str, text: &str, at: u64) {
+    let mut tracker = Tracker::new(key(), None).with_file_name(window_file_name(&key(), pid));
+    tracker.observe(&[doc(path, 1, 1, true, text)], Some(path));
+    assert!(matches!(tracker.flush(dir, at).unwrap(), Flush::Written(_)));
+}
+
+#[test]
+fn fr_l31_6_b7_two_windows_on_one_folder_keep_their_own_backups_and_both_are_restored() {
+    let dir = scratch();
+    // Window A edits X, window B edits Y; neither file replaces the other.
+    window_writes(dir.path(), 101, "/w/x.rs", "x edited\n", NOW);
+    window_writes(dir.path(), 202, "/w/y.rs", "y edited\n", NOW + 5);
+    assert_ne!(window_file_name(&key(), 101), window_file_name(&key(), 202));
+    assert!(dir.path().join(window_file_name(&key(), 101)).exists());
+    assert!(dir.path().join(window_file_name(&key(), 202)).exists());
+
+    // Both have quit; a window opened later restores both buffers, the newest file's tab current.
+    let found = collect_for_key(dir.path(), &key(), 303, NOW + 10, DEFAULT_BACKUP_DAYS, |_| false);
+    let merged = found.merged.expect("both backups are read");
+    let paths: Vec<&str> = merged.entries.iter().map(|e| e.path.as_str()).collect();
+    assert_eq!(paths, ["/w/y.rs", "/w/x.rs"]);
+    assert_eq!(merged.current.as_deref(), Some("/w/y.rs"));
+    assert_eq!(found.sources.len(), 2);
+
+    // A window that is still running keeps its file: it is not taken over.
+    let found = collect_for_key(dir.path(), &key(), 303, NOW + 10, DEFAULT_BACKUP_DAYS, |pid| pid == 202);
+    let paths: Vec<String> = found.merged.unwrap().entries.into_iter().map(|e| e.path).collect();
+    assert_eq!(paths, ["/w/x.rs"]);
+}
+
+#[test]
+fn fr_l31_6_b7_older_builds_shared_file_is_taken_over_and_the_same_path_keeps_the_newest_text() {
+    let dir = scratch();
+    std::fs::write(dir.path().join(backup_file_name(&key())), encode(&file(vec![entry("/w/a.rs", "old\n", "d\n")], None, NOW))).unwrap();
+    window_writes(dir.path(), 202, "/w/a.rs", "new\n", NOW + 50);
+    let found = collect_for_key(dir.path(), &key(), 303, NOW + 60, DEFAULT_BACKUP_DAYS, |_| false);
+    assert_eq!(found.sources.len(), 2);
+    let merged = found.merged.unwrap();
+    assert_eq!(merged.entries.len(), 1);
+    assert_eq!(merged.entries[0].text, "new\n");
+    assert_eq!(merge_backups(Vec::new()), None);
+}
+
+#[test]
+fn fr_l31_6_b7_a_window_counts_as_running_while_its_marker_is_fresh() {
+    let dir = scratch();
+    touch_marker(dir.path(), &key(), 101).unwrap();
+    let marker = dir.path().join(live_marker_name(&key(), 101));
+    assert!(marker_is_live(&marker, std::time::SystemTime::now()));
+    // A marker nobody touched for a minute is a window that was killed.
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+    assert!(!marker_is_live(&marker, later));
+    assert!(!marker_is_live(&dir.path().join(live_marker_name(&key(), 999)), std::time::SystemTime::now()));
+}
+
+#[test]
+fn fr_l31_6_b8_the_backup_follows_an_edit_without_waiting_for_a_pause() {
+    // One edit: written after the short quiet pause, not after a second.
+    let mut schedule = WriteSchedule::default();
+    assert!(schedule.note_change(10_000), "the first change starts the waiting task");
+    assert_eq!(schedule.due_in(10_000), Some(BACKUP_QUIET_MS));
+    assert_eq!(schedule.due_in(10_000 + BACKUP_QUIET_MS), Some(0));
+    schedule.written();
+    assert_eq!(schedule.due_in(10_300), None, "nothing waits after the write");
+    assert!(schedule.note_change(20_000), "the task ended, so the next change starts one again");
+
+    // Continuous typing, a key every 50 ms for ten seconds: the write still comes due within the
+    // limit of the first unwritten change, over and over, instead of being pushed out for ever.
+    let mut schedule = WriteSchedule::default();
+    let (mut first_unwritten, mut writes, mut worst_lag) = (None::<u64>, 0, 0);
+    for now in (0..10_000u64).step_by(50) {
+        schedule.note_change(now);
+        first_unwritten.get_or_insert(now);
+        if schedule.due_in(now) == Some(0) {
+            worst_lag = worst_lag.max(now - first_unwritten.take().unwrap());
+            schedule.written();
+            writes += 1;
+        }
+    }
+    assert!(writes >= 9, "{writes} writes in ten seconds of typing");
+    assert!(worst_lag <= BACKUP_DEBOUNCE_MS, "the file was {worst_lag} ms behind the typing");
+
+    // The last edit before the quit is in the file: the tracker the write reads holds it.
+    let dir = scratch();
+    let mut tracker = Tracker::new(key(), None);
+    tracker.observe(&[doc("/w/a.rs", 1, 9, true, "last keystroke\n")], Some("/w/a.rs"));
+    tracker.flush(dir.path(), NOW).unwrap();
+    let read = decode(&std::fs::read(backup_path(dir.path())).unwrap()).unwrap();
+    assert_eq!(read.entries[0].text, "last keystroke\n");
 }

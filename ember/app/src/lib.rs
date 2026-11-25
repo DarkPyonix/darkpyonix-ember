@@ -335,6 +335,10 @@ pub(crate) fn shutdown() -> i32 {
     // The unsaved buffers of an editor window first (hot exit, FR-L31.6a): nothing else here needs them.
     editor_backup::flush_on_exit();
     let s = services();
+    // A save still on the wire finishes (bounded) before the process ends and cuts it off.
+    if !s.rt.block_on(ember_editor::writes::wait_settled(ember_editor::session::SHUTDOWN_WRITE_WAIT)) {
+        tracing::warn!("a file save was still unfinished at exit");
+    }
     let _guard = services::prefs_write_lock();
     let prefs = s.ui.prefs.get_untracked();
     let path = s.config.prefs_path();

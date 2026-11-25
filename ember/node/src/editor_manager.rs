@@ -335,6 +335,25 @@ impl ManagerClient {
         Ok((status, body.to_vec()))
     }
 
+    /// `DELETE /api/editor/{runtime}/extensions/{extension}`; the manager's status and body are
+    /// answered unchanged. `extension` is a checked `publisher.name`.
+    pub async fn uninstall_extension(&self, runtime: &str, extension: &str) -> Result<(u16, Vec<u8>), ManagerError> {
+        if !valid_runtime(runtime) {
+            return Err(ManagerError::Refused { status: 400, error: format!("invalid editor runtime: {runtime:?}") });
+        }
+        let res = self
+            .http
+            .delete(self.route(&format!("/api/editor/{runtime}/extensions/{extension}")))
+            .bearer_auth(&self.endpoint.token)
+            .timeout(INSTALL_TIMEOUT)
+            .send()
+            .await
+            .map_err(|e| ManagerError::Unreachable(format!("manager unreachable: {e}")))?;
+        let status = res.status().as_u16();
+        let body = res.bytes().await.map_err(|e| ManagerError::Unreachable(format!("manager unreachable: {e}")))?;
+        Ok((status, body.to_vec()))
+    }
+
     /// A byte stream to the manager's `host:port`: plain TCP for `http`, TLS for `https`.
     pub async fn connect(&self) -> std::io::Result<Box<dyn ManagerIo>> {
         connect_endpoint(&self.endpoint).await
@@ -514,6 +533,11 @@ impl EditorRelays {
     /// Forwards an extension install of `runtime` to the manager.
     pub async fn install_extension(&self, runtime: &str, body: Vec<u8>) -> Result<(u16, Vec<u8>), ManagerError> {
         self.source.client()?.install_extension(runtime, body).await
+    }
+
+    /// Forwards an extension uninstall of `runtime` to the manager.
+    pub async fn uninstall_extension(&self, runtime: &str, extension: &str) -> Result<(u16, Vec<u8>), ManagerError> {
+        self.source.client()?.uninstall_extension(runtime, extension).await
     }
 }
 

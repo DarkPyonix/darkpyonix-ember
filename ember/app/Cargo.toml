@@ -30,10 +30,10 @@ getrandom = "0.3"
 # ("Local dioxus-compose"). The crate's build script fetches the renderer for its version; set
 # DIOXUS_COMPOSE_RENDERER_DIR to use a renderer you built yourself.
 # TODO: 배포되면 버전 의존성으로 바꾼다 (dioxus-compose is not yet published, and it takes compose-rust by git, so this does too: one copy).
-# compose-rust develop after the builder flip (#906): widgets are call macros. dioxus-compose
-# chore/compose-rust-fr39-flip pins the same rev.
-compose-rust = { git = "https://github.com/DarkPyonix/compose-rust", rev = "e52fbd396681ceb3017513107edda5812dee4920", default-features = false }
-dioxus-compose = { git = "https://github.com/DarkPyonix/dioxus-compose", rev = "5b6f707c531246d71cc3a34cd41662b1375b1513" }
+# dioxus-compose develop after dioxus-compose#309 (HtmlView lays out at every dp, #1012); the
+# compose-rust rev is the one that dioxus-compose rev pins, so the lock has one compose-rust.
+compose-rust = { git = "https://github.com/DarkPyonix/compose-rust", rev = "519ffede15b777733c64fc038fdeae5d7256d7d6", default-features = false }
+dioxus-compose = { git = "https://github.com/DarkPyonix/dioxus-compose", rev = "00cd6de3e7ea4a0c30a385ca57b6dc4497f58331" }
 
 # Everything below the UI: sync engine, state reducer, transcript, cache.
 # `tls`: the push and file watch sockets reach an https server over wss (FR-S11, #1048).

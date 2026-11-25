@@ -21,7 +21,7 @@ use std::time::Duration;
 use axum::extract::{Path as AxPath, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{delete, post};
 use axum::{Json, Router};
 use ember_node::api::{self, Node};
 use ember_node::client::{ClientError, NodeClient};
@@ -103,12 +103,26 @@ async fn fake_extensions(
     (StatusCode::from_u16(status).unwrap(), Json(body)).into_response()
 }
 
+async fn fake_uninstall(
+    State(m): State<FakeManager>,
+    AxPath((runtime, extension)): AxPath<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    if !bearer_ok(&headers) {
+        return (StatusCode::UNAUTHORIZED, Json(json!({ "code": "unauthorized", "error": "bad token" }))).into_response();
+    }
+    m.seen.lock().unwrap().push((runtime, "uninstall".into(), Value::String(extension)));
+    let (status, body) = m.install_answer.lock().unwrap().clone();
+    (StatusCode::from_u16(status).unwrap(), Json(body)).into_response()
+}
+
 /// The fake manager on a loopback port: its url and its state.
 async fn start_manager() -> (String, FakeManager) {
     let m = FakeManager::new();
     let app = Router::new()
         .route("/api/editor/{runtime}/launch", post(fake_launch))
         .route("/api/editor/{runtime}/extensions", post(fake_extensions))
+        .route("/api/editor/{runtime}/extensions/{extension}", delete(fake_uninstall))
         .with_state(m.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -437,4 +451,46 @@ async fn fr_w4b_extensions_forward_to_the_manager() {
     let bad = NodeClient::new(&f.base, "wrong").unwrap();
     let (status, _) = bad.post_raw("/ide/extensions", &json!({ "id": "a.b" })).await.unwrap();
     assert_eq!(status, 401);
+}
+
+/// FR-W4c (D55): an uninstall is checked (400 for a bad id, nothing forwarded) and then forwarded
+/// to the manager's `DELETE /api/editor/ose/extensions/{extension}`, whose status and body come
+/// back unchanged; with no manager it is 503 like an install.
+#[tokio::test]
+async fn fr_w4c_uninstall_forwards_to_the_manager() {
+    let (url, m) = start_manager().await;
+    let f = start(EditorRelays::new(ManagerSource::fixed(url, MANAGER_TOKEN))).await;
+    let del = |client: NodeClient, ext: &'static str| async move {
+        client.request_raw(axum::http::Method::DELETE, &format!("/ide/extensions/{ext}"), None).await.unwrap()
+    };
+
+    *m.install_answer.lock().unwrap() = (200, json!({ "uninstalled": true, "id": "redhat.vscode-yaml", "output": "ok" }));
+    let (status, body) = del(f.client.clone(), "redhat.vscode-yaml").await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["uninstalled"], true);
+    {
+        let seen = m.seen.lock().unwrap();
+        let (runtime, what, sent) = seen.last().unwrap();
+        assert_eq!((runtime.as_str(), what.as_str()), ("ose", "uninstall"));
+        assert_eq!(*sent, json!("redhat.vscode-yaml"));
+    }
+
+    // A refusal of the manager keeps its status and body.
+    *m.install_answer.lock().unwrap() = (409, json!({ "code": "busy", "error": "an install is already running" }));
+    let (status, body) = del(f.client.clone(), "a.b").await;
+    assert_eq!(status, 409);
+    assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["code"], "busy");
+
+    // Bad ids never reach the manager.
+    let before = m.seen.lock().unwrap().len();
+    for bad in ["-a.b", "a.b%401.2.3", "nodot"] {
+        let (status, _) = del(f.client.clone(), bad).await;
+        assert_eq!(status, 400, "{bad}");
+    }
+    assert_eq!(m.seen.lock().unwrap().len(), before);
+
+    let none = start(EditorRelays::new(ManagerSource::none())).await;
+    let (status, body) = del(none.client.clone(), "a.b").await;
+    assert_eq!(status, 503);
+    assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["code"], "manager_not_installed");
 }

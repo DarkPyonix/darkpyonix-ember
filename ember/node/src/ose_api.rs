@@ -6,8 +6,9 @@
 //! | POST | `/ide/ose` | [`OseLaunchRequest`] | 200 [`OseLaunchResponse`] |
 //! | GET (WS) | `/ide/ose/{launch_id}/relay` | binary frames | binary frames |
 //! | POST | `/ide/extensions` | `{"id":"publisher.name","version":"1.2.3"}` | the manager's status and body |
+//! | DELETE | `/ide/extensions/{extension}` | none | the manager's status and body |
 //!
-//! All three sit behind the node's bearer token (and the peer allow-list over the transport), like
+//! All four sit behind the node's bearer token (and the peer allow-list over the transport), like
 //! every route but `/health`. The folder of a launch is checked by the path policy first (400 for a
 //! relative path or a file, 403 outside the roots, 404 when missing).
 //!
@@ -29,7 +30,7 @@ use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -117,6 +118,7 @@ pub(crate) fn routes() -> Router<Node> {
         .route("/ide/ose", post(launch))
         .route("/ide/ose/{launch_id}/relay", get(relay))
         .route("/ide/extensions", post(install_extension))
+        .route("/ide/extensions/{extension}", delete(uninstall_extension))
 }
 
 /// The node's answer for a manager that gave no launch (SPEC FR-W4b).
@@ -184,6 +186,23 @@ async fn install_extension(State(n): State<Node>, body: Bytes) -> Response {
         return ApiError::new(StatusCode::BAD_REQUEST, ErrorCode::BadRequest, m).into_response();
     }
     match n.editor().install_extension(OSE_RUNTIME, body.to_vec()).await {
+        Ok((status, answer)) => {
+            let status = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
+            (status, [(header::CONTENT_TYPE, "application/json")], answer).into_response()
+        }
+        Err(e) => manager_error(e).into_response(),
+    }
+}
+
+/// `DELETE /ide/extensions/{extension}`: checks the id (400 for a bad one), then forwards the
+/// uninstall to the manager's `DELETE /api/editor/ose/extensions/{extension}` and answers the
+/// manager's status and body unchanged. No manager: 503 `manager_not_installed`; no answer: 502
+/// `manager_unreachable`.
+async fn uninstall_extension(State(n): State<Node>, Path(extension): Path<String>) -> Response {
+    if let Err(m) = crate::ose::extension_spec(&extension, None) {
+        return ApiError::new(StatusCode::BAD_REQUEST, ErrorCode::BadRequest, m).into_response();
+    }
+    match n.editor().uninstall_extension(OSE_RUNTIME, &extension).await {
         Ok((status, answer)) => {
             let status = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
             (status, [(header::CONTENT_TYPE, "application/json")], answer).into_response()

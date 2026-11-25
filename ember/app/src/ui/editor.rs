@@ -86,16 +86,16 @@ pub fn fallback_sentence(fallback: &ember_editor::Fallback, has_vscode: bool) ->
 }
 
 /// What the hover card shows (SPEC FR-E3, #32 phase A step 7): the diagnostics at the position
-/// first, as Code-OSS's hover does, then each provider's Markdown as text. `None` when there is
-/// nothing to show.
+/// first, as Code-OSS's hover does, then each provider's Markdown, drawn from [`markdown_blocks`].
+/// `None` when there is nothing to show.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HoverCard {
     pub diagnostics: Vec<String>,
     pub contents: Vec<String>,
 }
 
-/// The card for `hover`, or `None` when it has no diagnostic and no non-empty content. Markdown is
-/// shown as its text for now (rendering it is a later step of the editor parity work).
+/// The card for `hover`, or `None` when it has no diagnostic and no non-empty content. Each
+/// content block is the provider's Markdown source; [`markdown_blocks`] turns it into what is drawn.
 pub fn hover_card(hover: &ember_editor::hover::HoverPopup) -> Option<HoverCard> {
     let diagnostics: Vec<String> = hover.diagnostics.iter().map(|d| d.message.clone()).filter(|m| !m.trim().is_empty()).collect();
     let contents: Vec<String> = hover.contents.iter().map(|m| m.value.trim().to_string()).filter(|v| !v.is_empty()).collect();
@@ -109,15 +109,277 @@ pub fn hover_key(generation: u64, hover: &ember_editor::hover::HoverPopup) -> (u
     (generation, at.line, at.col)
 }
 
-/// Where the card goes: under the hovered line, or above it when it is in the lower part of the
-/// window. `rect` is the position's rectangle in the window's dp.
-pub fn hover_card_style(rect: compose_rust::code::CodeRect) -> String {
-    let frame = format!("position:fixed; z-index:41; left:{:.0}px; max-width:480px; max-height:320px; overflow:auto; padding:var(--sp1);", rect.x.max(0.0));
-    if rect.y > 360.0 {
-        format!("{frame} top:auto; bottom:calc(100vh - {:.0}px);", rect.y - 2.0)
+/// The tallest the hover card grows, in dp; a longer card scrolls.
+pub const HOVER_CARD_MAX_HEIGHT: f32 = 320.0;
+
+/// Where the card goes: under the hovered line when the card fits below it in the window, else on
+/// the side with more room, as Code-OSS's hover does. `rect` is the position's rectangle in the
+/// window's dp and `window_height` the window's height in dp. A height of 0 (the renderer has not
+/// reported a size yet) places the card below.
+pub fn hover_card_style(rect: compose_rust::code::CodeRect, window_height: f32) -> String {
+    let frame = format!(
+        "position:fixed; z-index:41; left:{:.0}px; max-width:480px; max-height:{HOVER_CARD_MAX_HEIGHT:.0}px; overflow:auto; padding:var(--sp1);",
+        rect.x.max(0.0)
+    );
+    let below_top = rect.y + rect.height + 2.0;
+    let above_bottom = rect.y - 2.0;
+    let space_below = window_height - below_top;
+    let above = window_height > 0.0 && space_below < HOVER_CARD_MAX_HEIGHT && above_bottom > space_below;
+    if above {
+        format!("{frame} top:auto; bottom:calc(100vh - {above_bottom:.0}px);")
     } else {
-        format!("{frame} top:{:.0}px;", rect.y + rect.height + 2.0)
+        format!("{frame} top:{below_top:.0}px;")
     }
+}
+
+/// One run of inline Markdown in a hover card.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MdSpan {
+    Text(String),
+    Strong(String),
+    Emphasis(String),
+    Code(String),
+    /// A link's text and target. The card shows the text; the target is its tooltip.
+    Link { text: String, href: String },
+}
+
+/// One block of Markdown in a hover card.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MdBlock {
+    Heading { level: u8, spans: Vec<MdSpan> },
+    Paragraph(Vec<MdSpan>),
+    List { ordered: bool, items: Vec<Vec<MdSpan>> },
+    /// A fenced or indented code block: its info string (the language, may be empty) and text.
+    Code { lang: String, text: String },
+    Rule,
+}
+
+/// The blocks of `source`, the CommonMark subset language servers send in hovers: ATX headings,
+/// paragraphs, bullet and numbered lists, fenced code, thematic breaks, and inline code, strong,
+/// emphasis and links. Raw HTML is shown as text, never interpreted.
+pub fn markdown_blocks(source: &str) -> Vec<MdBlock> {
+    let mut blocks = Vec::new();
+    let mut para: Vec<String> = Vec::new();
+    let mut list: Option<(bool, Vec<String>)> = None;
+    let mut lines = source.lines();
+
+    fn flush(blocks: &mut Vec<MdBlock>, para: &mut Vec<String>, list: &mut Option<(bool, Vec<String>)>) {
+        if !para.is_empty() {
+            blocks.push(MdBlock::Paragraph(markdown_spans(&para.join(" "))));
+            para.clear();
+        }
+        if let Some((ordered, items)) = list.take() {
+            blocks.push(MdBlock::List { ordered, items: items.iter().map(|i| markdown_spans(i)).collect() });
+        }
+    }
+
+    while let Some(line) = lines.next() {
+        let trimmed = line.trim_start();
+        let indent = line.len() - trimmed.len();
+        if let Some(fence) = fence_marker(trimmed) {
+            flush(&mut blocks, &mut para, &mut list);
+            let lang = trimmed[fence.len()..].trim().to_string();
+            let mut body: Vec<&str> = Vec::new();
+            for next in lines.by_ref() {
+                let t = next.trim_start();
+                if t.starts_with(fence) && t[fence.len()..].trim().is_empty() {
+                    break;
+                }
+                body.push(next);
+            }
+            blocks.push(MdBlock::Code { lang, text: body.join("\n") });
+            continue;
+        }
+        if trimmed.is_empty() {
+            flush(&mut blocks, &mut para, &mut list);
+            continue;
+        }
+        if indent < 4 {
+            if let Some((level, text)) = heading(trimmed) {
+                flush(&mut blocks, &mut para, &mut list);
+                blocks.push(MdBlock::Heading { level, spans: markdown_spans(text) });
+                continue;
+            }
+            if is_rule(trimmed) {
+                flush(&mut blocks, &mut para, &mut list);
+                blocks.push(MdBlock::Rule);
+                continue;
+            }
+            if let Some((ordered, text)) = list_item(trimmed) {
+                if !para.is_empty() || list.as_ref().is_some_and(|(o, _)| *o != ordered) {
+                    flush(&mut blocks, &mut para, &mut list);
+                }
+                list.get_or_insert_with(|| (ordered, Vec::new())).1.push(text.to_string());
+                continue;
+            }
+        }
+        if let Some((_, items)) = list.as_mut() {
+            // A lazy continuation line belongs to the last item.
+            if let Some(last) = items.last_mut() {
+                last.push(' ');
+                last.push_str(trimmed);
+                continue;
+            }
+        }
+        if indent >= 4 && para.is_empty() {
+            let mut body = vec![&line[4..]];
+            // Indented code runs until a line that is not indented (blank lines inside are kept).
+            let mut rest: Vec<&str> = Vec::new();
+            for next in lines.by_ref() {
+                if next.trim().is_empty() {
+                    rest.push("");
+                    continue;
+                }
+                if next.len() - next.trim_start().len() >= 4 {
+                    body.append(&mut rest);
+                    body.push(&next[4..]);
+                } else {
+                    blocks.push(MdBlock::Code { lang: String::new(), text: body.join("\n") });
+                    body.clear();
+                    para.push(next.trim().to_string());
+                    break;
+                }
+            }
+            if !body.is_empty() {
+                blocks.push(MdBlock::Code { lang: String::new(), text: body.join("\n") });
+            }
+            continue;
+        }
+        para.push(trimmed.trim_end().to_string());
+    }
+    flush(&mut blocks, &mut para, &mut list);
+    blocks
+}
+
+/// The fence a line opens with (three or more backticks or tildes), if any.
+fn fence_marker(line: &str) -> Option<&str> {
+    for c in ['`', '~'] {
+        let n = line.chars().take_while(|&x| x == c).count();
+        if n >= 3 {
+            return Some(&line[..n]);
+        }
+    }
+    None
+}
+
+fn heading(line: &str) -> Option<(u8, &str)> {
+    let n = line.chars().take_while(|&c| c == '#').count();
+    if !(1..=6).contains(&n) {
+        return None;
+    }
+    let rest = &line[n..];
+    if !rest.is_empty() && !rest.starts_with(' ') && !rest.starts_with('\t') {
+        return None;
+    }
+    let text = rest.trim().trim_end_matches('#').trim_end();
+    Some((n as u8, text))
+}
+
+fn is_rule(line: &str) -> bool {
+    let compact: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+    compact.len() >= 3 && ['-', '*', '_'].iter().any(|&m| compact.chars().all(|c| c == m))
+}
+
+fn list_item(line: &str) -> Option<(bool, &str)> {
+    for marker in ["- ", "* ", "+ "] {
+        if let Some(rest) = line.strip_prefix(marker) {
+            return Some((false, rest.trim()));
+        }
+    }
+    let digits = line.chars().take_while(|c| c.is_ascii_digit()).count();
+    if (1..=9).contains(&digits) {
+        let rest = &line[digits..];
+        if let Some(text) = rest.strip_prefix(". ").or_else(|| rest.strip_prefix(") ")) {
+            return Some((true, text.trim()));
+        }
+    }
+    None
+}
+
+/// The inline runs of `text`: code spans, `**strong**` / `__strong__`, `*emphasis*` / `_emphasis_`,
+/// `[text](href)` links and backslash escapes. Markers that do not close are kept as text.
+pub fn markdown_spans(text: &str) -> Vec<MdSpan> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut spans: Vec<MdSpan> = Vec::new();
+    let mut plain = String::new();
+    let mut i = 0;
+    let push_plain = |spans: &mut Vec<MdSpan>, plain: &mut String| {
+        if !plain.is_empty() {
+            spans.push(MdSpan::Text(std::mem::take(plain)));
+        }
+    };
+    let find = |from: usize, pat: &[char]| -> Option<usize> {
+        (from..=chars.len().saturating_sub(pat.len())).find(|&j| chars[j..j + pat.len()] == *pat)
+    };
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\\' && i + 1 < chars.len() && chars[i + 1].is_ascii_punctuation() {
+            plain.push(chars[i + 1]);
+            i += 2;
+            continue;
+        }
+        if c == '`' {
+            let run = chars[i..].iter().take_while(|&&x| x == '`').count();
+            let fence: Vec<char> = vec!['`'; run];
+            if let Some(end) = find(i + run, &fence) {
+                push_plain(&mut spans, &mut plain);
+                let code: String = chars[i + run..end].iter().collect();
+                let code = if code.len() > 1 && code.starts_with(' ') && code.ends_with(' ') { code[1..code.len() - 1].to_string() } else { code };
+                spans.push(MdSpan::Code(code));
+                i = end + run;
+                continue;
+            }
+        }
+        if (c == '*' || c == '_') && i + 1 < chars.len() && chars[i + 1] == c {
+            if let Some(end) = find(i + 2, &[c, c]).filter(|&e| e > i + 2) {
+                push_plain(&mut spans, &mut plain);
+                spans.push(MdSpan::Strong(spans_text(&markdown_spans(&chars[i + 2..end].iter().collect::<String>()))));
+                i = end + 2;
+                continue;
+            }
+        }
+        // `_` only opens emphasis at a word boundary, so snake_case names stay as they are.
+        let boundary = c == '*' || i == 0 || !chars[i - 1].is_alphanumeric();
+        if (c == '*' || c == '_') && boundary && i + 1 < chars.len() && !chars[i + 1].is_whitespace() {
+            let close = (i + 2..chars.len()).find(|&j| {
+                chars[j] == c && !chars[j - 1].is_whitespace() && (c == '*' || j + 1 == chars.len() || !chars[j + 1].is_alphanumeric())
+            });
+            if let Some(end) = close {
+                push_plain(&mut spans, &mut plain);
+                spans.push(MdSpan::Emphasis(spans_text(&markdown_spans(&chars[i + 1..end].iter().collect::<String>()))));
+                i = end + 1;
+                continue;
+            }
+        }
+        if c == '[' {
+            if let Some(mid) = find(i + 1, &[']', '(']) {
+                if let Some(close) = (mid + 2..chars.len()).find(|&j| chars[j] == ')') {
+                    push_plain(&mut spans, &mut plain);
+                    let label: String = chars[i + 1..mid].iter().collect();
+                    let href: String = chars[mid + 2..close].iter().collect();
+                    let href = href.split_whitespace().next().unwrap_or("").to_string();
+                    spans.push(MdSpan::Link { text: spans_text(&markdown_spans(&label)), href });
+                    i = close + 1;
+                    continue;
+                }
+            }
+        }
+        plain.push(c);
+        i += 1;
+    }
+    push_plain(&mut spans, &mut plain);
+    spans
+}
+
+/// The text of `spans` without their markup.
+pub fn spans_text(spans: &[MdSpan]) -> String {
+    spans
+        .iter()
+        .map(|s| match s {
+            MdSpan::Text(t) | MdSpan::Strong(t) | MdSpan::Emphasis(t) | MdSpan::Code(t) => t.as_str(),
+            MdSpan::Link { text, .. } => text.as_str(),
+        })
+        .collect()
 }
 
 /// The label of the fallback button (SPEC FR-E10).
@@ -2223,10 +2485,62 @@ mod tests {
         assert_eq!(hover_card(&h), Some(HoverCard { diagnostics: vec!["expected ','".into()], contents: vec!["**probe**".into()] }));
         assert_eq!(hover_key(3, &h), (3, 1, 6));
         assert_eq!(hover_key(3, &hover(None, &[], &["x"])), (3, 1, 9));
-        let high = hover_card_style(compose_rust::code::CodeRect::new(100.0, 80.0, 2.0, 18.0));
+        let high = hover_card_style(compose_rust::code::CodeRect::new(100.0, 80.0, 2.0, 18.0), 800.0);
         assert!(high.contains("left:100px;") && high.contains("top:100px;"), "{high}");
-        let low = hover_card_style(compose_rust::code::CodeRect::new(-5.0, 600.0, 2.0, 18.0));
+        let low = hover_card_style(compose_rust::code::CodeRect::new(-5.0, 600.0, 2.0, 18.0), 800.0);
         assert!(low.contains("left:0px;") && low.contains("bottom:calc(100vh - 598px);"), "{low}");
+    }
+
+    /// SPEC FR-E3: the card flips above the line only when it does not fit below in the window
+    /// and there is more room above; the decision reads the window's height, not a fixed line.
+    #[test]
+    fn fr_e3_hover_card_flips_by_window_height() {
+        let at = |y: f32, h: f32| hover_card_style(compose_rust::code::CodeRect::new(10.0, y, 2.0, 18.0), h);
+        // 400 dp tall: 80 dp below, 298 above: above.
+        assert!(at(300.0, 400.0).contains("bottom:calc(100vh - 298px);"));
+        // The same line in a 1200 dp window: 800 dp below: below, where the old fixed 360 rule flipped it.
+        assert!(at(380.0, 1200.0).contains("top:400px;"));
+        assert!(at(500.0, 1200.0).contains("top:520px;"));
+        // Too little room either way: the side with more room.
+        assert!(at(100.0, 300.0).contains("top:120px;"));
+        assert!(at(180.0, 300.0).contains("bottom:calc(100vh - 178px);"));
+        // Size not reported yet: below.
+        assert!(at(700.0, 0.0).contains("top:720px;"));
+    }
+
+    /// SPEC FR-E3: provider Markdown is drawn as headings, paragraphs, lists, code and inline
+    /// styles, not as its source.
+    #[test]
+    fn fr_e3_hover_markdown_blocks_and_spans() {
+        use MdBlock as B;
+        use MdSpan as S;
+        let md = "## Heading ##\n\nUse **bold**, *italic*, `a_b()` and [docs](https://example.com \"t\").\nsnake_case_name stays.\n\n- one\n  more\n- two\n\n1. first\n2) second\n\n---\n```rust\nlet x = 1;\n\nlet y = 2;\n```\n\n    indented()\n\\*not em\\*";
+        let blocks = markdown_blocks(md);
+        assert_eq!(blocks[0], B::Heading { level: 2, spans: vec![S::Text("Heading".into())] });
+        assert_eq!(
+            blocks[1],
+            B::Paragraph(vec![
+                S::Text("Use ".into()),
+                S::Strong("bold".into()),
+                S::Text(", ".into()),
+                S::Emphasis("italic".into()),
+                S::Text(", ".into()),
+                S::Code("a_b()".into()),
+                S::Text(" and ".into()),
+                S::Link { text: "docs".into(), href: "https://example.com".into() },
+                S::Text(". snake_case_name stays.".into()),
+            ])
+        );
+        assert_eq!(blocks[2], B::List { ordered: false, items: vec![vec![S::Text("one more".into())], vec![S::Text("two".into())]] });
+        assert_eq!(blocks[3], B::List { ordered: true, items: vec![vec![S::Text("first".into())], vec![S::Text("second".into())]] });
+        assert_eq!(blocks[4], B::Rule);
+        assert_eq!(blocks[5], B::Code { lang: "rust".into(), text: "let x = 1;\n\nlet y = 2;".into() });
+        assert_eq!(blocks[6], B::Code { lang: String::new(), text: "indented()".into() });
+        assert_eq!(blocks[7], B::Paragraph(vec![S::Text("*not em*".into())]));
+        assert_eq!(blocks.len(), 8);
+        // Unclosed markers and HTML stay as text.
+        assert_eq!(markdown_spans("a ** b `c <b>x</b>"), vec![S::Text("a ** b `c <b>x</b>".into())]);
+        assert_eq!(markdown_blocks("#nospace"), vec![B::Paragraph(vec![S::Text("#nospace".into())])]);
     }
 
     /// SPEC FR-E10, Q-E2 (#32 phase A step 6): one sentence for the fallback, in 합니다체, naming a

@@ -1091,6 +1091,32 @@ fn fr_l33_1_the_safe_area_arriving_after_the_first_render_moves_the_top_bar() {
     compose_rust::window::reset_window_size();
 }
 
+fn compose_root() -> Element {
+    super::view::root_with(app)
+}
+
+// #301: the editor window is a Compose root with the page in an `HtmlView`. The page mounts there
+// with its own stylesheets and draws the project tree; the events of the code editor inside it reach
+// the page through the root since dioxus-compose a64f3b92 (its fr34_3 island tests). The rendered
+// window is a display check.
+#[test]
+fn fr_l31_the_editor_page_mounts_inside_a_compose_root() {
+    let _guard = crate::services::test_guard();
+    FOLDER.with(|f| *f.borrow_mut() = ROOT.to_string());
+    let (host, _commands) = EditorHost::fake();
+    {
+        let mut state = host.state.lock().unwrap();
+        state.connected = true;
+        state.listings.insert(ROOT.to_string(), vec![("a.rs".to_string(), ember_editor_conn::remote_fs::file_type::FILE)]);
+    }
+    FAKE.with(|f| *f.borrow_mut() = Some(host));
+    let mut root = dioxus_compose::Host::new(compose_root);
+    let bytes = root.rebuild().expect("the Compose root with the editor page did not build");
+    let batch = dioxus_compose::protocol::decode_batch(bytes).expect("decode");
+    let sent: Vec<String> = batch.iter().map(|m| format!("{m:?}")).collect();
+    assert!(sent.iter().any(|m| m.contains("\"a.rs\"")), "the project tree row a.rs is not in the root's first batch");
+}
+
 // SPEC FR-E3 (#32 phase A step 7): a hover update for the active document draws the hover card over
 // the editor once the editor has said where the hovered word is; a hover for another place, or
 // none, draws nothing.
@@ -1385,6 +1411,118 @@ fn sends_indentation_action(row: &str, ends_with: &str) {
     let sent = page.sent_indentation();
     assert_eq!(sent.len(), 1, "{row}: {sent:?}");
     assert!(sent[0].ends_with(ends_with), "{row}: {sent:?}");
+}
+
+#[test]
+fn fr_e3_hover_renders_markdown_instead_of_raw_syntax() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open();
+    page.click_row();
+    page.deliver(opened(7));
+    let word = ember_editor::WidgetRange::new(ember_editor::WidgetPos::new(0, 3), ember_editor::WidgetPos::new(0, 7));
+    let markdown = "## Heading\n\nUse **bold**, *italic*, `inline_code()`, and [docs](https://example.com).\n\n- first item\n- second item\n\n```rust\nlet x = 1;\n```";
+    let popup = ember_editor::hover::HoverPopup {
+        doc: uri().key(),
+        generation: 7,
+        pos: ember_editor::WidgetPos::new(0, 5),
+        range: Some(word),
+        diagnostics: Vec::new(),
+        contents: vec![ember_editor::hover::MarkdownString {
+            value: markdown.into(),
+            is_trusted: false,
+            support_theme_icons: false,
+            support_html: false,
+            raw: serde_json::Value::Null,
+        }],
+        complete: true,
+    };
+    page.deliver(SessionUpdate::Hover(popup));
+    super::set_hover_rect((7, 0, 3), Some(compose_rust::code::CodeRect::new(40.0, 60.0, 2.0, 18.0)));
+    page.redraw();
+    let card = page.find("data-ed", "hover-card").expect("the hover card is drawn");
+    let card_text = page.dom.document().get_node(card).expect("card node").text_content();
+    assert!(!card_text.contains("**bold**"), "raw bold markers must not appear: {card_text}");
+    assert!(!card_text.contains("`inline_code()`"), "raw backticks must not appear: {card_text}");
+    assert!(!card_text.contains("```rust"), "raw fence markers must not appear: {card_text}");
+    assert!(!card_text.contains("## Heading"), "raw heading markers must not appear: {card_text}");
+    assert!(card_text.contains("Heading"), "heading text present: {card_text}");
+    assert!(card_text.contains("bold"), "bold text present: {card_text}");
+    assert!(card_text.contains("italic"), "italic text present: {card_text}");
+    assert!(card_text.contains("inline_code()"), "inline code text present: {card_text}");
+    assert!(card_text.contains("let x = 1;"), "fenced code text present: {card_text}");
+    assert!(card_text.contains("first item"), "list item text present: {card_text}");
+    assert!(card_text.contains("docs"), "link text present: {card_text}");
+    super::set_hover_rect((0, 0, 0), None);
+}
+
+#[test]
+fn fr_e3_hover_positioning_uses_window_height() {
+    use compose_rust::protocol::HostEvent;
+    use compose_rust::{EventPayload, WindowHeightClass, WindowSizeClass};
+    let _guard = crate::services::test_guard();
+    let mut toolkit = compose_rust::Host::new(|| Box::new(compose_rust::Recomposer::new(toolkit_probe)));
+    toolkit.rebuild().expect("rebuild");
+    let mut page = Page::open();
+    page.click_row();
+    page.deliver(opened(7));
+    let word = ember_editor::WidgetRange::new(ember_editor::WidgetPos::new(0, 3), ember_editor::WidgetPos::new(0, 7));
+    let popup = ember_editor::hover::HoverPopup {
+        doc: uri().key(),
+        generation: 7,
+        pos: ember_editor::WidgetPos::new(0, 5),
+        range: Some(word),
+        diagnostics: Vec::new(),
+        contents: vec![ember_editor::hover::MarkdownString {
+            value: "fn main()".into(),
+            is_trusted: false,
+            support_theme_icons: false,
+            support_html: false,
+            raw: serde_json::Value::Null,
+        }],
+        complete: true,
+    };
+    page.deliver(SessionUpdate::Hover(popup));
+
+    // Short window (400px tall): rect.y = 300.0 has only 80px below vs 298px above, so it must flip above.
+    toolkit
+        .dispatch(HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
+            width_dp: 800.0,
+            height_dp: 400.0,
+            class: WindowSizeClass::from_width_dp(800.0),
+            height_class: WindowHeightClass::from_height_dp(400.0),
+            safe_area_top: 0.0,
+            safe_area_leading: 0.0,
+            safe_area_trailing: 0.0,
+            safe_area_bottom: 0.0,
+        }))
+        .expect("dispatch 400");
+    super::set_hover_rect((7, 0, 3), Some(compose_rust::code::CodeRect::new(40.0, 300.0, 2.0, 18.0)));
+    page.redraw();
+    let card = page.find("data-ed", "hover-card").expect("hover card in 400px window");
+    let short_style = page.attr(card, "style").unwrap_or_default();
+    assert!(short_style.contains("bottom:calc(100vh - 298px);"), "short window must flip above: {short_style}");
+
+    // Tall window (1200px tall): rect.y = 380.0 has 800px below, so it must stay below.
+    toolkit
+        .dispatch(HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
+            width_dp: 1200.0,
+            height_dp: 1200.0,
+            class: WindowSizeClass::from_width_dp(1200.0),
+            height_class: WindowHeightClass::from_height_dp(1200.0),
+            safe_area_top: 0.0,
+            safe_area_leading: 0.0,
+            safe_area_trailing: 0.0,
+            safe_area_bottom: 0.0,
+        }))
+        .expect("dispatch 1200");
+    super::set_hover_rect((7, 0, 3), Some(compose_rust::code::CodeRect::new(40.0, 380.0, 2.0, 18.0)));
+    page.redraw();
+    let card = page.find("data-ed", "hover-card").expect("hover card in 1200px window");
+    let tall_style = page.attr(card, "style").unwrap_or_default();
+    assert!(tall_style.contains("top:400px;"), "tall window must stay below: {tall_style}");
+
+    super::set_hover_rect((0, 0, 0), None);
+    compose_rust::window::reset_window_size();
 }
 
 #[test]

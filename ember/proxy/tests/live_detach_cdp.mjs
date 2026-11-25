@@ -328,7 +328,8 @@ async function startOse(oseBin, osePort, userDataDir, serverDataDir) {
     '--user-data-dir', userDataDir,
     '--server-data-dir', serverDataDir,
   ];
-  const proc = spawn(oseBin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  // Own process group: the launcher script starts a node child, and both must go at the end.
+  const proc = spawn(oseBin, args, { stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
   const logs = [];
   proc.stdout.on('data', (d) => logs.push(d.toString()));
   proc.stderr.on('data', (d) => logs.push(d.toString()));
@@ -360,7 +361,8 @@ async function startChrome(chromeBin, profileDir) {
   if (process.platform === 'linux') {
     args.push('--no-sandbox', '--disable-dev-shm-usage');
   }
-  const proc = spawn(chromeBin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  // Own process group: Chromium's helper processes must go with it.
+  const proc = spawn(chromeBin, args, { stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
   let stderrBuf = '';
   let wsUrl = null;
   proc.stderr.on('data', (d) => {
@@ -858,16 +860,47 @@ async function main() {
     console.log(`LIVE_DETACH_CDP_SUMMARY=${JSON.stringify(summary)}`);
   } finally {
     if (cdp) cdp.close();
-    if (proxyServer) proxyServer.close();
-    if (chromeProc && chromeProc.exitCode === null) chromeProc.kill('SIGTERM');
-    if (oseProc && oseProc.exitCode === null) oseProc.kill('SIGTERM');
+    if (proxyServer) {
+      proxyServer.close();
+      // Keep-alive and upgraded (WebSocket) connections would hold the server open.
+      if (typeof proxyServer.closeAllConnections === 'function') proxyServer.closeAllConnections();
+    }
+    await stopGroup(chromeProc, 'Chromium');
+    await stopGroup(oseProc, 'dpx-ose-server');
     if (process.env.EMBER_LIVE_KEEP !== '1') {
       fs.rmSync(tmpRoot, { recursive: true, force: true });
     }
   }
 }
 
-main().catch((err) => {
-  console.error('[live_detach_cdp] FAILED:', err);
-  process.exit(1);
-});
+// The whole process group gets SIGTERM, then SIGKILL after 3 s. Killing only the launcher left
+// its node child (and Chromium's helpers) holding the stdout pipes, so the script never exited
+// after a passing run and CI cancelled the job at its 1 h limit (em-train-22, run 45501476287).
+async function stopGroup(proc, label) {
+  if (!proc || proc.exitCode !== null || proc.signalCode !== null) return;
+  const signal = (sig) => {
+    try {
+      if (process.platform !== 'win32') process.kill(-proc.pid, sig);
+      else proc.kill(sig);
+    } catch (e) {
+      if (e.code !== 'ESRCH') console.error(`[live_detach_cdp] ${label} ${sig}:`, e.message);
+    }
+  };
+  signal('SIGTERM');
+  const exited = await Promise.race([
+    new Promise((r) => proc.once('exit', () => r(true))),
+    new Promise((r) => setTimeout(() => r(false), 3000)),
+  ]);
+  if (!exited) signal('SIGKILL');
+  proc.stdout?.destroy();
+  proc.stderr?.destroy();
+}
+
+// Exit explicitly: a pass must end the step even if a handle is still open somewhere.
+main().then(
+  () => process.exit(0),
+  (err) => {
+    console.error('[live_detach_cdp] FAILED:', err);
+    process.exit(1);
+  }
+);

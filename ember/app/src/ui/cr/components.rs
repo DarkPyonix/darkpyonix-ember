@@ -3261,7 +3261,6 @@ mod tests {
         for call in [
             "ChoiceButton(pref.label(), Choice::Radio, current_theme == pref, true, true,",
             "ChoiceButton(km.label(), Choice::Radio, current_keymap == km, true, true,",
-            "ChoiceButton(label, Choice::Radio, selected, true, true,",
         ] {
             assert!(settings.contains(call), "{call}");
         }

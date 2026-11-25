@@ -5443,7 +5443,10 @@ mod tests {
         assert!(conversation.contains("ide_prefs.ide_for("));
         assert!(conversation.contains("record_ide_pick(&ui_ide, &pick_project, kind);"));
         for (name, src) in [("session", session), ("project", project), ("conversation", conversation)] {
-            assert!(!src.contains(".ide_target"), "{name} reads no device-wide IDE");
+            // `.ide_targets` (the chooser's list, the per-project map) is fine; the old
+            // device-wide `ide_target` field is not.
+            let device_wide = src.match_indices(".ide_target").any(|(i, m)| !src[i + m.len()..].starts_with('s'));
+            assert!(!device_wide, "{name} reads no device-wide IDE");
         }
     }
 

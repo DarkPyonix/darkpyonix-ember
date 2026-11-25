@@ -2372,6 +2372,8 @@ pub mod diff_editor_view {
         } else {
             crate::ui::editor::diff_gutter_decorations(version, &markers)
         };
+        // Before `doc.decoration_bytes` and `doc.text` move out of `doc`.
+        let syntax_spans = crate::ui::editor::syntax_spans_at(&doc.syntax, doc.widget_version_of(doc.syntax.version));
         let decorations = crate::ui::editor::with_diff_line_tints(compose_rust::code::Decorations::from_bytes(doc.decoration_bytes), version, &markers);
         let change_s = s.clone();
         let change_uri = uri.clone();
@@ -2385,8 +2387,6 @@ pub mod diff_editor_view {
         let selection_uri = uri;
         let range_s = s.clone();
         let metrics_s = s.clone();
-        // Before `doc.text` moves into the widget below.
-        let syntax_spans = crate::ui::editor::syntax_spans_at(&doc.syntax, doc.widget_version_of(doc.syntax.version));
         rsx! { CodeEditor {
             key: "diff-{generation}", width: Some(box_w), height: Some(box_h), handle,
             text: doc.text, decorations, syntax_spans, tab_width: Some(doc.tab_width),

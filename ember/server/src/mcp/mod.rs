@@ -419,6 +419,7 @@ impl McpRegistry {
                 command: e.command,
                 args: e.args,
                 startup_timeout_secs: None,
+                always_load: false,
                 env: env.into_iter().collect(),
             });
         }

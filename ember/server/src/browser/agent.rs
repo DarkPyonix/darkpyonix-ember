@@ -245,6 +245,7 @@ pub fn mcp_server(base: &str, project: &str, mcp: BrowserMcp, runner: &Runner) -
         command,
         args,
         startup_timeout_secs: Some(MCP_STARTUP_TIMEOUT_SECS),
+        always_load: false,
         env: Vec::new(),
     }
 }

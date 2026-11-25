@@ -1199,6 +1199,7 @@ mod tests {
                 command: "/opt/bin/npx".into(),
                 args: vec!["-y".into(), "@playwright/mcp@latest".into(), "--cdp-endpoint=ws://h/c".into()],
                 startup_timeout_secs: Some(60),
+                always_load: false,
                 env: Vec::new(),
             }],
             ..Default::default()
@@ -1226,6 +1227,7 @@ mod tests {
             command: "gh-mcp".into(),
             args: vec![],
             startup_timeout_secs: None,
+            always_load: false,
             env: vec![("GITHUB_TOKEN".into(), val.into()), ("LOG".into(), "1".into())],
         };
         let req = StartRequest {
@@ -1568,6 +1570,7 @@ mod tests {
                 command: "/opt/ember/ember-a2a".into(),
                 args: vec!["mcp".into()],
                 startup_timeout_secs: Some(10),
+                always_load: false,
                 env: vec![
                     ("EMBER_URL".into(), "http://127.0.0.1:8740".into()),
                     ("EMBER_RUNTIME_TOKEN".into(), "tok-SECRET".into()),

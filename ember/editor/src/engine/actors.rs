@@ -20,7 +20,7 @@ use ember_editor_conn::rpc::{IncomingRequest, Reply};
 use ember_editor_conn::uri::UriComponents;
 use serde_json::{json, Value};
 
-use super::{Effect, ReadPurpose, SessionCore, SessionUpdate};
+use super::{Effect, Pending, ReadPurpose, SessionCore, SessionUpdate};
 use crate::codelens::CommandDto;
 use crate::registry::{InlineMeta, RegistryCall};
 use crate::replies::session_reply;
@@ -30,6 +30,11 @@ use crate::trust::TrustAnswer;
 /// extension host, which sends no `$update` for them, and the editor watches the workspace folder
 /// only, so a log file outside it has no change event to wait for.
 const LOG_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The workbench commands Ember's main thread runs itself, which `$getCommands` lists beside the
+/// extension host's registrations: `_setContext`, the id Code-OSS registers in its
+/// `CommandsRegistry` (`contextKeyService.ts`) and a no-op here (see `execute_command`).
+pub const WORKBENCH_COMMANDS: [&str; 1] = ["_setContext"];
 
 fn empty() -> Outcome {
     Outcome::Reply(Reply::Empty)
@@ -135,7 +140,7 @@ impl SessionCore {
             Some(TrustAnswer::Ask) => self.out.push(Effect::Ui(SessionUpdate::WorkspaceTrustRequested)),
             None => {
                 let reply = session_reply(r.proxy, &r.method, self.reply_seq, &self.language_ids);
-                self.respond(r.req, Ok(reply));
+                self.respond(r.req, reply);
             }
         }
     }
@@ -297,8 +302,15 @@ impl main_thread_commands::Commands for SessionCore {
         empty()
     }
 
+    /// Every known command id, as Code-OSS answers with the keys of its `CommandsRegistry`
+    /// (`mainThreadCommands.ts`): the workbench commands Ember runs ([`WORKBENCH_COMMANDS`]) and the
+    /// extension host's own, which `$registerCommand` added. Sorted, without duplicates.
     fn get_commands(&mut self, _cx: &Ctx, _args: main_thread_commands::GetCommandsArgs) -> Outcome {
-        Outcome::Reply(Reply::Json(json!([])))
+        let mut ids: Vec<&str> = self.registry.commands().collect();
+        ids.extend(WORKBENCH_COMMANDS);
+        ids.sort_unstable();
+        ids.dedup();
+        Outcome::Reply(Reply::Json(json!(ids)))
     }
 }
 
@@ -470,10 +482,28 @@ impl main_thread_search::Search for SessionCore {
         empty()
     }
 
+    /// The extension host's file search provider (registered at its start for the workspace's
+    /// scheme), which answers `$checkExists`. The remote scheme wins over `file`, as for text search.
+    fn register_file_search_provider(&mut self, _cx: &Ctx, args: main_thread_search::RegisterFileSearchProviderArgs) -> Outcome {
+        if args.scheme == ember_editor_conn::uri::SCHEME_REMOTE || (args.scheme == "file" && self.file_search_provider.is_none()) {
+            self.file_search_provider = Some(args.handle);
+        }
+        empty()
+    }
+
     fn unregister_provider(&mut self, _cx: &Ctx, args: main_thread_search::UnregisterProviderArgs) -> Outcome {
         if self.search_provider == Some(args.handle) {
             self.search_provider = None;
         }
+        if self.file_search_provider == Some(args.handle) {
+            self.file_search_provider = None;
+        }
+        empty()
+    }
+
+    /// Files found by a file search. Ember's only file search is the `exists` query of
+    /// `$checkExists`, whose answer is the reply's `limitHit`, so the files themselves are not needed.
+    fn handle_file_match(&mut self, _cx: &Ctx, _args: main_thread_search::HandleFileMatchArgs) -> Outcome {
         empty()
     }
 
@@ -705,9 +735,26 @@ impl main_thread_workspace::Workspace for SessionCore {
         self.trust_request("$requestResourceTrust", cx)
     }
 
-    /// `workspaceContains:` activation; `false` until Ember searches the remote filesystem by glob.
-    fn check_exists(&mut self, _cx: &Ctx, _args: main_thread_workspace::CheckExistsArgs) -> Outcome {
-        Outcome::Reply(Reply::Json(Value::Bool(false)))
+    /// `workspaceContains:` activation, as Code-OSS's `checkGlobFileExists`: a file search over the
+    /// folders through the extension host's own file search provider (the remote workspace's ripgrep),
+    /// stopping at the first file that matches an include glob; the answer comes with the provider's
+    /// reply (`on_check_exists_reply`). With no provider registered, or no folder, no
+    /// file can be found and the answer is `false`.
+    fn check_exists(&mut self, cx: &Ctx, args: main_thread_workspace::CheckExistsArgs) -> Outcome {
+        let not_found = Outcome::Reply(Reply::Json(Value::Bool(false)));
+        let folders: Vec<UriComponents> = match serde_json::from_value(args.folders) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!("ember-editor: cannot decode the folders of MainThreadWorkspace.$checkExists: {e}");
+                return not_found;
+            }
+        };
+        let Some(handle) = self.file_search_provider.filter(|_| !folders.is_empty()) else { return not_found };
+        self.search_session += 1;
+        let query = ember_editor_conn::search::exists_query(&folders, &args.includes);
+        let call = ember_editor_conn::search::provide_file_search_results(handle, self.search_session, query);
+        self.rpc_with(call, Pending::CheckExists { req: cx.req });
+        Outcome::Deferred
     }
 }
 

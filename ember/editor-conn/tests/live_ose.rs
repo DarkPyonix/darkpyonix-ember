@@ -293,10 +293,10 @@ enum DiagEvent {
 ///   would throw in callers that iterate it).
 /// * `MainThreadOutputService.$register` → the channel id string (`window.createOutputChannel`,
 ///   used by every language client for its log).
-fn live_reply(proxy: Option<&str>, method: &str, seq: u64) -> Reply {
+fn live_reply(proxy: Option<&str>, method: &str, seq: u64) -> exthost::ReplyResult {
     match (proxy, method) {
-        (Some("MainThreadLanguages"), "$getLanguages") => Reply::Json(json!(["plaintext", "json", "jsonc"])),
-        (Some("MainThreadOutputService"), "$register") => Reply::Json(json!(format!("ember-live-output-{seq}"))),
+        (Some("MainThreadLanguages"), "$getLanguages") => Ok(Reply::Json(json!(["plaintext", "json", "jsonc"]))),
+        (Some("MainThreadOutputService"), "$register") => Ok(Reply::Json(json!(format!("ember-live-output-{seq}")))),
         _ => exthost::default_reply(proxy, method),
     }
 }
@@ -397,7 +397,7 @@ async fn respond_loop(
                         Err(e) => eprintln!("[live-ose] cannot parse {name}: {e}; args {}", args_preview(&r.args)),
                     }
                 }
-                peer.respond(r.req, Ok(live_reply(r.proxy, &r.method, seq)));
+                peer.respond(r.req, live_reply(r.proxy, &r.method, seq));
             }
             RpcEvent::Cancel(_) => {}
             RpcEvent::Lost(reason) => {

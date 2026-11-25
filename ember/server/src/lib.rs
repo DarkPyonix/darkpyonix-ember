@@ -13,6 +13,7 @@ pub mod chatgpt;
 pub mod computers;
 pub mod devices;
 pub mod door;
+pub mod editor_settings;
 pub mod egress_proxy;
 pub mod enrol_door;
 pub mod events;

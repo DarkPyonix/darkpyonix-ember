@@ -43,6 +43,7 @@ pub mod jobs;
 pub mod keystore;
 pub mod metrics;
 pub mod editor_manager;
+pub mod editor_settings;
 pub mod ose;
 pub mod ose_api;
 pub mod policy;

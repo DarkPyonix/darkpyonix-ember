@@ -292,6 +292,7 @@ async fn serve_main() -> anyhow::Result<()> {
     let store_for_mcp = store.clone();
     let store_for_channels = store.clone();
     let store_for_guest = store.clone();
+    let store_for_editor = store.clone();
     // One `Enrol` for the whole process: the owner's routes (mint, confirm, deny) and the enrol door
     // (redeem, poll, from step C3a) share its failure windows and its pending-token map, which live per instance.
     let enrol = computers::enrol::Enrol::with_server_key(store.clone(), server_key, transport_on);
@@ -609,6 +610,14 @@ async fn serve_main() -> anyhow::Result<()> {
     let editor = Arc::new(ember_node::editor_manager::EditorRelays::new(
         ember_node::editor_manager::ManagerSource::discover(local_node_options.state_dir.clone()),
     ));
+    // FR-W7, FR-W7a (D56): the editor settings, applied to each computer through its manager; the
+    // local computer through the manager above, in this process.
+    let editor_settings = Arc::new(
+        ember_server::editor_settings::EditorSettingsService::new(store_for_editor, computers.clone(), editor.clone())
+            .with_local_state_dir(local_node_options.state_dir.clone()),
+    );
+    // FR-W7a: a computer registered or enrolled from now on gets its effective settings at once.
+    editor_settings.apply_on_registration();
     let transfers = ember_server::transfers::TransferManager::new(
         &data_dir,
         Some(devices.clone()),
@@ -647,6 +656,7 @@ async fn serve_main() -> anyhow::Result<()> {
         .merge(ember_server::api::integrations::router(sessions.clone(), computers.clone()))
         .merge(ember_server::api::ide::router_with_computers_and_editor(sessions.clone(), ide, computers.clone(), editor.clone()))
         .merge(ember_server::api::ide_extensions::router(computers.clone(), ose.clone()))
+        .merge(ember_server::editor_settings::router(editor_settings))
         .merge(ember_server::schedules::api::agent_router(scheduler.clone(), a2a.clone()))
         .merge(ember_server::schedules::api::router(scheduler))
         .merge(ember_server::mcp::api::router(mcp))

@@ -1,5 +1,6 @@
-//! `/exec-server`: the raw byte relay to `codex exec-server --listen stdio`, exercised with a
-//! fake codex (a shell script that checks its arguments and echoes stdin back).
+//! `/exec-server`: the relay to `codex exec-server --listen stdio`, exercised with a fake codex
+//! (a shell script that checks its arguments and echoes stdin back). Requests are screened
+//! (#1047, `exec_server_confine.rs`); these two pass and come back byte for byte.
 
 use std::time::Duration;
 

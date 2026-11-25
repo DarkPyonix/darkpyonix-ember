@@ -51,6 +51,8 @@ pub struct OwnerState {
     /// `remember(nodeId)`), and an empty text is not written at all, so clearing `custom` alone
     /// leaves the typed value on screen. Bumping this draws a fresh field that starts from
     /// `custom`, the way the toolkit says to show other text (`TextFieldScope::text`).
+    /// TODO(compose-rust#1075): drop this and the `key` around the field once a live field takes
+    /// a new `text` (and `""`) from composition.
     custom_gen: MutableState<u64>,
     /// An action is in flight: the buttons wait, so one tap is one request.
     busy: MutableState<bool>,

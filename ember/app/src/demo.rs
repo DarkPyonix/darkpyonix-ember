@@ -110,6 +110,8 @@ pub fn ide_launch_with(
             target("vscode", false),
             target("gateway", false),
         ],
+        // The demo has no editor settings record: the chooser opens until a pick (FR-W7b).
+        default_ide: None,
     }
 }
 

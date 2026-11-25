@@ -30,6 +30,7 @@ pub mod agents;
 pub mod vcs;
 pub mod settings;
 pub mod device_scope;
+pub mod editor_settings;
 pub mod this_device;
 pub mod self_update;
 pub mod owner_claim;

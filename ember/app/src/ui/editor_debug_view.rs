@@ -4,8 +4,9 @@
 //! `callStackView.ts`, `breakpointsView.ts`) and the panel's `repl.ts`. The session layer
 //! (`ember_editor::debugger`) loads the threads, the stack and the scopes of the top frame when a
 //! thread stops; this window asks for the variables of the scopes it shows expanded, evaluates
-//! the watch expressions and the console input, selects frames and threads, and edits the
-//! breakpoint registry. When the folder has no `launch.json` it offers to create one from the
+//! the watch expressions and the console input, selects frames and threads, sets a variable's
+//! value (Set Value: F2 or a double-click, when the adapter can), and edits the breakpoint
+//! registry. When the folder has no `launch.json` it offers to create one from the
 //! debuggers the running extensions contribute, as the viewlet's welcome view does.
 //!
 //! The window opens the way Code-OSS's defaults open it: the debug console on the first session
@@ -99,6 +100,13 @@ pub(crate) struct VarRow {
     pub reference: i64,
     pub expanded: bool,
     pub error: Option<String>,
+    /// The `variablesReference` of the container the variable is in (0 for a scope, a watch or a
+    /// console result).
+    pub container: i64,
+    pub evaluate_name: Option<String>,
+    /// Set Value is offered: the adapter can set it and it is not read-only (Code-OSS
+    /// `variablesView` `CONTEXT_SET_VARIABLE_SUPPORTED` and `readOnly`).
+    pub editable: bool,
 }
 
 impl VarRow {
@@ -159,6 +167,11 @@ pub(crate) struct DebugView {
     functions: Vec<FunctionBreakpoint>,
     filters: Vec<ExceptionFilter>,
     creating: Option<String>,
+    /// The variable row whose value is being edited (Set Value), by path.
+    editing: Option<String>,
+    /// Why setting a variable failed, by (session, container, name), shown in its row until it
+    /// is set again or the session moves on.
+    set_errors: HashMap<(String, i64, String), String>,
 }
 
 fn stopped(s: &SessionInfo) -> bool {
@@ -249,6 +262,8 @@ impl DebugView {
     }
 
     fn drop_session_data(&mut self, id: &str) {
+        self.set_errors.retain(|(s, _, _), _| s != id);
+        self.editing = None;
         self.threads.remove(id);
         self.stacks.retain(|(s, _), _| s != id);
         self.scopes.retain(|(s, _), _| s != id);
@@ -407,8 +422,100 @@ impl DebugView {
             DebugUpdate::StartFailed { message } => {
                 self.push_output("important", message, None, None);
             }
+            DebugUpdate::VariableSet {
+                session,
+                reference,
+                name,
+                result,
+            } => {
+                let key = (session.clone(), *reference, name.clone());
+                match result {
+                    Ok(_) => {
+                        self.set_errors.remove(&key);
+                        self.refresh_after_set(session, &mut fx);
+                    }
+                    Err(e) => {
+                        self.set_errors.insert(key, e.clone());
+                    }
+                }
+            }
+            // The editor's run controls take these (`editor_debug`).
+            DebugUpdate::RunTask { .. } | DebugUpdate::TaskFailed { .. } => {}
         }
         fx
+    }
+
+    /// After a variable was set, its scopes and the watch expressions are loaded again, as
+    /// Code-OSS's `viewModel.updateViews` makes the variables and watch views do: a change can
+    /// show anywhere.
+    fn refresh_after_set(&mut self, session: &str, fx: &mut Effects) {
+        self.variables.retain(|(s, _), _| s != session);
+        let Some((focused, _, Some(frame))) = self.focus() else {
+            return;
+        };
+        if focused != session {
+            return;
+        }
+        if let Some(scopes) = self.scopes.get(&(focused.clone(), frame)) {
+            for sc in scopes {
+                if sc.variables_reference > 0 && self.expanded.contains(&sc.name) {
+                    fx.requests.push(DebugRequest::Variables {
+                        session: focused.clone(),
+                        reference: sc.variables_reference,
+                    });
+                }
+            }
+        }
+        let ids: Vec<u64> = self.watches.iter().map(|w| w.id).collect();
+        for wid in ids {
+            if let Some(request) = self.evaluate_watch(wid) {
+                fx.requests.push(request);
+            }
+        }
+    }
+
+    /// Whether the session's adapter can set a variable.
+    fn can_set(&self, session: &str) -> bool {
+        self.session(session).is_some_and(|s| s.can_set_variables)
+    }
+
+    /// The row whose value is being edited, by path.
+    pub fn editing(&self) -> Option<&str> {
+        self.editing.as_deref()
+    }
+
+    /// Set Value on a row (F2 or a double-click): only a variable the adapter can set.
+    pub fn begin_edit(&mut self, row: &VarRow) -> bool {
+        if !row.editable || self.focus().is_none() {
+            return false;
+        }
+        self.editing = Some(row.path.clone());
+        true
+    }
+
+    pub fn cancel_edit(&mut self) {
+        self.editing = None;
+    }
+
+    /// The edited value is set when it changed, in the focused frame (`variablesView`
+    /// `onFinish`: `success && variable.value !== value && focusedStackFrame`).
+    pub fn submit_edit(&mut self, row: &VarRow, value: &str) -> Option<DebugRequest> {
+        if self.editing.as_deref() != Some(row.path.as_str()) {
+            return None;
+        }
+        self.editing = None;
+        let (_, _, frame_id) = self.focus()?;
+        if value == row.value || !row.editable {
+            return None;
+        }
+        Some(DebugRequest::SetVariable {
+            session: row.session.clone(),
+            reference: row.container,
+            name: row.name.clone(),
+            value: value.to_owned(),
+            evaluate_name: row.evaluate_name.clone(),
+            frame_id,
+        })
     }
 
     fn sessions_changed(
@@ -681,11 +788,19 @@ impl DebugView {
                 reference: 0,
                 expanded: false,
                 error: Some(error.clone()),
+                container: reference,
+                evaluate_name: None,
+                editable: false,
             }),
             Some(Ok(vars)) => {
+                let can_set = self.can_set(session);
                 for v in vars {
                     let child = format!("{path}{SEP}{}", v.name);
                     let expanded = v.variables_reference > 0 && self.expanded.contains(&child);
+                    let error = self
+                        .set_errors
+                        .get(&(session.to_owned(), reference, v.name.clone()))
+                        .cloned();
                     out.push(VarRow {
                         path: child.clone(),
                         depth,
@@ -695,7 +810,10 @@ impl DebugView {
                         session: session.to_owned(),
                         reference: v.variables_reference,
                         expanded,
-                        error: None,
+                        error,
+                        container: reference,
+                        evaluate_name: v.evaluate_name.clone(),
+                        editable: can_set && !v.read_only,
                     });
                     if expanded {
                         self.children(session, v.variables_reference, &child, depth + 1, out);
@@ -726,6 +844,9 @@ impl DebugView {
                 reference: sc.variables_reference,
                 expanded,
                 error: None,
+                container: 0,
+                evaluate_name: None,
+                editable: false,
             });
             if expanded {
                 self.children(&session, sc.variables_reference, &sc.name, 1, &mut out);
@@ -1032,6 +1153,9 @@ fn VarRows(
     prefix: String,
 ) -> Element {
     let mut view = view;
+    // The text of the value being edited (Set Value).
+    let mut draft = use_hook(|| Signal::new(String::new()));
+    let editing = view.read().editing().map(str::to_owned);
     rsx! {
         for (i, row) in rows.into_iter().enumerate() {
             {
@@ -1043,8 +1167,14 @@ fn VarRows(
                 };
                 let title = row.type_name.clone().unwrap_or_default();
                 let toggle_row = row.clone();
+                let key_row = row.clone();
+                let double_row = row.clone();
+                let submit_row = row.clone();
+                let edited = editing.as_deref() == Some(row.path.as_str());
+                let text = draft.read().clone();
                 rsx! {
                     div { key: "{row.path}", id: "{prefix}-{i}", class: "ed-tn ed-dbg-var", role: "treeitem",
+                        tabindex: "0",
                         "aria-expanded": if row.expandable() { "{row.expanded}" } else { "" },
                         "aria-label": "{label}", title: "{title}", style: "--d:{depth}",
                         onclick: move |_| {
@@ -1053,8 +1183,39 @@ fn VarRows(
                                 if let Some(request) = request { act.call(ViewAction::Debug(request)); }
                             }
                         },
+                        // Set Value: F2 or a double-click, as Code-OSS's variables view binds it.
+                        onkeydown: move |e| {
+                            if matches!(e.key(), Key::F2) && view.write().begin_edit(&key_row) {
+                                e.stop_propagation();
+                                draft.set(key_row.value.clone());
+                            }
+                        },
+                        ondoubleclick: move |_| {
+                            if view.write().begin_edit(&double_row) {
+                                draft.set(double_row.value.clone());
+                            }
+                        },
                         if row.expandable() { {chevron(row.expanded)} } else { span { class: "chev-sp" } }
-                        if let Some(error) = &row.error {
+                        if edited {
+                            span { class: "ed-dbg-name", "{row.name}" }
+                            form { class: "ed-dbg-edit",
+                                onsubmit: move |event| {
+                                    event.prevent_default();
+                                    let value = draft.read().clone();
+                                    let request = view.write().submit_edit(&submit_row, &value);
+                                    if let Some(request) = request { act.call(ViewAction::Debug(request)); }
+                                },
+                                input { id: "{prefix}-{i}-edit", class: "ed-dbg-input", "aria-label": "{row.name}의 값", value: "{text}", autofocus: true,
+                                    onclick: move |e| e.stop_propagation(),
+                                    oninput: move |e| draft.set(e.value()),
+                                    onkeydown: move |e| {
+                                        e.stop_propagation();
+                                        if matches!(e.key(), Key::Escape) { view.write().cancel_edit(); }
+                                    }
+                                }
+                            }
+                        } else if let Some(error) = &row.error {
+                            span { class: "ed-dbg-name", "{row.name}" }
                             span { class: "ed-dbg-err ellipsis", "{error}" }
                         } else {
                             span { class: "ed-dbg-name", "{row.name}" }
@@ -1189,7 +1350,7 @@ fn RunDebugWindow(
                                     Some(Err(e)) => (e.clone(), 0, true),
                                 };
                                 let session = view.read().result_session(&path).or_else(|| focus.as_ref().map(|f| f.0.clone())).unwrap_or_default();
-                                let row = VarRow { path: path.clone(), depth: 0, name: w.expression.clone(), value: value.clone(), type_name: None, session, reference, expanded, error: None };
+                                let row = VarRow { path: path.clone(), depth: 0, name: w.expression.clone(), value: value.clone(), type_name: None, session, reference, expanded, error: None, container: 0, evaluate_name: None, editable: false };
                                 let wid = w.id;
                                 let value_class = if error { "ed-dbg-err ellipsis" } else { "ed-dbg-val ellipsis" };
                                 rsx! {
@@ -1452,7 +1613,7 @@ fn DebugConsole(view: Signal<DebugView>, act: EventHandler<ViewAction>) -> Eleme
                             LineKind::Result(Ok(r)) => {
                                 let path = format!("console:{id}");
                                 let session = view.read().result_session(&path).unwrap_or_default();
-                                let row = VarRow { path: path.clone(), depth: 0, name: String::new(), value: r.result.clone(), type_name: r.type_name.clone(), session, reference: r.variables_reference, expanded, error: None };
+                                let row = VarRow { path: path.clone(), depth: 0, name: String::new(), value: r.result.clone(), type_name: r.type_name.clone(), session, reference: r.variables_reference, expanded, error: None, container: 0, evaluate_name: None, editable: false };
                                 let reference = r.variables_reference;
                                 let value = r.result.clone();
                                 rsx! {

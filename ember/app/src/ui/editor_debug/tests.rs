@@ -162,6 +162,8 @@ fn stopped_session() -> SessionInfo {
         },
         thread_id: Some(7),
         frame_id: None,
+        can_set_variables: false,
+        no_debug: false,
     }
 }
 
@@ -295,7 +297,8 @@ fn fr_l31_42_the_task_run_and_the_debug_start_sit_side_by_side() {
     assert_eq!(
         requests(),
         [DebugRequest::Start {
-            selector: ConfigSelector::Name("Python".into())
+            selector: ConfigSelector::Name("Python".into()),
+            no_debug: false,
         }]
     );
     // In the top bar's order: the picker, 실행, then 디버깅 시작.
@@ -342,7 +345,8 @@ fn fr_l31_42_f5_starts_or_continues_and_shift_f5_stops_the_session() {
     assert_eq!(
         idle.f5_command(),
         Some(DebugRequest::Start {
-            selector: ConfigSelector::Name("Python".into())
+            selector: ConfigSelector::Name("Python".into()),
+            no_debug: false,
         })
     );
     assert_eq!(idle.stop_command(), None);
@@ -431,7 +435,8 @@ fn fr_l31_42_run_button_starts_the_selected_configuration() {
     assert_eq!(
         requests(),
         [DebugRequest::Start {
-            selector: ConfigSelector::Name("Tests".into())
+            selector: ConfigSelector::Name("Tests".into()),
+            no_debug: false,
         }]
     );
 }
@@ -537,8 +542,8 @@ fn fr_l31_42_the_code_editor_passes_f5_and_shift_f5_on() {
     assert_eq!(vscode(&[], Key::Other, "a", false), None);
     assert_eq!(
         code_key_action(Keymap::VsCode, Os::Other, &[], Key::F5, "", true, false, false, false),
-        None,
-        "Ctrl+F5 is run without debugging, not F5"
+        Some(Action::RunConfig),
+        "Ctrl+F5 is Run Without Debugging, not F5"
     );
     assert_eq!(
         code_key_action(Keymap::JetBrains, Os::Other, &[], Key::F9, "", false, true, false, false),
@@ -555,4 +560,61 @@ fn fr_l31_42_the_code_editor_passes_f5_and_shift_f5_on() {
     assert_eq!(vscode(&unbound, Key::F5, "", false), None, "removed in keybindings.json");
     let moved = [rule("f8", "workbench.action.debug.start")];
     assert_eq!(vscode(&moved, Key::F8, "", false), Some(Action::Debug), "bound in keybindings.json");
+}
+
+// Ctrl+F5 (`workbench.action.debug.run`): the chosen configuration with `noDebug`, also while a
+// session runs or is stopped, as Code-OSS starts another session.
+#[test]
+fn fr_l31_42_ctrl_f5_runs_the_chosen_configuration_without_debugging() {
+    let run = Some(DebugRequest::Start {
+        selector: ConfigSelector::Name("Python".into()),
+        no_debug: true,
+    });
+    assert_eq!(configured(DebugView::default()).run_without_debugging_command(), run);
+    assert_eq!(configured(showing(stopped_session())).run_without_debugging_command(), run);
+    assert_eq!(configured(showing(running_session())).run_without_debugging_command(), run);
+    assert_eq!(DebugControls::default().run_without_debugging_command(), None, "no configuration");
+    // 디버깅 시작 and F5 still debug.
+    assert_eq!(
+        configured(DebugView::default()).run_command(),
+        Some(DebugRequest::Start { selector: ConfigSelector::Name("Python".into()), no_debug: false })
+    );
+}
+
+// A frame selected below the top one (Code-OSS `debug-focused-stack-frame-line`): its line gets a
+// tint and an arrow apart from the top frame's, which keeps its own.
+#[test]
+fn fr_l31_42_a_focused_lower_frame_is_tinted_apart_from_the_top_frame() {
+    use ember_editor::debugger::FrameInfo;
+    let frame = |id: i64, line: u32| FrameInfo {
+        id,
+        name: format!("f{id}"),
+        uri: Some(uri()),
+        source_name: None,
+        line,
+        column: 1,
+        hint: None,
+    };
+    let mut view = DebugView {
+        stopped_at: Some(stopped_at(3, 1)),
+        stack: vec![frame(1, 3), frame(2, 5)],
+        ..showing(SessionInfo { frame_id: Some(1), ..stopped_session() })
+    };
+    let top_only = stopped_line_decorations(&uri(), 4, &view, Decorations::default()).decorations();
+    assert_eq!(top_only, [Decoration::line_background(4, 2, 2, ColorRole::Tertiary)]);
+
+    view.sessions[0].frame_id = Some(2);
+    let both = stopped_line_decorations(&uri(), 4, &view, Decorations::default()).decorations();
+    assert_eq!(
+        both,
+        [
+            Decoration::line_background(4, 2, 2, ColorRole::Tertiary),
+            Decoration::line_background(4, 4, 4, FOCUSED_FRAME_TINT),
+        ]
+    );
+    assert_ne!(FOCUSED_FRAME_TINT, ColorRole::Tertiary);
+    let gutter = breakpoint_gutter(&uri(), "a\nb\nc\nd\ne\n", 0, &view, GutterDecorations::default()).decorations();
+    assert_eq!(char::from_u32(gutter[2].glyph), Some('▶'));
+    assert_eq!(char::from_u32(gutter[4].glyph), Some('▶'));
+    assert_ne!(gutter[2].color, gutter[4].color, "the two arrows differ");
 }

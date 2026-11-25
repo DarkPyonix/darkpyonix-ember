@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use ember_editor::debugger::{
     ConfigSelector, DebugRequest, DebugUpdate, EvalContext, EvalResult, SessionInfo, SessionState,
+    TaskChoice, TaskOutcome,
 };
 use ember_editor::languages::LanguageRegistry;
 use ember_editor::{BridgeAction, CoreOptions, Effect, Input, SessionCore, SessionUpdate, WidgetBridge};
@@ -53,20 +54,31 @@ struct Adapter {
     held_launch: Option<Value>,
     armed: bool,
     swallow_disconnect: bool,
+    /// Extra capabilities the `initialize` response offers.
+    caps: Value,
 }
 
 impl Adapter {
     fn answer(&mut self, req: &Value) -> Vec<Value> {
         let args = &req["arguments"];
         match req["command"].as_str().unwrap_or("") {
-            "initialize" => vec![resp(
-                req,
-                json!({
+            "initialize" => {
+                let mut caps = json!({
                     "supportsConfigurationDoneRequest": true,
                     "supportsFunctionBreakpoints": true,
                     "supportTerminateDebuggee": true,
                     "exceptionBreakpointFilters": [{"filter": "raised", "label": "Raised Exceptions", "default": false}],
-                }),
+                });
+                if let Some(extra) = self.caps.as_object() {
+                    for (k, v) in extra {
+                        caps[k] = v.clone();
+                    }
+                }
+                vec![resp(req, caps)]
+            }
+            "setVariable" | "setExpression" => vec![resp(
+                req,
+                json!({"value": args["value"], "type": "int", "variablesReference": 0}),
             )],
             "launch" | "attach" => {
                 self.held_launch = Some(req.clone());
@@ -375,7 +387,56 @@ impl Rig {
     fn start_python(&mut self) {
         self.debug(DebugRequest::Start {
             selector: ConfigSelector::Name("Python: Current File".into()),
+            no_debug: false,
         });
+    }
+
+    /// The task runs the session layer asked for: (label, the start waiting for it).
+    fn task_runs(&self) -> Vec<(String, Option<u64>)> {
+        self.ui
+            .iter()
+            .filter_map(|u| match u {
+                DebugUpdate::RunTask { label, start } => Some((label.clone(), *start)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The question a failed `preLaunchTask` asks, if one was asked.
+    fn task_question(&self) -> Option<(u64, String, Vec<TaskChoice>, bool)> {
+        self.ui.iter().rev().find_map(|u| match u {
+            DebugUpdate::TaskFailed {
+                start,
+                message,
+                choices,
+                error,
+            } => Some((*start, message.clone(), choices.clone(), *error)),
+            _ => None,
+        })
+    }
+
+    /// Start a configuration whose `preLaunchTask` is `build` and whose `postDebugTask` is
+    /// `cleanup`; returns the start id the session layer gave the task run.
+    fn start_with_tasks(&mut self) -> u64 {
+        self.debug(DebugRequest::Start {
+            selector: ConfigSelector::Config(json!({
+                "name": "Build and run",
+                "type": "debugpy",
+                "request": "launch",
+                "program": "${file}",
+                "preLaunchTask": "build",
+                "postDebugTask": "cleanup",
+            })),
+            no_debug: false,
+        });
+        let runs = self.task_runs();
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        assert_eq!(runs[0].0, "build");
+        runs[0].1.expect("the start waits for its preLaunchTask")
+    }
+
+    fn task_done(&mut self, start: u64, outcome: TaskOutcome) {
+        self.debug(DebugRequest::TaskDone { start, outcome });
     }
 
     fn toggle(&mut self, line: u32) {
@@ -457,6 +518,7 @@ fn fr_l31_42_a_missing_launch_json_an_unknown_name_and_an_unsupported_type_fail_
     rig.ui.clear();
     rig.debug(DebugRequest::Start {
         selector: ConfigSelector::Name("Nope".into()),
+        no_debug: false,
     });
     assert!(
         failure(&rig).unwrap().contains("no configuration"),
@@ -475,6 +537,7 @@ fn fr_l31_42_a_missing_launch_json_an_unknown_name_and_an_unsupported_type_fail_
     let mut rig = Rig::fixture();
     rig.debug(DebugRequest::Start {
         selector: ConfigSelector::Config(json!({"type": "nope", "request": "launch", "name": "x"})),
+        no_debug: false,
     });
     assert!(
         failure(&rig).unwrap().contains("'nope' is not supported"),
@@ -1219,5 +1282,247 @@ fn fr_l31_42_extension_host_calls_without_behaviour_are_counted_not_answered_wro
             .unimplemented_calls()
             .get(&(PROXY.to_owned(), "$registerDebugVisualizer".to_owned())),
         Some(&1)
+    );
+}
+
+// The preLaunchTask runs where `debugService.createSession` runs it: after the providers and the
+// substitution, before the second chain of providers and the adapter. The session starts only
+// once the task has ended well.
+#[test]
+fn fr_l31_42_pre_launch_task_runs_before_the_adapter_and_a_clean_exit_starts_it() {
+    let mut rig = Rig::fixture();
+    let start = rig.start_with_tasks();
+    let names = rig.methods();
+    assert!(names.contains(&"$resolveDebugConfiguration"), "{names:?}");
+    assert!(
+        !names.contains(&"$resolveDebugConfigurationWithSubstitutedVariables"),
+        "the second chain waits for the task: {names:?}"
+    );
+    assert!(!names.contains(&"$startDASession"));
+    assert!(rig.sessions().is_empty());
+
+    rig.task_done(start, TaskOutcome::Exited { code: Some(0), errors: 3 });
+    let names = rig.methods();
+    let second = names
+        .iter()
+        .position(|m| *m == "$resolveDebugConfigurationWithSubstitutedVariables")
+        .expect("the second chain ran");
+    let adapter = names.iter().position(|m| *m == "$startDASession").expect("the adapter started");
+    assert!(second < adapter, "{names:?}");
+    assert_eq!(rig.task_question(), None, "exit code 0 is a success whatever the problems say");
+    assert_eq!(rig.sessions().len(), 1);
+    assert_eq!(rig.dap_request("launch")["arguments"]["preLaunchTask"], "build");
+
+    // A second answer for the same start does nothing.
+    rig.calls.clear();
+    rig.task_done(start, TaskOutcome::Exited { code: Some(0), errors: 0 });
+    assert!(!rig.methods().contains(&"$startDASession"));
+}
+
+// A task that ends badly asks Code-OSS's question (Debug Anyway, Show Errors, Abort) with
+// Code-OSS's message; Debug Anyway starts the session and the other answers do not.
+#[test]
+fn fr_l31_42_a_failed_pre_launch_task_asks_whether_to_debug_anyway() {
+    let mut rig = Rig::fixture();
+    let start = rig.start_with_tasks();
+    rig.task_done(start, TaskOutcome::Exited { code: Some(2), errors: 0 });
+    let (asked, message, choices, error) = rig.task_question().expect("a question");
+    assert_eq!(asked, start);
+    assert_eq!(message, "The preLaunchTask 'build' terminated with exit code 2.");
+    assert_eq!(
+        choices,
+        vec![TaskChoice::DebugAnyway, TaskChoice::ShowErrors, TaskChoice::Abort]
+    );
+    assert!(!error, "a warning, not the error dialog");
+    assert!(!rig.methods().contains(&"$startDASession"));
+    rig.debug(DebugRequest::AnswerTask { start, choice: TaskChoice::DebugAnyway });
+    assert!(rig.methods().contains(&"$startDASession"));
+    assert_eq!(rig.sessions().len(), 1);
+
+    for choice in [TaskChoice::ShowErrors, TaskChoice::Abort] {
+        let mut rig = Rig::fixture();
+        let start = rig.start_with_tasks();
+        rig.task_done(start, TaskOutcome::Exited { code: Some(1), errors: 0 });
+        rig.debug(DebugRequest::AnswerTask { start, choice });
+        assert!(!rig.methods().contains(&"$startDASession"), "{choice:?}");
+        // The start is gone: a late Debug Anyway starts nothing.
+        rig.debug(DebugRequest::AnswerTask { start, choice: TaskChoice::DebugAnyway });
+        assert!(!rig.methods().contains(&"$startDASession"), "{choice:?}");
+        assert!(rig.sessions().is_empty());
+    }
+}
+
+// The messages and buttons of `runTaskAndCheckErrors` for each way a task can end.
+#[test]
+fn fr_l31_42_pre_launch_task_outcomes_follow_code_oss() {
+    let question = |outcome: TaskOutcome| {
+        let mut rig = Rig::fixture();
+        let start = rig.start_with_tasks();
+        rig.task_done(start, outcome);
+        let started = rig.methods().contains(&"$startDASession");
+        let failed = rig.ui.iter().any(|u| matches!(u, DebugUpdate::StartFailed { .. }));
+        (rig.task_question().map(|(_, m, c, e)| (m, c, e)), started, failed)
+    };
+    // Problems the matcher reported.
+    let (asked, started, _) = question(TaskOutcome::Exited { code: Some(1), errors: 2 });
+    assert_eq!(asked.unwrap().0, "Errors exist after running preLaunchTask 'build'.");
+    assert!(!started);
+    let (asked, _, _) = question(TaskOutcome::Exited { code: Some(1), errors: 1 });
+    assert_eq!(asked.unwrap().0, "Error exists after running preLaunchTask 'build'.");
+    // A background task that went inactive: only its problems count.
+    let (asked, started, _) = question(TaskOutcome::Ready { errors: 0 });
+    assert_eq!(asked, None);
+    assert!(started);
+    let (asked, started, _) = question(TaskOutcome::Ready { errors: 2 });
+    assert_eq!(asked.unwrap().0, "Errors exist after running preLaunchTask 'build'.");
+    assert!(!started);
+    // A task that could not run: the error dialog, with Configure Task and Cancel.
+    let (asked, started, _) = question(TaskOutcome::Failed {
+        message: "Could not find the task 'build'.".into(),
+    });
+    assert_eq!(
+        asked,
+        Some((
+            "Could not find the task 'build'.".to_owned(),
+            vec![TaskChoice::DebugAnyway, TaskChoice::ConfigureTask, TaskChoice::Cancel],
+            true
+        ))
+    );
+    assert!(!started);
+    // A task stopped without an exit code was cancelled: no question, no session, no error.
+    let (asked, started, failed) = question(TaskOutcome::Exited { code: None, errors: 0 });
+    assert_eq!(asked, None);
+    assert!(!started);
+    assert!(!failed);
+}
+
+// `$startDebugging` of an extension waits for the task and hears `false` when the start is
+// abandoned, as `createSession` returns false on a failed task.
+#[test]
+fn fr_l31_42_an_abandoned_pre_launch_task_answers_the_extension_false() {
+    let mut rig = Rig::fixture();
+    let config = json!({"type": "debugpy", "request": "launch", "name": "ext", "program": "/w/a.py", "preLaunchTask": "build"});
+    let req = rig.ext("$startDebugging", vec![Value::Null, config, json!({})]);
+    let start = rig.task_runs()[0].1.unwrap();
+    assert!(!rig.responses.iter().any(|(r, _)| *r == req), "it waits for the task");
+    rig.task_done(start, TaskOutcome::Exited { code: Some(1), errors: 0 });
+    rig.debug(DebugRequest::AnswerTask { start, choice: TaskChoice::Abort });
+    assert!(
+        matches!(rig.response(req), Ok(Reply::Json(Value::Bool(false)))),
+        "{:?}",
+        rig.response(req)
+    );
+}
+
+// `postDebugTask` runs when the session ends, and nothing waits for it.
+#[test]
+fn fr_l31_42_post_debug_task_runs_when_the_session_ends() {
+    let mut rig = Rig::fixture();
+    let start = rig.start_with_tasks();
+    rig.task_done(start, TaskOutcome::Exited { code: Some(0), errors: 0 });
+    assert_eq!(rig.task_runs().len(), 1, "only the preLaunchTask so far");
+    let id = rig.session_id();
+    rig.debug(DebugRequest::Stop { session: Some(id) });
+    let runs = rig.task_runs();
+    assert_eq!(runs.len(), 2, "{runs:?}");
+    assert_eq!(runs[1], ("cleanup".to_owned(), None));
+    assert!(rig.sessions().iter().all(|s| s.state == SessionState::Terminated));
+}
+
+// Run Without Debugging (Ctrl+F5) starts the configuration with `noDebug: true`, and the session
+// gets no breakpoints, at the start or later, as `debugService.sendBreakpoints` skips it.
+#[test]
+fn fr_l31_42_run_without_debugging_sends_no_debug_and_no_breakpoints() {
+    let mut rig = Rig::fixture();
+    rig.toggle(2);
+    rig.debug(DebugRequest::Start {
+        selector: ConfigSelector::Name("Python: Current File".into()),
+        no_debug: true,
+    });
+    let resolved = rig.calls_of("$resolveDebugConfiguration")[0].clone();
+    assert_eq!(resolved[2]["noDebug"], true, "the providers see it");
+    assert_eq!(rig.dap_request("launch")["arguments"]["noDebug"], true);
+    assert_eq!(
+        rig.dap_commands()[..3].to_vec(),
+        vec!["initialize", "launch", "configurationDone"],
+        "{:?}",
+        rig.dap_commands()
+    );
+    assert!(!rig.dap_commands().iter().any(|c| c.starts_with("set")));
+    let session = rig.sessions()[0].clone();
+    assert!(session.no_debug);
+    assert!(
+        !matches!(session.state, SessionState::Stopped { .. }),
+        "the breakpoint on line 2 was never sent"
+    );
+    rig.dap.clear();
+    rig.toggle(3);
+    assert!(rig.dap.is_empty(), "{:?}", rig.dap);
+
+    // A child the adapter starts without saying runs as its parent does.
+    let handle = rig.calls_of("$startDASession")[0][0].as_i64().unwrap();
+    rig.adapter_says(
+        handle,
+        json!({"type": "request", "seq": 50, "command": "startDebugging", "arguments": {"request": "launch", "configuration": {"name": "child"}}}),
+    );
+    let child = rig.calls_of("$startDASession").last().unwrap()[1].clone();
+    assert_eq!(child["configuration"]["noDebug"], true);
+}
+
+// setVariable from the Variables view: DAP `setVariable` when the adapter offers it, else
+// `setExpression` on the variable's `evaluateName`, else a refusal; the answer reaches the window.
+#[test]
+fn fr_l31_42_set_variable_follows_the_adapter_capabilities() {
+    let stopped_rig = |caps: Value| {
+        let mut rig = Rig::fixture();
+        rig.adapter.caps = caps;
+        rig.toggle(2);
+        rig.start_python();
+        assert!(matches!(rig.sessions()[0].state, SessionState::Stopped { .. }));
+        rig
+    };
+    let set = |rig: &mut Rig| {
+        let session = rig.session_id();
+        rig.debug(DebugRequest::SetVariable {
+            session,
+            reference: 100,
+            name: "x".into(),
+            value: "5".into(),
+            evaluate_name: Some("x".into()),
+            frame_id: Some(10),
+        });
+        rig.ui.iter().rev().find_map(|u| match u {
+            DebugUpdate::VariableSet { reference, name, result, .. } => {
+                Some((*reference, name.clone(), result.clone()))
+            }
+            _ => None,
+        })
+    };
+
+    let mut rig = stopped_rig(json!({"supportsSetVariable": true}));
+    assert!(rig.sessions()[0].can_set_variables);
+    assert_eq!(set(&mut rig), Some((100, "x".to_owned(), Ok("5".to_owned()))));
+    let request = rig.dap_request("setVariable");
+    assert_eq!(
+        request["arguments"],
+        json!({"variablesReference": 100, "name": "x", "value": "5"})
+    );
+
+    let mut rig = stopped_rig(json!({"supportsSetExpression": true}));
+    assert!(rig.sessions()[0].can_set_variables);
+    assert_eq!(set(&mut rig), Some((100, "x".to_owned(), Ok("5".to_owned()))));
+    assert_eq!(
+        rig.dap_request("setExpression")["arguments"],
+        json!({"expression": "x", "value": "5", "frameId": 10})
+    );
+
+    let mut rig = stopped_rig(json!({}));
+    assert!(!rig.sessions()[0].can_set_variables);
+    let (_, _, result) = set(&mut rig).unwrap();
+    assert!(result.is_err());
+    let commands = rig.dap_commands();
+    assert!(
+        !commands.iter().any(|c| c == "setVariable" || c == "setExpression"),
+        "{commands:?}"
     );
 }

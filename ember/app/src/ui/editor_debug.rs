@@ -8,8 +8,11 @@
 //!
 //! A thread that stops opens the file of its top frame, scrolls to the line and tints it
 //! ([`stopped_line_decorations`]), as Code-OSS's `focusStackFrame` and its
-//! `debug-top-stack-frame-line` decoration do. F5 and Shift+F5 also come from the focused code
-//! editor ([`code_key_action`]), which keeps the keys it does not pass on.
+//! `debug-top-stack-frame-line` decoration do; a frame selected below the top one gets a tint
+//! and an arrow of its own (`debug-focused-stack-frame-line`). F5, Shift+F5 and Ctrl+F5 (Run
+//! Without Debugging, a start with `noDebug`) also come from the focused code editor
+//! ([`code_key_action`]), which keeps the keys it does not pass on. The `preLaunchTask` and
+//! `postDebugTask` go through the task runner ([`super::editor_debug_tasks`]).
 
 use compose_rust::code::{Decoration, Decorations, GutterDecoration, GutterDecorations};
 use compose_rust::schema::ColorRole;
@@ -39,6 +42,8 @@ pub(crate) struct DebugControls {
     /// The bridge's view as of the last debug update, here so the page renders when it changes.
     view: DebugView,
     last_gutter_click: Option<(UriComponents, u32)>,
+    /// The question of a failed `preLaunchTask`, while it is open.
+    pub(crate) task_prompt: Option<super::editor_debug_tasks::TaskPrompt>,
 }
 
 impl DebugControls {
@@ -100,6 +105,16 @@ impl DebugControls {
     fn run_command(&self) -> Option<DebugRequest> {
         Some(DebugRequest::Start {
             selector: ConfigSelector::Name(self.selected.clone()?),
+            no_debug: false,
+        })
+    }
+
+    /// Ctrl+F5 (`workbench.action.debug.run`): the chosen configuration with `noDebug`, whether or
+    /// not a session runs, as Code-OSS starts another one.
+    fn run_without_debugging_command(&self) -> Option<DebugRequest> {
+        Some(DebugRequest::Start {
+            selector: ConfigSelector::Name(self.selected.clone()?),
+            no_debug: true,
         })
     }
 
@@ -117,6 +132,9 @@ impl DebugControls {
 
 /// A debug update the widget bridge passed on (`BridgeAction::Debug`), after it took it.
 pub(crate) fn on_debug(s: &Shared, update: &DebugUpdate) {
+    if super::editor_debug_tasks::on_debug(s, update) {
+        return;
+    }
     if let DebugUpdate::StartFailed { message } = update {
         crate::ui::cr::notice::post(format!("디버깅을 시작하지 못했습니다: {message}"));
         return;
@@ -140,20 +158,35 @@ fn reveal_target<'a>(
     after.filter(|at| before != Some(*at))
 }
 
+/// The colour of a focused frame below the top one: Code-OSS's
+/// `editor.focusedStackFrameHighlightBackground` has no role of its own yet (compose-rust#1082),
+/// so it is the quiet fill of the top frame's accent.
+const FOCUSED_FRAME_TINT: ColorRole = ColorRole::TertiaryContainer;
+/// The focused frame's arrow, apart from the top frame's (Code-OSS `debugStackframeFocused`).
+const FOCUSED_FRAME_ARROW: ColorRole = ColorRole::Secondary;
+
 /// The document's own decorations with the stopped line's tint after them, so it covers a diff
 /// tint on the same line (the renderer draws the last line background sent). Code-OSS draws the
-/// line in `editor.stackFrameHighlightBackground`; here it is the role of the gutter's arrow.
+/// line in `editor.stackFrameHighlightBackground`; here it is the role of the gutter's arrow. A
+/// frame the window focuses below the top one is tinted apart ([`FOCUSED_FRAME_TINT`]).
 fn stopped_line_decorations(
     uri: &UriComponents,
     version: u32,
     view: &DebugView,
     existing: Decorations,
 ) -> Decorations {
-    let Some(line) = view.stopped_line(uri).and_then(|line| line.checked_sub(1)) else {
+    let top = view
+        .stopped_line(uri)
+        .and_then(|line| line.checked_sub(1))
+        .map(|line| Decoration::line_background(version, line, line, ColorRole::Tertiary));
+    let focused = view
+        .focused_line(uri)
+        .and_then(|line| line.checked_sub(1))
+        .map(|line| Decoration::line_background(version, line, line, FOCUSED_FRAME_TINT));
+    if top.is_none() && focused.is_none() {
         return existing;
-    };
-    let tint = Decoration::line_background(version, line, line, ColorRole::Tertiary);
-    Decorations::new(existing.decorations().into_iter().chain([tint]))
+    }
+    Decorations::new(existing.decorations().into_iter().chain(top).chain(focused))
 }
 
 pub(crate) fn decorations(
@@ -218,7 +251,7 @@ pub(crate) fn code_key_action(
             KeyResolution::Unbound | KeyResolution::Command(_) => None,
         }
     };
-    action.filter(|a| matches!(a, Action::Debug | Action::Stop))
+    action.filter(|a| matches!(a, Action::Debug | Action::Stop | Action::RunConfig))
 }
 
 /// The focused code editor's key, when it is F5 or Shift+F5: consumed and run as the page's key
@@ -240,6 +273,7 @@ pub(crate) fn code_key(s: &Shared, event: &compose_rust::KeyEvent) -> bool {
     match action {
         Some(Action::Debug) => start_or_continue(s),
         Some(Action::Stop) => stop(s),
+        Some(Action::RunConfig) => run_without_debugging(s),
         _ => return false,
     }
     event.consume();
@@ -283,6 +317,7 @@ fn breakpoint_gutter(
     let by_line: std::collections::HashMap<_, _> =
         view.breakpoints_in(uri).map(|bp| (bp.line, bp)).collect();
     let stopped = view.stopped_line(uri);
+    let focused = view.focused_line(uri);
     // While a session runs, a breakpoint its adapter did not verify is hollow, as in Code-OSS.
     let in_session = view.active_session().is_some();
     // A blank glyph supplies a hit target on lines without a breakpoint. The other marks
@@ -291,6 +326,7 @@ fn breakpoint_gutter(
         let (glyph, color) = match by_line.get(&line) {
             // The stopped line's arrow covers its breakpoint; a click still toggles it.
             _ if stopped == Some(line) => ('▶', ColorRole::Tertiary),
+            _ if focused == Some(line) => ('▶', FOCUSED_FRAME_ARROW),
             None => (' ', ColorRole::Background),
             Some(bp) if !bp.enabled => ('●', ColorRole::Outline),
             Some(bp) if in_session && !bp.verified => ('○', ColorRole::Outline),
@@ -585,6 +621,24 @@ pub(crate) fn start_or_continue(s: &Shared) {
             crate::ui::cr::notice::post(reason);
             return;
         }
+    }
+    s.host.send(HostCommand::Debug(request));
+}
+
+/// Ctrl+F5 from the keymap (`Action::RunConfig`, `workbench.action.debug.run`): start the chosen
+/// configuration with `noDebug`.
+pub(crate) fn run_without_debugging(s: &Shared) {
+    let Some(request) = s.debug.peek().run_without_debugging_command() else {
+        crate::ui::cr::notice::post("시작할 실행 구성이 없습니다. .vscode/launch.json에 구성을 추가하세요.");
+        return;
+    };
+    if !s.host.state.lock().unwrap().connected {
+        crate::ui::cr::notice::post("서버에 연결되어 있지 않아 실행할 수 없습니다.");
+        return;
+    }
+    if let Some(reason) = blocked(s, Restricted::Debug) {
+        crate::ui::cr::notice::post(reason);
+        return;
     }
     s.host.send(HostCommand::Debug(request));
 }

@@ -685,12 +685,15 @@ impl HookCall {
     }
 }
 
-/// Whether `call` is the `channel_post` call of Ember's `ember-channels` server (FR-T12). agy keys
-/// approvals by the tool name `call_mcp_tool`, so an "allow always" for it would allow every MCP
-/// tool of the run: this call is allowed once at a time and never remembered.
+/// Whether `call` is a call of one of Ember's own MCP servers: `channel_post` of `ember-channels`
+/// (FR-T12) or `list_agents` / `send_message` of `ember` (FR-T2, #1045). agy keys approvals by the
+/// tool name `call_mcp_tool`, so an "allow always" for it would allow every MCP tool of the run:
+/// such a call is allowed once at a time and never remembered.
 fn is_channel_post(call: &HookCall) -> bool {
     call.tool == "call_mcp_tool"
-        && call.input["ServerName"].as_str().is_some_and(|s| s.eq_ignore_ascii_case(crate::a2a::CHANNEL_MCP_SERVER))
+        && call.input["ServerName"].as_str().is_some_and(|s| {
+            s.eq_ignore_ascii_case(crate::a2a::CHANNEL_MCP_SERVER) || s.eq_ignore_ascii_case(crate::a2a::NATIVE_MCP_SERVER)
+        })
 }
 
 /// `<conversation id>:<step index>`: both the tool call id and the approval id.
@@ -1822,6 +1825,7 @@ mod tests {
                 command: "npx".into(),
                 args: vec!["-y".into(), "x".into()],
                 startup_timeout_secs: Some(60),
+                always_load: false,
                 env: vec![("API_KEY".into(), "s3cret".into())],
             }],
             ..Default::default()
@@ -2038,6 +2042,7 @@ mod tests {
             command: "/opt/ember/ember-a2a".into(),
             args: vec!["mcp".into()],
             startup_timeout_secs: Some(10),
+            always_load: false,
             env: vec![
                 ("EMBER_URL".into(), "http://127.0.0.1:8740".into()),
                 ("EMBER_RUNTIME_TOKEN".into(), "tok-SECRET".into()),

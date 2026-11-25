@@ -234,6 +234,11 @@ pub struct McpServer {
     /// `--mcp-config` file, Codex from its own process environment through
     /// `mcp_servers.<name>.env_vars`, and `Debug` prints only the keys.
     pub env: Vec<(String, String)>,
+    /// Load the server's tools into the prompt upfront instead of behind tool search (FR-T2,
+    /// #1045). Only Claude Code has the switch: its stdio entry takes `alwaysLoad` (schema read
+    /// from the claude 2.1.332 binary). Codex, Antigravity and ACP agents have no deferred loading
+    /// on their MCP surfaces, so their adapters ignore it.
+    pub always_load: bool,
 }
 
 impl std::fmt::Debug for McpServer {
@@ -244,6 +249,7 @@ impl std::fmt::Debug for McpServer {
             .field("args", &self.args)
             .field("startup_timeout_secs", &self.startup_timeout_secs)
             .field("env_keys", &self.env.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>())
+            .field("always_load", &self.always_load)
             .finish()
     }
 }

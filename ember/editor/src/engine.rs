@@ -331,6 +331,8 @@ enum Pending {
     Command { id: String },
     /// `$provideTextSearchResults` of search `id`.
     Search { id: u64 },
+    /// `$provideFileSearchResults` answering the extension host's `$checkExists` request `req`.
+    CheckExists { req: u32 },
     /// A call of the language features (FR-L31.13).
     Language(language::PendingLang),
     /// A call of the webview model (FR-E8).
@@ -416,6 +418,9 @@ pub struct SessionCore {
     reopen: HashMap<String, Encoding>,
     /// Handle of the extension host's text search provider for the workspace's scheme (FR-E7).
     search_provider: Option<i64>,
+    /// Handle of the extension host's file search provider for the workspace's scheme
+    /// (`MainThreadWorkspace.$checkExists`, FR-E9).
+    file_search_provider: Option<i64>,
     search_session: i64,
     search: Option<ActiveSearch>,
     replaces: HashMap<u64, ReplaceJob>,
@@ -497,6 +502,7 @@ impl SessionCore {
             conflicts: HashSet::new(),
             reopen: HashMap::new(),
             search_provider: None,
+            file_search_provider: None,
             search_session: 0,
             search: None,
             replaces: HashMap::new(),
@@ -2049,6 +2055,7 @@ impl SessionCore {
                 }
             }
             Pending::Search { id } => self.on_search_reply(id, result),
+            Pending::CheckExists { req } => self.on_check_exists_reply(req, result),
             Pending::Language(pending) => self.on_language_reply(token, pending, result),
             Pending::Webview(pending) => {
                 let out = self.webviews.on_reply(pending, result);
@@ -2253,6 +2260,18 @@ impl SessionCore {
             Err(e) => SearchEnd::Failed(e),
         };
         self.ui(SessionUpdate::SearchDone { id, end });
+    }
+
+    /// The provider's answer to the file search of a `$checkExists` request (Code-OSS
+    /// `checkGlobFileExists`): `limitHit` means a file matched. A cancelled search is `false`; any
+    /// other failure rejects the request, as Code-OSS passes the search error on.
+    fn on_check_exists_reply(&mut self, req: u32, result: Result<Value, String>) {
+        let reply = match result {
+            Ok(v) => Ok(Reply::Json(Value::Bool(ember_editor_conn::search::SearchComplete::from_json(&v).limit_hit))),
+            Err(e) if e.contains("Canceled") => Ok(Reply::Json(Value::Bool(false))),
+            Err(e) => Err(Some(js_error("Error", &e))),
+        };
+        self.respond(req, reply);
     }
 
     fn on_replace(&mut self, id: u64, request: ReplaceRequest) {

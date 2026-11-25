@@ -129,13 +129,20 @@ pub const CODE_GUTTER_MIN_WIDTH: f32 = 56.0;
 pub const CODE_GUTTER_PADDING: f32 = 12.0;
 /// The room between the gutter and the text (FR-L31.27). The mockup's text starts 72px in: the
 /// 56px number column, then the 4px change marker and its 12px margin (`editor.css:73`), kept
-/// on every line. The toolkit adds its own 16dp change column and a fold column one row wide
-/// only where a file has them, and this inset after them, so no inset gives 72dp on a file
-/// with change bars and 78dp on one with folds; a fixed text start is a toolkit gap.
+/// on every line. The editor keeps a fold column, as Code-OSS does, which the mockup does not
+/// draw; the toolkit lays it out one row (22dp) wide, with its 16dp change column, after the
+/// number column and before this inset. With [`CODE_FIXED_GUTTER_COLUMNS`] both columns are
+/// kept on every file, so the text starts at the same 94dp (56 + 16 + 22 + 0) in every file:
+/// past the mockup's 72px by the fold column (#477).
 pub const CODE_TEXT_INSET: f32 = 0.0;
-/// The room above the first line (FR-L31.27): `editor.css:68` `.ed-code{padding:var(--sp2) 0}`.
-/// The code editor has no content padding, so the page leaves it above the widget's box.
-pub const CODE_TOP_PADDING_CSS: &str = "var(--sp2)";
+/// Whether the gutter keeps its fold and change columns on a file with no folds and no changes
+/// (FR-L31.27, #477): dioxus-compose's `fixed_gutter_columns`, so the text start does not move
+/// between files.
+pub const CODE_FIXED_GUTTER_COLUMNS: bool = true;
+/// The room above the first line and below the last, in dp (FR-L31.27): `editor.css:68`
+/// `.ed-code{padding:var(--sp2) 0}`, 8px (`style.css:19` `--sp2:8px`) inside what scrolls, so it
+/// scrolls away with the text as the mockup's does. The code editor's `content_padding_dp`.
+pub const CODE_CONTENT_PADDING: (f32, f32) = (8.0, 8.0);
 
 /// The colours of the code editor's own parts (FR-L31.27): line numbers in `muted`
 /// (`editor.css:71`), the caret line's number in `text` (`editor.css:72`). A part is a role of
@@ -305,8 +312,9 @@ mod tests {
         // `--sp3` is 12px (`style.css:19`).
         assert!(include_str!("../../assets/editor/style.css").contains("--sp3:12px"));
         assert_eq!(CODE_GUTTER_PADDING, 12.0);
-        assert!(css.contains(".ed-code{flex:1;overflow:auto;font:var(--code-fs)/var(--code-lh) var(--mono);padding:var(--sp2) 0"), "the mockup's top padding");
-        assert_eq!(CODE_TOP_PADDING_CSS, "var(--sp2)");
+        assert!(css.contains(".ed-code{flex:1;overflow:auto;font:var(--code-fs)/var(--code-lh) var(--mono);padding:var(--sp2) 0"), "the mockup's top and bottom padding");
+        assert!(include_str!("../../assets/editor/style.css").contains("--sp2:8px"));
+        assert_eq!(CODE_CONTENT_PADDING, (8.0, 8.0));
         // Line numbers `muted`, the caret line's number `text`, in both schemes.
         assert_eq!(CODE_EDITOR_COLORS.line_number, Some(ColorRole::SyntaxComment));
         assert_eq!(CODE_EDITOR_COLORS.current_line_number, Some(ColorRole::OnSurface));
@@ -329,10 +337,29 @@ mod tests {
                 assert!(source.contains(prop), "{file} passes `{prop}` to its CodeEditor");
             }
         }
+        // The padding lies inside the file's editor, which scrolls it away with the text, not in
+        // a band the page leaves above the editor's box.
+        let workbench = include_str!("editor_workbench.rs");
         assert!(
-            include_str!("editor_workbench.rs").contains("margin-top:{crate::ui::fonts::CODE_TOP_PADDING_CSS}"),
-            "the page leaves the top padding above the code editor's box"
+            workbench.contains("content_padding_dp: Some(crate::ui::fonts::CODE_CONTENT_PADDING)"),
+            "the file's CodeEditor takes the mockup's padding"
         );
+        assert!(!workbench.contains("margin-top:{crate::ui::fonts::"), "no band above the editor's box");
+    }
+
+    /// FR-L31.27 (#477): the editor keeps the fold column, as Code-OSS does, and the gutter keeps
+    /// its fold and change columns on every file, so the text starts at the same column in each.
+    #[test]
+    fn fr_l31_27_the_text_starts_at_a_fixed_column() {
+        assert!(std::hint::black_box(CODE_FIXED_GUTTER_COLUMNS), "the gutter keeps its fold and change columns");
+        assert_eq!(CODE_TEXT_INSET, 0.0);
+        let workbench = include_str!("editor_workbench.rs");
+        assert!(
+            workbench.contains("fixed_gutter_columns: crate::ui::fonts::CODE_FIXED_GUTTER_COLUMNS"),
+            "the file's CodeEditor keeps its gutter columns on every file"
+        );
+        // Folding stays: the editor is still given the document's folds.
+        assert!(workbench.contains("folds: crate::ui::editor::folds_from("), "the file's CodeEditor still folds");
     }
 
     /// FR-L31.28 (design review E2, #895): the caret line's band is the mockup's `surface-2`

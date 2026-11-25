@@ -467,6 +467,10 @@ fn editor_pane() -> Element {
         // FR-L31.27: the mockup's code type, row pitch and line number column (`editor.css:2`, `:71`).
         font_size: Some(crate::ui::fonts::CODE_FONT_SIZE), line_height: Some(crate::ui::fonts::CODE_LINE_HEIGHT),
         gutter_min_width: Some(crate::ui::fonts::CODE_GUTTER_MIN_WIDTH), gutter_padding: Some(crate::ui::fonts::CODE_GUTTER_PADDING), text_inset: Some(crate::ui::fonts::CODE_TEXT_INSET),
+        // FR-L31.27 (#477): the fold and change columns stay on every file, so the text starts at
+        // one column, and the mockup's 8px above the first line and below the last scrolls with it.
+        fixed_gutter_columns: crate::ui::fonts::CODE_FIXED_GUTTER_COLUMNS,
+        content_padding_dp: Some(crate::ui::fonts::CODE_CONTENT_PADDING),
         colors: crate::ui::fonts::CODE_EDITOR_COLORS,
         // FR-L31.13: the language chords from the focused code (compose-rust#554), Cmd/Ctrl+click to a
         // definition (compose-rust#555) and the caret a list opens under (compose-rust#553).
@@ -1835,9 +1839,9 @@ pub mod page {
                             else if let Some(pane) = current.as_deref().and_then(|p| webview_pane_for_tab(&s, p)) {
                                 {webview_pane_view(&s, &pane)}
                             }
-                            // FR-L31.27: the mockup's 8px above the first line (`editor.css:68`). The code editor has no
-                            // content padding, so the room is left above its box, in the panel's own `surface`.
-                            else if active.is_some() { WidgetView { app: editor_pane, style: "flex:1; min-width:0; height:calc(100% - {crate::ui::fonts::CODE_TOP_PADDING_CSS}); margin-top:{crate::ui::fonts::CODE_TOP_PADDING_CSS};" } }
+                            // FR-L31.27: the code editor fills the panel; the mockup's 8px padding (`editor.css:68`) is
+                            // its own `content_padding_dp`, which scrolls with the text.
+                            else if active.is_some() { WidgetView { app: editor_pane, style: "flex:1; min-width:0; height:100%;" } }
                             else if let Some(error) = current.as_ref().and_then(|p| open_error.clone().map(|e| (p.clone(), e))) {
                                 div { class: "ed-empty", role: "alert",
                                     b { "{crate::ui::editor::display_name(base_name(&error.0))} 파일을 열 수 없습니다" }

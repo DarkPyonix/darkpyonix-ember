@@ -241,4 +241,45 @@ mod tests {
         let css = include_str!("../../assets/editor/style.css");
         assert!(css.contains(".modal{position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.3);display:grid;place-items:center;padding:var(--sp4)}"), "style.css no longer has the .modal scrim");
     }
+
+    // #477 (PR #905's two choices, leader 2026-11-25: the look follows the mockup exactly): the
+    // scrim, the bottom-edge dialog at 560px and below, the panel's `surface` and the `muted` tone
+    // of tree rows and the find pill are the mockup's own values, in the stylesheets the window
+    // loads and in docs/design/mockup, character for character.
+    #[test]
+    fn fr_l31_16_the_scrim_and_muted_tone_are_the_mockups_values() {
+        let mock_style = include_str!("../../../../docs/design/mockup/style.css");
+        let mock_editor = include_str!("../../../../docs/design/mockup/editor.css");
+        let style = include_str!("../../assets/editor/style.css");
+        let editor = include_str!("../../assets/editor/editor.css");
+        for rule in [
+            // The scrim: black at .3 over the whole window.
+            ".modal{position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.3);display:grid;place-items:center;padding:var(--sp4)}",
+            // At 560px and below the dialog sits at the bottom edge.
+            "@media (max-width:560px){\n.modal{place-items:end center;padding:0}",
+            // The tokens, light then dark.
+            "--surface:#ffffff",
+            "--muted:#8f8b83",
+            "--surface:#1f1f1d",
+            "--muted:#8b877f",
+        ] {
+            assert!(mock_style.contains(rule), "the mockup's style.css has `{rule}`");
+            assert!(style.contains(rule), "the window's style.css has the mockup's `{rule}`");
+        }
+        for rule in [
+            // The code panel is `surface`.
+            "background:var(--surface);border:1px solid var(--line);border-radius:var(--rad);overflow:hidden}",
+            // Tree rows' icons and the find pill are `muted`.
+            ".ed-tn svg.i:not(.chev){color:var(--muted);width:15px;height:15px}",
+            ".ed-tn .chev{width:12px!important;height:12px!important;color:var(--muted);",
+            "border-radius:var(--pill);background:var(--surface);color:var(--muted);cursor:pointer;font-size:var(--fs-sm)",
+        ] {
+            assert!(mock_editor.contains(rule), "the mockup's editor.css has `{rule}`");
+            assert!(editor.contains(rule), "the window's editor.css has the mockup's `{rule}`");
+        }
+        // The muted icon tone strokes in exactly the `--muted` value of each palette.
+        assert_eq!(crate::ui::editor_icons::token("--muted", false), Some("#8f8b83"));
+        assert_eq!(crate::ui::editor_icons::token("--muted", true), Some("#8b877f"));
+        assert_eq!(crate::ui::editor_icons::icon_stroke("folder.muted"), ("folder", "--muted"));
+    }
 }

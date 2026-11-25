@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::wire::{Project, Push, SessionRecord, SessionStatus, StoredEvent, TeamView};
+use crate::wire::{Project, Push, Schedule, ScheduleRun, SessionRecord, SessionStatus, StoredEvent, TeamView};
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum DecodeError {
@@ -65,15 +65,48 @@ struct ProjectDeletedBody {
 }
 
 #[derive(Deserialize)]
+struct ScheduleBody {
+    schedule: Schedule,
+}
+
+#[derive(Deserialize)]
+struct ScheduleDeletedBody {
+    id: String,
+    #[serde(default)]
+    project: String,
+}
+
+#[derive(Deserialize)]
+struct ScheduleRunBody {
+    run: ScheduleRun,
+}
+
+#[derive(Deserialize)]
+struct ComputerStatusBody {
+    computer_id: String,
+    #[serde(default)]
+    reachable: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct TransferRef {
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct TransferUpdatedBody {
+    transfer: TransferRef,
+}
+
+#[derive(Deserialize)]
 struct LaggedBody {
     #[serde(default)]
     missed: u64,
 }
 
-/// Push types the server sends that this client knows about and ignores for now: the
-/// schedule pushes (FR-A8) have no client UI yet. Skipped quietly, unlike an unknown type.
-pub const SKIPPED_TYPES: &[&str] =
-    &["schedule_created", "schedule_updated", "schedule_deleted", "schedule_run"];
+/// Push types the server sends that this client knows about and ignores for now. Skipped
+/// quietly, unlike an unknown type. Empty since the schedule pushes are decoded (PR-1, #1049).
+pub const SKIPPED_TYPES: &[&str] = &[];
 
 /// Decode one push text frame. 
 pub fn decode(text: &str) -> Result<Push, DecodeError> {
@@ -112,6 +145,30 @@ pub fn decode(text: &str) -> Result<Push, DecodeError> {
         "channel_message" => {
             let b: ChannelMessageBody = serde_json::from_value(value).map_err(malformed)?;
             Ok(Push::ChannelMessage { channel_id: b.channel_id, message: b.message })
+        }
+        "schedule_created" => {
+            let b: ScheduleBody = serde_json::from_value(value).map_err(malformed)?;
+            Ok(Push::ScheduleCreated { schedule: b.schedule })
+        }
+        "schedule_updated" => {
+            let b: ScheduleBody = serde_json::from_value(value).map_err(malformed)?;
+            Ok(Push::ScheduleUpdated { schedule: b.schedule })
+        }
+        "schedule_deleted" => {
+            let b: ScheduleDeletedBody = serde_json::from_value(value).map_err(malformed)?;
+            Ok(Push::ScheduleDeleted { id: b.id, project: b.project })
+        }
+        "schedule_run" => {
+            let b: ScheduleRunBody = serde_json::from_value(value).map_err(malformed)?;
+            Ok(Push::ScheduleRun { run: b.run })
+        }
+        "computer_status" => {
+            let b: ComputerStatusBody = serde_json::from_value(value).map_err(malformed)?;
+            Ok(Push::ComputerStatus { computer_id: b.computer_id, reachable: b.reachable })
+        }
+        "transfer_updated" => {
+            let b: TransferUpdatedBody = serde_json::from_value(value).map_err(malformed)?;
+            Ok(Push::TransferUpdated { id: b.transfer.id })
         }
         "lagged" => {
             let b: LaggedBody = serde_json::from_value(value).map_err(malformed)?;
@@ -215,11 +272,51 @@ mod tests {
         assert!(matches!(p, Push::SessionCreated { session } if !session.pinned && session.account_id.is_none()));
         // A type this client does not know is reported, and the push loop skips it.
         assert_eq!(decode(r#"{"type":"future_thing"}"#), Err(DecodeError::UnknownType("future_thing".into())));
-        // The schedule pushes (FR-A8) are known and skipped on purpose.
+        // A schedule push without its body is malformed, not skipped (PR-1, #1049).
+        assert!(matches!(decode(r#"{"type":"schedule_run","run":{"id":"r"}}"#), Err(DecodeError::Malformed(_))));
+    }
+
+    /// The reachability and transfer pushes (FR-L3, FR-L27.8) decode to the computer's id and
+    /// reachability and the transfer's id; anything else in them is ignored (PR-1, #1049).
+    #[test]
+    fn pr_1_client_decodes_reachability_and_transfer_pushes() {
         assert_eq!(
-            decode(r#"{"type":"schedule_run","run":{"id":"r"}}"#),
-            Err(DecodeError::Skipped("schedule_run".into()))
+            decode(r#"{"type":"computer_status","computer_id":"studio","reachable":false,"error":"timed out","name":"x"}"#),
+            Ok(Push::ComputerStatus { computer_id: "studio".into(), reachable: Some(false) })
         );
+        assert_eq!(
+            decode(r#"{"type":"computer_status","computer_id":"studio"}"#),
+            Ok(Push::ComputerStatus { computer_id: "studio".into(), reachable: None })
+        );
+        assert_eq!(
+            decode(r#"{"type":"transfer_updated","transfer":{"id":"t1","state":"receiving","received":5,"size":9}}"#),
+            Ok(Push::TransferUpdated { id: "t1".into() })
+        );
+        assert!(matches!(decode(r#"{"type":"transfer_updated","id":"t1"}"#), Err(DecodeError::Malformed(_))));
+        assert!(matches!(decode(r#"{"type":"computer_status","reachable":true}"#), Err(DecodeError::Malformed(_))));
+    }
+
+    /// The schedule pushes (FR-A8) are decoded, not skipped (PR-1, #1049).
+    #[test]
+    fn pr_1_client_decodes_schedule_pushes() {
+        let schedule = r#"{"id":"sch1","project":"acme","agent":"codex","prompt":"p","kind":{"type":"cron","expr":"0 9 * * *","tz":"UTC"},
+            "target":{"type":"new"},"created_at":1,"updated_at":1}"#;
+        for kind in ["schedule_created", "schedule_updated"] {
+            let p = decode(&format!(r#"{{"type":"{kind}","schedule":{schedule}}}"#)).unwrap_or_else(|e| panic!("{kind}: {e}"));
+            match p {
+                Push::ScheduleCreated { schedule } | Push::ScheduleUpdated { schedule } => assert_eq!(schedule.id, "sch1"),
+                other => panic!("{kind}: {other:?}"),
+            }
+        }
+        assert_eq!(
+            decode(r#"{"type":"schedule_deleted","id":"sch1","project":"acme"}"#),
+            Ok(Push::ScheduleDeleted { id: "sch1".into(), project: "acme".into() })
+        );
+        let p = decode(
+            r#"{"type":"schedule_run","run":{"id":"r1","schedule_id":"sch1","scheduled_at":5,"started_at":5,"status":"running"}}"#,
+        );
+        assert!(matches!(p, Ok(Push::ScheduleRun { ref run }) if run.id == "r1" && run.schedule_id == "sch1"), "{p:?}");
+        assert!(SKIPPED_TYPES.is_empty());
     }
 
     #[test]

@@ -30,6 +30,11 @@ pub const SESSION_MENU: &str = "세션 메뉴";
 pub const OPEN_SCREEN: &str = "화면 열기";
 /// The back button of a phone detail view (`.icon-btn.sm.backbtn`, #885).
 pub const BACK: &str = "뒤로";
+/// The three buttons of the session view switcher (`.seg.viewseg`). The phone drops their
+/// visible text, so these are their only names there.
+pub const VIEW_MULTI: &str = "멀티";
+pub const VIEW_SINGLE: &str = "싱글";
+pub const VIEW_STATUS: &str = "상태";
 /// The scroll arrows of the project screen's computer strip (FR-L26, #671).
 pub const SCROLL_LEFT: &str = "왼쪽으로 스크롤";
 pub const SCROLL_RIGHT: &str = "오른쪽으로 스크롤";

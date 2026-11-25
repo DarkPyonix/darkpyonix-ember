@@ -2313,6 +2313,8 @@ pub fn SingleView(session: &str, focus: Option<String>, on_back: impl Fn() + Clo
 
     { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().fill_max_height(), content = move || {
             let sid_row = sid.clone();
+            let sid_comp = sid.clone();
+            let sid_actions = sid.clone();
             let sid_p = sid.clone();
             let sid_sh = sid.clone();
             let info_btn = info_open.clone();
@@ -2362,6 +2364,8 @@ pub fn SingleView(session: &str, focus: Option<String>, on_back: impl Fn() + Clo
                                     } else {
                                         { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                                     }
+                                    super::conversation::SessionComputerMenu(&sid_comp, true);
+                                    super::conversation::ConversationActionsMenu(&sid_actions);
                                     let io = info_btn.clone();
                                     let pv = pv_btn.clone();
                                     IconButton(IconRole::Sidebar, true, move || {
@@ -3630,6 +3634,14 @@ pub fn StatusView(
         }) };
 }
 
+fn view_name(v: SessionView) -> &'static str {
+    match v {
+        SessionView::Multi => super::a11y::VIEW_MULTI,
+        SessionView::Single => super::a11y::VIEW_SINGLE,
+        SessionView::Status => super::a11y::VIEW_STATUS,
+    }
+}
+
 fn view_icon_svg(v: SessionView) -> &'static str {
     match v {
         SessionView::Multi => ICON_GRID_SVG,
@@ -3671,7 +3683,8 @@ fn ViewSeg(
                 if full_width {
                     item_m = item_m.weight(1.0);
                 }
-                Clickable(
+                NamedClickable(
+                    view_name(v),
                     item_m,
                     Alignment::Center,
                     move || cb(v),
@@ -5371,6 +5384,28 @@ mod tests {
     }
 
     #[Composable]
+    fn host_view_seg_compact() {
+        ViewSeg(SessionView::Multi, true, true, |_| {});
+    }
+
+    #[test]
+    fn fr_l18_compact_view_buttons_have_an_accessible_name() {
+        let _guard = crate::services::test_guard();
+        let sent = PaneTabSent::of(host_view_seg_compact);
+        for v in SessionView::ALL {
+            assert!(!view_name(v).is_empty());
+            let named: Vec<u32> = sent.names.iter().filter(|(_, n)| n == view_name(v)).map(|(id, _)| *id).collect();
+            assert!(
+                named.iter().any(|id| sent.mods(*id).iter().any(|m| m.starts_with("Semantics") && m.contains("Button"))),
+                "no button named {:?} for {v:?}: names {:?}, modifiers {:?}",
+                view_name(v),
+                sent.names,
+                sent.modifiers
+            );
+        }
+    }
+
+    #[Composable]
     fn host_pane_tab_alone() {
         PaneTabChip("작업 1", 2, true, false, || {}, || {});
     }
@@ -5386,18 +5421,25 @@ mod tests {
         clicked: Vec<u32>,
         parents: Vec<(u32, u32)>,
         modifiers: Vec<(u32, String)>,
+        /// Accessible names: a name is a node property, not part of the semantics modifier.
+        names: Vec<(u32, String)>,
     }
 
     impl PaneTabSent {
         fn of(content: fn()) -> Self {
             let mut host = Host::new(move || Box::new(Recomposer::new(content)));
             let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
-            let mut sent = PaneTabSent { clicked: Vec::new(), parents: Vec::new(), modifiers: Vec::new() };
+            let mut sent = PaneTabSent { clicked: Vec::new(), parents: Vec::new(), modifiers: Vec::new(), names: Vec::new() };
             for m in batch.iter() {
                 match m {
                     Mutation::SetProp { node_id, property: compose_rust::PropertyKind::OnClick, .. } => sent.clicked.push(*node_id),
                     Mutation::Insert { parent_id, node_id, .. } => sent.parents.push((*node_id, *parent_id)),
                     Mutation::SetModifier { node_id, modifier, .. } => sent.modifiers.push((*node_id, format!("{modifier:?}"))),
+                    Mutation::SetProp {
+                        node_id,
+                        property: compose_rust::PropertyKind::AccessibleName,
+                        value: compose_rust::protocol::PropertyValue::String(name),
+                    } => sent.names.push((*node_id, name.to_string())),
                     _ => {}
                 }
             }
@@ -5686,5 +5728,77 @@ mod tests {
         }
 
         compose_rust::window::reset_window_size();
+    }
+
+    #[test]
+    fn fr_l10_4_single_view_topbar_renders_anchored_session_action_popovers() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+        shared_ui().update_prefs(|p| p.session_view = Some("single".to_string()));
+        services().open_session("demo-s1");
+
+        let mut host = Host::new(|| Box::new(Recomposer::new(host_session_single)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        crate::ui::window_size::set_opened_for_test(None);
+        shared_ui().update_prefs(|p| p.session_view = None);
+        compose_rust::window::reset_window_size();
+
+        let popover_ids: Vec<u32> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::Create { node_id, widget } if format!("{widget:?}") == "Popover" => {
+                    Some(*node_id)
+                }
+                _ => None,
+            })
+            .collect();
+
+        let popover_props: Vec<String> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetProp { node_id, property, value } if popover_ids.contains(node_id) => {
+                    Some(format!("{property:?}={value:?}"))
+                }
+                _ => None,
+            })
+            .collect();
+
+        for name in [
+            super::super::a11y::MORE,
+            super::super::a11y::COMPUTER_PICKER,
+            super::super::a11y::IDE_PICKER,
+        ] {
+            assert!(
+                popover_props.iter().any(|p| p.contains(name)),
+                "visible single session layout must emit an anchored Popover named '{name}', got {popover_props:?}"
+            );
+        }
+
+        let all_texts = texts(&batch);
+        for action in [
+            "대화 메뉴",
+            "고정",
+            "내보내기",
+            super::super::ko::FORK_MENU_LABEL,
+            super::super::ko::approve_all_menu_label(false),
+        ] {
+            assert!(
+                all_texts.iter().any(|t| t == action),
+                "visible single session topbar must expose menu action '{action}', got {all_texts:?}"
+            );
+        }
+
+        let has_dialog_or_sheet = batch.iter().any(|m| {
+            matches!(
+                m,
+                Mutation::Create { widget, .. }
+                    if matches!(format!("{widget:?}").as_str(), "Dialog" | "Sheet")
+            )
+        });
+        assert!(
+            !has_dialog_or_sheet,
+            "desktop session single view must not emit a centred Dialog or Sheet for popover menus"
+        );
     }
 }

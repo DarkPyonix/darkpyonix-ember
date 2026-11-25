@@ -4263,7 +4263,12 @@ mod tests {
         use compose_rust::schema::{SEMANTICS_DISABLED_SHIFT, SEMANTICS_FOCUSED_SHIFT, SEMANTICS_HIDDEN_BIT, SEMANTICS_SELECTED_SHIFT};
         assert_eq!(entries.len(), titles.len(), "{look}: one entry per option");
         for (e, title) in entries.iter().zip(titles) {
-            assert!(is_under(nodes, text_node(nodes, title), e.id), "{look}: {title} is the entry's text, in order");
+            // The field above the menu shows the current option too, so look for the title under this entry.
+            let want = format!("Text=String({title:?})");
+            assert!(
+                nodes.iter().any(|n| n.props.contains(&want) && is_under(nodes, n, e.id)),
+                "{look}: {title} is the entry's text, in order"
+            );
             assert!(e.props.iter().any(|p| p.starts_with("OnClick=")), "{look}: {title} is pressable, so it takes focus");
             let (_, s) = semantics_state(e).expect("entry semantics");
             assert_ne!(tri_state(s, SEMANTICS_DISABLED_SHIFT), Some(true), "{look}: {title} is not disabled");

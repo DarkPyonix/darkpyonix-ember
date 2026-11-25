@@ -507,7 +507,13 @@ pub fn syntax_spans(syntax: &ember_editor::SyntaxRuns) -> compose_rust::code::Sy
 pub fn syntax_spans_at(syntax: &ember_editor::SyntaxRuns, version: u32) -> compose_rust::code::SyntaxSpans {
     use compose_rust::code::{CodeRange, SyntaxSpan, SyntaxSpans};
     SyntaxSpans::new(
-        syntax.runs.iter().map(|r| SyntaxSpan::role(version, CodeRange::of(r.line, r.start, r.line, r.end), colour_role(r.role))),
+        // Comments italic and types at weight 500, as the editor mockup draws them (#477): the
+        // toolkit's default style for each colour role.
+        syntax.runs.iter().map(|r| {
+            let role = colour_role(r.role);
+            SyntaxSpan::role(version, CodeRange::of(r.line, r.start, r.line, r.end), role)
+                .with_style(compose_rust::highlight::style_for_role(role))
+        }),
     )
 }
 
@@ -2623,6 +2629,22 @@ mod tests {
         assert_eq!(spans.len(), 2);
         assert!(spans.iter().all(|s| s.version == 7));
         assert!(syntax_spans(&ember_editor::SyntaxRuns::default()).is_empty());
+    }
+
+    #[test]
+    fn fr_l31_editor_comments_are_italic_and_types_weight_500() {
+        // #477: the mockup's `.tok-c` is italic and `.tok-t` is 500; other runs keep the body style.
+        use compose_rust::code::SyntaxFontStyle;
+        use ember_editor::textmate::{DocRun, SyntaxRole};
+        let run = |role| DocRun { line: 0, start: 0, end: 3, role };
+        let syntax = ember_editor::SyntaxRuns {
+            version: 1,
+            runs: vec![run(SyntaxRole::Comment), run(SyntaxRole::Type), run(SyntaxRole::Keyword)],
+        };
+        let spans = syntax_spans(&syntax).spans();
+        assert_eq!(spans[0].style, SyntaxFontStyle::NORMAL.italic());
+        assert_eq!(spans[1].style, SyntaxFontStyle::NORMAL.weight(500));
+        assert_eq!(spans[2].style, SyntaxFontStyle::NORMAL);
     }
 
     #[test]

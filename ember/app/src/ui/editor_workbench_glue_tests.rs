@@ -695,13 +695,13 @@ fn page_box(page: &Page, node: NodeId) -> (f32, f32, f32, f32) {
     (x, y, size.width, size.height)
 }
 
-// FR-L31.40 (#301): the code editor's box is the editor pane under the breadcrumb row less the
-// 8 px above the first line (FR-L31.27), and ends where the pane does, above the bottom panel: the
+// FR-L31.40 (#301): the code editor's box is the editor pane under the breadcrumb row (the 8 px
+// above the first line is the editor's own content padding since #477, FR-L31.27), and ends where the pane does, above the bottom panel: the
 // box `use_widget_box` hands the editor is the area the reader sees, so a line the editor counts
 // as on screen is drawn there. The window measured the same (pane 1054x456 at 337,135 and box
 // 1054x448 at 1440x900); this keeps the stylesheet and the pane's inline sizes from drifting.
 #[test]
-fn fr_l31_40_the_code_editor_box_is_the_pane_under_the_breadcrumb_less_the_top_room() {
+fn fr_l31_40_the_code_editor_box_is_the_pane_under_the_breadcrumb() {
     let _guard = crate::services::test_guard();
     let mut page = Page::open_styled();
     page.click_row();
@@ -718,7 +718,7 @@ fn fr_l31_40_the_code_editor_box_is_the_pane_under_the_breadcrumb_less_the_top_r
         assert!(p.3 > 0.0 && w.3 > 0.0, "laid out {at}");
         assert!(close(p.1, c.1 + c.3), "the pane starts under the breadcrumb row {at}");
         assert!(close(w.0, p.0) && close(w.2, p.2), "the box is the pane's width {at}");
-        assert!(close(w.1, p.1 + 8.0), "8 px above the box {at}");
+        assert!(close(w.1, p.1), "the box starts at the pane's top; the 8 px is padding inside the editor {at}");
         assert!(close(w.1 + w.3, p.1 + p.3), "the box ends where the pane does {at}");
         assert!(w.1 + w.3 <= b.1 + 0.5, "the box ends above the bottom panel {at}");
     }

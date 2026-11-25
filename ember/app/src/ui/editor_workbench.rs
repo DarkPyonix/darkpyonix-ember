@@ -1382,15 +1382,75 @@ pub mod page {
         if at != key {
             return rsx! {};
         }
-        let style = crate::ui::editor::hover_card_style(rect);
+        let height = crate::ui::window_size::current_window_size().height_dp;
+        let style = crate::ui::editor::hover_card_style(rect, height);
         rsx! {
             div { class: "ed-menu", role: "tooltip", "aria-label": "호버 정보", "data-ed": "hover-card", style: "{style}",
                 for (i, line) in card.diagnostics.iter().enumerate() {
                     div { key: "d{i}", style: "padding:var(--sp1) var(--sp3); color:var(--danger);", "{line}" }
                 }
-                for (i, block) in card.contents.iter().enumerate() {
-                    div { key: "c{i}", style: "padding:var(--sp1) var(--sp3); white-space:pre-wrap;", "{block}" }
+                for (i, source) in card.contents.iter().enumerate() {
+                    div { key: "c{i}", style: "padding:var(--sp1) var(--sp3);",
+                        for (j, block) in crate::ui::editor::markdown_blocks(source).iter().enumerate() {
+                            div { key: "b{j}", {hover_markdown_block(block)} }
+                        }
+                    }
                 }
+            }
+        }
+    }
+
+    /// One Markdown block of a hover card (SPEC FR-E3), drawn as elements: the provider's text is
+    /// never interpreted as HTML.
+    fn hover_markdown_block(block: &crate::ui::editor::MdBlock) -> Element {
+        use crate::ui::editor::MdBlock;
+        match block {
+            MdBlock::Heading { level, spans } => {
+                let size = if *level <= 2 { "1.05em" } else { "inherit" };
+                rsx! { div { role: "heading", "aria-level": "{level}", style: "font-weight:var(--fw-semibold); font-size:{size}; margin:var(--sp1) 0;", {hover_markdown_spans(spans)} } }
+            }
+            MdBlock::Paragraph(spans) => rsx! { div { style: "margin:var(--sp1) 0; white-space:normal;", {hover_markdown_spans(spans)} } },
+            MdBlock::List { ordered, items } => {
+                let rows: Vec<(String, Element)> = items
+                    .iter()
+                    .enumerate()
+                    .map(|(i, item)| (if *ordered { format!("{}.", i + 1) } else { "\u{2022}".to_owned() }, hover_markdown_spans(item)))
+                    .collect();
+                rsx! {
+                    div { role: "list", style: "margin:var(--sp1) 0;",
+                        for (i, (marker, body)) in rows.into_iter().enumerate() {
+                            div { key: "{i}", role: "listitem", style: "display:flex; gap:var(--sp2);",
+                                span { style: "color:var(--muted);", "{marker}" }
+                                span { {body} }
+                            }
+                        }
+                    }
+                }
+            }
+            MdBlock::Code { lang, text } => rsx! {
+                div { "data-lang": "{lang}", style: "margin:var(--sp1) 0; padding:var(--sp1) var(--sp2); background:var(--surface-2); border-radius:var(--r-xs); font-family:var(--mono); font-size:var(--fs-xs); white-space:pre; overflow-x:auto;", "{text}" }
+            },
+            MdBlock::Rule => rsx! { div { role: "separator", style: "border-top:1px solid var(--line); margin:var(--sp1) 0;" } },
+        }
+    }
+
+    /// The inline runs of one hover Markdown block.
+    fn hover_markdown_spans(spans: &[crate::ui::editor::MdSpan]) -> Element {
+        use crate::ui::editor::MdSpan;
+        const CODE: &str = "font-family:var(--mono); font-size:var(--fs-xs); background:var(--surface-2); border-radius:var(--r-xs); padding:0 2px;";
+        let runs: Vec<(String, &'static str, String)> = spans
+            .iter()
+            .map(|span| match span {
+                MdSpan::Text(t) => (t.clone(), "", String::new()),
+                MdSpan::Strong(t) => (t.clone(), "font-weight:var(--fw-semibold);", String::new()),
+                MdSpan::Emphasis(t) => (t.clone(), "font-style:italic;", String::new()),
+                MdSpan::Code(t) => (t.clone(), CODE, String::new()),
+                MdSpan::Link { text, href } => (text.clone(), "color:var(--c-blue); text-decoration:underline;", href.clone()),
+            })
+            .collect();
+        rsx! {
+            for (i, (text, style, href)) in runs.into_iter().enumerate() {
+                span { key: "{i}", style: "{style}", title: "{href}", "{text}" }
             }
         }
     }

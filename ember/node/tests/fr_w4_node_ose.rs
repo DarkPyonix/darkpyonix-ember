@@ -486,6 +486,62 @@ esac
     assert!(started.elapsed() < Duration::from_secs(30), "took {:?}", started.elapsed());
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn fr_w4b_node_ide_extensions_uninstalls_and_shares_mutex() {
+    let f = start(|dir, data| {
+        let script = dir.join("fake-ose");
+        common::write_exec_ready(
+            &script,
+            r##"#!/bin/sh
+case "$1:$2" in
+  --install-extension:slow.ext) sleep 2; echo "installed $2" ;;
+  --uninstall-extension:fail.ext) echo "not installed" >&2; exit 1 ;;
+  --uninstall-extension:*) echo "uninstalled $2" ;;
+  *) echo "unexpected: $*" >&2; exit 2 ;;
+esac
+"##,
+        );
+        OseManager::with_data_root(Some(script), data.to_path_buf()).with_install_timeout(Duration::from_secs(5))
+    })
+    .await;
+    let del = |ext: String| {
+        let client = f.client.clone();
+        async move {
+            let (status, bytes) =
+                client.request_raw(axum::http::Method::DELETE, &format!("/ide/extensions/{ext}"), None).await.unwrap();
+            (status, serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null))
+        }
+    };
+
+    let (status, v) = del("good.ext".into()).await;
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(v["uninstalled"], true);
+    assert_eq!(v["id"], "good.ext");
+    assert!(v["output"].as_str().unwrap().contains("uninstalled good.ext"), "{v}");
+
+    for bad in ["-a.b", "a.b%401.2.3"] {
+        let (status, v) = del(bad.into()).await;
+        assert_eq!(status, 400, "{bad}: {v}");
+        assert!(v["error"].is_string(), "{v}");
+    }
+
+    let (status, v) = del("fail.ext".into()).await;
+    assert_eq!(status, 502, "{v}");
+    assert_eq!(v["uninstalled"], false);
+    assert_eq!(v["id"], "fail.ext");
+    assert!(v["output"].as_str().unwrap().contains("not installed"), "{v}");
+
+    // Uninstall shares the per-computer mutex with install.
+    let client = f.client.clone();
+    let slow = tokio::spawn(async move { client.post_raw("/ide/extensions", &json!({ "id": "slow.ext" })).await.unwrap() });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let (status, v) = del("good.ext".into()).await;
+    assert_eq!(status, 409, "{v}");
+    let (status, _) = slow.await.unwrap();
+    assert_eq!(status, 200);
+}
+
 /// SPEC FR-E10 (#32): the node's launch answer carries the Code-OSS commit of its OSE build,
 /// read from the `product.json` beside the launcher's `bin/`.
 #[cfg(unix)]

@@ -56,9 +56,12 @@ use super::home::{CardHead, Dot as HomeDot};
 use super::components::{
     AppButton, BackButton, ButtonKind, Clickable, CloseButton, NamedClickable, NamedClickableOn, NameThenPill, EmberCard, EmberCardSized, TrackBar, EmberField, EmberSheet,
     FieldOptions, IconButton, Label, OptionSheet, PickChip, Pill, PillTone, PopExtra, PopKind, PopMenu, PopRow, PopoverMenu, PopoverMenuWith, SearchField, Select, SheetFooter, Txt,
-    SEARCH_FIELD_H_COMPACT,
+    WrapLabel, SEARCH_FIELD_H_COMPACT,
 };
-use super::conversation::{ConversationView, ICON_SEND_SVG, ICON_TERMINAL_SVG, TranscriptRow, tail_start_index};
+use super::conversation::{
+    ConversationView, ICON_SEND_SVG, ICON_TERMINAL_SVG, TranscriptDisplayRow,
+    tail_display_start_index,
+};
 use super::notice;
 use super::shell::{
     ICON_CHEVRON_DOWN_SVG, ICON_CLOSE_SVG, ICON_CPU_SVG, ICON_PLUS_SVG, ICON_USERS_SVG, NavIcon,
@@ -1194,8 +1197,9 @@ pub fn PaneTranscript(session: &str, agent: &str) {
                     - 56.0
                     - (if window.width_dp <= 560.0 { 164.0 } else { 0.0 });
                 let exp_set = expanded.get();
-                let start_idx = tail_start_index(&items, &exp_set, avail_h);
-                let items_c = items[start_idx..].to_vec();
+                let display_items = crate::ui::conversation::group_shell_calls(&items);
+                let start_idx = tail_display_start_index(&display_items, &exp_set, avail_h);
+                let items_c = display_items[start_idx..].to_vec();
                 let sid_c = sid.clone();
                 let agent_c = agent_name.clone();
                 let exp_c = expanded.clone();
@@ -1204,7 +1208,7 @@ pub fn PaneTranscript(session: &str, agent: &str) {
                 { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(scroll_state = &scroll, modifier = Modifier::new().fill_max_width().fill_max_height(), content = move || {
                         { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width().padding(SP[1]), content = move || {
                                 for item in items_c.iter() {
-                                    TranscriptRow(&sid_c, &agent_c, item, &exp_c, &ans_c, computer_c.as_deref(), true);
+                                    TranscriptDisplayRow(&sid_c, &agent_c, item, &exp_c, &ans_c, computer_c.as_deref(), true);
                                 }
                                 { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(12.0)) };
                             }) };
@@ -2325,6 +2329,8 @@ pub fn SingleView(session: &str, focus: Option<String>, on_back: impl Fn() + Clo
 
     { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().fill_max_height(), content = move || {
             let sid_row = sid.clone();
+            let sid_comp = sid.clone();
+            let sid_actions = sid.clone();
             let sid_p = sid.clone();
             let sid_sh = sid.clone();
             let info_btn = info_open.clone();
@@ -2374,6 +2380,8 @@ pub fn SingleView(session: &str, focus: Option<String>, on_back: impl Fn() + Clo
                                     } else {
                                         { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                                     }
+                                    super::conversation::SessionComputerMenu(&sid_comp, true);
+                                    super::conversation::ConversationActionsMenu(&sid_actions);
                                     let io = info_btn.clone();
                                     let pv = pv_btn.clone();
                                     IconButton(IconRole::Sidebar, true, move || {
@@ -3642,6 +3650,14 @@ pub fn StatusView(
         }) };
 }
 
+fn view_name(v: SessionView) -> &'static str {
+    match v {
+        SessionView::Multi => super::a11y::VIEW_MULTI,
+        SessionView::Single => super::a11y::VIEW_SINGLE,
+        SessionView::Status => super::a11y::VIEW_STATUS,
+    }
+}
+
 fn view_icon_svg(v: SessionView) -> &'static str {
     match v {
         SessionView::Multi => ICON_GRID_SVG,
@@ -3683,7 +3699,8 @@ fn ViewSeg(
                 if full_width {
                     item_m = item_m.weight(1.0);
                 }
-                Clickable(
+                NamedClickable(
+                    view_name(v),
                     item_m,
                     Alignment::Center,
                     move || cb(v),
@@ -3784,15 +3801,26 @@ const PHONE_HEAD_ROW_H: f32 =
 /// review B6); the label is the tooltip and the accessible name.
 pub const SESSION_HEADER_LABELS: bool = false;
 
-/// The 웹 페이지 button and its menu (FR-P7, FR-L10.4, #888, mockup `webMenu`): the globe with a
-/// chevron (`.btn.sm` with `I("globe")` and `.chev`, review SE3), and under it, lined up with its
-/// end, "웹 페이지 열기" and one row per listening port: the address in the mono face, the process
-/// (and why a port cannot be opened) below, and a green 감지됨 pill on a port that opens. A tap
-/// opens the address in the browser or says why it cannot. `sub` is the line under the head,
-/// `computer · ip` ([`crate::ui::session::web_menu_subtitle`]), read with the ports. Not built:
-/// the member character on a row (ports carry no member), the port field and the tunnel hint
-/// (no direct-port open).
-fn WebMenu(open: bool, load: &WebPagesLoad, sub: Option<&str>, on_dismiss: impl FnMut() + Clone + 'static, on_open: impl FnMut() + 'static) {
+/// The 웹 페이지 button and its menu (FR-P7, FR-L10.4, FR-L18, #888, #1076, mockup `webMenu`):
+/// the globe with a chevron (`.btn.sm` with `I("globe")` and `.chev`, review SE3), and under it,
+/// lined up with its end, "웹 페이지 열기" and one row per listening port: the address in the mono
+/// face, the process (and why a port cannot be opened) below, and a green 감지됨 pill on a port
+/// that opens. A tap opens the address in the browser or says why it cannot. `sub` is the line
+/// under the head, `computer · ip` ([`crate::ui::session::web_menu_subtitle`]), read with the
+/// ports. The footer (#1076) shows the session's member (character and name; ports carry no
+/// member, so the mockup's character on each row is not built), a port field with 열기 that opens
+/// the typed port at `host` ([`crate::ui::session::direct_port_url`]), and the caption
+/// [`crate::ui::session::WEB_MENU_TUNNEL_HINT`].
+fn WebMenu(
+    open: bool,
+    load: &WebPagesLoad,
+    sub: Option<&str>,
+    host: Option<&ComputerHost>,
+    active_member: Option<(&Member, &str)>,
+    on_dismiss: impl FnMut() + Clone + 'static,
+    on_open: impl FnMut() + 'static,
+) {
+    let p = ember_theme().palette;
     let items = crate::ui::session::web_menu_items(load);
     let rows: Vec<PopRow> = items
         .iter()
@@ -3805,7 +3833,78 @@ fn WebMenu(open: bool, load: &WebPagesLoad, sub: Option<&str>, on_dismiss: impl 
             ..Default::default()
         })
         .collect();
+    let port_input = remember(|| mutable_state_of(String::new()));
     let load_now = load.clone();
+    let host_direct = host.cloned();
+    let port_submit = port_input.clone();
+    let dismiss_direct = on_dismiss.clone();
+    let open_direct = move |raw: String| {
+        let url = crate::ui::session::parse_direct_port(&raw).and_then(|port| match &host_direct {
+            Some(h) => crate::ui::session::direct_port_url(h, port),
+            None => Err(crate::ui::session::DIRECT_PORT_NO_HOST),
+        });
+        match url {
+            Ok(url) => {
+                if crate::ide::open_external(&url).is_err() {
+                    notice::post("브라우저를 열지 못했습니다");
+                } else {
+                    port_submit.set(String::new());
+                    let mut d = dismiss_direct.clone();
+                    d();
+                }
+            }
+            Err(msg) => notice::post(msg),
+        }
+    };
+    let mut footer = || {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().width(0.0).weight(1.0), {
+            if let Some((member, project)) = active_member {
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
+                    Character(
+                        &member.agent,
+                        member.leader,
+                        22.0,
+                        &member.name,
+                        project,
+                        CharState::from_status(member.status),
+                        None,
+                    );
+                    Label(&member.name, Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(1));
+                }) };
+            }
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
+                let port_ch = port_input.clone();
+                let open_sub = open_direct.clone();
+                EmberField(FieldOptions {
+                    weight: Some(1.0),
+                    height: Some(32.0),
+                    placeholder: "포트 (예: 3000)".to_string(),
+                    label: Some("포트 번호"),
+                    on_value_change: Some(Box::new(move |v| port_ch.set(v))),
+                    on_submit: Some(Box::new(move |v| open_sub(v))),
+                    ..Default::default()
+                });
+                let port_btn = port_input.clone();
+                let open_btn = open_direct.clone();
+                AppButton(
+                    "열기",
+                    None,
+                    ButtonKind::Default,
+                    true,
+                    true,
+                    false,
+                    move || open_btn(port_btn.get_untracked()),
+                );
+            }) };
+            WrapLabel(
+                crate::ui::session::WEB_MENU_TUNNEL_HINT,
+                Fs::Xs2,
+                Weight::Regular,
+                Some(paint(p.muted)),
+                None,
+            );
+        }) };
+    };
     PopoverMenu(
         open,
         PopMenu {
@@ -3835,7 +3934,7 @@ fn WebMenu(open: bool, load: &WebPagesLoad, sub: Option<&str>, on_dismiss: impl 
             WebTap::Nothing => {}
         },
         move || ToolbarBtn(ICON_GLOBE_SVG, "웹 페이지", SESSION_HEADER_LABELS, true, Some(open), on_open),
-        None,
+        Some(&mut footer),
     );
 }
 
@@ -4461,6 +4560,8 @@ pub fn SessionScreen(focus: Option<String>) {
     let web_pages = remember(|| mutable_state_of(WebPagesLoad::Loading));
     // The 웹 페이지 menu's `computer · ip` line, read with the ports.
     let web_sub = remember(|| mutable_state_of(None::<String>));
+    // The session computer's address, read with the ports, for a typed port (FR-L18, #1076).
+    let web_host = remember(|| mutable_state_of(None::<ComputerHost>));
     // The detail flag value this screen last wrote or saw (FR-L28, #885).
     let detail_wrote = remember(|| mutable_state_of(false));
 
@@ -4522,6 +4623,7 @@ pub fn SessionScreen(focus: Option<String>) {
         let web_menu = web_menu.clone();
         let web_pages = web_pages.clone();
         let web_sub = web_sub.clone();
+        let web_host = web_host.clone();
         let sid = target.clone().or_else(|| members.first().map(|m| m.session_id.clone()));
         move || {
             web_menu.set(true);
@@ -4531,8 +4633,11 @@ pub fn SessionScreen(focus: Option<String>) {
             // The line of the last open is not shown while another session's ports load, or
             // after a read that fails.
             sub.set(None);
+            let host_state = web_host.clone();
+            host_state.set(None);
             if services().demo.is_some() {
                 let host = ComputerHost { host: Some(crate::demo::DEMO_HOST.to_string()), ..Default::default() };
+                host_state.set(Some(host.clone()));
                 sub.set(crate::ui::session::web_menu_subtitle(Some(DEMO_COMPUTER), &host));
                 done.set(web_pages_from(Ok(crate::demo::ports()), &host));
                 return;
@@ -4551,6 +4656,7 @@ pub fn SessionScreen(focus: Option<String>) {
                 move |r: Result<(ember_client::api::Ports, ComputerHost, String), String>| match r {
                     Ok((ports, host, name)) => {
                         sub.set(crate::ui::session::web_menu_subtitle(Some(&name), &host));
+                        host_state.set(Some(host.clone()));
                         done.set(web_pages_from(Ok(ports), &host));
                     }
                     Err(e) => {
@@ -4739,8 +4845,20 @@ pub fn SessionScreen(focus: Option<String>) {
                                 ToolbarBtn(ICON_GIT_SVG, "버전 관리", SESSION_HEADER_LABELS, false, None, move || vo.set(true));
                                 let wm = open_web_menu.clone();
                                 let wm_d = web_menu.clone();
+                                let web_member = target
+                                    .as_deref()
+                                    .and_then(|sid| members.iter().find(|m| m.session_id == sid))
+                                    .or_else(|| members.first());
                                 #[allow(clippy::redundant_closure)]
-                                WebMenu(web_menu.get(), &web_pages.get(), web_sub.get().as_deref(), move || wm_d.set(false), move || wm());
+                                WebMenu(
+                                    web_menu.get(),
+                                    &web_pages.get(),
+                                    web_sub.get().as_deref(),
+                                    web_host.get().as_ref(),
+                                    web_member.map(|m| (m, current.as_str())),
+                                    move || wm_d.set(false),
+                                    move || wm(),
+                                );
                                 if let Some(t) = target.clone() {
                                     IdeMenu(&t);
                                 } else {
@@ -5221,6 +5339,78 @@ mod tests {
         assert!(!src.contains("// Web pages OptionSheet"));
     }
 
+    fn web_menu_sample() {
+        let _ = services();
+        let load = web_pages_from(
+            Ok(ember_client::api::Ports {
+                supported: true,
+                ports: vec![ember_client::api::ListeningPort {
+                    port: 3000,
+                    scope: ember_client::api::PortScope::Lan,
+                    process: "node".to_string(),
+                    ..Default::default()
+                }],
+            }),
+            &ComputerHost { host: Some("192.168.0.10".to_string()), ..Default::default() },
+        );
+        let member = Member {
+            session_id: "s-1".to_string(),
+            name: "ember-리더".to_string(),
+            task: "작업 중".to_string(),
+            agent: "claude".to_string(),
+            status: LauncherStatus::Running,
+            leader: true,
+            updated_at: 0,
+        };
+        WebMenu(
+            true,
+            &load,
+            Some("mac-mini \u{b7} 192.168.0.10"),
+            Some(&ComputerHost { host: Some("192.168.0.10".to_string()), ..Default::default() }),
+            Some((&member, "ember")),
+            || {},
+            || {},
+        );
+    }
+
+    #[test]
+    fn fr_l18_web_menu_renders_port_input_tunnel_hint_and_active_member_character() {
+        use compose_rust::protocol::{decode_batch, Mutation};
+        let _guard = crate::services::test_guard();
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+        let mut host = compose_rust::Host::new(|| Box::new(compose_rust::Recomposer::new(web_menu_sample)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        crate::ui::window_size::set_opened_for_test(None);
+        let mut nodes: Vec<(u32, String, Vec<String>, Vec<String>)> = Vec::new();
+        for m in batch.iter() {
+            match m {
+                Mutation::Create { node_id, widget } => nodes.push((*node_id, format!("{widget:?}"), Vec::new(), Vec::new())),
+                Mutation::SetModifier { node_id, modifier, .. } => {
+                    if let Some(n) = nodes.iter_mut().find(|n| n.0 == *node_id) {
+                        n.2.push(format!("{modifier:?}"));
+                    }
+                }
+                Mutation::SetProp { node_id, property, value } => {
+                    if let Some(n) = nodes.iter_mut().find(|n| n.0 == *node_id) {
+                        n.3.push(format!("{property:?}={value:?}"));
+                    }
+                }
+                _ => {}
+            }
+        }
+        let says = |t: &str| nodes.iter().any(|n| n.3.iter().any(|p| p.contains(t)));
+        assert!(nodes.iter().any(|n| n.1 == "Popover" && n.3.iter().any(|p| p == "Open=Bool(true)")), "open popover");
+        assert!(nodes.iter().any(|n| n.1 == "TextField"), "direct port input field");
+        assert!(says("포트 (예: 3000)"), "port input placeholder");
+        assert!(says("열기"), "direct port open button");
+        assert!(says(crate::ui::session::WEB_MENU_TUNNEL_HINT), "tunnel hint caption");
+        assert!(
+            nodes.iter().any(|n| n.1 == "Image" && n.2.iter().any(|m| m.contains("22.0"))),
+            "active member character image"
+        );
+        assert!(says("ember-리더"), "active member name");
+    }
+
     #[test]
     fn fr_l36_phone_header_places_plus_right_after_title_and_clears_menu() {
         assert_eq!(super::phone_header_title_max_w(390.0), 240.0);
@@ -5408,6 +5598,28 @@ mod tests {
     }
 
     #[Composable]
+    fn host_view_seg_compact() {
+        ViewSeg(SessionView::Multi, true, true, |_| {});
+    }
+
+    #[test]
+    fn fr_l18_compact_view_buttons_have_an_accessible_name() {
+        let _guard = crate::services::test_guard();
+        let sent = PaneTabSent::of(host_view_seg_compact);
+        for v in SessionView::ALL {
+            assert!(!view_name(v).is_empty());
+            let named: Vec<u32> = sent.names.iter().filter(|(_, n)| n == view_name(v)).map(|(id, _)| *id).collect();
+            assert!(
+                named.iter().any(|id| sent.mods(*id).iter().any(|m| m.starts_with("Semantics") && m.contains("Button"))),
+                "no button named {:?} for {v:?}: names {:?}, modifiers {:?}",
+                view_name(v),
+                sent.names,
+                sent.modifiers
+            );
+        }
+    }
+
+    #[Composable]
     fn host_pane_tab_alone() {
         PaneTabChip("작업 1", 2, true, false, || {}, || {});
     }
@@ -5423,18 +5635,25 @@ mod tests {
         clicked: Vec<u32>,
         parents: Vec<(u32, u32)>,
         modifiers: Vec<(u32, String)>,
+        /// Accessible names: a name is a node property, not part of the semantics modifier.
+        names: Vec<(u32, String)>,
     }
 
     impl PaneTabSent {
         fn of(content: fn()) -> Self {
             let mut host = Host::new(move || Box::new(Recomposer::new(content)));
             let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
-            let mut sent = PaneTabSent { clicked: Vec::new(), parents: Vec::new(), modifiers: Vec::new() };
+            let mut sent = PaneTabSent { clicked: Vec::new(), parents: Vec::new(), modifiers: Vec::new(), names: Vec::new() };
             for m in batch.iter() {
                 match m {
                     Mutation::SetProp { node_id, property: compose_rust::PropertyKind::OnClick, .. } => sent.clicked.push(*node_id),
                     Mutation::Insert { parent_id, node_id, .. } => sent.parents.push((*node_id, *parent_id)),
                     Mutation::SetModifier { node_id, modifier, .. } => sent.modifiers.push((*node_id, format!("{modifier:?}"))),
+                    Mutation::SetProp {
+                        node_id,
+                        property: compose_rust::PropertyKind::AccessibleName,
+                        value: compose_rust::protocol::PropertyValue::String(name),
+                    } => sent.names.push((*node_id, name.to_string())),
                     _ => {}
                 }
             }
@@ -5927,5 +6146,77 @@ mod tests {
         shared_ui().update_prefs(|p| p.session_view = None);
         crate::ui::window_size::set_opened_for_test(None);
         compose_rust::window::reset_window_size();
+    }
+
+    #[test]
+    fn fr_l10_4_single_view_topbar_renders_anchored_session_action_popovers() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+        shared_ui().update_prefs(|p| p.session_view = Some("single".to_string()));
+        services().open_session("demo-s1");
+
+        let mut host = Host::new(|| Box::new(Recomposer::new(host_session_single)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        crate::ui::window_size::set_opened_for_test(None);
+        shared_ui().update_prefs(|p| p.session_view = None);
+        compose_rust::window::reset_window_size();
+
+        let popover_ids: Vec<u32> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::Create { node_id, widget } if format!("{widget:?}") == "Popover" => {
+                    Some(*node_id)
+                }
+                _ => None,
+            })
+            .collect();
+
+        let popover_props: Vec<String> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetProp { node_id, property, value } if popover_ids.contains(node_id) => {
+                    Some(format!("{property:?}={value:?}"))
+                }
+                _ => None,
+            })
+            .collect();
+
+        for name in [
+            super::super::a11y::MORE,
+            super::super::a11y::COMPUTER_PICKER,
+            super::super::a11y::IDE_PICKER,
+        ] {
+            assert!(
+                popover_props.iter().any(|p| p.contains(name)),
+                "visible single session layout must emit an anchored Popover named '{name}', got {popover_props:?}"
+            );
+        }
+
+        let all_texts = texts(&batch);
+        for action in [
+            "대화 메뉴",
+            "고정",
+            "내보내기",
+            super::super::ko::FORK_MENU_LABEL,
+            super::super::ko::approve_all_menu_label(false),
+        ] {
+            assert!(
+                all_texts.iter().any(|t| t == action),
+                "visible single session topbar must expose menu action '{action}', got {all_texts:?}"
+            );
+        }
+
+        let has_dialog_or_sheet = batch.iter().any(|m| {
+            matches!(
+                m,
+                Mutation::Create { widget, .. }
+                    if matches!(format!("{widget:?}").as_str(), "Dialog" | "Sheet")
+            )
+        });
+        assert!(
+            !has_dialog_or_sheet,
+            "desktop session single view must not emit a centred Dialog or Sheet for popover menus"
+        );
     }
 }

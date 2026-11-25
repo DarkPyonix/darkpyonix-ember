@@ -2772,11 +2772,25 @@ pub fn delete_tap(armed: Option<(usize, i64)>, index: usize, now: i64) -> Delete
     }
 }
 
-/// Whether the armed label ("정말 삭제합니다") shows. Nothing re-renders on a timer, so the label
-/// may stay on screen until the next recomposition after the timeout; `delete_tap` is the
-/// authority for what a tap does.
+/// Whether the armed label ("정말 삭제합니다") shows. An auto-disarm timer clears the armed
+/// state after [`STASH_ARM_TIMEOUT_MS`], and `delete_tap` remains the authority for what a tap
+/// does.
 pub fn armed_label_visible(armed: Option<(usize, i64)>, index: usize, now: i64) -> bool {
     matches!(armed, Some((i, at)) if i == index && now - at < STASH_ARM_TIMEOUT_MS)
+}
+
+/// Clears an armed confirmation state when its one-shot timer fires, if and only if the exact
+/// same `(key, armed_at)` token is still armed (FR-L19). A newer re-arm on the same or another
+/// button is left untouched.
+pub fn disarm_if_matches(
+    current: Option<(usize, i64)>,
+    token: (usize, i64),
+) -> Option<(usize, i64)> {
+    if current == Some(token) {
+        None
+    } else {
+        current
+    }
 }
 
 /// The key of one button of one entry in the armed state: three buttons per entry.
@@ -4901,6 +4915,19 @@ rename to new.txt
     fn fr_g6_delete_on_another_row_rearms() {
         assert_eq!(delete_tap(Some((1, 10_000)), 2, 10_900), DeleteTap::Arm);
         assert!(!armed_label_visible(Some((1, 10_000)), 2, 10_900));
+    }
+
+    #[test]
+    fn fr_l19_disarm_if_matches_clears_only_matching_token() {
+        let token = (1, 10_000);
+        // Matching token disarms to None.
+        assert_eq!(disarm_if_matches(Some(token), token), None);
+        // Newer re-arm on the same key is not cleared by an older timer.
+        assert_eq!(disarm_if_matches(Some((1, 12_500)), token), Some((1, 12_500)));
+        // Re-arm on a different key is not cleared by an older timer.
+        assert_eq!(disarm_if_matches(Some((2, 10_000)), token), Some((2, 10_000)));
+        // Already disarmed stays None.
+        assert_eq!(disarm_if_matches(None, token), None);
     }
 
     #[test]

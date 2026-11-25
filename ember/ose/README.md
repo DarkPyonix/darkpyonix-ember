@@ -128,8 +128,22 @@ OSE_REGRESS_OUT=.scratch/regress ember/ose/regress.sh "$(dirname "$(dirname "$EM
 ```
 
 `OSE_REGRESS_OUT` keeps `results.json` (the status of every listed extension), `installed.txt` and
-the extension host logs. In CI the Live checks job runs this per target and uploads the folder as
-`ose-regress-<target>`.
+the extension host logs, and `protocol-gaps.json`: the FR-E9 records of the run (every `todo`
+method with a value that got the fallback reply, with its count and the extensions that named
+themselves in an argument). In CI the Live checks job runs this per target and uploads the folder
+as `ose-regress-<target>`.
+
+The RPC wire does not say which extension made a call, so `OSE_REGRESS_MODE=per-extension` runs
+the same check with one session per entry: a first session that opens nothing (`(startup)`), then
+a new session, and so a new extension host, for every entry with an `open` file. Each session stays
+`OSE_REGRESS_SETTLE` seconds, and its records go under its label in
+`protocol-gaps-by-extension.json`. An extension that activates at startup is counted under
+`(startup)` and again in every later session. The comparison with `expected.json` is the same as
+in the activation run.
+
+```sh
+OSE_REGRESS_MODE=per-extension OSE_REGRESS_OUT=.scratch/regress-per-ext ember/ose/regress.sh "$(dirname "$(dirname "$EMBER_OSE_SERVER")")"
+```
 
 Status today: the list is the five extensions the leader approved on 2026-11-15: two language
 servers (`redhat.vscode-yaml`, `dbaeumer.vscode-eslint`), the most used language extension

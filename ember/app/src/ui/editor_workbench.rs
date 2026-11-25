@@ -3340,6 +3340,7 @@ pub mod page {
         let offer_control = offers_take_control(&handle.snapshot());
         let offer_reconnect = handle.snapshot().needs_reconnect();
         let revision = s.revision;
+        let paste_s = s.clone();
         rsx! {
             {strip}
             div { class: "ed-term", role: "log", "aria-label": "터미널 출력", tabindex: "0", style: "outline:none;",
@@ -3358,6 +3359,13 @@ pub mod page {
                     if crate::terminal_input::is_paste_chord(&name, m.contains(Modifiers::CONTROL), m.contains(Modifiers::ALT), m.contains(Modifiers::SHIFT), m.contains(Modifiers::META)) {
                         event.stop_propagation();
                         event.prevent_default();
+                        // Code-OSS `terminalInstance.paste`: read the clipboard, then send it or ask
+                        // first (`terminal.integrated.enableMultiLinePasteWarning`, old booleans
+                        // included).
+                        let setting = crate::terminal_input::MultiLinePasteWarning::from_setting(
+                            paste_s.host.state.lock().unwrap().settings.scopes
+                                .value("terminal.integrated.enableMultiLinePasteWarning", None).as_ref(),
+                        );
                         let paste_handle = key_handle.clone();
                         let mut paste_confirm = paste_confirm_key;
                         compose_rust::clipboard::read_text(move |result| match result {
@@ -3368,7 +3376,7 @@ pub mod page {
                                 }
                                 match crate::terminal_input::plan_paste(
                                     &text,
-                                    crate::terminal_input::MultiLinePasteWarning::default(),
+                                    setting,
                                     snap.bracketed_paste,
                                 ) {
                                     crate::terminal_input::PasteAction::Send(bytes) => {
@@ -3846,6 +3854,10 @@ mod tests {
         let term = &src[src.find("fn terminal_body(").expect("terminal_body")..src.find("fn problems_body(").expect("problems_body")];
         assert!(term.contains("compose_rust::clipboard::read_text("), "paste chord reads the clipboard");
         assert!(term.contains("crate::terminal_input::plan_paste("), "paste chord routes through plan_paste");
+        assert!(
+            term.contains("MultiLinePasteWarning::from_setting(") && term.contains("\"terminal.integrated.enableMultiLinePasteWarning\""),
+            "paste chord follows the multi-line warning setting"
+        );
         assert!(term.contains("crate::terminal_input::multiline_warning_text("), "multi-line paste shows confirmation prompt");
         assert!(term.contains("crate::terminal_input::WARN_PASTE") && term.contains("crate::terminal_input::WARN_CANCEL"));
         assert!(!term.contains("PASTE_UNAVAILABLE"), "stub paste notice is gone");

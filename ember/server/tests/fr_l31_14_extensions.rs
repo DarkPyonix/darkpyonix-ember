@@ -352,14 +352,14 @@ async fn fr_l31_14_a_failed_uninstall_is_502_with_the_output() {
 }
 
 #[tokio::test]
-async fn fr_l31_14_uninstall_on_another_computer_is_400_and_an_unknown_one_404() {
+async fn fr_l31_14_uninstall_on_an_unreachable_computer_is_502_and_an_unknown_one_404() {
     let f = fx("").await;
     let (st, _) = uninstall(&f, "nope", "a.b").await;
     assert_eq!(st, StatusCode::NOT_FOUND);
     let c = f.computers.registry().insert("peer", "http://127.0.0.1:1", "tok").unwrap();
     let (st, body) = uninstall(&f, &c.id, "a.b").await;
-    assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
-    assert_eq!(body["error"], "OSE server is only available on the local computer");
+    assert_eq!(st, StatusCode::BAD_GATEWAY, "{body}");
+    assert!(body["error"].as_str().unwrap().starts_with("node unreachable"), "{body}");
     assert!(!ran(&f));
 }
 

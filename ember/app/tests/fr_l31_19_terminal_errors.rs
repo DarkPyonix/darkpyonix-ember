@@ -67,3 +67,21 @@ async fn fr_l31_22_other_failures_name_the_action_in_korean() {
     }
     assert!(!has_latin(AUTH_REFUSED_TEXT));
 }
+
+#[tokio::test]
+async fn fr_l31_22_a_reattached_terminal_retries_a_dropped_stream() {
+    // A terminal tab put back from the node's list (FR-P6) follows the reconnect policy of the
+    // panel's first shell: a failed attach waits and tries again instead of ending.
+    let base = answer_with("500 Internal Server Error");
+    let handle = ember_app::terminal_stream::attach_existing(&base, "local", "t1", None);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let notice = handle.snapshot().notice().unwrap_or_default();
+        if notice.contains("다시 연결") {
+            assert!(notice.contains("(1/"), "{notice}");
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the dropped attach was not retried: {notice:?}");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}

@@ -13,7 +13,7 @@ use ember_editor::debugger::{
     ConfigSelector, DebugRequest, DebugUpdate, EvalContext, EvalResult, SessionInfo, SessionState,
 };
 use ember_editor::languages::LanguageRegistry;
-use ember_editor::{CoreOptions, Effect, Input, SessionCore, SessionUpdate};
+use ember_editor::{BridgeAction, CoreOptions, Effect, Input, SessionCore, SessionUpdate, WidgetBridge};
 use ember_editor_conn::rpc::{Arg, IncomingRequest, Reply};
 use ember_editor_conn::uri::UriComponents;
 use serde_json::{json, Value};
@@ -626,6 +626,59 @@ fn fr_l31_42_stopped_event_loads_threads_and_stack_and_updates_the_session() {
         (focus["kind"].as_str(), focus["frameId"].as_i64()),
         (Some("stackFrame"), Some(10))
     );
+}
+
+/// Hand the debug updates the rig collected to a widget bridge, as the window's update loop does,
+/// and return the actions it gave back.
+fn bridge_takes(bridge: &mut WidgetBridge, rig: &mut Rig) -> Vec<BridgeAction> {
+    rig.ui
+        .drain(..)
+        .map(|u| bridge.apply(SessionUpdate::Debug(u)))
+        .collect()
+}
+
+// FR-L31.42: the debug updates reach the window through the widget bridge, which keeps what the
+// editor's controls show: the session for the toolbar, the stopped line for the gutter and the
+// breakpoints as the adapter verified them.
+#[test]
+fn fr_l31_42_the_bridge_passes_debug_updates_and_keeps_the_session_the_stop_and_the_breakpoints() {
+    let mut rig = Rig::fixture();
+    let mut bridge = WidgetBridge::new();
+    let main = uri("/w/main.py");
+    rig.toggle(2);
+    let actions = bridge_takes(&mut bridge, &mut rig);
+    assert!(!actions.is_empty());
+    assert!(actions.iter().all(|a| matches!(a, BridgeAction::Debug(_))), "{actions:?}");
+    let marked: Vec<_> = bridge.debug().breakpoints_in(&main).collect();
+    assert_eq!((marked.len(), marked[0].line, marked[0].verified), (1, 2, false));
+    assert!(bridge.debug().active_session().is_none());
+
+    rig.start_python();
+    let id = rig.session_id();
+    let actions = bridge_takes(&mut bridge, &mut rig);
+    assert!(actions.iter().all(|a| matches!(a, BridgeAction::Debug(_))), "{actions:?}");
+    let view = bridge.debug();
+    let session = view.active_session().expect("the shown session");
+    assert_eq!(session.id, id);
+    assert!(matches!(session.state, SessionState::Stopped { .. }), "{:?}", session.state);
+    assert_eq!(view.stopped_line(&main), Some(2));
+    assert_eq!(view.stopped_line(&uri("/w/other.py")), None);
+    let at = view.stopped_at.as_ref().unwrap();
+    assert_eq!((at.thread_id, at.frame_id, at.column), (1, 10, 1));
+    assert_eq!(view.pause_thread(), Some(1));
+    assert!(view.breakpoints_in(&main).all(|bp| bp.verified), "{:?}", view.breakpoints);
+
+    // Continuing runs the thread on: the stop mark goes, and the session ends with the program.
+    rig.debug(DebugRequest::Continue {
+        session: id.clone(),
+        thread_id: 1,
+    });
+    bridge_takes(&mut bridge, &mut rig);
+    assert_eq!(bridge.debug().stopped_at, None);
+    assert!(bridge.debug().active_session().is_none(), "{:?}", bridge.debug().sessions);
+    assert!(bridge.debug().threads.is_empty());
+    // The breakpoints outlive the session, as in Code-OSS.
+    assert_eq!(bridge.debug().breakpoints_in(&main).count(), 1);
 }
 
 #[test]

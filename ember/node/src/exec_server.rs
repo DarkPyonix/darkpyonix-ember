@@ -194,7 +194,7 @@ enum Field {
     /// `params.<name>[*]`, every element a path.
     Each(&'static str),
     /// `params.<list>[*].<name>`.
-    EachField(&'static str, &'static str),
+    EachMember(&'static str, &'static str),
 }
 
 /// The client-to-codex request methods of `codex exec-server` at rust-v0.167.0
@@ -219,7 +219,7 @@ fn method_paths(method: &str) -> Option<&'static [(Field, PathUse)]> {
         // Several.
         "fs/copy" => &[(One("sourcePath"), Follow), (One("destinationPath"), Follow)],
         "fs/watchMissing" => &[(Each("missing"), Follow), (Optional("present"), Follow)],
-        "capabilityRoots/discoverV1" => &[(EachField("roots", "path"), Follow)],
+        "capabilityRoots/discoverV1" => &[(EachMember("roots", "path"), Follow)],
         _ => return None,
     };
     Some(fields)
@@ -327,7 +327,7 @@ fn collect(params: &Value, field: Field) -> Result<Vec<&str>, String> {
             let list = params.get(name).and_then(Value::as_array).ok_or_else(|| format!("`{name}` must be a list"))?;
             list.iter().map(|v| str_at(Some(v), name)).collect()
         }
-        Field::EachField(list_name, name) => {
+        Field::EachMember(list_name, name) => {
             let list = params
                 .get(list_name)
                 .and_then(Value::as_array)

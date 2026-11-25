@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 use dioxus_compose::html::prelude::dioxus_elements::Key;
 use dioxus_compose::html::prelude::*;
 use dioxus_compose::prelude::{Props, component};
+use dioxus_signals::{ReadableExt, WritableExt};
 use dioxus_core::EventHandler;
 use ember_editor::debugger::{DebugRequest, DebugUpdate, TaskChoice, TaskOutcome};
 

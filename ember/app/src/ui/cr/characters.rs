@@ -8,10 +8,17 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::time::Duration;
 
+use compose_rust::runtime::{
+    MutableState, delay, launched_effect, mutable_state_of, remember_with_key,
+};
 use compose_rust::ui as cu;
 use compose_rust::ui::{Modifier, Role};
-use compose_rust::{Alignment, AssetKind, TextAlign, TextOverflow, TypeRole};
+use compose_rust::{
+    Alignment, AssetKind, GraphicsLayer, ReducedMotion, TextAlign, TextOverflow, TypeRole,
+    reduced_motion,
+};
 
 pub use crate::ui::characters::{
     crown_shown, family_of, svg, CharSpec, CharState, CharStyle, Family,
@@ -34,6 +41,47 @@ fn doc_bytes(doc: String) -> &'static [u8] {
             .entry(doc.clone())
             .or_insert_with(|| Box::leak(doc.into_bytes().into_boxed_slice()))
     })
+}
+
+/// Subtle periodic motion parameters for an active team character (FR-L22, #1089).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CharAnim {
+    pub interval_ms: u64,
+    pub scale_delta: f32,
+    pub offset_y: f32,
+}
+
+/// Returns the subtle animation cadence and transform deltas for active character states
+/// (`Run`, `Wait`), or `None` for static states (`Idle`, `Done`, `Fail`) so idle characters
+/// spawn zero timers (FR-L22, #1089).
+pub fn char_anim_for(state: CharState) -> Option<CharAnim> {
+    match state {
+        CharState::Run => Some(CharAnim {
+            interval_ms: 900,
+            scale_delta: 0.03,
+            offset_y: -1.5,
+        }),
+        CharState::Wait => Some(CharAnim {
+            interval_ms: 1200,
+            scale_delta: 0.02,
+            offset_y: -1.0,
+        }),
+        CharState::Idle | CharState::Done | CharState::Fail => None,
+    }
+}
+
+fn char_anim_modifier(size: f32, anim: CharAnim, active_phase: bool) -> Modifier {
+    let layer = if active_phase {
+        GraphicsLayer {
+            scale_x: 1.0 + anim.scale_delta,
+            scale_y: 1.0 + anim.scale_delta,
+            translation_y: anim.offset_y,
+            ..GraphicsLayer::default()
+        }
+    } else {
+        GraphicsLayer::default()
+    };
+    Modifier::new().size(size, size).graphics_layer(layer)
 }
 
 /// A drawn character. `project` picks the project's style from prefs and decides the crown
@@ -75,15 +123,37 @@ pub fn Character(
         pin: None,
     };
     let spec = crate::ui::characters::apply_character_override(base, project, overrides.get(name));
-    draw(&spec, size);
+    let anim = if reduced_motion() == ReducedMotion::On {
+        None
+    } else {
+        char_anim_for(spec.state)
+    };
+    if let Some(anim) = anim {
+        let phase: MutableState<bool> = remember_with_key(spec.state, || mutable_state_of(false));
+        let phase_effect = phase.clone();
+        launched_effect((spec.state, anim.interval_ms), move || async move {
+            loop {
+                delay(Duration::from_millis(anim.interval_ms)).await;
+                phase_effect.set(!phase_effect.get_untracked());
+            }
+        });
+        let modifier = char_anim_modifier(size, anim, phase.get());
+        draw_with_modifier(&spec, modifier);
+    } else {
+        draw(&spec, size);
+    }
 }
 
-pub fn draw(spec: &CharSpec, size: f32) {
+fn draw_with_modifier(spec: &CharSpec, modifier: Modifier) {
     // The root fills the image box (SVG root sizes are pixels, so a dp number drew small on
     // Android, compose-rust#677); the modifier sets the box.
     let doc = svg(spec).replacen("width=\"100\" height=\"100\"", crate::ui::shell::FILL_BOX, 1);
     let id = compose_rust::asset(AssetKind::Svg, doc_bytes(doc));
-    { use ::compose_rust::ui::Image; Image!(id, modifier = Modifier::new().size(size, size)) };
+    { use ::compose_rust::ui::Image; Image!(id, modifier = modifier) };
+}
+
+pub fn draw(spec: &CharSpec, size: f32) {
+    draw_with_modifier(spec, Modifier::new().size(size, size));
 }
 
 /// The gap between style cards (`.cs-grid` gap `--sp2`).
@@ -322,6 +392,85 @@ mod tests {
         let text: String = batch.iter().map(|m| format!("{m:?}")).collect();
         for style in CharStyle::ALL {
             assert!(text.contains(style.label()), "missing {}", style.label());
+        }
+    }
+
+    #[test]
+    fn fr_l22_char_anim_for_animates_active_states_only() {
+        for state in [CharState::Run, CharState::Wait] {
+            let anim = char_anim_for(state).unwrap_or_else(|| panic!("{state:?} should animate"));
+            assert!(
+                (700..=1500).contains(&anim.interval_ms),
+                "{state:?} interval_ms={} should be calm and non-distracting",
+                anim.interval_ms
+            );
+            assert!(
+                anim.scale_delta > 0.0 && anim.scale_delta <= 0.05,
+                "{state:?} scale_delta={} should be subtle",
+                anim.scale_delta
+            );
+            assert!(
+                anim.offset_y < 0.0 && anim.offset_y.abs() <= 3.0,
+                "{state:?} offset_y={} should be a subtle upward bob",
+                anim.offset_y
+            );
+            assert_ne!(
+                char_anim_modifier(48.0, anim, false),
+                char_anim_modifier(48.0, anim, true),
+                "{state:?} phase toggle must change the visual transform"
+            );
+        }
+        for state in [CharState::Idle, CharState::Done, CharState::Fail] {
+            assert_eq!(
+                char_anim_for(state),
+                None,
+                "{state:?} must stay static with zero timer overhead"
+            );
+        }
+        // Exhaustively account for every CharState variant.
+        let animated_count = CharState::ALL
+            .into_iter()
+            .filter(|&s| char_anim_for(s).is_some())
+            .count();
+        assert_eq!(animated_count, 2);
+    }
+
+    #[test]
+    fn fr_l22_character_renders_cleanly_for_animated_and_static_states() {
+        use compose_rust::protocol::{decode_batch, Mutation};
+        let _guard = crate::services::test_guard();
+        for state in CharState::ALL {
+            let mut host = Host::new(move || {
+                Box::new(Recomposer::new(move || {
+                    Character("claude", false, 48.0, "ember", "demo", state, None);
+                }))
+            });
+            let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+            let mods: Vec<String> = batch
+                .iter()
+                .filter_map(|m| match m {
+                    Mutation::SetModifier { modifier, .. } => Some(format!("{modifier:?}")),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                mods.windows(2).any(|w| w[0] == "Width(48.0)" && w[1] == "Height(48.0)"),
+                "{state:?} must preserve outer 48x48 dimensions: {mods:?}"
+            );
+            let has_transform = batch.iter().any(|m| {
+                matches!(
+                    m,
+                    Mutation::SetModifier {
+                        modifier: compose_rust::schema::Modifier::Transform { .. },
+                        ..
+                    }
+                )
+            });
+            let expect_animated = char_anim_for(state).is_some();
+            assert_eq!(
+                has_transform, expect_animated,
+                "{state:?}: animated states apply a graphics_layer transform, static states do not ({mods:?})"
+            );
         }
     }
 }

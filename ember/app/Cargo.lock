@@ -667,7 +667,7 @@ dependencies = [
 [[package]]
 name = "compose-rust"
 version = "0.0.12"
-source = "git+https://github.com/DarkPyonix/compose-rust?rev=e52fbd396681ceb3017513107edda5812dee4920#e52fbd396681ceb3017513107edda5812dee4920"
+source = "git+https://github.com/DarkPyonix/compose-rust?rev=519ffede15b777733c64fc038fdeae5d7256d7d6#519ffede15b777733c64fc038fdeae5d7256d7d6"
 dependencies = [
  "compose-rust-macros",
  "jni",
@@ -676,7 +676,7 @@ dependencies = [
 [[package]]
 name = "compose-rust-macros"
 version = "0.0.12"
-source = "git+https://github.com/DarkPyonix/compose-rust?rev=e52fbd396681ceb3017513107edda5812dee4920#e52fbd396681ceb3017513107edda5812dee4920"
+source = "git+https://github.com/DarkPyonix/compose-rust?rev=519ffede15b777733c64fc038fdeae5d7256d7d6#519ffede15b777733c64fc038fdeae5d7256d7d6"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1121,7 +1121,7 @@ dependencies = [
 [[package]]
 name = "dioxus-compose"
 version = "0.0.1"
-source = "git+https://github.com/DarkPyonix/dioxus-compose?rev=5b6f707c531246d71cc3a34cd41662b1375b1513#5b6f707c531246d71cc3a34cd41662b1375b1513"
+source = "git+https://github.com/DarkPyonix/dioxus-compose?rev=00cd6de3e7ea4a0c30a385ca57b6dc4497f58331#00cd6de3e7ea4a0c30a385ca57b6dc4497f58331"
 dependencies = [
  "blitz-dom",
  "blitz-html",
@@ -1435,6 +1435,7 @@ name = "ember-editor"
 version = "0.1.0"
 dependencies = [
  "ember-editor-conn",
+ "keyring",
  "onig",
  "serde",
  "serde_json",
@@ -3636,7 +3637,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -3674,7 +3675,7 @@ dependencies = [
  "cfg_aliases 0.2.2",
  "libc",
  "once_cell",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.59.0",
 ]

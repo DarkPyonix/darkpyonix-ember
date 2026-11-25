@@ -36,6 +36,10 @@ use std::time::Duration;
 use ember_client::wire::{ApprovalDecision, MentionCandidate, Question, SessionPatch, TurnOutcome};
 use ember_client::LauncherStatus;
 
+use crate::ui::conversation::{
+    ConversationDisplayItem, group_shell_calls, shell_group_key, shell_group_label,
+};
+
 pub fn item_key(item: &TranscriptItem) -> String {
     crate::ui::conversation::item_key(item)
 }
@@ -51,8 +55,9 @@ use crate::ui::Route;
 
 use super::compat::{Badge, Banner, CodeText, MessageText, Spinner, StatusIndicator};
 use super::components::{
-    AppButton, BackButton, ButtonKind, Clickable, EmberCard, EmberField, FieldOptions, IconButton, Label, NameThenPill,
-    OptionSheet, Pill, PillTone, Txt,
+    AppButton, BackButton, ButtonKind, Clickable, EmberCard, EmberField, FieldOptions, IconButton,
+    Label, NameThenPill, NamedClickable, Pill, PillTone, PopKind, PopMenu, PopRow, PopoverMenu,
+    Txt,
 };
 use super::ko;
 use super::launcher::{ConnectionBanner, export, patch_session};
@@ -63,8 +68,49 @@ use super::theme::*;
 pub const ICON_SHIELD_SVG: &str = include_str!("../../../assets/nav/shield.svg");
 pub const ICON_TERMINAL_SVG: &str = include_str!("../../../assets/nav/terminal.svg");
 pub const ICON_SEND_SVG: &str = include_str!("../../../assets/nav/send.svg");
+/// The More menu's row icons, from the mockup's icon set (`icons.js` `star`, `arrow-up-tray`,
+/// `zap`; the fork row uses the nav `git` icon).
+const ICON_STAR_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11.48 3.499a.562.562 0 0 1 1.04 0l2.125 5.111a.563.563 0 0 0 .475.345l5.518.442c.499.04.701.663.321.988l-4.204 3.602a.563.563 0 0 0-.182.557l1.285 5.385a.562.562 0 0 1-.84.61l-4.725-2.885a.563.563 0 0 0-.586 0L6.982 20.54a.562.562 0 0 1-.84-.61l1.285-5.386a.562.562 0 0 0-.182-.557l-4.204-3.602a.562.562 0 0 1 .321-.988l5.518-.442a.563.563 0 0 0 .475-.345L11.48 3.5Z"/></svg>"#;
+const ICON_EXPORT_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5"/></svg>"#;
+const ICON_ZAP_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m3.75 13.5 10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75Z"/></svg>"#;
+const ICON_FORK_SVG: &str = include_str!("../../../assets/nav/git.svg");
 
-const POPUP_W: f32 = 280.0;
+/// The rows of the conversation's More menu (대화 메뉴, #888): each has an icon and a line that
+/// says what it does, as the computer and IDE menus' rows do, so the rows are the menu's 55 dp
+/// drop rows with the title and description centred in them.
+pub(crate) fn more_pop_rows(pinned: bool, approve_all: bool) -> Vec<PopRow> {
+    vec![
+        PopRow {
+            icon: Some(ICON_STAR_SVG),
+            title: if pinned { "고정 해제" } else { "고정" }.into(),
+            description: Some(if pinned { "고정 목록에서 이 대화를 뺍니다" } else { "이 대화를 고정 목록에 둡니다" }.into()),
+            chosen: pinned,
+            ..Default::default()
+        },
+        PopRow {
+            icon: Some(ICON_EXPORT_SVG),
+            title: "내보내기".into(),
+            description: Some("대화를 JSON 파일로 데이터 폴더에 저장합니다".into()),
+            ..Default::default()
+        },
+        PopRow {
+            icon: Some(ICON_FORK_SVG),
+            title: ko::FORK_MENU_LABEL.into(),
+            description: Some("마지막으로 끝난 턴까지를 새 세션으로 엽니다".into()),
+            ..Default::default()
+        },
+        PopRow {
+            icon: Some(ICON_ZAP_SVG),
+            title: ko::approve_all_menu_label(approve_all).into(),
+            description: Some(
+                if approve_all { "도구를 실행하기 전에 다시 확인을 받습니다" } else { "이 세션의 도구 실행을 묻지 않고 승인합니다" }.into(),
+            ),
+            chosen: approve_all,
+            danger: !approve_all,
+            ..Default::default()
+        },
+    ]
+}
 
 /// The height of a transcript summary row (mockup `.cmd`: `padding:3px 0` around a 24 dp pill).
 pub const CMD_ROW_H: f32 = 30.0;
@@ -306,6 +352,64 @@ pub fn tail_start_index(
     start
 }
 
+/// Estimate the rendered height (dp) of a [`ConversationDisplayItem`] (FR-L5, #1075).
+pub fn estimate_display_item_height(
+    item: &ConversationDisplayItem,
+    expanded: &HashSet<String>,
+) -> f32 {
+    match item {
+        ConversationDisplayItem::Single(inner) => {
+            let open = match inner {
+                TranscriptItem::ToolCall { call_id, .. } => expanded.contains(call_id),
+                _ => false,
+            };
+            estimate_item_height(inner, open)
+        }
+        ConversationDisplayItem::ShellGroup(calls) => {
+            let key = shell_group_key(calls);
+            if !expanded.contains(&key) {
+                CMD_ROW_H
+            } else {
+                let inner_h: f32 = calls
+                    .iter()
+                    .map(|c| {
+                        let open = match c {
+                            TranscriptItem::ToolCall { call_id, .. } => expanded.contains(call_id),
+                            _ => false,
+                        };
+                        estimate_item_height(c, open) + SP[1]
+                    })
+                    .sum();
+                CMD_ROW_H + SP[0] + inner_h
+            }
+        }
+    }
+}
+
+/// Return the starting index of grouped `items` so the tail slice fits within `avail_h` dp
+/// (FR-L5, #1075).
+pub fn tail_display_start_index(
+    items: &[ConversationDisplayItem],
+    expanded: &HashSet<String>,
+    avail_h: f32,
+) -> usize {
+    if items.len() <= 1 || avail_h <= 0.0 {
+        return 0;
+    }
+    let budget = (avail_h - 16.0).max(160.0);
+    let mut used = 0.0;
+    let mut start = items.len();
+    for (idx, item) in items.iter().enumerate().rev() {
+        let h = estimate_display_item_height(item, expanded) + 8.0;
+        if used + h > budget && start < items.len() {
+            break;
+        }
+        used += h;
+        start = idx;
+    }
+    start
+}
+
 fn demo_blocked_cr() -> bool {
     match crate::demo::unavailable(services().demo.is_some()) {
         Some(m) => {
@@ -335,6 +439,264 @@ pub fn fork_from(ui: &SharedUi, id: String, seq: Option<i64>) {
             Ok(rec) => ui.open_conversation(&rec.id),
             Err(e) => notice::post(format!("포크하지 못했습니다: {e}")),
         },
+    );
+}
+
+/// Anchored popover menu for session actions (pin, export, fork, approve-all).
+/// Used in the visible single-session topbar and in standalone conversation headers.
+pub fn ConversationActionsMenu(id: &str) {
+    let p = ember_theme().palette;
+    let ui = shared_ui().clone();
+    let s = services();
+    let sid = id.to_string();
+    let actions_menu = remember_with_key(format!("{sid}:actions_menu"), || {
+        mutable_state_of(std::env::var("EMBER_CR_SESSION_MENU").as_deref() == Ok("more"))
+    });
+
+    let info = {
+        let _ = ui.live.launcher.get();
+        s.client.read(|st| {
+            st.session(&sid)
+                .map(|v| (v.record.title.clone(), v.record.pinned, st.approve_all(&sid)))
+        })
+    };
+    let Some((title, pinned, approve_all)) = info else {
+        return;
+    };
+
+    let more_rows = more_pop_rows(pinned, approve_all);
+    let open = actions_menu.get();
+    let dismiss = actions_menu;
+    let toggle = actions_menu;
+    let sid_pick = sid.clone();
+    let title_pick = title;
+    let ui_pick = ui;
+    PopoverMenu(
+        open,
+        PopMenu {
+            name: super::a11y::MORE,
+            kind: PopKind::Drop,
+            head: "대화 메뉴",
+            sub: None,
+            rows: &more_rows,
+            align: compose_rust::PopoverAlign::End,
+        },
+        move || dismiss.set(false),
+        move |idx| match idx {
+            0 => patch_session(
+                sid_pick.clone(),
+                SessionPatch {
+                    pinned: Some(!pinned),
+                    ..Default::default()
+                },
+            ),
+            1 => export(sid_pick.clone(), title_pick.clone()),
+            2 => fork_from(&ui_pick, sid_pick.clone(), None),
+            3 => {
+                let id_ap = sid_pick.clone();
+                let enable = !approve_all;
+                run_shared(
+                    async move { services().set_approve_all(&id_ap, enable).await },
+                    |r| {
+                        if let Err(e) = r {
+                            notice::post(format!("모드를 바꾸지 못했습니다: {e}"));
+                        }
+                    },
+                );
+            }
+            _ => {}
+        },
+        move || {
+            NamedClickable(
+                super::a11y::MORE,
+                Modifier::new()
+                    .size(H_CTL, H_CTL)
+                    .background(paint(p.surface))
+                    .border(1.0, paint(p.line))
+                    .shape_role(ShapeRole::Full)
+                    .expanded(open),
+                Alignment::Center,
+                move || toggle.set(!toggle.get_untracked()),
+                move || NavIcon(super::session::ICON_MORE_H_SVG, p.text_2.to_argb(), 15.0),
+            );
+        },
+        None,
+    );
+}
+
+/// The computer menu's rows. The session's current computer is checked, as the IDE menu checks
+/// its current IDE. Before the session's computer is known (and in the demo, which never asks),
+/// the current one is the local computer, the same fallback the trigger label uses.
+pub(crate) fn computer_pop_rows(computers: &[ember_client::state::Computer], current_id: Option<&str>) -> Vec<PopRow> {
+    if computers.is_empty() {
+        return vec![PopRow { title: "등록된 컴퓨터가 없습니다".into(), ..Default::default() }];
+    }
+    let current = current_id.unwrap_or("local");
+    computers
+        .iter()
+        .map(|c| PopRow {
+            title: c.name.clone(),
+            description: Some(ko::reachability_label(c.reachability).to_string()),
+            chosen: c.id == current,
+            ..Default::default()
+        })
+        .collect()
+}
+
+/// Anchored popover menu for switching the session's computer.
+/// Uses a compact 32 dp icon trigger in the single-session topbar and a labelled button in
+/// standalone conversation headers.
+pub fn SessionComputerMenu(id: &str, compact_trigger: bool) {
+    let p = ember_theme().palette;
+    let ui = shared_ui().clone();
+    let s = services();
+    let sid = id.to_string();
+    let computer = remember_with_key(format!("{sid}:comp_cur"), || {
+        mutable_state_of(None::<CurrentComputer>)
+    });
+    let computer_menu = remember_with_key(format!("{sid}:comp_menu"), || {
+        mutable_state_of(std::env::var("EMBER_CR_SESSION_MENU").as_deref() == Ok("computer"))
+    });
+
+    {
+        let sid_load = sid.clone();
+        let comp_load = computer;
+        launched_effect(sid.clone(), move || async move {
+            if services().demo.is_some() {
+                return;
+            }
+            let a = sid_load.clone();
+            let comp = comp_load;
+            run_shared(
+                async move {
+                    services()
+                        .server
+                        .session_computer(&a)
+                        .await
+                        .map_err(|e| e.to_string())
+                },
+                move |r| match r {
+                    Ok(c) => comp.set(Some(c)),
+                    Err(e) => tracing::debug!("current computer: {e}"),
+                },
+            );
+        });
+    }
+
+    let (busy, computers) = {
+        let _ = ui.live.launcher.get();
+        s.client.read(|st| {
+            let busy = st
+                .session(&sid)
+                .is_some_and(|v| model::is_busy(v.status));
+            (busy, st.computers().to_vec())
+        })
+    };
+    let current = computer.get();
+    let current_computer_id = current.as_ref().map(|c| c.computer.id.clone());
+    let computer_name = current
+        .as_ref()
+        .map(|c| c.computer.name.clone())
+        .unwrap_or_else(|| "이 컴퓨터".into());
+
+    let comp_rows = computer_pop_rows(&computers, current_computer_id.as_deref());
+
+    let open = computer_menu.get();
+    let dismiss = computer_menu;
+    let toggle = computer_menu;
+    let comp_state = computer;
+    let comps_for_pick = computers;
+    let sid_comp = sid;
+    PopoverMenu(
+        open,
+        PopMenu {
+            name: super::a11y::COMPUTER_PICKER,
+            kind: PopKind::Mode,
+            head: "컴퓨터",
+            sub: None,
+            rows: &comp_rows,
+            align: if compact_trigger {
+                compose_rust::PopoverAlign::End
+            } else {
+                compose_rust::PopoverAlign::Start
+            },
+        },
+        move || dismiss.set(false),
+        move |idx| {
+            let Some(c) = comps_for_pick.get(idx) else {
+                return;
+            };
+            if demo_blocked_cr() {
+                return;
+            }
+            let cid = c.id.clone();
+            let s_id = sid_comp.clone();
+            let comp_out = comp_state;
+            run_shared(
+                async move {
+                    services()
+                        .server
+                        .switch_computer(&s_id, &cid)
+                        .await
+                        .map_err(|e| e.to_string())
+                },
+                move |r| match r {
+                    Ok(out) => {
+                        let name = out.computer.name.clone();
+                        let designated = comp_out
+                            .get_untracked()
+                            .and_then(|c| c.designated_computer_id);
+                        comp_out.set(Some(CurrentComputer {
+                            session_id: out.session_id,
+                            computer: out.computer,
+                            implicit: false,
+                            notice_pending: false,
+                            designated_computer_id: designated,
+                        }));
+                        notice::post(format!("{name} 컴퓨터로 전환했습니다"));
+                    }
+                    Err(e) => {
+                        notice::post(format!("컴퓨터를 전환하지 못했습니다: {e}"))
+                    }
+                },
+            );
+        },
+        move || {
+            if compact_trigger {
+                let tint = if busy {
+                    p.muted.to_argb()
+                } else {
+                    p.text_2.to_argb()
+                };
+                NamedClickable(
+                    super::a11y::COMPUTER_PICKER,
+                    Modifier::new()
+                        .size(H_CTL, H_CTL)
+                        .background(paint(p.surface))
+                        .border(1.0, paint(p.line))
+                        .shape_role(ShapeRole::Full)
+                        .expanded(open),
+                    Alignment::Center,
+                    move || {
+                        if !busy {
+                            toggle.set(!toggle.get_untracked());
+                        }
+                    },
+                    move || NavIcon(super::session::ICON_PC_SVG, tint, 15.0),
+                );
+            } else {
+                AppButton(
+                    &computer_name,
+                    None,
+                    ButtonKind::Default,
+                    true,
+                    !busy,
+                    false,
+                    move || toggle.set(!toggle.get_untracked()),
+                );
+            }
+        },
+        None,
     );
 }
 
@@ -506,8 +868,6 @@ pub fn ConversationView(id: &str, embedded: bool) {
     let expanded = remember_with_key(sid.clone(), || mutable_state_of(HashSet::<String>::new()));
     let answering = remember_with_key(sid.clone(), || mutable_state_of(HashSet::<String>::new()));
     let ide_menu = remember_with_key(sid.clone(), || mutable_state_of(false));
-    let computer_menu = remember_with_key(sid.clone(), || mutable_state_of(false));
-    let more_menu = remember_with_key(sid.clone(), || mutable_state_of(false));
 
     let send = {
         let sid = sid.clone();
@@ -580,15 +940,6 @@ pub fn ConversationView(id: &str, embedded: bool) {
         meta.push(m.clone());
     }
     let meta = meta.join(" \u{00b7} ");
-    let computer_name = computer
-        .get()
-        .as_ref()
-        .map(|c| c.computer.name.clone())
-        .unwrap_or_else(|| "이 컴퓨터".into());
-    let computers = {
-        let _ = ui.live.launcher.get();
-        s.client.read(|st| st.computers().to_vec())
-    };
     let approve_all = {
         let _ = ui.live.launcher.get();
         s.client.read(|st| st.approve_all(&sid))
@@ -616,7 +967,7 @@ pub fn ConversationView(id: &str, embedded: bool) {
         })
     };
     // Review captures: `EMBER_CR_QUESTION=single|multi|secret|answered` adds a sample question.
-    let (items, keys) = match qv::debug_sample(
+    let (items, _keys) = match qv::debug_sample(
         std::env::var("EMBER_CR_QUESTION").ok().as_deref(),
         cfg!(debug_assertions),
         s.client.read(|st| st.transcript(&sid).map_or(0, |t| t.last_seq)) + 1_000_000,
@@ -676,36 +1027,18 @@ pub fn ConversationView(id: &str, embedded: bool) {
         .ide_target
         .as_deref()
         .and_then(IdeKind::from_key);
-    let mut ide_order: Vec<IdeKind> = IdeKind::ALL.to_vec();
-    if let Some(k) = remembered {
-        ide_order.retain(|x| *x != k);
-        ide_order.insert(0, k);
-    }
+    let ide_choices = crate::ui::session::ide_choices(remembered);
     let ide_now = ide.get();
-    let ide_entries: Vec<(IdeKind, String)> = ide_order
-        .iter()
-        .map(|k| {
-            let mut label = k.label().to_string();
-            if Some(*k) == remembered {
-                label.push_str(" (최근 사용)");
-            }
-            if let Some(Ok(l)) = &ide_now {
-                if let Some(t) = l.target(k.key()) {
-                    if !t.available {
-                        if let Some(r) = &t.reason {
-                            label = format!("{label}: {r}");
-                        }
-                    }
-                }
-            }
-            if *k == IdeKind::Ember {
-                if let Some(n) = crate::ui::session::ember_ide_notice(ide_now.as_ref()) {
-                    label = format!("{label}: {n}");
-                }
-            }
-            (*k, label)
-        })
-        .collect();
+    let ide_rows = super::session::with_ember_notice(
+        super::session::ide_pop_rows(&ide_choices, remembered),
+        &ide_choices,
+        ide_now.as_ref(),
+    );
+    let current_computer = computer.get();
+    let ide_sub = crate::ui::session::ide_menu_subtitle(
+        current_computer.as_ref().map(|c| c.computer.name.as_str()),
+        &record.cwd,
+    );
 
     // ---- mentions (FR-T6) ----------------------------------------------------------------------
     let cur_draft = draft.get();
@@ -736,7 +1069,6 @@ pub fn ConversationView(id: &str, embedded: bool) {
         }
     };
 
-    let pinned = record.pinned;
     let agent = record.agent.clone();
 
     // `.detail{background:var(--surface)}`: the conversation sits on `surface`, not the window
@@ -770,8 +1102,7 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                         );
                                     }) };
                                 StatusIndicator(status);
-                                let more = more_menu.clone();
-                                IconButton(IconRole::More, true, move || more.set(true));
+                                ConversationActionsMenu(&sid);
                             }) };
                     }
 
@@ -812,42 +1143,60 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                     Some(paint(p.muted)),
                                     Some(1),
                                 );
-                                let cm = computer_menu.clone();
-                                AppButton(
-                                    &computer_name,
-                                    None,
-                                    ButtonKind::Default,
-                                    true,
-                                    !busy,
-                                    false,
-                                    move || cm.set(true),
-                                );
+                                SessionComputerMenu(&sid, false);
                                 { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                                 if let Some(label) = qv::needs_you_label(pending) {
                                     Badge(&label, Tone::Warning);
                                 }
-                                let im = ide_menu.clone();
+                                let ide_dismiss = ide_menu;
+                                let ide_choices_pick = ide_choices.clone();
+                                let ui_ide = ui.clone();
+                                let launch_res = ide_now.clone();
+                                let im = ide_menu;
                                 let ui_ide_btn = ui.clone();
-                                let launch_btn = ide.get();
-                                let chev = ide_menu.clone();
-                                AppButton(
-                                    "IDE 열기",
-                                    Some(IconRole::Forward),
-                                    ButtonKind::Default,
-                                    true,
-                                    true,
-                                    false,
-                                    move || {
-                                        super::session::ide_main_click(remembered, &im, |kind| {
-                                            super::session::launch_ide_shared(
-                                                &ui_ide_btn,
-                                                kind,
-                                                launch_btn.clone(),
-                                            )
-                                        })
+                                let launch_btn = ide_now.clone();
+                                let chev = ide_menu;
+                                PopoverMenu(
+                                    ide_menu.get(),
+                                    PopMenu {
+                                        name: super::a11y::IDE_PICKER,
+                                        kind: PopKind::Drop,
+                                        head: crate::ui::session::IDE_MENU_HEAD,
+                                        sub: ide_sub.as_deref(),
+                                        rows: &ide_rows,
+                                        align: compose_rust::PopoverAlign::End,
                                     },
+                                    move || ide_dismiss.set(false),
+                                    move |idx| {
+                                        let Some(choice) = ide_choices_pick.get(idx) else {
+                                            return;
+                                        };
+                                        super::session::launch_ide_shared(&ui_ide, choice.kind, launch_res.clone());
+                                    },
+                                    move || {
+                                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, space_role = SpaceRole::Sm, content = move || {
+                                            AppButton(
+                                                "IDE 열기",
+                                                Some(IconRole::Forward),
+                                                ButtonKind::Default,
+                                                true,
+                                                true,
+                                                false,
+                                                move || {
+                                                    super::session::ide_main_click(remembered, &im, |kind| {
+                                                        super::session::launch_ide_shared(
+                                                            &ui_ide_btn,
+                                                            kind,
+                                                            launch_btn.clone(),
+                                                        )
+                                                    })
+                                                },
+                                            );
+                                            super::session::IdeChevron(chev, false);
+                                        }) };
+                                    },
+                                    None,
                                 );
-                                super::session::IdeChevron(chev, false);
                             }) };
                     }
 
@@ -882,9 +1231,9 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                     })
                                     - (if window.width_dp <= 560.0 { 112.0 } else { 0.0 });
                                 let exp_set = expanded.get();
-                                let start_idx = tail_start_index(&items, &exp_set, avail_h);
-                                let items_row = items[start_idx..].to_vec();
-                                let _keys_row = keys[start_idx..].to_vec();
+                                let display_items = group_shell_calls(&items);
+                                let start_idx = tail_display_start_index(&display_items, &exp_set, avail_h);
+                                let items_row = display_items[start_idx..].to_vec();
                                 let sid_row = sid.clone();
                                 let agent_row = agent.clone();
                                 let exp_row = expanded.clone();
@@ -896,7 +1245,7 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                                     .fill_max_width()
                                                     .padding(SP[1]), content = move || {
                                                 for item in items_row.iter() {
-                                                    TranscriptRow(
+                                                    TranscriptDisplayRow(
                                                         &sid_row,
                                                         &agent_row,
                                                         item,
@@ -1198,136 +1547,6 @@ pub fn ConversationView(id: &str, embedded: bool) {
                             }) };
                     }
                 }) };
-
-            // ---- Popups (outside spaced Column) ------------------------------------------------
-            // 1. More menu OptionSheet
-            let more_labels = vec![
-                if pinned {
-                    "고정 해제".to_string()
-                } else {
-                    "고정".to_string()
-                },
-                "내보내기".to_string(),
-                ko::FORK_MENU_LABEL.to_string(),
-                ko::approve_all_menu_label(approve_all).to_string(),
-            ];
-            let more_dismiss = more_menu.clone();
-            let sid_more = sid.clone();
-            let title_more = title.clone();
-            let ui_more = ui.clone();
-            OptionSheet(
-                more_menu.get(),
-                &more_labels,
-                None,
-                POPUP_W,
-                move || more_dismiss.set(false),
-                move |idx| match idx {
-                    0 => patch_session(
-                        sid_more.clone(),
-                        SessionPatch {
-                            pinned: Some(!pinned),
-                            ..Default::default()
-                        },
-                    ),
-                    1 => export(sid_more.clone(), title_more.clone()),
-                    2 => fork_from(&ui_more, sid_more.clone(), None),
-                    3 => {
-                        let id_ap = sid_more.clone();
-                        let enable = !approve_all;
-                        run_shared(
-                            async move { services().set_approve_all(&id_ap, enable).await },
-                            |r| {
-                                if let Err(e) = r {
-                                    notice::post(format!("모드를 바꾸지 못했습니다: {e}"));
-                                }
-                            },
-                        );
-                    }
-                    _ => {}
-                },
-            );
-
-            // 2. Computer menu OptionSheet
-            let comp_labels: Vec<String> = if computers.is_empty() {
-                vec!["등록된 컴퓨터가 없습니다".to_string()]
-            } else {
-                computers
-                    .iter()
-                    .map(|c| {
-                        format!(
-                            "{} ({})",
-                            c.name,
-                            ko::reachability_label(c.reachability)
-                        )
-                    })
-                    .collect()
-            };
-            let comp_dismiss = computer_menu.clone();
-            let comps_for_pick = computers.clone();
-            let sid_comp = sid.clone();
-            let reload_comp = load.clone();
-            OptionSheet(
-                computer_menu.get(),
-                &comp_labels,
-                None,
-                POPUP_W,
-                move || comp_dismiss.set(false),
-                move |idx| {
-                    let Some(c) = comps_for_pick.get(idx) else {
-                        return;
-                    };
-                    if demo_blocked_cr() {
-                        return;
-                    }
-                    let cid = c.id.clone();
-                    let s_id = sid_comp.clone();
-                    let reload = reload_comp.clone();
-                    run_shared(
-                        async move {
-                            services()
-                                .server
-                                .switch_computer(&s_id, &cid)
-                                .await
-                                .map_err(|e| e.to_string())
-                        },
-                        move |r| match r {
-                            Ok(out) => {
-                                reload();
-                                notice::post(format!(
-                                    "{} 컴퓨터로 전환했습니다",
-                                    out.computer.name
-                                ));
-                            }
-                            Err(e) => {
-                                notice::post(format!("컴퓨터를 전환하지 못했습니다: {e}"))
-                            }
-                        },
-                    );
-                },
-            );
-
-            // 3. IDE menu OptionSheet (when not embedded)
-            if !embedded {
-                let ide_labels: Vec<String> =
-                    ide_entries.iter().map(|(_, l)| l.clone()).collect();
-                let ide_kinds: Vec<IdeKind> = ide_entries.iter().map(|(k, _)| *k).collect();
-                let ide_dismiss = ide_menu.clone();
-                let ui_ide = ui.clone();
-                let launch_res = ide.get();
-                OptionSheet(
-                    ide_menu.get(),
-                    &ide_labels,
-                    remembered.map(|_| 0),
-                    POPUP_W,
-                    move || ide_dismiss.set(false),
-                    move |idx| {
-                        let Some(&kind) = ide_kinds.get(idx) else {
-                            return;
-                        };
-                        super::session::launch_ide_shared(&ui_ide, kind, launch_res.clone());
-                    },
-                );
-            }
         }) };
 }
 
@@ -1592,6 +1811,127 @@ pub fn QuestionCard(
                 }
             }) };
     });
+}
+
+/// A collapsible summary row for 2 or more consecutive shell tool calls (FR-L5, #1075).
+///
+/// Collapsed by default (`명령 N개 실행`); pressing the row toggles expansion and renders each
+/// individual shell tool call inside.
+pub fn ShellGroupRow(
+    session: &str,
+    agent: &str,
+    calls: &[TranscriptItem],
+    expanded: &MutableState<HashSet<String>>,
+    answering: &MutableState<HashSet<String>>,
+    computer: Option<&str>,
+    pane: bool,
+) {
+    let p = ember_theme().palette;
+    let group_key = shell_group_key(calls);
+    let open = expanded.get().contains(&group_key);
+    let label = shell_group_label(calls.len());
+    let any_running = calls
+        .iter()
+        .any(|c| matches!(c, TranscriptItem::ToolCall { result: None, .. }));
+    let any_error = calls.iter().any(|c| {
+        matches!(c, TranscriptItem::ToolCall { result: Some(r), .. } if r.is_error)
+    });
+    let exp_toggle = expanded.clone();
+    let key_toggle = group_key.clone();
+    let calls_owned = calls.to_vec();
+    let sid = session.to_string();
+    let agent_name = agent.to_string();
+    let exp_children = expanded.clone();
+    let ans_children = answering.clone();
+    let computer_owned = computer.map(str::to_string);
+
+    { use ::compose_rust::ui::Column; Column!(spacing = SP[0], modifier = Modifier::new().fill_max_width(), content = move || {
+        let label_row = label.clone();
+        Clickable(
+            Modifier::new()
+                .fill_max_width()
+                .height(CMD_ROW_H)
+                .role(cu::Role::Button)
+                .expanded(open)
+                .click_action(true),
+            Alignment::CenterStart,
+            move || {
+                exp_toggle.update(|set| {
+                    if !set.remove(&key_toggle) {
+                        set.insert(key_toggle.clone());
+                    }
+                });
+            },
+            move || {
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = CMD_ROW_GAP, modifier = Modifier::new().fill_max_width(), content = move || {
+                        if any_running {
+                            Spinner(12.0);
+                        } else {
+                            NavIcon(ICON_TERMINAL_SVG, p.text_2.to_argb(), 16.0);
+                        }
+                        Label(
+                            &label_row,
+                            Fs::Sm,
+                            Weight::Medium,
+                            Some(paint(p.text_2)),
+                            Some(1),
+                        );
+                        if any_error {
+                            Pill("오류", PillTone::Red, false);
+                        }
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
+                        NavIcon(
+                            if open {
+                                super::shell::ICON_CHEVRON_DOWN_SVG
+                            } else {
+                                super::session::ICON_CHEVRON_RIGHT_SVG
+                            },
+                            p.muted.to_argb(),
+                            16.0,
+                        );
+                    }) };
+            },
+        );
+        if open {
+            { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width(), content = move || {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
+                { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().width(0.0).weight(1.0), content = move || {
+                    for call in calls_owned.iter() {
+                        TranscriptRow(
+                            &sid,
+                            &agent_name,
+                            call,
+                            &exp_children,
+                            &ans_children,
+                            computer_owned.as_deref(),
+                            pane,
+                        );
+                    }
+                }) };
+            }) };
+        }
+    }) };
+}
+
+/// Render one [`ConversationDisplayItem`]: either a single transcript row or a collapsible
+/// group of consecutive shell calls (FR-L5, #1075).
+pub fn TranscriptDisplayRow(
+    session: &str,
+    agent: &str,
+    item: &ConversationDisplayItem,
+    expanded: &MutableState<HashSet<String>>,
+    answering: &MutableState<HashSet<String>>,
+    computer: Option<&str>,
+    pane: bool,
+) {
+    match item {
+        ConversationDisplayItem::Single(inner) => {
+            TranscriptRow(session, agent, inner, expanded, answering, computer, pane);
+        }
+        ConversationDisplayItem::ShellGroup(calls) => {
+            ShellGroupRow(session, agent, calls, expanded, answering, computer, pane);
+        }
+    }
 }
 
 /// One transcript entry (FR-L5..FR-L7, FR-S5).
@@ -2561,6 +2901,87 @@ mod tests {
         }
     }
 
+    #[test]
+    fn fr_l10_4_computer_menu_checks_only_the_current_computer() {
+        let cs = crate::demo::computers();
+        let chosen = |rows: &[PopRow]| rows.iter().map(|r| r.chosen).collect::<Vec<_>>();
+        assert_eq!(chosen(&computer_pop_rows(&cs, Some("studio"))), [false, true]);
+        assert_eq!(chosen(&computer_pop_rows(&cs, Some("local"))), [true, false]);
+        assert_eq!(chosen(&computer_pop_rows(&cs, None)), [true, false], "unknown falls back to the local computer");
+    }
+
+    /// #888: the More menu's rows carry an icon and a description like the other header menus,
+    /// so a row is not a lone title at the top of a 55 dp row.
+    #[test]
+    fn fr_l10_4_more_menu_rows_have_icon_and_description() {
+        for (pinned, approve_all) in [(false, false), (true, true)] {
+            let rows = more_pop_rows(pinned, approve_all);
+            assert_eq!(rows.len(), 4);
+            for r in &rows {
+                assert!(r.icon.is_some(), "{:?} has no icon", r.title);
+                assert!(r.description.as_deref().is_some_and(|d| !d.trim().is_empty()), "{:?} has no description", r.title);
+            }
+            assert_eq!(rows[0].chosen, pinned);
+            assert_eq!(rows[3].chosen, approve_all);
+            assert_eq!(rows[3].danger, !approve_all);
+        }
+    }
+
+    #[test]
+    fn fr_l10_4_conversation_menus_are_anchored_popovers_not_option_sheets() {
+        let _guard = crate::services::test_guard();
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+        services().open_session("demo-s1");
+        let mut host = Host::new(|| Box::new(Recomposer::new(host_conversation_s1)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        crate::ui::window_size::set_opened_for_test(None);
+
+        let popover_ids: Vec<u32> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::Create { node_id, widget } if format!("{widget:?}") == "Popover" => Some(*node_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(popover_ids.len(), 3, "More, Computer, and IDE menus should each be an anchored Popover");
+
+        let has_dialog_or_sheet = batch.iter().any(|m| {
+            matches!(m, Mutation::Create { widget, .. } if matches!(format!("{widget:?}").as_str(), "Dialog" | "Sheet"))
+        });
+        assert!(!has_dialog_or_sheet, "conversation header menus must not emit a centred OptionSheet Dialog or Sheet");
+
+        let popover_mods: Vec<String> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetModifier { node_id, modifier, .. } if popover_ids.contains(node_id) => {
+                    Some(format!("{modifier:?}"))
+                }
+                _ => None,
+            })
+            .collect();
+        let menu_role_count = popover_mods.iter().filter(|m| m.contains("Semantics") && m.contains("Menu")).count();
+        assert_eq!(menu_role_count, 3, "all 3 popovers must declare Role::Menu, got {popover_mods:?}");
+
+        let popover_props: Vec<String> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetProp { node_id, property, value } if popover_ids.contains(node_id) => {
+                    Some(format!("{property:?}={value:?}"))
+                }
+                _ => None,
+            })
+            .collect();
+        for name in [super::super::a11y::MORE, super::super::a11y::COMPUTER_PICKER, super::super::a11y::IDE_PICKER] {
+            assert!(
+                popover_props.iter().any(|p| p.contains(name)),
+                "expected a Popover prop named '{name}', got {popover_props:?}"
+            );
+        }
+
+        let prod = include_str!("conversation.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(!prod.contains("OptionSheet("), "no centred OptionSheet remains in conversation.rs");
+    }
+
     #[Composable]
     fn host_conversation_s2_embedded() {
         ConversationView("demo-s2", true);
@@ -2606,5 +3027,106 @@ mod tests {
         let idle_nodes = emitted(host_conversation_s2_embedded);
         assert!(idle_nodes.iter().any(is_send), "SendCircleButton when idle");
         assert!(!idle_nodes.iter().any(is_stop), "no StopCircleButton when idle");
+    }
+
+    fn shell_call_item(seq: i64, call_id: &str, cmd: &str) -> TranscriptItem {
+        TranscriptItem::ToolCall {
+            seq,
+            call_id: call_id.into(),
+            name: "Bash".into(),
+            input: serde_json::json!({ "command": cmd }),
+            result: Some(ember_client::transcript::ToolOutput {
+                output: String::new(),
+                is_error: false,
+            }),
+        }
+    }
+
+    fn consecutive_shell_rows() {
+        let expanded = remember(|| mutable_state_of(HashSet::<String>::new()));
+        let answering = remember(|| mutable_state_of(HashSet::<String>::new()));
+        let items = vec![
+            shell_call_item(1, "s1", "cargo fmt --check"),
+            shell_call_item(2, "s2", "cargo clippy"),
+            shell_call_item(3, "s3", "cargo test --locked"),
+        ];
+        let grouped = group_shell_calls(&items);
+        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), content = move || {
+            for item in grouped.iter() {
+                TranscriptDisplayRow("demo-s1", "claude", item, &expanded, &answering, None, false);
+            }
+        }) };
+    }
+
+    #[test]
+    fn fr_l5_consecutive_shell_calls_fold_into_collapsible_group_row() {
+        use compose_rust::PropertyKind;
+        use std::collections::HashMap;
+
+        let _guard = crate::services::test_guard();
+        let mut host = Host::new(|| Box::new(Recomposer::new(consecutive_shell_rows)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let initial_texts = texts(&batch);
+        assert!(
+            initial_texts.iter().any(|t| t == "명령 3개 실행"),
+            "missing grouped header in initial render: {initial_texts:?}"
+        );
+        for cmd in ["cargo fmt --check", "cargo clippy", "cargo test --locked"] {
+            assert!(
+                !initial_texts.iter().any(|t| t.contains(cmd)),
+                "individual command {cmd:?} should be hidden while collapsed: {initial_texts:?}"
+            );
+        }
+
+        // Locate the clickable ancestor of the "명령 3개 실행" label and click it.
+        let mut parents: HashMap<u32, u32> = HashMap::new();
+        let mut handlers: HashMap<u32, u64> = HashMap::new();
+        let mut label_node: Option<u32> = None;
+        for m in &batch {
+            match m {
+                Mutation::Insert { parent_id, node_id, .. } => {
+                    parents.insert(*node_id, *parent_id);
+                }
+                Mutation::SetProp {
+                    node_id,
+                    property: PropertyKind::OnClick,
+                    value: PropertyValue::Integer(h),
+                } => {
+                    handlers.insert(*node_id, *h as u64);
+                }
+                Mutation::SetProp {
+                    node_id,
+                    property: PropertyKind::Text,
+                    value: PropertyValue::String(s),
+                } if *s == "명령 3개 실행" => {
+                    label_node = Some(*node_id);
+                }
+                _ => {}
+            }
+        }
+        let mut cursor = label_node.expect("group label node");
+        let (click_node, handler_id) = loop {
+            if let Some(&h) = handlers.get(&cursor) {
+                break (cursor, h);
+            }
+            cursor = *parents
+                .get(&cursor)
+                .expect("group label has a clickable ancestor");
+        };
+
+        let (bytes, _) = host
+            .dispatch(HostEvent::new(
+                click_node,
+                handler_id,
+                EventPayload::Clicked,
+            ))
+            .expect("click group row");
+        let expanded_texts = texts(&decode_batch(bytes).expect("decode expanded"));
+        for cmd in ["cargo fmt --check", "cargo clippy", "cargo test --locked"] {
+            assert!(
+                expanded_texts.iter().any(|t| t.contains(cmd)),
+                "missing expanded command {cmd:?}: {expanded_texts:?}"
+            );
+        }
     }
 }

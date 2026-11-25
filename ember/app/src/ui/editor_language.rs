@@ -809,7 +809,11 @@ pub mod view {
         if let Some(action) = action {
             event.consume();
             run(s, action);
+            return;
         }
+        // F5 and Shift+F5 (FR-L31.42): the code editor keeps keys it does not pass on, so the
+        // page's key handler would never see them while the code has focus.
+        crate::ui::editor_debug::code_key(s, event);
     }
 
     /// The code editor's `on_code_pointer` (compose-rust#555): Cmd or Ctrl and a click on a name asks

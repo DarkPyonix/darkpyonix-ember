@@ -461,3 +461,37 @@ fn fr_l31_42_breakpoint_editor_saves_conditions_and_log_messages() {
         }]
     );
 }
+
+// The focused code editor passes F5 and Shift+F5 on (compose-rust#554), read from the keymap and
+// keybindings.json as the page's key handler reads them; other keys stay with the editor.
+#[test]
+fn fr_l31_42_the_code_editor_passes_f5_and_shift_f5_on() {
+    use compose_rust::Key;
+    let vscode = |rules: &[KeybindingRule], key, text: &str, shift| {
+        code_key_action(Keymap::VsCode, Os::Other, rules, key, text, false, shift, false, false)
+    };
+    assert_eq!(vscode(&[], Key::F5, "", false), Some(Action::Debug));
+    assert_eq!(vscode(&[], Key::F5, "", true), Some(Action::Stop));
+    assert_eq!(vscode(&[], Key::F12, "", false), None, "a language chord is not a debug one");
+    assert_eq!(vscode(&[], Key::Other, "a", false), None);
+    assert_eq!(
+        code_key_action(Keymap::VsCode, Os::Other, &[], Key::F5, "", true, false, false, false),
+        None,
+        "Ctrl+F5 is run without debugging, not F5"
+    );
+    assert_eq!(
+        code_key_action(Keymap::JetBrains, Os::Other, &[], Key::F9, "", false, true, false, false),
+        Some(Action::Debug),
+        "the JetBrains keymap's Debug"
+    );
+    let rule = |key: &str, command: &str| KeybindingRule {
+        key: key.into(),
+        command: command.into(),
+        when: None,
+        args: None,
+    };
+    let unbound = [rule("f5", "-workbench.action.debug.start")];
+    assert_eq!(vscode(&unbound, Key::F5, "", false), None, "removed in keybindings.json");
+    let moved = [rule("f8", "workbench.action.debug.start")];
+    assert_eq!(vscode(&moved, Key::F8, "", false), Some(Action::Debug), "bound in keybindings.json");
+}

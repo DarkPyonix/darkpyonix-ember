@@ -5,6 +5,9 @@
 //! 실행 구성 picker, and F5 on a stopped session continues it. The sessions, the stopped line
 //! and the breakpoints come from the widget bridge ([`ember_editor::DebugView`]), which keeps
 //! them from the session's debug updates.
+//!
+//! F5 and Shift+F5 also come from the focused code editor ([`code_key_action`]), which keeps
+//! the keys it does not pass on.
 
 use compose_rust::code::{GutterDecoration, GutterDecorations};
 use compose_rust::schema::ColorRole;
@@ -12,6 +15,7 @@ use dioxus_compose::html::prelude::*;
 use dioxus_compose::prelude::{Props, component};
 use dioxus_core::{EventHandler, use_hook};
 use dioxus_signals::{ReadableExt, Signal, WritableExt};
+use ember_editor::settings::KeybindingRule;
 use ember_editor::DebugView;
 use ember_editor::debugger::{
     ConfigInfo, ConfigSelector, DebugRequest, DebugUpdate, SessionInfo, SessionState,
@@ -19,7 +23,9 @@ use ember_editor::debugger::{
 };
 use ember_editor_conn::uri::UriComponents;
 
+use super::editor_settings::{KeyResolution, resolve_key};
 use super::editor_workbench::{Shared, page::icon_tone};
+use super::keymap::{Action, Keymap, Os};
 use super::workspace_trust::{Restricted, view::blocked};
 use crate::editor_host::HostCommand;
 
@@ -113,6 +119,87 @@ pub(crate) fn on_debug(s: &Shared, update: &DebugUpdate) {
     let view = s.bridge.borrow().debug().clone();
     let mut debug = s.debug;
     debug.write().apply(update, &view);
+}
+
+/// The name a key offered by the focused code editor has in the keymap table: the function keys
+/// are named keys (compose-rust#554), the rest come as their DOM key string.
+fn code_key_name(key: compose_rust::Key, text: &str) -> &str {
+    use compose_rust::Key;
+    match key {
+        Key::F1 => "F1",
+        Key::F2 => "F2",
+        Key::F3 => "F3",
+        Key::F4 => "F4",
+        Key::F5 => "F5",
+        Key::F6 => "F6",
+        Key::F7 => "F7",
+        Key::F8 => "F8",
+        Key::F9 => "F9",
+        Key::F10 => "F10",
+        Key::F11 => "F11",
+        Key::F12 => "F12",
+        _ => text,
+    }
+}
+
+/// The debug action a key offered by the focused code editor (`on_key_preview`) asks for:
+/// [`Action::Debug`] or [`Action::Stop`] (F5 and Shift+F5 in the VS Code keymap), read from the
+/// keymap and then the user's keybindings.json as the page's key handler reads them. Code-OSS
+/// binds both in every editor context, so they work while typing. Any other action is left to
+/// the code editor and the page.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn code_key_action(
+    keymap: Keymap,
+    os: Os,
+    rules: &[KeybindingRule],
+    key: compose_rust::Key,
+    text: &str,
+    ctrl: bool,
+    shift: bool,
+    alt: bool,
+    meta: bool,
+) -> Option<Action> {
+    let name = code_key_name(key, text);
+    if name.is_empty() {
+        return None;
+    }
+    let default = crate::ui::editor::action_for_key(keymap, os, name, ctrl, shift, alt, meta);
+    let action = if rules.is_empty() {
+        default
+    } else {
+        let chord = crate::ui::editor::chord_from_key(name, ctrl, shift, alt, meta);
+        match resolve_key(rules, &chord, default) {
+            KeyResolution::Default => default,
+            KeyResolution::Action(action) => Some(action),
+            KeyResolution::Unbound | KeyResolution::Command(_) => None,
+        }
+    };
+    action.filter(|a| matches!(a, Action::Debug | Action::Stop))
+}
+
+/// The focused code editor's key, when it is F5 or Shift+F5: consumed and run as the page's key
+/// handler runs it. Returns whether it was.
+pub(crate) fn code_key(s: &Shared, event: &compose_rust::KeyEvent) -> bool {
+    let keymap = *s.keymap.peek();
+    let rules = s.host.state.lock().unwrap().settings.keybindings.clone();
+    let action = code_key_action(
+        keymap,
+        Os::current(),
+        &rules,
+        event.key(),
+        event.text(),
+        event.ctrl_key(),
+        event.shift_key(),
+        event.alt_key(),
+        event.meta_key(),
+    );
+    match action {
+        Some(Action::Debug) => start_or_continue(s),
+        Some(Action::Stop) => stop(s),
+        _ => return false,
+    }
+    event.consume();
+    true
 }
 
 /// The session updates other than debugging ones that the controls follow.

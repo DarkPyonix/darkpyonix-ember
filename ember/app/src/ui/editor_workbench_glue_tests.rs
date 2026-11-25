@@ -1646,6 +1646,17 @@ fn fr_l31_6_a3_window_the_compare_view_editor_is_its_own_mount() {
     super::forget_mount();
 }
 
+#[test]
+fn fr_l31_6_a3_window_the_compare_view_reports_its_mount_before_it_copies_the_document() {
+    // The compare view's render tells the bridge it is a new widget, then copies the document,
+    // so the copy carries the widget's numbering.
+    let src = include_str!("editor_scm.rs");
+    let src = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
+    let report = src.find("report_view_mount(&s, &uri, generation, DIFF_VIEW);").expect("the compare view reports its mount");
+    let copy = src[report..].find("let doc = s.bridge.borrow().document(&uri).cloned();").expect("then copies the document");
+    assert!(copy > 0);
+}
+
 const OTHER: &str = "/w/b.rs";
 
 fn other_opened(generation: u64, text: &str) -> SessionUpdate {

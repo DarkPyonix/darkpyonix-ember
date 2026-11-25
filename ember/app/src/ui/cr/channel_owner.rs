@@ -9,7 +9,7 @@
 
 #![allow(non_snake_case)]
 
-use compose_rust::runtime::{launched_effect, mutable_state_of, remember_with_key, MutableState};
+use compose_rust::runtime::{key, launched_effect, mutable_state_of, remember_with_key, MutableState};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
 use compose_rust::{Alignment, SpaceRole};
@@ -46,6 +46,12 @@ pub struct OwnerState {
     /// The hours the next allowance gets: a preset, or the valid custom value.
     hours: MutableState<u32>,
     custom: MutableState<String>,
+    /// The custom field's identity. compose-rust's `TextField` is uncontrolled up to the pinned
+    /// rev (e52fbd3): the Renderer reads `Text` once per node (`HostTextField.kt`
+    /// `remember(nodeId)`), and an empty text is not written at all, so clearing `custom` alone
+    /// leaves the typed value on screen. Bumping this draws a fresh field that starts from
+    /// `custom`, the way the toolkit says to show other text (`TextFieldScope::text`).
+    custom_gen: MutableState<u64>,
     /// An action is in flight: the buttons wait, so one tap is one request.
     busy: MutableState<bool>,
     /// The last action's outcome sentence (a fixed text, never the server's).
@@ -165,6 +171,7 @@ impl OwnerState {
             load: mutable_state_of(if sample.is_some() { OwnerLoad::Ready } else { OwnerLoad::Idle }),
             hours: mutable_state_of(DEFAULT_TTL_HOURS),
             custom: mutable_state_of(String::new()),
+            custom_gen: mutable_state_of(0),
             busy: mutable_state_of(false),
             confirm: mutable_state_of(Confirm::None),
             armed_at: mutable_state_of(0),
@@ -182,7 +189,7 @@ impl OwnerState {
     }
 
     /// Drops what must not outlive the sheet: the link, the confirm, the armed create, the
-    /// custom hours text.
+    /// custom hours text (the field is drawn again, empty).
     fn reset(&self) {
         if self.sample {
             return;
@@ -193,6 +200,7 @@ impl OwnerState {
         self.armed_at.set(0);
         self.create_armed.set(false);
         self.custom.set(String::new());
+        self.custom_gen.set(self.custom_gen.get_untracked().wrapping_add(1));
     }
 
     /// Reads invites and guests; a failure keeps what is shown and says so.
@@ -522,25 +530,28 @@ fn GuestList(channel: &str, st: &OwnerState) {
     let hours = st.hours.clone();
     let st_c = st.clone();
     HourChips(&ALLOW_PRESETS, current, move |h| {
-        // A preset replaces a typed value: clearing `custom` empties the controlled field.
+        // A preset replaces a typed value: `custom` is cleared and the field drawn again from it.
         st_c.confirm.set(Confirm::None);
         st_c.custom.set(String::new());
+        st_c.custom_gen.set(st_c.custom_gen.get_untracked().wrapping_add(1));
         hours.set(h)
     });
     let custom = st.custom.get();
     { use ::compose_rust::ui::Row; Row!(space_role = SpaceRole::Sm, alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
         let (text, hours) = (st.custom.clone(), st.hours.clone());
-        EmberField(FieldOptions {
-            weight: Some(1.0),
-            text: Some(custom.clone()),
-            placeholder: format!("직접 입력 ({MIN_HOURS}~{MAX_HOURS}시간)"),
-            on_value_change: Some(Box::new(move |v| {
-                if let Some((h, _)) = clamp_hours(&v) {
-                    hours.set(h);
-                }
-                text.set(v);
-            })),
-            ..Default::default()
+        key(st.custom_gen.get(), || {
+            EmberField(FieldOptions {
+                weight: Some(1.0),
+                text: Some(custom.clone()),
+                placeholder: format!("직접 입력 ({MIN_HOURS}~{MAX_HOURS}시간)"),
+                on_value_change: Some(Box::new(move |v| {
+                    if let Some((h, _)) = clamp_hours(&v) {
+                        hours.set(h);
+                    }
+                    text.set(v);
+                })),
+                ..Default::default()
+            })
         });
     }) };
     match clamp_hours(&custom) {
@@ -733,7 +744,7 @@ mod tests {
             .collect();
         assert_eq!(field_texts, vec!["12"], "custom-hours TextField must emit controlled PropertyKind::Text");
 
-        // Picking a preset clears the controlled field to "" without a generation reset workaround.
+        // Picking a preset clears the field: the field is drawn again from the emptied `custom`.
         let (preset_node, preset_handler) = batch
             .iter()
             .find_map(|m| match m {
@@ -747,18 +758,31 @@ mod tests {
             .dispatch(HostEvent::new(preset_node, preset_handler, EventPayload::Clicked))
             .expect("dispatch preset click");
         let after = decode_batch(bytes).expect("decode after click");
-        let cleared: Vec<&str> = after
+        // The Renderer applies `Text` only when a field node is created (compose-rust e52fbd3
+        // `HostTextField.kt`), so clearing means a fresh field node whose text is empty (an
+        // empty text is not written), with the old one taken away.
+        let fresh: Vec<u32> = after
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::Create { node_id, widget: WidgetKind::TextField } => Some(*node_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fresh.len(), 1, "preset click must draw the custom-hours TextField again: {after:?}");
+        assert_ne!(fresh[0], field_id, "the cleared field is a new node, not the one showing 12");
+        let fresh_texts: Vec<&str> = after
             .iter()
             .filter_map(|m| match m {
                 Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) }
-                    if *node_id == field_id =>
+                    if *node_id == fresh[0] =>
                 {
                     Some(*s)
                 }
                 _ => None,
             })
             .collect();
-        assert_eq!(cleared, vec![""], "preset click must clear the controlled custom-hours TextField");
+        assert!(fresh_texts.iter().all(|s| s.is_empty()), "preset click must clear the controlled custom-hours TextField: {fresh_texts:?}");
+        assert!(after.iter().any(|m| matches!(m, Mutation::Remove { .. })), "the field showing 12 is taken away: {after:?}");
     }
 }
 

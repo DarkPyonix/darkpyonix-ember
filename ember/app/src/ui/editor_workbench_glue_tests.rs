@@ -66,6 +66,8 @@ fn describe(command: &HostCommand) -> String {
             format!("save {} generation {generation} version {version}", uri.path)
         }
         HostCommand::Widget(uri, _, _) => format!("widget event {}", uri.path),
+        HostCommand::Restore { path, text } => format!("restore {path} text {text:?}"),
+        HostCommand::RestoreWithBase { path, text, base } => format!("restore {path} text {text:?} base {base:?}"),
         HostCommand::SetIndentation { path, action } => format!("set indentation {path} {action:?}"),
         HostCommand::CreateFile { parent, name } => format!("create file {parent} {name}"),
         HostCommand::Rename { path, new_name } => format!("rename {path} {new_name}"),
@@ -1706,4 +1708,193 @@ fn tree_self_drop_and_unchanged_rename_do_not_send_noop_commands() {
         sent.iter().any(|c| c == "rename /w/a.rs renamed.rs"),
         "changed rename sends Rename: {sent:?}"
     );
+}
+
+// FR-L31.6 (A3, window half): the editor pane tells the bridge about every mount of its code editor,
+// once per mount. A mount of a document the reader already typed in puts the widget's count back to 0,
+// so an edit the session queued for the widget is written against the widget's own numbering.
+#[test]
+fn fr_l31_6_a3_window_a_remount_is_reported_once_and_queued_edits_use_the_widget_numbering() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open();
+    page.click_row();
+    page.deliver(opened(7));
+    let shared = super::shared();
+    let other = UriComponents::remote("test", "/w/b.rs");
+    super::forget_mount();
+
+    // First mount, then one character typed: the widget is at version 1, and so is the session.
+    assert!(super::report_mount(&shared, &uri(), 7), "the first mount is reported");
+    let typed = shared.bridge.borrow_mut().on_code_changed(&uri(), 1, ember_editor::WidgetRange::empty(ember_editor::WidgetPos::new(0, 0)), "x".into());
+    assert!(matches!(typed, Some((_, 7, WidgetEvent::CodeChanged { version: 1, .. }))));
+    // A render without a remount does not report again.
+    assert!(!super::report_mount(&shared, &uri(), 7), "a re-render is not a mount");
+
+    // To b.rs and back: the editor is built again and counts from 0.
+    assert!(super::report_mount(&shared, &other, 8));
+    assert!(super::report_mount(&shared, &uri(), 7), "coming back is a new mount");
+    assert_eq!(shared.bridge.borrow().document(&uri()).unwrap().widget_version_of(1), 0);
+
+    // An edit the session wrote against its version 1 reaches the widget as version 0.
+    page.deliver(SessionUpdate::Command {
+        uri: uri(),
+        command: ember_editor::WidgetCommand::EditCode { request_id: 9, base_version: 1, range: ember_editor::WidgetRange::empty(ember_editor::WidgetPos::new(0, 0)), text: "y".into() },
+    });
+    let queued = shared.bridge.borrow_mut().take_pending_edits(&uri());
+    assert!(matches!(queued.as_slice(), [ember_editor::WidgetCommand::EditCode { base_version: 0, .. }]), "{queued:?}");
+
+    // The next character typed in the widget (its version 1) is the session's version 2: no gap.
+    let typed = shared.bridge.borrow_mut().on_code_changed(&uri(), 1, ember_editor::WidgetRange::empty(ember_editor::WidgetPos::new(0, 1)), "z".into());
+    assert!(matches!(typed, Some((_, 7, WidgetEvent::CodeChanged { version: 2, .. }))));
+    assert_eq!(shared.bridge.borrow().document(&uri()).unwrap().text, "xzfn main() {}\n");
+    super::forget_mount();
+}
+
+// FR-L31.6 (A3, compare view): the compare view's editable side is a code editor of its own over the same
+// document. Opening it is a mount; going back to the tab's pane is another; and the compare view going
+// away while the pane is on screen does not make the pane's next render count as a mount, which would
+// reset the version count under a widget that kept its own.
+#[test]
+fn fr_l31_6_a3_window_the_compare_view_editor_is_its_own_mount() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open();
+    page.click_row();
+    page.deliver(opened(7));
+    let shared = super::shared();
+    super::forget_mount();
+    super::forget_view_mount("diff");
+
+    assert!(super::report_mount(&shared, &uri(), 7), "the pane's first mount is reported");
+    let typed = shared.bridge.borrow_mut().on_code_changed(&uri(), 1, ember_editor::WidgetRange::empty(ember_editor::WidgetPos::new(0, 0)), "x".into());
+    assert!(matches!(typed, Some((_, 7, WidgetEvent::CodeChanged { version: 1, .. }))));
+
+    // The compare view opens over the same document and generation: a new widget, counted from 0.
+    assert!(super::report_view_mount(&shared, &uri(), 7, "diff"), "the compare view's editor is a mount");
+    assert!(!super::report_view_mount(&shared, &uri(), 7, "diff"), "a re-render of it is not");
+    assert_eq!(shared.bridge.borrow().document(&uri()).unwrap().widget_version_of(1), 0);
+    let typed = shared.bridge.borrow_mut().on_code_changed(&uri(), 1, ember_editor::WidgetRange::empty(ember_editor::WidgetPos::new(0, 1)), "y".into());
+    assert!(matches!(typed, Some((_, 7, WidgetEvent::CodeChanged { version: 2, .. }))), "{typed:?}");
+
+    // Back to the tab: the pane's editor is built again, so that is a mount too.
+    assert!(super::report_mount(&shared, &uri(), 7), "the pane after the compare view is a mount");
+    // The compare view's scope ends after the pane drew: the pane's record stays.
+    drop(super::MountGuard("diff"));
+    assert!(!super::report_mount(&shared, &uri(), 7), "the pane's re-render is still not a mount");
+    assert_eq!(shared.bridge.borrow().document(&uri()).unwrap().text, "xyfn main() {}\n");
+    super::forget_mount();
+}
+
+#[test]
+fn fr_l31_6_a3_window_the_compare_view_reports_its_mount_before_it_copies_the_document() {
+    // The compare view's render tells the bridge it is a new widget, then copies the document,
+    // so the copy carries the widget's numbering.
+    let src = include_str!("editor_scm.rs");
+    let src = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
+    let report = src.find("report_view_mount(&s, &uri, generation, DIFF_VIEW);").expect("the compare view reports its mount");
+    let copy = src[report..].find("let doc = s.bridge.borrow().document(&uri).cloned();").expect("then copies the document");
+    assert!(copy > 0);
+}
+
+const OTHER: &str = "/w/b.rs";
+
+fn other_opened(generation: u64, text: &str) -> SessionUpdate {
+    SessionUpdate::Opened { uri: UriComponents::remote("test", OTHER), generation, text: text.into(), language_id: "rust".into(), tab_width: 4 }
+}
+
+impl Page {
+    /// a.rs (with one character typed, so it has unsaved edits) and b.rs (untouched) are open in tabs.
+    fn open_dirty_a_clean_b() -> Page {
+        let mut page = Page::open_two_files();
+        let shared = super::shared();
+        { let mut tabs = shared.tabs; let mut tabs = dioxus_compose::prelude::WritableExt::write(&mut tabs); tabs.open(FILE); tabs.open(OTHER); tabs.activate(FILE); }
+        page.deliver(opened(7));
+        page.deliver(other_opened(8, "fn other() {}\n"));
+        shared.bridge.borrow_mut().on_code_changed(&uri(), 1, ember_editor::WidgetRange::empty(ember_editor::WidgetPos::new(0, 0)), "x".into()).expect("a.rs is open");
+        page.sent();
+        page
+    }
+
+    /// The window's connection came back: the host counts one more reconnect.
+    fn reconnect(&mut self) {
+        self.host().state.lock().unwrap().reconnects += 1;
+        self.redraw();
+    }
+}
+
+// FR-L31.6 (A2, window half): after a reconnect the tab with unsaved edits is put back with the file
+// text it was based on, and the tab without is only opened again, so it shows the file as it is now.
+#[test]
+fn fr_l31_6_a2_window_a_reconnect_restores_only_the_dirty_tab_and_passes_its_disk_base() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_dirty_a_clean_b();
+    page.reconnect();
+    let sent = page.sent();
+    assert!(sent.contains(&format!("restore {FILE} text \"xfn main() {{}}\\n\" base Some(\"fn main() {{}}\\n\")")), "{sent:?}");
+    assert!(sent.contains(&format!("open {OTHER}")), "{sent:?}");
+    assert!(sent.iter().all(|c| !c.starts_with(&format!("restore {OTHER}"))), "a clean tab is not restored: {sent:?}");
+}
+
+// FR-L31.6 (A2, window half): a dirty tab over a file that changed while the connection was lost shows
+// the conflict bar, and a clean tab shows the new file text.
+#[test]
+fn fr_l31_6_a2_window_after_a_reconnect_a_dirty_tab_shows_the_conflict_and_a_clean_tab_the_new_disk_text() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_dirty_a_clean_b();
+    page.reconnect();
+    // The new session answers: b.rs as the file is now, and a.rs raised as changed under its edits.
+    page.deliver(other_opened(9, "fn other_new() {}\n"));
+    page.deliver(SessionUpdate::ExternalChange { uri: uri(), change: ember_editor::ExternalChange::ChangedWhileDirty });
+    let shared = super::shared();
+    let b = shared.bridge.borrow().document(&UriComponents::remote("test", OTHER)).cloned().expect("b.rs is open");
+    assert_eq!(b.text, "fn other_new() {}\n");
+    assert!(!b.dirty);
+    assert!(page.text().contains("a.rs 파일이 디스크에서 바뀌었습니다"), "{}", page.text());
+}
+
+fn posted_notice() -> Option<String> {
+    crate::ui::coexist::shared_ui().notice.get_untracked().map(|(_, text)| text)
+}
+
+// FR-L31.6 (B3, window half): a file notice from the session (a reload that failed, a watch the server
+// refused, a watcher error, an edit the editor did not apply) is shown, in Korean, naming the file.
+#[test]
+fn fr_l31_6_b3_window_each_file_notice_kind_is_shown_with_the_file_name() {
+    use ember_editor::FileNoticeKind::{EditRejected, ReloadFailed, WatchRefused, WatcherError};
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open();
+    page.click_row();
+    page.deliver(opened(7));
+    let mut seen = Vec::new();
+    for (kind, uri_of, expect) in [
+        (ReloadFailed, Some(uri()), "다시 읽지 못했습니다"),
+        (WatchRefused, Some(uri()), "감시"),
+        (WatcherError, None, "파일 감시"),
+        (EditRejected, Some(uri()), "적용하지 못했습니다"),
+    ] {
+        page.deliver(SessionUpdate::FileNotice { uri: uri_of.clone(), kind, detail: "EIO: raw server text at /secret".into() });
+        let text = posted_notice().unwrap_or_else(|| panic!("{kind:?} shows nothing"));
+        assert!(text.contains(expect), "{kind:?}: {text}");
+        assert_eq!(text.contains("a.rs"), uri_of.is_some(), "{kind:?} names the file when it has one: {text}");
+        assert!(!text.contains("secret") && !text.contains("EIO"), "the server's words are not shown: {text}");
+        assert!(!seen.contains(&text), "each kind says its own thing");
+        seen.push(text);
+    }
+}
+
+// FR-L31.6 (B3, window half): a save the session refused because the file changed on disk says so in
+// Korean, not in the session's English.
+#[test]
+fn fr_l31_6_b3_window_a_stale_save_is_shown_in_korean() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open();
+    page.click_row();
+    page.deliver(opened(7));
+    page.deliver(SessionUpdate::ExternalChange { uri: uri(), change: ember_editor::ExternalChange::ChangedWhileDirty });
+    page.deliver(SessionUpdate::SaveFailed {
+        uri: uri(),
+        error: "the file changed on disk after it was opened or last saved, so nothing was written".into(),
+    });
+    let text = posted_notice().expect("the failed save is shown");
+    assert!(text.contains("a.rs") && text.contains("디스크에서 바뀌어"), "{text}");
+    assert!(!text.contains("nothing was written") && !text.contains("알 수 없는 오류"), "{text}");
 }

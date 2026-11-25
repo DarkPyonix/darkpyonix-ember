@@ -374,7 +374,9 @@ pub fn base_name(path: &str) -> &str {
 /// control characters, and is not for the person: the caller logs it and shows this.
 pub fn file_failure_reason(error: &str) -> &'static str {
     let e = error.to_lowercase();
-    if e.contains("entrynotfound") || e.contains("enoent") || e.contains("not found") || e.contains("no such file") {
+    if e.contains("changed on disk") {
+        "파일이 디스크에서 바뀌어 저장하지 않았습니다. 비교한 뒤 다시 저장하면 덮어씁니다"
+    } else if e.contains("entrynotfound") || e.contains("enoent") || e.contains("not found") || e.contains("no such file") {
         "파일이 없습니다. 지워졌거나 이름이 바뀌었을 수 있습니다"
     } else if e.contains("nopermissions") || e.contains("eacces") || e.contains("eperm") || e.contains("permission") {
         "파일을 읽거나 쓸 권한이 없습니다"
@@ -386,6 +388,27 @@ pub fn file_failure_reason(error: &str) -> &'static str {
         "파일이 너무 커서 열 수 없습니다"
     } else {
         "알 수 없는 오류입니다. 자세한 내용은 로그에 있습니다"
+    }
+}
+
+/// What the window says about a [`ember_editor::FileNoticeKind`] the session reported, in Korean and
+/// naming the file when the notice has one. The server's own words are logged, never shown.
+pub fn file_notice_text(kind: ember_editor::FileNoticeKind, name: Option<&str>) -> String {
+    use ember_editor::FileNoticeKind::{EditRejected, ReloadFailed, WatchRefused, WatcherError};
+    let file = name.map(display_name);
+    match (kind, file) {
+        (ReloadFailed, file) => format!(
+            "{}이(가) 디스크에서 바뀐 것을 다시 읽지 못했습니다. 화면의 내용이 파일과 다를 수 있습니다",
+            file.as_deref().unwrap_or("파일")
+        ),
+        (WatchRefused, Some(file)) => format!("서버가 {file}의 변경을 감시하지 않습니다. 다른 곳에서 바뀌어도 알려 드리지 못합니다"),
+        (WatchRefused, None) => "서버가 파일의 변경을 감시하지 않습니다. 다른 곳에서 바뀌어도 알려 드리지 못합니다".to_string(),
+        (WatcherError, Some(file)) => format!("서버의 파일 감시에 오류가 있습니다 ({file}). 파일이 바뀌어도 알려 드리지 못할 수 있습니다"),
+        (WatcherError, None) => "서버의 파일 감시에 오류가 있습니다. 파일이 바뀌어도 알려 드리지 못할 수 있습니다".to_string(),
+        (EditRejected, file) => format!(
+            "{}에 적용하려던 변경이 입력한 내용과 겹쳐 적용하지 못했습니다",
+            file.as_deref().unwrap_or("파일")
+        ),
     }
 }
 
@@ -451,17 +474,29 @@ pub fn colour_role(role: ember_editor::textmate::SyntaxRole) -> compose_rust::Co
 
 /// The `syntax_spans` prop for the coloured runs the session reported.
 pub fn syntax_spans(syntax: &ember_editor::SyntaxRuns) -> compose_rust::code::SyntaxSpans {
+    syntax_spans_at(syntax, syntax.version)
+}
+
+/// [`syntax_spans`] with the runs written against `version`, the widget's numbering of the session's
+/// `syntax.version` (`DocumentWidgetState::widget_version_of`).
+pub fn syntax_spans_at(syntax: &ember_editor::SyntaxRuns, version: u32) -> compose_rust::code::SyntaxSpans {
     use compose_rust::code::{CodeRange, SyntaxSpan, SyntaxSpans};
     SyntaxSpans::new(
-        syntax.runs.iter().map(|r| SyntaxSpan::role(syntax.version, CodeRange::of(r.line, r.start, r.line, r.end), colour_role(r.role))),
+        syntax.runs.iter().map(|r| SyntaxSpan::role(version, CodeRange::of(r.line, r.start, r.line, r.end), colour_role(r.role))),
     )
 }
 
 /// The `folds` prop for the foldable regions the session reported (FR-E6, #441).
 pub fn folds(regions: &[ember_editor::FoldRegion]) -> compose_rust::code::Folds {
+    folds_from(regions, 0)
+}
+
+/// [`folds`] with each version in the widget's numbering: the session's version minus the document's
+/// `widget_base`.
+pub fn folds_from(regions: &[ember_editor::FoldRegion], widget_base: u32) -> compose_rust::code::Folds {
     use compose_rust::code::{Fold, Folds};
     Folds::new(regions.iter().map(|f| Fold {
-        version: f.version,
+        version: f.version.saturating_sub(widget_base),
         start_line: f.start_line,
         end_line: f.end_line,
         collapsed: f.collapsed,
@@ -2563,6 +2598,17 @@ mod tests {
         assert_eq!(spans.len(), 2);
         assert!(spans.iter().all(|s| s.version == 7));
         assert!(syntax_spans(&ember_editor::SyntaxRuns::default()).is_empty());
+    }
+
+    #[test]
+    fn fr_l31_6_a3_window_syntax_runs_and_folds_are_written_in_the_widget_numbering() {
+        use ember_editor::textmate::{DocRun, SyntaxRole};
+        let syntax = ember_editor::SyntaxRuns { version: 12, runs: vec![DocRun { line: 0, start: 0, end: 2, role: SyntaxRole::Keyword }] };
+        // The session is at 12 and the widget was mounted again at 10: it knows this text as version 2.
+        assert!(syntax_spans_at(&syntax, 2).spans().iter().all(|s| s.version == 2));
+        let regions = [ember_editor::FoldRegion { version: 12, start_line: 1, end_line: 4, collapsed: false }];
+        assert_eq!(folds_from(&regions, 10).folds()[0].version, 2);
+        assert_eq!(folds_from(&regions, 0).folds()[0].version, 12, "a widget that never restarted keeps the session's numbers");
     }
 
     #[test]

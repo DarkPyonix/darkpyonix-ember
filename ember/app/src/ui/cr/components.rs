@@ -291,12 +291,11 @@ pub fn MenuRow(label: &str, width: f32, chosen: bool, on_click: impl FnMut() + '
     );
 }
 
-/// A small modal list of options: opaque `--surface`, 1 px `--line`, the `corner-md` radius.
-/// The toolkit `Menu` hangs its popup from the anchor's bottom-start corner and grows upward
-/// over the anchor, with no way to place it below, so option lists are a modal instead.
-/// v0.0.7: #383 fixed (`Select`, `Dropdown::closed`, `MenuItem` and `Popover` open below the
-/// anchor); workaround kept until checked on a display (the toolkit popup must match the
-/// mockup's surface, border and row height before the modal goes).
+/// A small modal list of options: opaque `--surface`, 1 px `--line`, the `corner-md` radius,
+/// centred over a scrim. Only the session's pane reorder and add-member lists use it, because the
+/// mockup has no menu to follow there (FR-L10.4: panes are dragged, members are chips in an
+/// empty tab); every other option list, the form [`Select`] included, is a [`PopoverMenu`]
+/// hanging from its control (#888).
 pub fn OptionSheet(
     open: bool,
     options: &[String],
@@ -325,12 +324,13 @@ pub fn OptionSheet(
         }) };
 }
 
-/// A closed select: a 40 px field showing the chosen option and an arrow, opening an
-/// [`OptionSheet`]. The toolkit `Dropdown` is a wheel on Apple design systems and a flat list
-/// of every option in the tree.
-/// v0.0.7: #383 fixed (`Select` and `Dropdown::closed(true)` draw a closed field with a
-/// below-anchor popup); workaround kept until checked on a display (the closed field must match
-/// the mockup's 40 px field in both schemes).
+/// A closed select: a 40 px field showing the chosen option and an arrow, opening the shared
+/// [`PopoverMenu`] in the permission-mode look under the field and lined up with its start, the
+/// current option checked (FR-L10.4, #888, leader 2026-11-25: one menu look everywhere). At 560
+/// and below the menu is the mockup's own bottom sheet, as every permission-mode menu is. The
+/// toolkit `Dropdown` is a wheel on Apple design systems and a native select looks different on
+/// every OS, so the field is drawn here. `popup_width` is the box's width, never more than the
+/// window less 24.
 pub fn Select(
     shown: &str,
     options: &[String],
@@ -367,7 +367,8 @@ fn select_field(
     use compose_rust::runtime::{mutable_state_of, remember};
     let p = ember_theme().palette;
     let open = remember(|| mutable_state_of(false));
-    let toggle = open.clone();
+    let (toggle, dismiss) = (open.clone(), open.clone());
+    let is_open = open.get();
     let trigger = Modifier::new()
         .fill_max_width()
         .height(H_BTN)
@@ -381,25 +382,55 @@ fn select_field(
         Some(n) => trigger.label(n),
         None => trigger,
     };
-    // One node, so the popup's `Dialog` is not a separate child that a parent's spacing counts.
+    let rows = select_rows(options, chosen);
+    // One node that fills the row, so the field keeps the full width it had and a parent's
+    // spacing counts the menu and its field once.
     { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width(), {
-    Clickable(
-        trigger,
-        Alignment::CenterStart,
-        move || toggle.set(!toggle.get_untracked()),
-        || {
-            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
-                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
-                Label(shown, Fs::Md, Weight::Regular, Some(paint(p.text)), Some(1));
-                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
-                super::shell::NavIcon(super::shell::ICON_CHEVRON_DOWN_SVG, p.muted.to_argb(), 16.0);
-                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
-            }) };
+    PopoverMenuWith(
+        is_open,
+        PopMenu {
+            name: name.unwrap_or(SELECT_MENU_NAME),
+            kind: PopKind::Mode,
+            head: "",
+            sub: None,
+            rows: &rows,
+            align: compose_rust::PopoverAlign::Start,
         },
+        PopExtra { plain_sheet: true, width: Some(popup_width), ..Default::default() },
+        move || dismiss.set(false),
+        on_choose,
+        move || {
+            Clickable(
+                trigger,
+                Alignment::CenterStart,
+                move || toggle.set(!toggle.get_untracked()),
+                || {
+                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
+                        Label(shown, Fs::Md, Weight::Regular, Some(paint(p.text)), Some(1));
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
+                        super::shell::NavIcon(super::shell::ICON_CHEVRON_DOWN_SVG, p.muted.to_argb(), 16.0);
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
+                    }) };
+                },
+            );
+        },
+        None,
     );
-    let dismiss = open.clone();
-    OptionSheet(open.get(), options, Some(chosen), popup_width, move || dismiss.set(false), on_choose);
     }) };
+}
+
+/// The name of an unnamed [`Select`]'s menu for assistive technology; a [`NamedSelect`]'s menu
+/// takes the field's own name.
+pub const SELECT_MENU_NAME: &str = "옵션";
+
+/// The rows of a [`Select`]'s menu: one title per option, the current one checked.
+pub fn select_rows(options: &[String], chosen: usize) -> Vec<PopRow> {
+    options
+        .iter()
+        .enumerate()
+        .map(|(i, title)| PopRow { title: title.clone(), chosen: i == chosen, ..Default::default() })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -536,6 +567,15 @@ pub fn pop_width(kind: PopKind, window_width_dp: f32) -> f32 {
     if kind == PopKind::Drop && window_width_dp <= 560.0 { room } else { want.min(room) }
 }
 
+/// A caller's own box width ([`PopExtra::width`]), never more than the window less 12 at each
+/// side, as [`pop_width`] caps the kind's.
+pub fn pop_width_capped(want: f32, window_width_dp: f32) -> f32 {
+    if window_width_dp <= 0.0 {
+        return want;
+    }
+    want.min((window_width_dp - 24.0).max(0.0))
+}
+
 /// One option of a [`PopoverMenu`]: an icon (in `tint`, else `text-2`, red on a danger row),
 /// the title, a description, a pill after the title, and whether it is the current one.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -577,8 +617,9 @@ pub struct PopMenu<'a> {
 /// The keyboard is the toolkit's (compose-rust#810): the box declares `Role::Menu` and its rows
 /// `Role::MenuItem`, so opening focuses the `selected(true)` row (the first when none is),
 /// `ArrowDown` and `ArrowUp` move between the rows and wrap, `Home` and `End` jump to the ends,
-/// and `Enter` and `Space` press the focused row. The bottom sheet has no such keyboard: the
-/// toolkit runs it only in a `Popover` or a `Menu`, not in a `Sheet`.
+/// and `Enter` and `Space` press the focused row; the row the keys moved to carries the toolkit's
+/// keyboard-focus fill and ring (compose-rust#941). The bottom sheet runs the same keyboard over
+/// its `Role::MenuItem` rows (compose-rust#940, `HostSheet`).
 pub fn PopoverMenu(
     open: bool,
     menu: PopMenu<'_>,
@@ -609,6 +650,9 @@ pub struct PopExtra {
     /// which is the popover node, and the renderer hands it to the anchor (`HostPopover.kt`
     /// `parentModifier`), so a control that shares a row by weight says it here.
     pub anchor_weight: Option<f32>,
+    /// The box's width when it is not the kind's own, never more than the window less 24: a
+    /// [`Select`] keeps the width its call site gives (#888).
+    pub width: Option<f32>,
 }
 
 /// [`PopoverMenu`] with the options of [`PopExtra`].
@@ -652,7 +696,10 @@ pub fn PopoverMenuWith(
             }) };
         }
         PopPresentation::Popover => {
-            let width = pop_width(menu.kind, window.width_dp);
+            let width = match extra.width {
+                Some(w) if menu.kind == PopKind::Mode => pop_width_capped(w, window.width_dp),
+                _ => pop_width(menu.kind, window.width_dp),
+            };
             let shift = pop_phone_shift(menu.kind, window.width_dp);
             let placed = if shift != 0.0 { Modifier::new().offset(shift, 0.0) } else { Modifier::new() };
             { use ::compose_rust::ui::Popover; Popover!(open, on_dismiss.clone(), placement = compose_rust::PopoverPlacement::Bottom, align = menu.align, offset = extra.offset.unwrap_or(m.offset), modifier = pop_anchor_weight(extra.anchor_weight,
@@ -4135,6 +4182,370 @@ mod tests {
         }
     }
 
+    // ---- FR-L10.4: the menu keyboard's entries, the focus mark and the form select (#888) -----
+
+    /// The `state` word of a node's last `Semantics` modifier, the one the renderer reads
+    /// (`Accessibility.kt` `isDeclaredSelected`, `declaredSemanticsRole`).
+    fn semantics_state(n: &EmittedNode) -> Option<(String, u32)> {
+        let m = n.mods.iter().rev().find(|m| m.starts_with("Semantics"))?;
+        let role = m.split("role: ").nth(1)?.split(',').next()?.trim().to_string();
+        let state = m.split("state: ").nth(1)?.trim_end_matches(|c: char| !c.is_ascii_digit()).parse().ok()?;
+        Some((role, state))
+    }
+
+    /// A tri-state field of a semantics state: `None` unset, else off or on.
+    fn tri_state(state: u32, shift: u32) -> Option<bool> {
+        match (state >> shift) & 0b11 {
+            1 => Some(false),
+            2 => Some(true),
+            _ => None,
+        }
+    }
+
+    fn children_of<'a>(nodes: &'a [EmittedNode], id: u32) -> Vec<&'a EmittedNode> {
+        let mut kids: Vec<&EmittedNode> = nodes.iter().filter(|n| n.parent == Some(id)).collect();
+        kids.sort_by_key(|n| (n.index, n.id));
+        kids
+    }
+
+    /// The entries the renderer's menu keyboard runs over in `overlay` (compose-rust
+    /// `HostOverlay.kt` `menuEntriesIn`, used by `HostPopover`, `HostSheet` and `HostDialog`
+    /// since compose-rust#940): the nodes declaring `MenuItem`, in tree order, not looking into
+    /// a nested overlay's own content.
+    fn menu_entries<'a>(nodes: &'a [EmittedNode], overlay: &EmittedNode) -> Vec<&'a EmittedNode> {
+        fn walk<'a>(nodes: &'a [EmittedNode], id: u32, out: &mut Vec<&'a EmittedNode>) {
+            for k in children_of(nodes, id) {
+                if semantics_state(k).is_some_and(|(r, _)| r == "MenuItem") {
+                    out.push(k);
+                    continue;
+                }
+                if matches!(k.widget.as_str(), "Popover" | "Menu" | "Dialog" | "Sheet") {
+                    continue;
+                }
+                walk(nodes, k.id, out);
+            }
+        }
+        let mut out = Vec::new();
+        walk(nodes, overlay.id, &mut out);
+        out
+    }
+
+    /// Where the renderer's `MenuKeyboard` puts focus: on open the entry declared selected (else
+    /// the first), then ArrowDown and ArrowUp go to the next and previous entry and wrap, Home and
+    /// End go to the ends (`HostOverlay.kt` `MenuKeyboard.focusOnOpen`, `handle`).
+    fn menu_keyboard_walk(entries: &[&EmittedNode], keys: &[&str]) -> Vec<usize> {
+        use compose_rust::schema::SEMANTICS_SELECTED_SHIFT;
+        let count = entries.len();
+        let mut at = entries
+            .iter()
+            .position(|e| semantics_state(e).is_some_and(|(_, s)| tri_state(s, SEMANTICS_SELECTED_SHIFT) == Some(true)))
+            .unwrap_or(0);
+        let mut seen = vec![at];
+        for key in keys {
+            at = match *key {
+                "ArrowDown" => (at + 1) % count,
+                "ArrowUp" => (at + count - 1) % count,
+                "Home" => 0,
+                "End" => count - 1,
+                other => panic!("not a menu key: {other}"),
+            };
+            seen.push(at);
+        }
+        seen
+    }
+
+    /// What every entry must be for the renderer to focus it and draw its keyboard-focus mark
+    /// (compose-rust#941, `RenderNode.kt`: the highlight and ring go on the entry the keys moved
+    /// to): pressable, not disabled or hidden (the keyboard passes over such an entry), and not
+    /// claiming a focus state of its own. Exactly one is declared selected, the one opening
+    /// focuses, and it is `chosen`.
+    fn assert_menu_entries_take_the_focus_mark(look: &str, nodes: &[EmittedNode], entries: &[&EmittedNode], titles: &[&str], chosen: usize) {
+        use compose_rust::schema::{SEMANTICS_DISABLED_SHIFT, SEMANTICS_FOCUSED_SHIFT, SEMANTICS_HIDDEN_BIT, SEMANTICS_SELECTED_SHIFT};
+        assert_eq!(entries.len(), titles.len(), "{look}: one entry per option");
+        for (e, title) in entries.iter().zip(titles) {
+            assert!(is_under(nodes, text_node(nodes, title), e.id), "{look}: {title} is the entry's text, in order");
+            assert!(e.props.iter().any(|p| p.starts_with("OnClick=")), "{look}: {title} is pressable, so it takes focus");
+            let (_, s) = semantics_state(e).expect("entry semantics");
+            assert_ne!(tri_state(s, SEMANTICS_DISABLED_SHIFT), Some(true), "{look}: {title} is not disabled");
+            assert_eq!(s & SEMANTICS_HIDDEN_BIT, 0, "{look}: {title} is not hidden");
+            assert_eq!(tri_state(s, SEMANTICS_FOCUSED_SHIFT), None, "{look}: {title} leaves focus to the menu keyboard");
+        }
+        let selected: Vec<usize> = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| semantics_state(e).is_some_and(|(_, s)| tri_state(s, SEMANTICS_SELECTED_SHIFT) == Some(true)))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(selected, vec![chosen], "{look}: only the current option is declared selected, so opening focuses it");
+    }
+
+    #[test]
+    fn fr_l10_4_the_focused_row_of_a_popover_menu_is_the_current_one_and_can_take_the_mark() {
+        // compose-rust#941 (pinned 519ffede): the renderer draws a fill and a ring on the row the
+        // menu keyboard moved focus to. The Host's part is that every row is an entry the
+        // keyboard can focus and that the current row alone is declared selected, so the menu
+        // opens focused on it. Both looks at 1440, and the titled and plain phone sheets at 390.
+        let _guard = crate::services::test_guard();
+        let titles = ["Ember 에디터", "VS Code", "JetBrains Gateway"];
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+        let wide = [("drop", emitted_nodes(drop_menu)), ("mode", emitted_nodes(mode_menu))];
+        crate::ui::window_size::set_opened_for_test(Some((390.0, 844.0)));
+        let phone = [("titled sheet", emitted_nodes(mode_menu)), ("plain sheet", emitted_nodes(plain_sheet_menu))];
+        crate::ui::window_size::set_opened_for_test(None);
+        for (look, nodes) in &wide {
+            let pop = the(nodes, "Popover");
+            let entries = menu_entries(nodes, pop);
+            assert_menu_entries_take_the_focus_mark(look, nodes, &entries, &titles, 1);
+        }
+        for (look, nodes) in &phone {
+            let sheet = the(nodes, "Sheet");
+            let entries = menu_entries(nodes, sheet);
+            assert_menu_entries_take_the_focus_mark(look, nodes, &entries, &titles, 1);
+        }
+    }
+
+    #[test]
+    fn fr_l10_4_arrow_keys_move_within_a_phone_bottom_sheet_menu() {
+        // compose-rust#940 (pinned 519ffede): `HostSheet` runs the same menu keyboard as a
+        // popover over the sheet's `MenuItem` nodes. At 390 a mode menu's sheet hands it exactly
+        // the three rows in order, nothing from the page behind it, so opening focuses VS Code,
+        // the arrows move between the rows and wrap at both ends, and Home and End jump to them.
+        // The keys themselves are the renderer's (`MenuKeyboardSheetDialogTest`); this pins the
+        // tree it is given and the stops it makes over that tree.
+        let _guard = crate::services::test_guard();
+        crate::ui::window_size::set_opened_for_test(Some((390.0, 844.0)));
+        let looks = [("titled sheet", emitted_nodes(mode_menu)), ("plain sheet", emitted_nodes(plain_sheet_menu))];
+        crate::ui::window_size::set_opened_for_test(None);
+        for (look, nodes) in &looks {
+            assert!(!nodes.iter().any(|n| n.widget == "Popover"), "{look}: a sheet, not a popover");
+            let sheet = the(nodes, "Sheet");
+            let entries = menu_entries(nodes, sheet);
+            assert_eq!(entries.len(), 3, "{look}: the keyboard's stops are the three rows");
+            assert!(!is_under(nodes, text_node(nodes, "IDE 버튼"), sheet.id), "{look}: the control is no stop");
+            let at = menu_keyboard_walk(&entries, &["ArrowDown", "ArrowDown", "ArrowUp", "ArrowUp", "ArrowUp", "Home", "End"]);
+            assert_eq!(at, vec![1, 2, 0, 2, 1, 0, 0, 2], "{look}: open on VS Code, down to the end and round, up and round, Home, End");
+        }
+    }
+
+    /// The nodes of `content` after a press on its select field (the node that is a dropdown
+    /// list to assistive technology), applying the press's batch over the first one (a property
+    /// set again replaces the old value).
+    fn emitted_after_opening_select(content: fn()) -> Vec<EmittedNode> {
+        fn absorb(nodes: &mut Vec<EmittedNode>, bytes: &[u8]) {
+            for m in decode_batch(bytes).expect("decode") {
+                match m {
+                    Mutation::Create { node_id, widget } => {
+                        nodes.retain(|n| n.id != node_id);
+                        nodes.push(EmittedNode { id: node_id, widget: format!("{widget:?}"), parent: None, index: 0, mods: Vec::new(), props: Vec::new() });
+                    }
+                    Mutation::Insert { parent_id, node_id, index } | Mutation::Move { parent_id, node_id, index } => {
+                        if let Some(n) = nodes.iter_mut().find(|n| n.id == node_id) {
+                            n.parent = Some(parent_id);
+                            n.index = index;
+                        }
+                    }
+                    Mutation::Remove { node_id } => {
+                        let mut gone = vec![node_id];
+                        while let Some(id) = gone.pop() {
+                            gone.extend(nodes.iter().filter(|n| n.parent == Some(id)).map(|n| n.id));
+                            nodes.retain(|n| n.id != id);
+                        }
+                    }
+                    Mutation::SetModifier { node_id, index, modifier } => {
+                        if let Some(n) = nodes.iter_mut().find(|n| n.id == node_id) {
+                            let i = index as usize;
+                            if n.mods.len() <= i {
+                                n.mods.resize(i + 1, String::new());
+                            }
+                            n.mods[i] = format!("{modifier:?}");
+                        }
+                    }
+                    Mutation::SetProp { node_id, property, value } => {
+                        if let Some(n) = nodes.iter_mut().find(|n| n.id == node_id) {
+                            let key = format!("{property:?}=");
+                            n.props.retain(|p| !p.starts_with(&key));
+                            n.props.push(format!("{key}{value:?}"));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut host = Host::new(move || Box::new(Recomposer::new(content)));
+        let mut nodes = Vec::new();
+        let first = host.rebuild().expect("rebuild").to_vec();
+        absorb(&mut nodes, &first);
+        let (node_id, handler) = nodes
+            .iter()
+            .filter(|n| semantics_state(n).is_some_and(|(r, _)| r == "DropdownList"))
+            .find_map(|n| {
+                let h = n.props.iter().find_map(|p| p.strip_prefix("OnClick=Integer("))?;
+                Some((n.id, h.trim_end_matches(')').parse::<u64>().expect("handler id")))
+            })
+            .expect("a pressable select field");
+        let (bytes, _) = host.dispatch(HostEvent::new(node_id, handler, EventPayload::Clicked)).expect("press");
+        let bytes = bytes.to_vec();
+        absorb(&mut nodes, &bytes);
+        nodes
+    }
+
+    fn named_select() {
+        let opts = vec!["Claude Code".to_string(), "Codex".to_string(), "Gemini CLI".to_string()];
+        NamedSelect("하네스", &opts[1], &opts, 1, 260.0, |_| {});
+    }
+
+    #[test]
+    fn fr_l10_4_a_select_opens_the_shared_menu_anchored_to_its_field() {
+        // #888, leader 2026-11-25 (one menu look everywhere): the form select opens the shared
+        // `PopoverMenu` in the permission-mode look, under the field and lined up with its start,
+        // the field its anchor, the current option checked, and no centred dialog.
+        let _guard = crate::services::test_guard();
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+        let nodes = emitted_after_opening_select(named_select);
+        crate::ui::window_size::set_opened_for_test(None);
+        assert!(!nodes.iter().any(|n| n.widget == "Dialog" || n.widget == "Sheet"), "no centred option sheet");
+        let pop = the(&nodes, "Popover");
+        for want in ["Open=Bool(true)", "Placement=Integer(2)", "OffsetDp=Float(8.0)"] {
+            assert!(pop.props.iter().any(|p| p == want), "{want} in {:?}", pop.props);
+        }
+        let start = emitted_nodes(mode_menu_start_aligned);
+        let start_align = the(&start, "Popover").props.iter().find(|p| p.starts_with("Align=")).cloned().expect("align");
+        assert!(pop.props.contains(&start_align), "lined up with the field's start: {:?}", pop.props);
+        // The box keeps the width the call site gives, is a menu named by the field's label.
+        assert!(pop.mods.iter().any(|m| m == "Width(260.0)"), "{:?}", pop.mods);
+        assert!(pop.mods.iter().any(|m| m.starts_with("Semantics") && m.contains("role: Menu,")), "{:?}", pop.mods);
+        assert!(pop.props.iter().chain(pop.mods.iter()).any(|p| p.contains("하네스")), "the menu is named by the field: {:?}", pop.props);
+        // The field is the anchor: the popover's first child, a named dropdown that says it is open.
+        let anchor = nodes.iter().find(|n| n.parent == Some(pop.id) && n.index == 0).expect("anchor child");
+        let field = nodes
+            .iter()
+            .find(|n| semantics_state(n).is_some_and(|(r, _)| r == "DropdownList"))
+            .expect("the select field");
+        assert!(field.id == anchor.id || is_under(&nodes, field, anchor.id), "the field is the anchor");
+        let (_, s) = semantics_state(field).unwrap();
+        assert_eq!(tri_state(s, compose_rust::schema::SEMANTICS_EXPANDED_SHIFT), Some(true), "the field says its menu is open");
+        // One menu item per option in the box, the current one alone selected and checked.
+        let entries = menu_entries(&nodes, pop);
+        assert_menu_entries_take_the_focus_mark("select", &nodes, &entries, &["Claude Code", "Codex", "Gemini CLI"], 1);
+        assert!(entries.iter().all(|e| !is_under(&nodes, e, anchor.id)), "the rows are the box's, not the field's");
+        let images = |r: &EmittedNode| nodes.iter().filter(|n| n.widget == "Image" && is_under(&nodes, n, r.id)).count();
+        assert_eq!(entries.iter().map(|e| images(*e)).collect::<Vec<_>>(), vec![0, 1, 0], "the check on the current row only");
+        assert_eq!(select_rows(&["a".to_string(), "b".to_string()], 0).iter().map(|r| r.chosen).collect::<Vec<_>>(), vec![true, false]);
+    }
+
+    fn mode_menu_start_aligned() {
+        let rows = pop_sample_rows();
+        PopoverMenu(
+            true,
+            PopMenu { name: "메뉴", kind: PopKind::Mode, head: "", sub: None, rows: &rows, align: compose_rust::PopoverAlign::Start },
+            || {},
+            |_| {},
+            || Label("열기", Fs::Sm, Weight::Medium, None, Some(1)),
+            None,
+        );
+    }
+
+    #[test]
+    fn fr_l10_4_a_select_at_390_is_the_phone_bottom_sheet_menu() {
+        // At 560 and below the select's menu is the permission-mode look's bottom sheet, as the
+        // 저장소, 기준 and session project menus are; its rows are the menu keyboard's stops.
+        let _guard = crate::services::test_guard();
+        crate::ui::window_size::set_opened_for_test(Some((390.0, 844.0)));
+        let nodes = emitted_after_opening_select(named_select);
+        crate::ui::window_size::set_opened_for_test(None);
+        assert!(!nodes.iter().any(|n| n.widget == "Popover" || n.widget == "Dialog"));
+        let sheet = the(&nodes, "Sheet");
+        assert!(sheet.props.iter().any(|p| p == "Open=Bool(true)"), "{:?}", sheet.props);
+        let entries = menu_entries(&nodes, sheet);
+        assert_menu_entries_take_the_focus_mark("select sheet", &nodes, &entries, &["Claude Code", "Codex", "Gemini CLI"], 1);
+        assert_sheet_rows_in_one_named_menu(&nodes, sheet, &entries, "하네스");
+        assert_eq!(menu_keyboard_walk(&entries, &["ArrowDown", "ArrowDown"]), vec![1, 2, 0]);
+    }
+
+    #[test]
+    fn fr_l10_4_every_select_field_is_a_popover_menu_and_only_two_sheets_remain() {
+        // #888: the form `Select` and `NamedSelect` go through `select_field`, which opens the
+        // shared menu. The only centred `OptionSheet`s left are the session's pane reorder and
+        // add-member lists (FR-L10.4: the mockup has no menu there).
+        let production = |src: &'static str| src.split("#[cfg(test)]").next().unwrap();
+        let comps = production(include_str!("components.rs"));
+        let select = comps.split("fn select_field(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(select.contains("PopoverMenuWith("), "the select opens the shared menu");
+        assert!(select.contains("kind: PopKind::Mode") && select.contains("align: compose_rust::PopoverAlign::Start"));
+        assert!(select.contains("plain_sheet: true") && select.contains("width: Some(popup_width)"));
+        assert!(!select.contains("OptionSheet(") && !select.contains("Dialog!("), "no centred list");
+        for (f, body) in [("Select", "select_field(None,"), ("NamedSelect", "select_field(Some(name),")] {
+            let def = comps.split(&format!("pub fn {f}(")).nth(1).unwrap().split("\n}\n").next().unwrap();
+            assert!(def.contains(body), "{f} goes through select_field");
+        }
+        assert_eq!(comps.matches("OptionSheet(").count(), 1, "components.rs only defines it");
+        let files: [(&str, &str); 33] = [
+            ("a11y.rs", include_str!("a11y.rs")),
+            ("add_computer.rs", include_str!("add_computer.rs")),
+            ("agents.rs", include_str!("agents.rs")),
+            ("channel_owner.rs", include_str!("channel_owner.rs")),
+            ("channels.rs", include_str!("channels.rs")),
+            ("characters_screen.rs", include_str!("characters_screen.rs")),
+            ("characters.rs", include_str!("characters.rs")),
+            ("compat.rs", include_str!("compat.rs")),
+            ("components.rs", include_str!("components.rs")),
+            ("conversation.rs", include_str!("conversation.rs")),
+            ("device_scope.rs", include_str!("device_scope.rs")),
+            ("editor_settings.rs", include_str!("editor_settings.rs")),
+            ("files.rs", include_str!("files.rs")),
+            ("gallery.rs", include_str!("gallery.rs")),
+            ("home.rs", include_str!("home.rs")),
+            ("ko.rs", include_str!("ko.rs")),
+            ("launcher.rs", include_str!("launcher.rs")),
+            ("mod.rs", include_str!("mod.rs")),
+            ("monitor.rs", include_str!("monitor.rs")),
+            ("new_channel.rs", include_str!("new_channel.rs")),
+            ("new_session.rs", include_str!("new_session.rs")),
+            ("notice.rs", include_str!("notice.rs")),
+            ("owner_claim.rs", include_str!("owner_claim.rs")),
+            ("project.rs", include_str!("project.rs")),
+            ("routines.rs", include_str!("routines.rs")),
+            ("search.rs", include_str!("search.rs")),
+            ("self_update.rs", include_str!("self_update.rs")),
+            ("session.rs", include_str!("session.rs")),
+            ("settings.rs", include_str!("settings.rs")),
+            ("shell.rs", include_str!("shell.rs")),
+            ("theme.rs", include_str!("theme.rs")),
+            ("this_device.rs", include_str!("this_device.rs")),
+            ("vcs.rs", include_str!("vcs.rs")),
+        ];
+        for (name, src) in files {
+            let prod = production(src);
+            if name != "components.rs" {
+                assert!(!prod.contains("fn Select(") && !prod.contains("fn NamedSelect("), "{name} draws no select of its own");
+            }
+            let sheets = prod.matches("OptionSheet(").count();
+            match name {
+                "components.rs" => assert_eq!(sheets, 1, "{name}"),
+                "session.rs" => {
+                    assert_eq!(sheets, 2, "session.rs keeps only the reorder and add-member sheets");
+                    let reorder = prod.find("// Reorder OptionSheet").expect("reorder sheet");
+                    let add = prod.find("// Add-member OptionSheet").expect("add-member sheet");
+                    let at: Vec<usize> = prod.match_indices("OptionSheet(").map(|(i, _)| i).collect();
+                    assert!(reorder < at[0] && at[0] < add && add < at[1], "the two sheets are the reorder and add-member lists");
+                }
+                _ => assert_eq!(sheets, 0, "{name} opens no centred option sheet"),
+            }
+        }
+        // The call sites the leader listed all reach the shared field.
+        for (name, src) in [
+            ("characters_screen.rs", include_str!("characters_screen.rs")),
+            ("files.rs", include_str!("files.rs")),
+            ("new_session.rs", include_str!("new_session.rs")),
+            ("project.rs", include_str!("project.rs")),
+            ("routines.rs", include_str!("routines.rs")),
+            ("session.rs", include_str!("session.rs")),
+        ] {
+            let prod = production(src);
+            assert!(prod.contains("Select(&") || prod.contains("Select(\n") || prod.contains("NamedSelect("), "{name} has a select");
+        }
+    }
+
     #[test]
     fn fr_l10_4_a_title_beside_a_badge_takes_two_lines() {
         // Review st, A FAIL 2: the model menu's one row was cut at 1440 and 800.
@@ -4616,7 +5027,7 @@ mod tests {
             assert!(mh.open_modals().is_empty());
         }
 
-        // 2. OptionSheet, Select / NamedSelect, and PopoverMenu (Drop Popover, Mode Popover at 1440, Mode Sheet at 390).
+        // 2. OptionSheet, Select / NamedSelect (a PopoverMenu since #888), and PopoverMenu (Drop Popover, Mode Popover at 1440, Mode Sheet at 390).
         crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
         {
             let mut mh = ModalHost::new(|| {
@@ -4637,7 +5048,8 @@ mod tests {
             assert!(mh.open_modals().is_empty());
             mh.click_text("Claude Code");
             assert_eq!(mh.open_modals().len(), 1);
-            assert_eq!(mh.press_escape(), "Dialog");
+            // #888: a form select opens the shared menu, anchored to the field.
+            assert_eq!(mh.press_escape(), "Popover");
             assert!(mh.open_modals().is_empty());
         }
         for (w, h, kind, expected_widget) in [
@@ -4979,8 +5391,8 @@ mod tests {
             ui.owner_claim_dismissed.set(None);
         }
 
-        // 2. Inner Select (OptionSheet) or branch_menu opened inside a parent sheet:
-        // first Escape closes only the inner OptionSheet / branch_menu; second Escape closes the parent sheet.
+        // 2. Inner Select (its PopoverMenu, #888) or branch_menu opened inside a parent sheet:
+        // first Escape closes only the inner menu; second Escape closes the parent sheet.
         {
             // Select opened inside "새 세션" (NewSessionDialog).
             let ui = crate::ui::coexist::shared_ui();
@@ -4989,16 +5401,16 @@ mod tests {
             assert_eq!(mh.open_modals().len(), 1, "only NewSessionDialog open");
             let shown = crate::ui::home::default_mode(crate::ui::home::Harness::ClaudeCode).label();
             mh.click_text(shown);
-            assert_eq!(mh.open_modals().len(), 2, "NewSessionDialog + Select OptionSheet open");
-            mh.press_escape();
-            assert_eq!(mh.open_modals().len(), 1, "1st Escape closed only the Select OptionSheet");
+            assert_eq!(mh.open_modals().len(), 2, "NewSessionDialog + Select menu open");
+            assert_eq!(mh.press_escape(), "Popover", "the select's menu is the shared popover");
+            assert_eq!(mh.open_modals().len(), 1, "1st Escape closed only the Select menu");
             assert!(ui.new_session.get_untracked().is_some(), "NewSessionDialog remains open");
             mh.press_escape();
             assert!(mh.open_modals().is_empty(), "2nd Escape closed NewSessionDialog");
             assert!(ui.new_session.get_untracked().is_none());
         }
         {
-            // NamedSelect (OptionSheet) opened inside RoutineForm sheet ("새 루틴").
+            // NamedSelect (PopoverMenu) opened inside RoutineForm sheet ("새 루틴").
             let mut mh = ModalHost::new(|| {
                 let open = remember(|| mutable_state_of(true));
                 let draft = remember(|| mutable_state_of(crate::ui::routines::FormDraft::new("ember")));
@@ -5021,9 +5433,9 @@ mod tests {
             let shown = crate::ui::home::default_mode(crate::ui::home::Harness::ClaudeCode).label();
             assert_eq!(mh.open_modals().len(), 1, "only RoutineForm sheet open");
             mh.click_text(shown);
-            assert_eq!(mh.open_modals().len(), 2, "RoutineForm sheet + NamedSelect OptionSheet open");
-            mh.press_escape();
-            assert_eq!(mh.open_modals().len(), 1, "1st Escape closed only NamedSelect OptionSheet");
+            assert_eq!(mh.open_modals().len(), 2, "RoutineForm sheet + NamedSelect menu open");
+            assert_eq!(mh.press_escape(), "Popover", "the select's menu is the shared popover");
+            assert_eq!(mh.open_modals().len(), 1, "1st Escape closed only the NamedSelect menu");
             mh.press_escape();
             assert!(mh.open_modals().is_empty(), "2nd Escape closed RoutineForm sheet");
         }

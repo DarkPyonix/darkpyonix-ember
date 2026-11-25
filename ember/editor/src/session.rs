@@ -895,7 +895,10 @@ impl EditorSession {
     /// Start the configuration of `.vscode/launch.json` that `selector` names. Answered with
     /// [`crate::debugger::DebugUpdate::Sessions`], or [`crate::debugger::DebugUpdate::StartFailed`].
     pub fn start_debugging(&self, selector: crate::debugger::ConfigSelector) -> Result<(), Error> {
-        self.debug(crate::debugger::DebugRequest::Start { selector })
+        self.debug(crate::debugger::DebugRequest::Start {
+            selector,
+            no_debug: false,
+        })
     }
 
     /// Stop one debug session, or all of them with `None`.

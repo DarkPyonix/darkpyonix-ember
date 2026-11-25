@@ -55,6 +55,9 @@ pub struct TaskDef {
     /// `group` (`build`, `test`, ...).
     pub group: Option<String>,
     pub is_default: bool,
+    /// `isBackground`: a watch task that does not exit. A debug start waits for such a task through
+    /// its problem matcher in Code-OSS; this runner reads no matcher (FR-L31.42).
+    pub is_background: bool,
     /// Why this task cannot run here yet, in Korean.
     pub unsupported: Option<String>,
 }
@@ -256,6 +259,7 @@ pub fn parse_tasks_json(text: &str) -> Result<Vec<TaskDef>, String> {
             env,
             group,
             is_default,
+            is_background: t.get("isBackground").and_then(|b| b.as_bool()).unwrap_or(false),
             unsupported,
         });
     }
@@ -514,20 +518,21 @@ pub mod view {
         s.host.send(HostCommand::LoadTasks);
     }
 
-    /// Run `task` in a new terminal on the project's computer.
-    pub fn run(s: &Shared, task: &TaskDef) {
+    /// Run `task` in a new terminal on the project's computer. Returns its terminal, or `None`
+    /// when it was refused (the notice says why).
+    pub fn run(s: &Shared, task: &TaskDef) -> Option<TerminalHandle> {
         let trust = s.host.state.lock().unwrap().trust;
         let attach = crate::ui::editor_workbench::page::can_attach(&s.server_url, &s.computer);
         if let Some(why) = run_refusal(&trust, attach) {
             notice(why);
-            return;
+            return None;
         }
         let ctx = VarContext { folder: s.folder.clone(), file: s.tabs.read().current_path().map(str::to_owned) };
         let l = match launch(task, &ctx) {
             Ok(l) => l,
             Err(e) => {
                 notice(format!("{}을(를) 실행할 수 없습니다: {e}", task.label));
-                return;
+                return None;
             }
         };
         let revision = s.revision;
@@ -545,7 +550,7 @@ pub mod view {
         // The earlier run's terminal is detached, not killed: it keeps running on the computer,
         // as a Code-OSS task terminal does until it is closed.
         RUN.with(|r| {
-            if let Some((_, old)) = r.borrow_mut().replace((task.label.clone(), handle)) {
+            if let Some((_, old)) = r.borrow_mut().replace((task.label.clone(), handle.clone())) {
                 old.detach();
             }
         });
@@ -555,6 +560,7 @@ pub mod view {
             stripes.write().toggle(ToolWindow::Run);
         }
         bump(s);
+        Some(handle)
     }
 
     /// The top bar's 실행: the chosen task, else the default build task; with none, the 실행 window opens.
@@ -562,7 +568,9 @@ pub mod view {
         let chosen = CHOSEN.with(|c| c.borrow().clone());
         match tasks_of(s) {
             Some(TasksLoad::Parsed(tasks)) => match pick_task(&tasks, chosen.as_deref()) {
-                Some(t) => run(s, &t.clone()),
+                Some(t) => {
+                    run(s, &t.clone());
+                }
                 None => {
                     notice("실행할 작업을 실행 창에서 고르세요.");
                     open(s);
@@ -618,7 +626,7 @@ pub mod view {
                                         div { style: if enabled { "" } else { "color:var(--muted);" }, "{label}" }
                                         div { style: "color:var(--muted); font-size:var(--fs-xs); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;", "{note}" }
                                     }
-                                    button { class: "ed-ib", title: "{tip}", "aria-label": "{tip}", disabled: !enabled, onclick: move |_| run(&run_s, &t), {icon("play")} }
+                                    button { class: "ed-ib", title: "{tip}", "aria-label": "{tip}", disabled: !enabled, onclick: move |_| { run(&run_s, &t); }, {icon("play")} }
                                 }
                             }
                         }

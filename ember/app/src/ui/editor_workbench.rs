@@ -656,6 +656,11 @@ pub mod page {
             crate::ui::editor_debug::stop(s);
             return;
         }
+        // Ctrl+F5: Run Without Debugging (`workbench.action.debug.run`).
+        if action == Action::RunConfig {
+            crate::ui::editor_debug::run_without_debugging(s);
+            return;
+        }
         if action == Action::Ask {
             let mut stripes = s.stripes;
             if !stripes.read().is_selected(ToolWindow::Agent) {
@@ -1713,6 +1718,8 @@ pub mod page {
             *revision.write() += 1;
         }
         crate::ui::editor_language::view::after_updates(&s, saved);
+        // FR-L31.42: a preLaunchTask or postDebugTask on its way (tasks.json read, task ended).
+        crate::ui::editor_debug_tasks::poll(&s);
         let tabs = s.tabs;
         let current = tabs.read().current_path().map(str::to_owned);
         let paths: Vec<String> = tabs.read().paths().into_iter().map(str::to_owned).collect();
@@ -1933,6 +1940,7 @@ pub mod page {
                                 onclick: move |_| close_palette(&palette_scrim_s) }
                         }
                         if let Some(request) = s.close_confirm.read().clone() { {close_confirm_sheet(&s, &request)} }
+                        {crate::ui::editor_debug_tasks::prompt_sheet(&s)}
                         {crate::ui::workspace_trust::view::prompt(&s)}
                         {crate::ui::editor_notifications::view::layer(&s)}
                         {crate::ui::editor_language::view::overlay(&s)}
@@ -2902,7 +2910,7 @@ pub mod page {
     /// Whether a modal is up: the trust prompt, the unsaved-changes sheet or an extension's modal
     /// message (#831). Code-OSS's modal dialogs block the workbench, so the ⋯ menu stays closed.
     fn modal_up(s: &Shared) -> bool {
-        crate::ui::workspace_trust::view::prompt_up(s) || s.close_confirm.peek().is_some() || s.notifications.borrow().modal().is_some()
+        crate::ui::workspace_trust::view::prompt_up(s) || s.close_confirm.peek().is_some() || s.notifications.borrow().modal().is_some() || s.debug.peek().task_prompt.is_some()
     }
 
     /// Where a keyboard-opened tab context menu (Shift+F10 / ContextMenu) anchors under the tab

@@ -741,6 +741,7 @@ pub fn IdeMenu(session: &str) {
                         Clickable(
                             Modifier::new()
                                 .size(32.0, 32.0)
+                                .min_touch_target(super::vcs::ICON_TOUCH_TARGET)
                                 .background(paint(split.fill))
                                 .border(1.0, paint(split.border))
                                 .shape_role(ShapeRole::Full),
@@ -1558,7 +1559,9 @@ pub fn Pane(
                     { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, space_role = SpaceRole::Xs, modifier = Modifier::new().fill_max_width(), {
                             let m_open = menu.clone();
                             Clickable(
-                                Modifier::new().size(18.0, 28.0),
+                                Modifier::new()
+                                    .size(18.0, 28.0)
+                                    .min_touch_target(super::vcs::ICON_TOUCH_TARGET),
                                 Alignment::Center,
                                 move || m_open.set(true),
                                 || NavIcon(ICON_GRIP_SVG, p.muted.to_argb(), 14.0),
@@ -1601,7 +1604,10 @@ pub fn Pane(
                                 let to = cur_toggle.other();
                                 NamedClickable(
                                     to.switch_label(),
-                                    Modifier::new().size(28.0, 28.0).corner_radius(CORNER_SM),
+                                    Modifier::new()
+                                        .size(28.0, 28.0)
+                                        .min_touch_target(super::vcs::ICON_TOUCH_TARGET)
+                                        .corner_radius(CORNER_SM),
                                     Alignment::Center,
                                     move || tg_seg.set(to),
                                     move || {
@@ -1619,7 +1625,10 @@ pub fn Pane(
                             let enl = on_enlarge.clone();
                             let id_enl = id.clone();
                             Clickable(
-                                Modifier::new().size(28.0, 28.0).corner_radius(CORNER_SM),
+                                Modifier::new()
+                                    .size(28.0, 28.0)
+                                    .min_touch_target(super::vcs::ICON_TOUCH_TARGET)
+                                    .corner_radius(CORNER_SM),
                                 Alignment::Center,
                                 move || enl(id_enl.clone()),
                                 || NavIcon(ICON_EXPAND_SVG, p.muted.to_argb(), 14.0),
@@ -1630,7 +1639,10 @@ pub fn Pane(
                             let all_close = all_owned.clone();
                             let id_close = id.clone();
                             Clickable(
-                                Modifier::new().size(28.0, 28.0).corner_radius(CORNER_SM),
+                                Modifier::new()
+                                    .size(28.0, 28.0)
+                                    .min_touch_target(super::vcs::ICON_TOUCH_TARGET)
+                                    .corner_radius(CORNER_SM),
                                 Alignment::Center,
                                 move || {
                                     let (all_c, id_c) = (all_close.clone(), id_close.clone());
@@ -4534,6 +4546,7 @@ pub fn SessionScreen(focus: Option<String>) {
     let drawer = remember(|| {
         mutable_state_of(std::env::var("EMBER_CR_SESSION_DRAWER").as_deref() == Ok("1"))
     });
+    let drawer_focus = cu::use_focus_handle();
     let rail_collapsed = remember(|| mutable_state_of(false));
     let new_member_open = remember(|| {
         mutable_state_of(std::env::var("EMBER_CR_SESSION_NEW_MEMBER").as_deref() == Ok("1"))
@@ -4592,6 +4605,15 @@ pub fn SessionScreen(focus: Option<String>) {
     // reopen it (FR-L18). Written only while it is true, so there is no write loop.
     if show_column && drawer.get() {
         drawer.set(false);
+    }
+    let drawer_open = crate::ui::session::drawer_open_effective(show_column, drawer.get());
+    {
+        let take = drawer_focus.clone();
+        launched_effect(drawer_open, move || async move {
+            if drawer_open {
+                take.request();
+            }
+        });
     }
     let chips_below = view_chips_below(window.width_dp);
     let hide_view_lbl = crate::ui::session::view_seg_icon_only(window.width_dp);
@@ -4865,6 +4887,7 @@ pub fn SessionScreen(focus: Option<String>) {
                                             super::a11y::MENU,
                                             Modifier::new()
                                                 .size(32.0, 32.0)
+                                                .min_touch_target(super::vcs::ICON_TOUCH_TARGET)
                                                 .background(paint(p.surface))
                                                 .border(1.0, paint(p.line))
                                                 .shape_role(ShapeRole::Full)
@@ -5009,14 +5032,14 @@ pub fn SessionScreen(focus: Option<String>) {
             // Left drawer with a scrim on compact/tablet (#582). The toolkit's Sheet picks its
             // own edge and Dialog centres, so this is an in-tree overlay stacked in the screen's
             // Box. It covers the session content area, not the phone tab bar or title strip
-            // (the shell is outside this screen).
-            // v0.0.7: #476 fixed (containers take `on_key_down`, and `Batch::request_focus`
-            // exists); workaround kept until checked on a display (the drawer has to take focus
-            // when it opens before Escape can reach it); the scrim and the close button close it.
+            // (the shell is outside this screen). The drawer takes focus when it opens and closes
+            // on Escape via `on_key_down` (FR-L32, FR-L18, #1070); the scrim and the close button
+            // also close it.
             // The toggle, the scrim and the drawer are named (compose-rust v0.0.7, #429).
             if crate::ui::session::drawer_open_effective(show_column, drawer.get()) {
                 let dr_s = drawer.clone();
                 let dr_x = drawer.clone();
+                let dr_k = drawer.clone();
                 let sec_d = sections.clone();
                 let cur_d = current.clone();
                 let tgt_d = target.clone();
@@ -5036,24 +5059,38 @@ pub fn SessionScreen(focus: Option<String>) {
                     move || dr_s.set(false),
                     || {},
                 );
-                { use ::compose_rust::ui::Row; Row!(modifier = with_shadows(Modifier::new(), theme.shadow_sm())
+                {
+                    let df = drawer_focus.clone();
+                    use ::compose_rust::ui::Row;
+                    Row!(
+                        modifier = with_shadows(Modifier::new(), theme.shadow_sm())
                             .width(w)
                             .fill_max_height()
                             .role(compose_rust::ui::Role::Navigation)
-                            .label(super::a11y::SESSION_MENU), content = move || {
-                        { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().weight(1.0).fill_max_height(), content = move || {
-                                SideList(
-                                    &sec_d,
-                                    &cur_d,
-                                    tgt_d.as_deref(),
-                                    is_m,
-                                    Some(Box::new(move || dr_x.set(false))),
-                                    move |q| q_d.set(q),
-                                    op_d.clone(),
-                                );
-                            }) };
-                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(1.0).fill_max_height().background(paint(pal.line))) };
-                    }) };
+                            .label(super::a11y::SESSION_MENU),
+                        on_key_down = Some(move |key: compose_rust::KeyEvent| {
+                            if key.key() == compose_rust::Key::Escape || key.text() == "Escape" {
+                                key.consume();
+                                dr_k.set(false);
+                            }
+                        }),
+                        focus_handle = &df,
+                        content = move || {
+                            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().weight(1.0).fill_max_height(), content = move || {
+                                    SideList(
+                                        &sec_d,
+                                        &cur_d,
+                                        tgt_d.as_deref(),
+                                        is_m,
+                                        Some(Box::new(move || dr_x.set(false))),
+                                        move |q| q_d.set(q),
+                                        op_d.clone(),
+                                    );
+                                }) };
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(1.0).fill_max_height().background(paint(pal.line))) };
+                        }
+                    );
+                }
             }
 
             // New member sheet (#snew)
@@ -5904,6 +5941,210 @@ mod tests {
             );
         }
 
+        compose_rust::window::reset_window_size();
+    }
+
+    #[Composable]
+    fn host_ide_menu_phone() {
+        IdeMenu("demo-s1");
+    }
+
+    #[Composable]
+    fn host_pane_phone() {
+        let m = Member {
+            session_id: "demo-s1".to_string(),
+            name: "ember-리더".to_string(),
+            task: "작업".to_string(),
+            agent: "claude".to_string(),
+            status: LauncherStatus::Running,
+            leader: true,
+            updated_at: 0,
+        };
+        let all = vec!["demo-s1".to_string(), "demo-s2".to_string()];
+        Pane("demo-p1", &m, &all, &all, |_| {});
+    }
+
+    /// FR-L34.3 (#1070): the phone IDE button (32x32), phone menu square (32x32), and the pane
+    /// header's grip (18x28), switch (28x28), enlarge (28x28) and close (28x28) buttons all emit
+    /// `MinTouchTarget(44.0)` without growing their drawn dimensions.
+    #[test]
+    fn fr_l34_3_phone_ide_menu_and_pane_header_buttons_emit_44_dp_touch_target() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        crate::ui::window_size::set_opened_for_test(Some((390.0, 844.0)));
+        let want_touch = format!("{:?}", compose_rust::schema::Modifier::MinTouchTarget { size: 44.0 });
+
+        // 1. Phone IDE button (32x32) in IdeMenu.
+        let ide_sent = PaneTabSent::of(host_ide_menu_phone);
+        let phone_ide = ide_sent.clicked.iter().copied().find(|&id| {
+            let mods = ide_sent.mods(id);
+            mods.iter().any(|m| m == "Width(32.0)") && mods.iter().any(|m| m == "Height(32.0)")
+        });
+        let phone_ide = phone_ide.expect("phone IDE 32x32 clickable");
+        let ide_mods = ide_sent.mods(phone_ide);
+        assert!(ide_mods.contains(&want_touch), "phone IDE button missing 44 dp touch target: {ide_mods:?}");
+
+        // 2. Phone menu square button (32x32) in SessionScreen.
+        shared_ui().update_prefs(|p| p.session_view = Some("multi".to_string()));
+        let t = Tree::of(host_session_multi);
+        let menu_node = *t
+            .nodes_with(super::super::a11y::MENU)
+            .first()
+            .expect("phone MENU button");
+        let menu_mods: Vec<String> = t
+            .modifiers
+            .iter()
+            .filter(|(n, _)| *n == menu_node)
+            .map(|(_, m)| m.clone())
+            .collect();
+        for want in ["Width(32.0)", "Height(32.0)", want_touch.as_str()] {
+            assert!(menu_mods.iter().any(|m| m == want), "phone MENU button missing {want}: {menu_mods:?}");
+        }
+
+        // 3. Pane header buttons at 390 dp (pane_width = 366 <= 420, so icon_toggle is true):
+        // grip (18x28) and switch, enlarge, close (each 28x28).
+        let pane_sent = PaneTabSent::of(host_pane_phone);
+        let grip = pane_sent.clicked.iter().copied().find(|&id| {
+            let mods = pane_sent.mods(id);
+            mods.iter().any(|m| m == "Width(18.0)") && mods.iter().any(|m| m == "Height(28.0)")
+        });
+        let grip = grip.expect("pane header grip 18x28 clickable");
+        let grip_mods = pane_sent.mods(grip);
+        assert!(grip_mods.contains(&want_touch), "pane grip missing 44 dp touch target: {grip_mods:?}");
+
+        let square_btns: Vec<u32> = pane_sent
+            .clicked
+            .iter()
+            .copied()
+            .filter(|&id| {
+                let mods = pane_sent.mods(id);
+                mods.iter().any(|m| m == "Width(28.0)") && mods.iter().any(|m| m == "Height(28.0)")
+            })
+            .collect();
+        assert_eq!(square_btns.len(), 3, "expected switch, enlarge and close 28x28 buttons: {square_btns:?}");
+        for id in square_btns {
+            let mods = pane_sent.mods(id);
+            assert!(mods.contains(&want_touch), "pane header 28x28 button {id} missing 44 dp touch target: {mods:?}");
+        }
+
+        shared_ui().update_prefs(|p| p.session_view = None);
+        crate::ui::window_size::set_opened_for_test(None);
+        compose_rust::window::reset_window_size();
+    }
+
+    /// FR-L32, FR-L18 (#1070): pressing Escape on the in-tree session side drawer closes it.
+    #[test]
+    fn fr_l32_escape_closes_the_in_tree_session_side_drawer() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        crate::ui::window_size::set_opened_for_test(Some((390.0, 844.0)));
+        shared_ui().update_prefs(|p| p.session_view = Some("multi".to_string()));
+
+        let mut host = Host::new(|| Box::new(Recomposer::new(host_session_multi)));
+        let init_batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+
+        // Find the phone MENU button and its OnClick handler.
+        let menu_node = init_batch
+            .iter()
+            .find_map(|m| match m {
+                Mutation::SetProp {
+                    node_id,
+                    value: PropertyValue::String(s),
+                    ..
+                } if *s == super::super::a11y::MENU => Some(*node_id),
+                _ => None,
+            })
+            .expect("phone MENU button");
+        let menu_click = init_batch
+            .iter()
+            .find_map(|m| match m {
+                Mutation::SetProp {
+                    node_id,
+                    property: compose_rust::PropertyKind::OnClick,
+                    value: PropertyValue::Integer(h),
+                } if *node_id == menu_node => Some(*h as u64),
+                _ => None,
+            })
+            .expect("phone MENU OnClick handler");
+
+        // Open the side drawer by clicking the menu button.
+        let (bytes, _) = host
+            .dispatch(HostEvent::new(menu_node, menu_click, EventPayload::Clicked))
+            .expect("open drawer");
+        let open_batch = decode_batch(bytes).expect("decode open");
+
+        // Locate the drawer container (labelled SESSION_MENU) and its OnKeyDown handler.
+        let drawer_node = open_batch
+            .iter()
+            .find_map(|m| match m {
+                Mutation::SetProp {
+                    node_id,
+                    value: PropertyValue::String(s),
+                    ..
+                } if *s == super::super::a11y::SESSION_MENU => Some(*node_id),
+                _ => None,
+            })
+            .expect("session side drawer node");
+        let key_handler = open_batch
+            .iter()
+            .find_map(|m| match m {
+                Mutation::SetProp {
+                    node_id,
+                    property: compose_rust::PropertyKind::OnKeyDown,
+                    value: PropertyValue::Integer(h),
+                } if *node_id == drawer_node => Some(*h as u64),
+                _ => None,
+            })
+            .expect("session side drawer OnKeyDown handler");
+
+        // A non-Escape key leaves the drawer open.
+        let (bytes, _) = host
+            .dispatch(HostEvent::new(
+                drawer_node,
+                key_handler,
+                EventPayload::KeyDown {
+                    key: compose_rust::Key::Other,
+                    shift_key: false,
+                    ctrl_key: false,
+                    alt_key: false,
+                    meta_key: false,
+                    repeat: false,
+                    code: 0x04,
+                    text: "a",
+                },
+            ))
+            .expect("dispatch non-Escape");
+        let noop_batch = decode_batch(bytes).expect("decode non-Escape");
+        assert!(
+            !noop_batch.iter().any(|m| matches!(m, Mutation::Remove { node_id } if *node_id == drawer_node)),
+            "non-Escape key must not close the side drawer"
+        );
+
+        // Pressing Escape closes the drawer and removes its node from the tree.
+        let (bytes, _) = host
+            .dispatch(HostEvent::new(
+                drawer_node,
+                key_handler,
+                EventPayload::KeyDown {
+                    key: compose_rust::Key::Escape,
+                    shift_key: false,
+                    ctrl_key: false,
+                    alt_key: false,
+                    meta_key: false,
+                    repeat: false,
+                    code: 0x29,
+                    text: "Escape",
+                },
+            ))
+            .expect("dispatch Escape");
+        let close_batch = decode_batch(bytes).expect("decode close");
+        assert!(
+            close_batch.iter().any(|m| matches!(m, Mutation::Remove { node_id } if *node_id == drawer_node)),
+            "Escape must close and remove the session side drawer"
+        );
+
+        shared_ui().update_prefs(|p| p.session_view = None);
+        crate::ui::window_size::set_opened_for_test(None);
         compose_rust::window::reset_window_size();
     }
 

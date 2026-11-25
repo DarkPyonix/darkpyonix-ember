@@ -17,6 +17,9 @@
 //! `server/discover` first and `initialize` with protocol 2025-11-25; Codex sends `initialize`
 //! with 2025-06-18 and later probes `resources/list` and `resources/templates/list`. Every
 //! unknown request is answered with `-32601` and the loop goes on.
+//!
+//! The frame loop is shared with `ember-a2a mcp ember` (FR-T2, #1045, [`super::mcp_native`]):
+//! [`serve_tools`] drives any [`ToolSet`], and [`serve`] is that loop over the one channel tool.
 
 use std::io::{self, BufRead, Write};
 
@@ -144,9 +147,15 @@ pub fn non_loopback_host(url: &str) -> Option<String> {
 }
 
 /// The one startup warning line for `host`: only the host, never the token or the URL.
+#[cfg(test)]
 fn non_loopback_warning(host: &str) -> String {
+    non_loopback_warning_for("ember-a2a mcp", host)
+}
+
+/// The one startup warning line for `host`, starting with `label`.
+fn non_loopback_warning_for(label: &str, host: &str) -> String {
     format!(
-        "ember-a2a mcp: EMBER_URL names {host}, which is not this machine; the runtime token is sent to it over plain HTTP"
+        "{label}: EMBER_URL names {host}, which is not this machine; the runtime token is sent to it over plain HTTP"
     )
 }
 
@@ -168,24 +177,80 @@ impl ChannelPoster for EnvPoster {
     }
 }
 
+/// The tools one stdio MCP server offers. The frame loop ([`serve_tools`]) owns the protocol; a
+/// tool set only names itself, lists its tools and answers a call.
+pub trait ToolSet {
+    /// `serverInfo.name` in the `initialize` answer.
+    fn server_name(&self) -> &'static str;
+    /// `instructions` in the `initialize` answer (MCP 2025-03-26 and later), if any.
+    fn instructions(&self) -> Option<&'static str> {
+        None
+    }
+    /// The `tools/list` entries.
+    fn tools(&self) -> Vec<Value>;
+    /// One `tools/call`: `name` is `""` when the request has none. A refusal the model should read
+    /// is an `Ok` tool result with `isError`; `Err` is a JSON-RPC error (an unknown tool).
+    fn call(&self, name: &str, arguments: Option<&Value>) -> Result<Value, (i64, &'static str)>;
+}
+
+/// The `ember-channels` server: the one tool `channel_post` (FR-T12).
+struct ChannelTools<'a> {
+    poster: &'a dyn ChannelPoster,
+}
+
+impl ToolSet for ChannelTools<'_> {
+    fn server_name(&self) -> &'static str {
+        "ember-channels"
+    }
+
+    fn tools(&self) -> Vec<Value> {
+        vec![tool_definition()]
+    }
+
+    fn call(&self, name: &str, arguments: Option<&Value>) -> Result<Value, (i64, &'static str)> {
+        if name != TOOL_NAME {
+            return Err((-32602, "unknown tool"));
+        }
+        let (channel, text) = match validate_arguments(arguments) {
+            Ok(v) => v,
+            Err(reason) => return Ok(tool_result(reason, true)),
+        };
+        Ok(match self.poster.post(channel, text) {
+            Ok(id) => tool_result(&format!("Posted message {id} in channel {channel}."), false),
+            Err(refusal) => tool_result(&refusal.reason, true),
+        })
+    }
+}
+
 /// Entry point of `ember-a2a mcp`; returns the process exit code.
 pub fn run_stdio() -> i32 {
+    run_stdio_with(&ChannelTools { poster: &EnvPoster }, "ember-a2a mcp")
+}
+
+/// Serve `tools` on this process's stdin and stdout; `label` starts each stderr line. Warns once
+/// on stderr when `EMBER_URL` names another machine.
+pub(crate) fn run_stdio_with(tools: &dyn ToolSet, label: &str) -> i32 {
     if let Some(host) = std::env::var("EMBER_URL").ok().as_deref().and_then(non_loopback_host) {
-        eprintln!("{}", non_loopback_warning(&host));
+        eprintln!("{}", non_loopback_warning_for(label, &host));
     }
     let stdin = io::stdin();
     let stdout = io::stdout();
-    match serve(stdin.lock(), stdout.lock(), &EnvPoster) {
+    match serve_tools(stdin.lock(), stdout.lock(), tools) {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("ember-a2a mcp: i/o error ({:?})", e.kind());
+            eprintln!("{label}: i/o error ({:?})", e.kind());
             1
         }
     }
 }
 
 /// Handle frames from `input` until EOF, one at a time, answering on `output`.
-pub fn serve<R: BufRead, W: Write>(mut input: R, mut output: W, poster: &dyn ChannelPoster) -> io::Result<()> {
+pub fn serve<R: BufRead, W: Write>(input: R, output: W, poster: &dyn ChannelPoster) -> io::Result<()> {
+    serve_tools(input, output, &ChannelTools { poster })
+}
+
+/// [`serve`] for any [`ToolSet`].
+pub fn serve_tools<R: BufRead, W: Write>(mut input: R, mut output: W, tools: &dyn ToolSet) -> io::Result<()> {
     let mut line = Vec::new();
     loop {
         match read_frame(&mut input, &mut line)? {
@@ -200,7 +265,7 @@ pub fn serve<R: BufRead, W: Write>(mut input: R, mut output: W, poster: &dyn Cha
                 if line.iter().all(u8::is_ascii_whitespace) {
                     continue;
                 }
-                if let Some(answer) = handle(&line, poster) {
+                if let Some(answer) = handle(&line, tools) {
                     write_frame(&mut output, &answer)?;
                 }
             }
@@ -269,7 +334,8 @@ fn error_response(id: &Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
-fn tool_result(text: &str, is_error: bool) -> Value {
+/// A `tools/call` result with one text item, flagged `isError` when `is_error`.
+pub(crate) fn tool_result(text: &str, is_error: bool) -> Value {
     let mut v = json!({ "content": [{ "type": "text", "text": text }] });
     if is_error {
         v["isError"] = json!(true);
@@ -278,7 +344,7 @@ fn tool_result(text: &str, is_error: bool) -> Value {
 }
 
 /// The answer to one line, or `None` for a notification.
-fn handle(line: &[u8], poster: &dyn ChannelPoster) -> Option<Value> {
+fn handle(line: &[u8], tools: &dyn ToolSet) -> Option<Value> {
     let Ok(frame) = serde_json::from_slice::<Value>(line) else {
         return Some(error_response(&Value::Null, -32700, "parse error"));
     };
@@ -294,10 +360,10 @@ fn handle(line: &[u8], poster: &dyn ChannelPoster) -> Option<Value> {
     let null = Value::Null;
     let params = frame.get("params").unwrap_or(&null);
     let answer = match method {
-        "initialize" => Ok(initialize_result(params)),
+        "initialize" => Ok(initialize_result(params, tools)),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": [tool_definition()] })),
-        "tools/call" => call_tool(params, poster),
+        "tools/list" => Ok(json!({ "tools": tools.tools() })),
+        "tools/call" => call_tool(params, tools),
         _ => Err((-32601, "method not found")),
     };
     Some(match answer {
@@ -306,14 +372,18 @@ fn handle(line: &[u8], poster: &dyn ChannelPoster) -> Option<Value> {
     })
 }
 
-fn initialize_result(params: &Value) -> Value {
+fn initialize_result(params: &Value, tools: &dyn ToolSet) -> Value {
     let asked = params.get("protocolVersion").and_then(Value::as_str);
     let version = SUPPORTED_VERSIONS.iter().find(|v| Some(**v) == asked).unwrap_or(&SUPPORTED_VERSIONS[0]);
-    json!({
+    let mut result = json!({
         "protocolVersion": version,
         "capabilities": { "tools": {} },
-        "serverInfo": { "name": "ember-channels", "version": env!("CARGO_PKG_VERSION") },
-    })
+        "serverInfo": { "name": tools.server_name(), "version": env!("CARGO_PKG_VERSION") },
+    });
+    if let Some(text) = tools.instructions() {
+        result["instructions"] = json!(text);
+    }
+    result
 }
 
 fn tool_definition() -> Value {
@@ -338,21 +408,12 @@ fn tool_definition() -> Value {
     })
 }
 
-fn call_tool(params: &Value, poster: &dyn ChannelPoster) -> Result<Value, (i64, &'static str)> {
+fn call_tool(params: &Value, tools: &dyn ToolSet) -> Result<Value, (i64, &'static str)> {
     let Some(p) = params.as_object() else {
         return Err((-32602, "invalid params"));
     };
-    if p.get("name").and_then(Value::as_str) != Some(TOOL_NAME) {
-        return Err((-32602, "unknown tool"));
-    }
-    let (channel, text) = match validate_arguments(p.get("arguments")) {
-        Ok(v) => v,
-        Err(reason) => return Ok(tool_result(reason, true)),
-    };
-    Ok(match poster.post(channel, text) {
-        Ok(id) => tool_result(&format!("Posted message {id} in channel {channel}."), false),
-        Err(refusal) => tool_result(&refusal.reason, true),
-    })
+    let name = p.get("name").and_then(Value::as_str).unwrap_or("");
+    tools.call(name, p.get("arguments"))
 }
 
 /// A channel id is a UUID or `default-<project>` (project names: letters, digits, `-`, `_`, `.`).

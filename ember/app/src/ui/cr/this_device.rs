@@ -1,6 +1,8 @@
 //! The "이 기기" section of the settings sheet (FR-N9, #856): this device's peer id with a 복사
-//! button, so the owner can allow it on the server, and the server's peer address and relay,
-//! saved in prefs and read at the next start. Logic in `crate::device_link`.
+//! button, so the owner can allow it on the server, pairing with a main server through the hub
+//! ("허브로 연결", `super::hub_pairing`, #1044), and the server's peer address and relay typed by
+//! hand ("직접 입력"), saved in prefs and read at the next start. Logic in `crate::device_link`
+//! and `crate::hub_pairing`.
 
 #![allow(non_snake_case)]
 
@@ -110,6 +112,9 @@ pub fn ThisDeviceSection() {
             }
         }) };
     });
+
+    // Pairing through the hub (FR-N9, FR-N2, #1044), above the hand-typed fields it fills in.
+    super::hub_pairing::HubPairingSection(typed_peer.clone(), typed_relay.clone(), saved.clone());
 
     Label(ADDR_LABEL, Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(1));
     {

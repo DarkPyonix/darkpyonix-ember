@@ -1998,3 +1998,62 @@ fn fr_l31_21_terminal_key_handler_consults_the_one_rule() {
     assert!(rule < stop && stop < send, "the rule is asked before the key is stopped or sent");
     assert!(keys[rule..stop].contains("return;"), "a key the terminal does not keep goes on unsent");
 }
+
+#[test]
+fn fr_l31_7_language_picker_shows_every_row_and_moves_the_highlight() {
+    use crate::ui::palette::{Mode, search_label};
+
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open();
+    page.click_row();
+    page.deliver(opened(1));
+    page.deliver(SessionUpdate::Format {
+        uri: uri(),
+        format: ember_editor::DocumentFormat {
+            eol: ember_editor::Eol::Lf,
+            encoding: ember_editor::Encoding::Utf8,
+            language_id: "rust".into(),
+            language_name: "Rust".into(),
+        },
+    });
+    let languages: Vec<_> = (0..40)
+        .map(|i| ember_editor::LanguageInfo {
+            id: format!("language-{i:02}"),
+            name: format!("Alpha {i:02}"),
+        })
+        .chain([
+            ember_editor::LanguageInfo { id: "rust".into(), name: "Rust".into() },
+            ember_editor::LanguageInfo { id: "zeta".into(), name: "Zeta".into() },
+        ])
+        .collect();
+    let option_count = languages.len() + 1;
+    page.host().state.lock().unwrap().languages = languages;
+    page.redraw();
+    page.click("title", "언어 모드 선택");
+
+    let options: Vec<_> = page
+        .connected()
+        .into_iter()
+        .filter(|&id| page.attr(id, "role").as_deref() == Some("option"))
+        .collect();
+    assert_eq!(options.len(), option_count, "every language and auto-detect should be rendered");
+    assert!(page.find("aria-label", "위 항목 더 보기").is_none());
+
+    let selected_text = |page: &Page| {
+        let row = page
+            .find_where("selected language", |id| {
+                page.attr(id, "role").as_deref() == Some("option")
+                    && page.attr(id, "aria-selected").as_deref() == Some("true")
+            })
+            .expect("a highlighted language");
+        page.dom.document().get_node(row).unwrap().text_content()
+    };
+    assert!(selected_text(&page).starts_with("Rust"));
+    let input = page.find("aria-label", search_label(Mode::Language)).expect("language search");
+    page.dom.key_down(input, Key::ArrowDown, Code::ArrowDown, Modifiers::empty());
+    page.dom.render();
+    assert!(selected_text(&page).starts_with("Zeta"));
+    page.dom.key_down(input, Key::ArrowUp, Code::ArrowUp, Modifiers::empty());
+    page.dom.render();
+    assert!(selected_text(&page).starts_with("Rust"));
+}

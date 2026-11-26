@@ -588,7 +588,9 @@ async fn fr_p6_fixture_fails_and_reaps_a_keeper_that_outlives_its_socket() {
     // SAFETY: keeper_pid matched the test process, exact socket and shell PID.
     assert_eq!(unsafe { libc::kill(keeper as libc::pid_t, libc::SIGSTOP) }, 0);
     std::fs::remove_file(&socket).unwrap();
-    let result = catch_unwind(AssertUnwindSafe(|| drop(fixture)));
-    assert!(result.is_err(), "fixture teardown accepted a keeper that was still running");
+    let error = catch_unwind(AssertUnwindSafe(|| drop(fixture)))
+        .expect_err("fixture teardown accepted a keeper that was still running");
+    let message = error.downcast_ref::<String>().expect("teardown timeout diagnostic");
+    assert!(message.contains("terminal fixture cleanup timed out"), "{message}");
     assert!(keeper_pid(&socket, shell).is_none(), "fixture did not kill its stalled keeper");
 }

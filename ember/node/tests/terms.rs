@@ -489,9 +489,7 @@ async fn fr_p1_terms_running_session_cap_refuses_one_more() {
 #[cfg(unix)]
 #[tokio::test]
 async fn fr_p6_panicking_fixture_reaps_its_terminal_and_keeper() {
-    use std::ffi::OsStr;
     use std::panic::{AssertUnwindSafe, catch_unwind};
-    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
     let f = start().await;
     let t = f.client.term_create(&req(&f.root, &["/bin/sh"])).await.unwrap().term;
@@ -506,29 +504,7 @@ async fn fr_p6_panicking_fixture_reaps_its_terminal_and_keeper() {
     let cleanup = StopSession(session);
     let socket = cleanup.0.record().keeper_socket.unwrap();
     let shell = t.pid.unwrap();
-    let shell_arg = shell.to_string();
-    let mut processes = System::new();
-    processes.refresh_processes_specifics(
-        ProcessesToUpdate::All,
-        true,
-        ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
-    );
-    let keeper = processes
-        .processes()
-        .iter()
-        .find(|(_, process)| {
-            process.parent() == Some(Pid::from_u32(std::process::id()))
-                && matches!(
-                    process.cmd(),
-                    [_, cmd, socket_flag, path, pid_flag, pid, fd_flag, _]
-                        if cmd == ember_node::term::pty::KEEPER_SUBCOMMAND
-                            && socket_flag == "--socket" && path == socket.as_os_str()
-                            && pid_flag == "--pid" && pid == OsStr::new(&shell_arg)
-                            && fd_flag == "--fd"
-                )
-        })
-        .map(|(pid, _)| pid.as_u32())
-        .expect("the fixture's keeper is running");
+    let keeper = keeper_pid(&socket, shell).expect("the fixture's keeper is running");
 
     let panic = catch_unwind(AssertUnwindSafe(move || {
         let _f = f;
@@ -550,4 +526,69 @@ async fn fr_p6_panicking_fixture_reaps_its_terminal_and_keeper() {
         wait_for_exit().await.expect("test fallback cleanup");
     }
     assert!(reaped_by_fixture, "unwinding left shell {shell} or keeper {keeper} alive");
+}
+
+#[cfg(unix)]
+fn keeper_pid(socket: &Path, shell: u32) -> Option<u32> {
+    use std::ffi::OsStr;
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+
+    let shell_arg = shell.to_string();
+    let mut processes = System::new();
+    processes.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+    );
+    processes
+        .processes()
+        .iter()
+        .find(|(_, process)| {
+            process.parent() == Some(Pid::from_u32(std::process::id()))
+                && matches!(
+                    process.cmd(),
+                    [_, cmd, socket_flag, path, pid_flag, pid, fd_flag, _]
+                        if cmd == ember_node::term::pty::KEEPER_SUBCOMMAND
+                            && socket_flag == "--socket" && path == socket.as_os_str()
+                            && pid_flag == "--pid" && pid == OsStr::new(&shell_arg)
+                            && fd_flag == "--fd"
+                )
+        })
+        .map(|(pid, _)| pid.as_u32())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fr_p6_fixture_fails_and_reaps_a_keeper_that_outlives_its_socket() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    let fixture = start().await;
+    let term = fixture.client.term_create(&req(&fixture.root, &["/bin/sh"])).await.unwrap().term;
+    let session = fixture.node.terms().get(&term.id).unwrap();
+    let socket = session.record().keeper_socket.unwrap();
+    let shell = term.pid.unwrap();
+    let keeper = keeper_pid(&socket, shell).expect("the fixture's keeper is running");
+
+    // A failing regression must also clean up the keeper it stopped.
+    struct KillKeeper {
+        pid: u32,
+        socket: PathBuf,
+        shell: u32,
+    }
+    impl Drop for KillKeeper {
+        fn drop(&mut self) {
+            if keeper_pid(&self.socket, self.shell) == Some(self.pid) {
+                // SAFETY: the PID still identifies the child started by this fixture.
+                unsafe { libc::kill(self.pid as libc::pid_t, libc::SIGKILL) };
+            }
+        }
+    }
+
+    let _cleanup = KillKeeper { pid: keeper, socket: socket.clone(), shell };
+    // SAFETY: keeper_pid matched the test process, exact socket and shell PID.
+    assert_eq!(unsafe { libc::kill(keeper as libc::pid_t, libc::SIGSTOP) }, 0);
+    std::fs::remove_file(&socket).unwrap();
+    let result = catch_unwind(AssertUnwindSafe(|| drop(fixture)));
+    assert!(result.is_err(), "fixture teardown accepted a keeper that was still running");
+    assert!(keeper_pid(&socket, shell).is_none(), "fixture did not kill its stalled keeper");
 }

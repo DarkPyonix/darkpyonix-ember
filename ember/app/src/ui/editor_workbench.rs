@@ -1213,7 +1213,7 @@ pub mod page {
                 if crate::ui::palette::lists_files(mode) && index_capped {
                     div { style: "padding:var(--sp1) var(--sp3); color:var(--muted); font-size:var(--fs-xs);", "파일이 많아 일부만 표시합니다." }
                 }
-                div { key: "{mode:?}", class: "ed-pall", role: "listbox",
+                div { class: "ed-pall", role: "listbox",
                     if shown.is_empty() { div { style: "padding:var(--sp3); color:var(--muted);", "{crate::ui::palette::empty_text(mode, index_running)}" } }
                     for (row, r) in shown.iter().enumerate() {
                         {
@@ -1226,7 +1226,7 @@ pub mod page {
                             let picker_scroll = s.picker_scroll.clone();
                             let class = if row == chosen { "ed-tn sel" } else { "ed-tn" };
                             let row_style = if enabled { "--d:0; height:34px;" } else { "--d:0; height:34px; color:var(--muted);" };
-                            rsx! { div { key: "{row}", class, role: "option", "aria-selected": "{row == chosen}", "aria-disabled": "{!enabled}", style: "{row_style}",
+                            rsx! { div { key: "{mode:?}-{row}", class, role: "option", "aria-selected": "{row == chosen}", "aria-disabled": "{!enabled}", style: "{row_style}",
                                 onmounted: move |event| {
                                     if picker {
                                         picker_scroll.borrow_mut().mounted(row, event.data());

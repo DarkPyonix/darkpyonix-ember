@@ -13,16 +13,31 @@ use tokio::task::JoinHandle;
 pub struct TermServer {
     node: Node,
     server: JoinHandle<std::io::Result<()>>,
+    #[cfg(unix)]
+    keepers: Option<KeeperProcesses>,
 }
 
 impl TermServer {
     pub async fn start(config: NodeConfig, token: &str) -> (NodeClient, Self) {
+        #[cfg(unix)]
+        let keepers = config.state_dir
+            .as_ref()
+            .zip(config.pty_keeper.as_ref())
+            .map(|(state, executable)| KeeperProcesses::new(state.join("terms"), executable.clone()));
         let node = Node::new(config).unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let client = NodeClient::new(&base, token).unwrap();
         let server = tokio::spawn(api::serve(listener, node.clone()));
-        (client, Self { node, server })
+        (
+            client,
+            Self {
+                node,
+                server,
+                #[cfg(unix)]
+                keepers,
+            },
+        )
     }
 
     pub fn terms(&self) -> &Terms {
@@ -53,17 +68,88 @@ impl Drop for TermServer {
             }
         }
 
-        // Use a bounded synchronous wait so cleanup also works while the test unwinds.
-        // Let the exit workers finish and the keepers remove their sockets before the
-        // caller's TempDir can remove the fixture directory.
+        // Wait for processes as well as sockets. A keeper can remain alive after its socket
+        // disappears. Keep the wait synchronous so it also runs while a test unwinds.
         let deadline = Instant::now() + Duration::from_secs(5);
-        while let Some((session, _)) = sessions.iter().find(|(session, socket)| {
-            session.is_running() || socket.as_ref().is_some_and(|path| path.exists())
-        }) {
-            if Instant::now() >= deadline {
-                eprintln!("test terminal {} is still stopping", session.id);
+        loop {
+            let stopping = sessions.iter().find(|(session, socket)| {
+                session.is_running() || socket.as_ref().is_some_and(|path| path.exists())
+            });
+            #[cfg(unix)]
+            let keepers = self.keepers.as_mut().map_or_else(Vec::new, KeeperProcesses::running);
+            #[cfg(not(unix))]
+            let keepers: Vec<u32> = Vec::new();
+            if stopping.is_none() && keepers.is_empty() {
                 break;
             }
+            if Instant::now() >= deadline {
+                #[cfg(unix)]
+                if let Some(processes) = self.keepers.as_ref() {
+                    processes.kill_and_wait(&keepers);
+                }
+                let session = stopping.map(|(session, _)| &session.id);
+                let error = format!("terminal fixture cleanup timed out (session {session:?}, keepers {keepers:?})");
+                if std::thread::panicking() {
+                    eprintln!("{error}");
+                } else {
+                    panic!("{error}");
+                }
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+#[cfg(unix)]
+struct KeeperProcesses {
+    socket_dir: std::path::PathBuf,
+    executable: std::path::PathBuf,
+    system: sysinfo::System,
+}
+
+#[cfg(unix)]
+impl KeeperProcesses {
+    fn new(socket_dir: std::path::PathBuf, executable: std::path::PathBuf) -> Self {
+        Self { socket_dir, executable, system: sysinfo::System::new() }
+    }
+
+    fn running(&mut self) -> Vec<u32> {
+        use std::path::Path;
+        use sysinfo::{ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, UpdateKind};
+        self.system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+        );
+        self.system
+            .processes()
+            .values()
+            .filter(|process| process.status() != ProcessStatus::Zombie)
+            .filter(|process| {
+                matches!(
+                    process.cmd(),
+                    [exe, command, socket_flag, socket, ..]
+                        if Path::new(exe) == self.executable.as_path()
+                            && command == pty::KEEPER_SUBCOMMAND
+                            && socket_flag == "--socket"
+                            && Path::new(socket).parent() == Some(self.socket_dir.as_path())
+                )
+            })
+            .map(|process| process.pid().as_u32())
+            .collect()
+    }
+
+    fn kill_and_wait(&self, pids: &[u32]) {
+        for &pid in pids {
+            if let Some(process) = self.system.process(sysinfo::Pid::from_u32(pid)) {
+                process.kill();
+            }
+        }
+
+        // spawn_keeper owns the child handle and joins the process in its reaper thread.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while pids.iter().any(|&pid| pty::alive(pid)) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
     }

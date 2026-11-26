@@ -76,7 +76,7 @@ use punching::Puncher;
 
 /// The punch runner of this backend: Ember's own rendezvous and letify's signalling Worker.
 type BackendPuncher = Puncher<SignalAdapter, SignalRendezvous>;
-pub use pkarr::{direct_addresses_from_txt, is_record_label};
+pub use pkarr::{direct_addresses_from_txt, is_record_label, relay_urls_from_txt};
 use relay_url::{parse_relay_url, RelayTarget};
 
 use crate::{
@@ -577,18 +577,26 @@ impl Inner {
         out
     }
 
+    /// Where other endpoints reach this endpoint's own relay, when it is the relay (the main
+    /// server): the IP it advertises for TCP (else loopback) on the relay's port.
+    fn own_relay_addr(&self, direct: &[SocketAddr]) -> Option<SocketAddr> {
+        let t = self.relay_target()?;
+        if !self.own_relay.as_ref().is_some_and(|own| own.url == t.url) {
+            return None;
+        }
+        let port = t.addr.parse::<SocketAddr>().map(|a| a.port()).unwrap_or(0);
+        let ip = direct.first().map(|a| a.ip()).unwrap_or_else(|| [127, 0, 0, 1].into());
+        Some(SocketAddr::new(ip, port))
+    }
+
     fn local_addr(&self) -> PeerAddr {
         let direct = self.advertised();
-        let relays = match self.relay_target() {
+        let relays = match (self.own_relay_addr(&direct), self.relay_target()) {
             // This endpoint is the relay: other endpoints reach it where it advertises its TCP
             // address, on the relay's port.
-            Some(t) if self.own_relay.as_ref().is_some_and(|own| own.url == t.url) => {
-                let port = t.addr.parse::<SocketAddr>().map(|a| a.port()).unwrap_or(0);
-                let ip = direct.first().map(|a| a.ip()).unwrap_or_else(|| [127, 0, 0, 1].into());
-                vec![format!("letify://{}@{}", self.me, SocketAddr::new(ip, port))]
-            }
-            Some(t) => vec![t.url],
-            None => Vec::new(),
+            (Some(own), _) => vec![format!("letify://{}@{}", self.me, own)],
+            (None, Some(t)) => vec![t.url],
+            (None, None) => Vec::new(),
         };
         PeerAddr { peer: self.me, relays, direct }
     }
@@ -603,6 +611,11 @@ impl Inner {
         let mut rec = AddressRecord::new(node_of(self.me), version);
         if self.publish_direct.load(Ordering::Relaxed) {
             rec.tcp = self.advertised();
+            // The main server names its own relay in its signed record, so the hub's record of
+            // it carries `letify://<its peer id>@<ip>:<relay port>` and a client paired from
+            // the hub needs no typed relay (FR-N2 Defaults, FR-N9, #1044). Only the relay
+            // itself publishes one: the record has no field for another node's id.
+            rec.relay = self.own_relay_addr(&rec.tcp);
         }
         rec.udp = self.observed.lock().unwrap().iter().copied().collect();
         rec.transports = vec![LETIFY_TRANSPORT_ID.to_string()];

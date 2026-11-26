@@ -883,6 +883,8 @@ async fn device_addresses(State(st): State<Shared>, headers: HeaderMap, Path(id)
         // The letify backend publishes one signed binary record under `_letify.<key>`.
         if ember_transport::is_record_label(&name) {
             direct.extend(ember_transport::direct_addresses_from_txt(&txt).unwrap_or_default().iter().map(|a| a.to_string()));
+            // A main server names its own relay in the record (FR-N2, #1044).
+            relays.extend(ember_transport::relay_urls_from_txt(id, &txt).unwrap_or_default());
             continue;
         }
         if name != own && name != "_iroh" {

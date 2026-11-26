@@ -336,6 +336,10 @@ mod tests {
             "메인 서버",
             "이 기기",
             "이 기기의 peer id",
+            // FR-N9, FR-N2 (#1044): the hub path beside the hand-typed one.
+            crate::ui::cr::hub_pairing::TITLE,
+            crate::ui::cr::hub_pairing::REGISTER_LABEL,
+            crate::ui::cr::hub_pairing::MANUAL_LABEL,
             "서버 주소",
             "릴레이 (선택)",
             "저장",

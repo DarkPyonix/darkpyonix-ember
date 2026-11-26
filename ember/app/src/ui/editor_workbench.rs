@@ -1,5 +1,6 @@
 //! Remote editor workbench.
 use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
+use dioxus_compose::html::prelude::dioxus_elements::{MountedData, ScrollBehavior};
 use dioxus_compose::prelude::*;
 use ember_editor::{BridgeAction, WidgetBridge, WidgetEvent, WidgetPos, WidgetRange};
 use ember_editor::widget::HoverPhase as EditorHoverPhase;
@@ -47,6 +48,36 @@ pub struct PendingGoto {
     pub col: u32,
 }
 
+#[derive(Default)]
+struct PickerScroll {
+    rows: HashMap<usize, Rc<MountedData>>,
+    mode: Option<crate::ui::palette::Mode>,
+    selected: Option<usize>,
+}
+
+impl PickerScroll {
+    fn select(&mut self, mode: crate::ui::palette::Mode, count: usize, row: usize) {
+        if self.mode != Some(mode) {
+            *self = Self { mode: Some(mode), ..Self::default() };
+        }
+        self.rows.retain(|&index, _| index < count);
+        let selected = (count > 0).then_some(row);
+        if self.selected != selected {
+            self.selected = selected;
+            if let Some(data) = selected.and_then(|index| self.rows.get(&index)) {
+                drop(data.scroll_to(ScrollBehavior::Instant));
+            }
+        }
+    }
+
+    fn mounted(&mut self, row: usize, data: Rc<MountedData>) {
+        if self.selected == Some(row) {
+            drop(data.scroll_to(ScrollBehavior::Instant));
+        }
+        self.rows.insert(row, data);
+    }
+}
+
 #[derive(Clone)]
 pub struct Shared {
     pub host: EditorHost,
@@ -71,6 +102,7 @@ pub struct Shared {
     pub palette_mode: Signal<crate::ui::palette::Mode>,
     pub palette_query: Signal<String>,
     pub palette_sel: Signal<usize>,
+    picker_scroll: Rc<RefCell<PickerScroll>>,
     pub recent_files: Signal<Vec<String>>,
     pub theme: Signal<crate::ui::theme::ThemePref>,
     pub position: Signal<(usize, usize)>,
@@ -220,6 +252,7 @@ fn init(target: EditorTarget) {
     let palette_mode = use_hook(|| Signal::new_in_scope(crate::ui::palette::Mode::Commands, root));
     let palette_query = use_hook(|| Signal::new_in_scope(String::new(), root));
     let palette_sel = use_hook(|| Signal::new_in_scope(0usize, root));
+    let picker_scroll = use_hook(|| Rc::new(RefCell::new(PickerScroll::default())));
     let recent_files = use_hook(|| Signal::new_in_scope(Vec::<String>::new(), root));
     let prompt_at = use_hook(|| Signal::new_in_scope(0u64, root));
     let prompt_text = use_hook(|| Signal::new_in_scope(String::new(), root));
@@ -279,7 +312,7 @@ fn init(target: EditorTarget) {
     let extensions = use_hook(|| crate::ui::editor_extensions::Extensions::new(&target.computer, revision));
     let agent = use_hook(|| crate::ui::editor_agent::AgentTool::new(&target.project, &target.folder, revision));
     let vscode = crate::ide::VsCodeFallback::for_editor(&target);
-    SHARED.with(|s| *s.borrow_mut() = Some(Shared { extensions, agent, host, bridge, revision, debug, debug_view, tabs, directory, expanded, bottom_max, tree_sel, tree_multi_sel, tree_clipboard, tree_drag_src, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, recent_files, theme, position, stripes, menu_open, tab_menu, close_confirm, term_paste_confirm, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, vscode, server_url: target.server_url, computer: target.computer, uris, open_errors, editor_versions, last_find_cmd, pending_goto, next_goto_id, last_goto_id, problems_limit, selected_output_channel, workbench_logs, scm, notifications }));
+    SHARED.with(|s| *s.borrow_mut() = Some(Shared { extensions, agent, host, bridge, revision, debug, debug_view, tabs, directory, expanded, bottom_max, tree_sel, tree_multi_sel, tree_clipboard, tree_drag_src, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, picker_scroll, recent_files, theme, position, stripes, menu_open, tab_menu, close_confirm, term_paste_confirm, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, vscode, server_url: target.server_url, computer: target.computer, uris, open_errors, editor_versions, last_find_cmd, pending_goto, next_goto_id, last_goto_id, problems_limit, selected_output_channel, workbench_logs, scm, notifications }));
 }
 
 pub(crate) fn join_path(dir: &str, name: &str) -> String {
@@ -951,6 +984,7 @@ pub mod page {
         let mut open = s.palette_open;
         if *open.read() {
             open.set(false);
+            *s.picker_scroll.borrow_mut() = super::PickerScroll::default();
             s.host.send(HostCommand::CancelIndexFiles);
         }
     }
@@ -1111,8 +1145,7 @@ pub mod page {
             }
         };
         let hint_text = placeholder(mode, keymap);
-        // A picker lists every row (a language list is longer than 50) and shows the window of rows that
-        // holds the highlighted one, so the current language or encoding is in view when it opens (FR-L31.7).
+        // A picker renders all rows and asks the renderer to reveal the highlighted row.
         let picker = crate::ui::editor_status::is_picker(mode);
         let shown: Vec<_> = ranked.iter().take(if picker { usize::MAX } else { 50 }).cloned().collect();
         let chosen = if picker {
@@ -1132,11 +1165,9 @@ pub mod page {
         } else {
             (*sel.read()).min(shown.len().saturating_sub(1))
         };
-        let (win_start, _) = if picker {
-            crate::ui::editor_status::list_window(chosen, shown.len(), crate::ui::editor_status::PICKER_VISIBLE_ROWS)
-        } else {
-            (0, shown.len())
-        };
+        if picker {
+            s.picker_scroll.borrow_mut().select(mode, shown.len(), chosen);
+        }
         // A command the editor cannot do yet is listed but does nothing: Enter on it leaves the sheet open.
         let enter_payload = shown
             .get(chosen)
@@ -1182,15 +1213,9 @@ pub mod page {
                 if crate::ui::palette::lists_files(mode) && index_capped {
                     div { style: "padding:var(--sp1) var(--sp3); color:var(--muted); font-size:var(--fs-xs);", "파일이 많아 일부만 표시합니다." }
                 }
-                div { class: "ed-pall", role: "listbox",
+                div { key: "{mode:?}", class: "ed-pall", role: "listbox",
                     if shown.is_empty() { div { style: "padding:var(--sp3); color:var(--muted);", "{crate::ui::palette::empty_text(mode, index_running)}" } }
-                    if win_start > 0 {
-                        div { class: "ed-tn", role: "option", "aria-label": "위 항목 더 보기", style: "--d:0; height:34px; color:var(--muted);",
-                            onclick: move |_| sel.set(win_start - 1),
-                            "{crate::ui::editor_status::more_above_text(win_start)}"
-                        }
-                    }
-                    for (row, r) in shown.iter().enumerate().skip(win_start) {
+                    for (row, r) in shown.iter().enumerate() {
                         {
                             let item = &items[r.index];
                             let segments = highlight_segments(&item.title, &r.matched);
@@ -1198,9 +1223,15 @@ pub mod page {
                             let hint = if enabled { item.hint.clone() } else if mode == crate::ui::palette::Mode::GotoLine { String::new() } else if let crate::ui::palette::Payload::Action(a) = &item.payload { crate::ui::editor_actions::not_ready_hint(*a) } else { "준비 중".to_string() };
                             let payload = apply_line_suffix(item.payload.clone(), line_suffix);
                             let click_s = s.clone();
+                            let picker_scroll = s.picker_scroll.clone();
                             let class = if row == chosen { "ed-tn sel" } else { "ed-tn" };
                             let row_style = if enabled { "--d:0; height:34px;" } else { "--d:0; height:34px; color:var(--muted);" };
                             rsx! { div { key: "{row}", class, role: "option", "aria-selected": "{row == chosen}", "aria-disabled": "{!enabled}", style: "{row_style}",
+                                onmounted: move |event| {
+                                    if picker {
+                                        picker_scroll.borrow_mut().mounted(row, event.data());
+                                    }
+                                },
                                 onclick: move |_| {
                                     if !enabled { return; }
                                     close_palette(&click_s);

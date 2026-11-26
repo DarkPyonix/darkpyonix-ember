@@ -129,8 +129,16 @@ approved link (a denied, expired or claimed one is reported and forgotten).
 names in the hub's `^[a-z][a-z0-9-]{0,31}$` form (`/` → `-v`).
 
 **Client role (FR-H1, provisional).** `Role::Client` exists in the hub crate (connect, list,
-publish / resolve, relay; no account rights, names or shares) for the Ember client to register
-with; nothing in Ember uses it yet.
+publish / resolve, relay; no account rights, names or shares). The Ember app registers with it
+(`ember/app/src/hub_pairing.rs`, #1044): its device key links as a `client`, the registration is
+kept in `<data dir>/hub.json` (0600), and pairing with a main server saves that server's hub peer
+id and the `letify://` relay from its record. A removed client is refused and `revoked_at` is set.
+
+**The main server's relay in its record (FR-N2 Defaults, #1044).** A letify endpoint that runs
+the relay role puts its relay address in the `relay` field of its signed address record;
+`ember_transport::relay_urls_from_txt` reads it back as `letify://<peer id>@<ip>:<port>`, and the
+hub's `GET /devices/{id}/addresses` lists it in `relay_urls`
+(`AddressRecord::letify_relays`). Only the relay itself publishes one.
 
 ## Pieces
 

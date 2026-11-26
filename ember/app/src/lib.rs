@@ -21,6 +21,7 @@ pub mod demo;
 pub mod device_link;
 pub mod export;
 pub mod fs_watch;
+pub mod hub_pairing;
 pub mod editor_backup;
 pub mod editor_host;
 pub mod editor_reach;

@@ -1,5 +1,5 @@
-Inter-Regular.otf, Inter-Medium.otf and Inter-SemiBold.otf in this folder are a Modified
-Version of Inter 4.1 (rsms/inter release v4.1, extras/otf) under the SIL Open Font License 1.1,
+Inter-Regular.otf, Inter-Medium.otf and Inter-SemiBold.otf in this folder are a
+Modified Version of Inter 4.1 (rsms/inter release v4.1, extras/otf) under the SIL Open Font License 1.1,
 which permits modification and redistribution. The license is Inter-OFL.txt beside this note.
 Inter declares no Reserved Font Name, so the modified faces keep the name Inter.
 

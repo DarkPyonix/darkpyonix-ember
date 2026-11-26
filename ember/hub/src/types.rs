@@ -143,7 +143,7 @@ pub struct AddressRecord {
 
 impl AddressRecord {
     /// The `letify://` relays the record names: a main server's own relay (FR-N2 Defaults,
-    /// INTENT D36). Other relay URLs (a legacy iroh relay) are left out.
+    /// INTENT D36). Other relay URLs (older relay kinds) are left out.
     pub fn letify_relays(&self) -> Vec<String> {
         self.relay_urls.iter().filter(|u| u.starts_with("letify://")).cloned().collect()
     }

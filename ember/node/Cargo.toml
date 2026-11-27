@@ -70,7 +70,7 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [features]
-# The letify transport backend (EMBER_TRANSPORT_BACKEND=letify; SPEC FR-N5). Already on through ember-transport's default features (INTENT D36).
+# The letify transport backend (SPEC FR-N5; the only backend since #1163). Already on through ember-transport's default features (INTENT D36).
 letify = ["ember-transport/letify"]
 
 [dev-dependencies]

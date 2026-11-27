@@ -1,8 +1,8 @@
 //! Peer identity: an Ed25519 key pair. The public key is the peer's address (`PeerId`).
 //!
 //! These types are ours, not the backend's, so that replacing the transport (SPEC `FR-N5`)
-//! does not change any caller. The iroh backend uses the same Ed25519 key bytes, so a key file
-//! written today stays valid if the backend changes.
+//! does not change any caller. A key file holds plain Ed25519 key bytes, so it stays valid if the
+//! backend changes (it did: the iroh backend used the same bytes, #1163).
 
 use std::fmt;
 use std::io::Write;
@@ -143,8 +143,7 @@ impl SecretKey {
         self.0
     }
 
-    /// Ed25519 signature over `message` (the same signature iroh's key produces for these
-    /// bytes; used to prove key possession to the hub).
+    /// Ed25519 signature over `message` (used to prove key possession to the hub).
     pub fn sign(&self, message: &[u8]) -> [u8; 64] {
         SigningKey::from_bytes(&self.0).sign(message).to_bytes()
     }

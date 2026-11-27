@@ -96,7 +96,7 @@ Plain HTTP serves the rest. `GET /version` returns the server commit (`agentServ
   L22-86). Code-OSS uses this mode itself for managed sockets: `managedSocket.ts`
   `makeRawSocketHeaders` L11-26 sends `GET ws://localhost${path}?${query}&skipWebSocketFrames=true`.
   Ember uses this mode too, so the code runs over any byte stream: TCP, TLS, or later an
-  `ember-transport` (iroh) stream. The browser path (`skipWebSocketFrames=false`) instead uses real
+  `ember-transport` (letify-link) stream. The browser path (`skipWebSocketFrames=false`) instead uses real
   WebSocket binary frames with optional deflate (`node/ipc.net.ts` L292ff.). Ember never needs it.
 - The upgrade itself does **not** check the connection token. The token is checked in the `auth`
   handshake message (§3.4). The HTTP routes check it as `?tkn=` or the `vscode-tkn` cookie
@@ -156,7 +156,7 @@ The handshake is three Control messages, all JSON:
 A Microsoft build that does have `vsda` also accepts `signedData == connectionToken` ("web client",
 L363). Ember therefore sends the connection token when it has one, and echoes `challenge2`
 otherwise. That works against both OSE and VSC (`INTENT.md` D10). Ember cannot verify the server's
-signature. Server authenticity comes from the transport (TLS, or the iroh peer identity).
+signature. Server authenticity comes from the transport (TLS, or the transport's peer identity).
 
 **Commit check.** If both sides send a commit and they differ, the server refuses with
 "Client refused: version mismatch" (L351-357). The extension host runs its own check on
@@ -500,7 +500,7 @@ runtime turns "protocol stability" from a research risk into a release-engineeri
 5. **Activation and configuration fidelity.** Port the implicit-activation generators and core
    configuration defaults, generated from the workbench's `registerConfiguration` calls at OSE
    build time.
-6. **Transport.** Swap TCP for `ember-transport` (iroh) streams. Nothing above `AsyncRead +
+6. **Transport.** Swap TCP for `ember-transport` (letify-link) streams. Nothing above `AsyncRead +
    AsyncWrite` changes.
 
 ### 6.1 Crate API (summary)

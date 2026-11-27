@@ -40,33 +40,6 @@ pub async fn echo_roundtrip(conn: &Connection, msg: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Two iroh transports on localhost, no relay, finding each other through a shared in-memory
-/// address directory (the pluggable lookup the darkpyonix.dev directory will implement).
-#[cfg(feature = "iroh")]
-pub async fn iroh_pair() -> (Transport, Transport, ember_transport::MemoryDirectory) {
-    use ember_transport::{MemoryDirectory, RelayConfig, SecretKey, TransportConfig};
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
-
-    let dir = MemoryDirectory::new();
-    let make = || {
-        TransportConfig::new(SecretKey::generate())
-            .relay(RelayConfig::Disabled)
-            .directory(Arc::new(dir.clone()))
-            .bind_addr("127.0.0.1:0".parse().unwrap())
-    };
-    let a = Transport::bind(make()).await.unwrap();
-    let b = Transport::bind(make()).await.unwrap();
-    for t in [&a, &b] {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while dir.get(&t.peer_id()).is_none_or(|e| e.direct.is_empty()) {
-            assert!(Instant::now() < deadline, "endpoint never published its address");
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    }
-    (a, b, dir)
-}
-
 /// A letify-link transport on localhost: TCP on 127.0.0.1, found through a shared in-memory
 /// address directory, no relay.
 #[cfg(feature = "letify")]

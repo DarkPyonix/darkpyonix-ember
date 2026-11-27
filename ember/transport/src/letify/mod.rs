@@ -1,5 +1,5 @@
 //! letify-link backend (SPEC `FR-N1`, `FR-N2`, `FR-N5`, `INTENT.md` D36). The only module in
-//! Ember, besides the iroh backend, that names a transport library.
+//! Ember that names a transport library.
 //!
 //! What it does, and what it leaves to letify-link:
 //!

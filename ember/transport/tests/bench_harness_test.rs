@@ -18,7 +18,6 @@ fn nfr_n1_bench_binary_json_output_format() {
     let mut listener = Listener(
         Command::new(binary)
             .args(["listen", "--relay", "none"])
-            .env("EMBER_TRANSPORT_BACKEND", "letify")
             .stdout(Stdio::piped())
             .spawn()
             .expect("start listener"),
@@ -29,7 +28,6 @@ fn nfr_n1_bench_binary_json_output_format() {
         .expect("read listener address");
     let output = Command::new(binary)
         .args(["dial", address.trim(), "--relay", "none", "--pings", "3", "--bytes", "4096", "--no-tcp"])
-        .env("EMBER_TRANSPORT_BACKEND", "letify")
         .output()
         .expect("run benchmark");
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));

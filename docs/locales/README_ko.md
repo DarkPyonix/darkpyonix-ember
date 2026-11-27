@@ -57,7 +57,7 @@ Ember 는 세 개의 프로그램입니다.
 | `ember-app` | 사용자가 앉은 곳 | 메인 서버가 마지막으로 보낸 내용의 캐시. 그래서 바로 시작됩니다 |
 
 클라이언트는 HTTP 로 `ember-server` 와 통신합니다. `ember-server` 는 각 컴퓨터에 HTTP 로, 또는
-[iroh](https://github.com/n0-computer/iroh) 기반 P2P 전송(QUIC, 홀 펀칭과 릴레이)으로 연결합니다.
+[letify-link](https://crates.io/crates/letify-link) 기반 P2P 전송(TCP 위의 Noise 세션, 홀 펀칭, 메인 서버 릴레이)으로 연결합니다.
 darkpyonix.dev 허브를 쓰면 일회용 코드로 컴퓨터를 GitHub 계정에 연결합니다. 그래서 주소를
 입력하거나 포트를 열 필요가 없습니다.
 
@@ -155,7 +155,7 @@ darkpyonix-ember/
 │  ├─ node/              ember-node: 각 컴퓨터에서 도구 동작을 수행
 │  ├─ app/               ember-app: dioxus-compose 위의 런처와 대화 UI
 │  ├─ client/            클라이언트 코어: UI 아래의 연결, 동기화, 상태
-│  ├─ transport/         P2P 연결 (iroh 백엔드와 메모리 내 가짜)
+│  ├─ transport/         P2P 연결 (letify-link 백엔드와 메모리 내 가짜)
 │  ├─ hub/               darkpyonix.dev 허브 클라이언트: 기기 등록과 디렉터리
 │  ├─ bridge/            IDE 창 브리지: 버전이 붙은 웹뷰와 네이티브 사이 메시지
 │  ├─ editor-conn/       Code-OSS 서버용 Rust 클라이언트

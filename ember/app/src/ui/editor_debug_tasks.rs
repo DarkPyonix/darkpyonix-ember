@@ -25,7 +25,7 @@
 //! `debug.hideSlowPreLaunchWarning` is on: Debug Anyway starts the session as if the task had
 //! exited with 0, and Abort and Configure Task cancel the start and stop the task with Ctrl+C, as
 //! the 실행 window's 작업 중지 does. Code-OSS draws it as a progress notification; the toolkit has no
-//! animation yet (a compose-rust gap), so its bar does not move.
+//! animation yet (dioxus-compose#46), so its bar does not move.
 //!
 //! Not built: the error dialog's "Remember my choice for this task", which Code-OSS keeps in the
 //! workspace's storage.
@@ -414,7 +414,8 @@ pub(crate) fn TaskPromptSheet(prompt: TaskPrompt, choose: EventHandler<(TaskChoi
 
 /// The "Waiting for preLaunchTask" card: Code-OSS's progress notification, drawn where the
 /// window's notifications are, with the notification card's tokens (the mockup has no
-/// notification screen). The bar is still: the toolkit has no animation yet (a compose-rust gap).
+/// notification screen). The bar is still: the toolkit has no animation yet (dioxus-compose#46).
+// TODO(dioxus-compose#46): slide the bar (Code-OSS's indeterminate progress) once `@keyframes` run.
 #[component]
 pub(crate) fn WaitingCard(label: String, choose: EventHandler<TaskChoice>) -> Element {
     let message = waiting_message(&label);

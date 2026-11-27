@@ -215,13 +215,13 @@ mod tests {
     use serde_json::json;
 
     fn base() -> UriComponents {
-        UriComponents::new("vscode-remote".into(), "host+1".into(), "/w")
+        UriComponents::new("vscode-remote", "host+1", "/w")
     }
 
     #[test]
     fn fr_l31_42_stored_breakpoints_round_trip_through_the_registry() {
         let mut bps = Breakpoints::default();
-        let uri = UriComponents::new("vscode-remote".into(), "old+0".into(), "/w/a.py");
+        let uri = UriComponents::new("vscode-remote", "old+0", "/w/a.py");
         bps.add_source(
             None,
             uri,
@@ -244,7 +244,7 @@ mod tests {
         let (ids, touched) = back.restore(&stored, &base());
         assert_eq!(ids.len(), 2);
         let restored = &back.source[0];
-        assert_eq!(restored.uri, UriComponents::new("vscode-remote".into(), "host+1".into(), "/w/a.py"));
+        assert_eq!(restored.uri, UriComponents::new("vscode-remote", "host+1", "/w/a.py"));
         assert_eq!(
             (restored.line, restored.column, restored.enabled),
             (3, Some(5), false)

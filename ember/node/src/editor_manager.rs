@@ -392,7 +392,14 @@ impl ManagerClient {
         let status = res.status().as_u16();
         let body = res.bytes().await.map_err(|e| ManagerError::Unreachable(format!("manager unreachable: {e}")))?;
         if !(200..300).contains(&status) {
-            return Err(ManagerError::Refused { status, error: reason_of(status, &body) });
+            let mut error = reason_of(status, &body);
+            if status == 409 && runtime == OSE_RUNTIME {
+                error.push_str(&format!(
+                    ". If OSE is missing, install it on this computer with \
+                     `darkpyonix editor install --runtime ose --release {OSE_RELEASE}`."
+                ));
+            }
+            return Err(ManagerError::Refused { status, error });
         }
         let mut launch: EditorLaunch = serde_json::from_slice(&body)
             .map_err(|e| ManagerError::Unreachable(format!("the manager answered an invalid launch: {e}")))?;

@@ -413,7 +413,7 @@ pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<Cre
             { use ::compose_rust::ui::Column; Column!(spacing = SP[4], modifier = Modifier::new().fill_max_width().padding(pad), {
                 if skip.show(EST_HEAD) {
                     // On a phone the header keeps the menu button's room beside the title.
-                    let tablet = !compact && w <= 900.0;
+                    let subtitle = "연결된 모든 장비 사이에서 파일을 주고받습니다. 휴대폰과 태블릿도 포함됩니다.";
                     let secondary = || {
                         ShareButton(compact, {
                             let o = share_open.clone();
@@ -430,17 +430,23 @@ pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<Cre
                             AppButton("보내기", Some(IconRole::Send), ButtonKind::Primary, false, true, false, open);
                         }
                     };
-                    { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), {
-                        HeaderGap("파일", "연결된 모든 장비 사이에서 파일을 주고받습니다. 휴대폰과 태블릿도 포함됩니다.", compact, compact, 6.0, compact, || {
+                    if compact || w > 900.0 {
+                        HeaderGap("파일", subtitle, compact, compact, 6.0, compact, || {
                             secondary();
-                            if !tablet {
-                                primary();
-                            }
-                        });
-                        if tablet {
                             primary();
-                        }
-                    }) };
+                        });
+                    } else {
+                        { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), {
+                            { use ::compose_rust::ui::Row; Row!(spacing = SP[1], alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
+                                { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().weight(1.0), {
+                                    Label("파일", Fs::Xl2, PAGE_TITLE_WEIGHT, None, Some(1));
+                                }) };
+                                secondary();
+                            }) };
+                            Label(subtitle, Fs::Xs, Weight::Regular, Some(paint(ember_theme().palette.muted)), Some(2));
+                            primary();
+                        }) };
+                    }
                     // The lost server, said on the screen and not only in the send sheet (FR-L27.9).
                     if let Some(line) = server_status(&live_model) {
                         Banner(&line, Tone::Error);
@@ -2331,6 +2337,6 @@ mod tests {
         assert!(all.iter().any(|t| t == "전송 기록"), "history list kept when server is lost");
         let src = include_str!("files.rs");
         assert!(src.contains("HeaderGap(\"파일\""), "header exists");
-        assert!(src.contains("if tablet {\n                            primary();"), "768 send wraps below the secondary actions");
+        assert!(src.contains("if compact || w > 900.0"), "768 uses the tablet header");
     }
 }

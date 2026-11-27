@@ -63,7 +63,7 @@ The `darkpyonix-ember` repository covers these deliverables. [user]
 
 | Component | What it is |
 | --------- | ---------- |
-| **ember** | The multiplatform client: everything described in this document. Its IDE window reaches files mainly through VS Code's own `serve-web`. For Android and iOS, where there is no Node, it also supports a `serve-web`-compatible Rust backend, or no backend at all with direct local access through web APIs (the `vscode.dev` model). Hosted for outside access through a dedicated manager. |
+| **ember** | The multiplatform client: everything described in this document. Its IDE window reaches files mainly through VS Code's own `serve-web`. On Android and iOS agents run on the device as on any other computer (corrected 2026-11-27, see "Mobile runs agents"). Hosted for outside access through a dedicated manager. |
 | **vscode-darkpyonix** | VS Code extension rendering DarkPyonix notebook files (`.py`, `.pynb`). Installed by default. |
 | **vscode-darkpyonix-theme** | VS Code theme extension in the DarkPyonix Ember (phoenix) design language. Installed by default. |
 | **intellij-darkpyonix** | IntelliJ / PyCharm plugin rendering DarkPyonix notebook files (`.py`, `.pynb`). Installed by default. |
@@ -277,11 +277,7 @@ So:
 - Ember never downloads, bundles or installs Microsoft's server.
 - OSE uses Open VSX only; the Microsoft Marketplace's terms are for Microsoft products.
 
-**Mobile without Node.** [user] On Android and iOS the IDE window must work without Node, through a
-`serve-web`-compatible Rust backend or by direct local access through web APIs. This does **not**
-reimplement the Extension Host (E4): without Node there is no Node extension host at all, so only
-extensions that ship a web build (VS Code's browser web-worker extension host, as on `vscode.dev`)
-run there. Extensions that need Node require a VS Code server on a computer.
+**Mobile runs agents.** *[user, 2026-11-27: "INTENT에도 안드로이드·iOS에서 Node 없이 IDE 창이 동작해야 한다 >> 이건 잘못된 기록이야. 안드로이드랑 iOS도 에이전트가 그 안에서 돌 수 이…" (message cut off there)]* Android and iOS devices are computers like the others: agents run on the device itself. The earlier entry here, "On Android and iOS the IDE window must work without Node, through a `serve-web`-compatible Rust backend or by direct local access through web APIs", was a wrong record and is withdrawn. What follows from it (the node on the phone, how the agent CLIs run there, and what the IDE window uses on a phone) is to be written into SPEC as its own change.
 
 *[Note, 2026-11-22]* #80 is 1.0 work by the owner's decision of 2026-11-22 (relayed by the leader):
 the mobile client without Node, plus the phone webview part of #10. iOS waits on the owner's answer

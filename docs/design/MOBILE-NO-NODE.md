@@ -40,7 +40,7 @@ What this document has to decide:
 | D9, 10-03 decisions [user, relayed by the leader; not yet written into `INTENT.md`] | Ember's own IDE is a **dioxus-compose editor core**: no webview, **no JS engine**. The VS Code target is VS Code Web wrapped by `ember/proxy/`. Default runtime is **OSE** (Code-OSS + Open VSX). | The editor core cannot run any VS Code extension itself. VS Code compatibility on the phone comes only from VS Code Web. |
 | D10 | Marketplace follows the runtime: Open VSX for OSE. | Offline web extensions on the phone come from Open VSX. |
 | E3, D3 | Conversations, agents and credentials live on the main server. | The phone never needs to run agents. Its IDE is for looking and editing. |
-| `FR-N1`, `FR-N5` | All traffic goes through one transport interface (iroh behind it). | The IDE window reaches remote computers through that interface, not through a separate tunnel. |
+| `FR-N1`, `FR-N5` | All traffic goes through one transport interface (letify-link behind it; iroh before #1163). | The IDE window reaches remote computers through that interface, not through a separate tunnel. |
 | `FR-N4`, `ember/proxy/README.md` | VS Code Web webviews need service workers, so they need a secure context. | On a phone the IDE window must load from an origin the platform webview treats as secure (§5). |
 
 ## 3. What VS Code actually requires: sources
@@ -257,7 +257,7 @@ talks to a real `serve-web` on a computer through a Rust gateway) rather than by
 │   └──────┬────────┘                       │  • token per launch, binds loopback only      │ │ │
 │          │ sync when online               └──────────────────────────────────────────────┘ │ │
 │          ▼                                                                                  │ │
-│   ┌────────────────────────── transport crate (FR-N5; iroh inside) ─────────────────────────┴─┐│
+│   ┌────────────────────────── transport crate (FR-N5; letify inside)────────────────────────┴─┐│
 │   └───────────────────────────────────────┬──────────────────────────────────────────────────┘│
 └───────────────────────────────────────────┼───────────────────────────────────────────────────┘
                                             │ QUIC, direct or via darkpyonix.dev relay

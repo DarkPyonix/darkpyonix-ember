@@ -6,61 +6,19 @@ use std::time::Duration;
 
 use crate::{AddressDirectory, PeerId, PkarrStore, SecretKey, SignalChannel};
 
-/// Environment variable choosing the transport backend: `letify` (the default) or `iroh`
-/// (kept for one release, then removed; SPEC `FR-N5`).
-/// Every endpoint of a fleet must use the same value until the rollout is complete (SPEC `FR-N5`).
-pub const BACKEND_ENV: &str = "EMBER_TRANSPORT_BACKEND";
-
-/// Which backend [`crate::Transport::bind`] builds (SPEC `FR-N5`, `INTENT.md` D36).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Which backend [`crate::Transport::bind`] builds (SPEC `FR-N5`, `INTENT.md` D36). letify-link
+/// is the only one: the legacy iroh backend and its `EMBER_TRANSPORT_BACKEND` selection are
+/// removed (#1163). The type stays so a configuration names its backend.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BackendKind {
-    /// iroh: QUIC, hole punching, the hub's iroh relay.
-    Iroh,
-    /// letify-link: a Noise session over TCP paths, the main server as relay (cargo feature
-    /// `letify`).
+    /// letify-link: a Noise session over TCP paths, the main server as relay.
+    #[default]
     Letify,
-}
-
-impl Default for BackendKind {
-    /// letify-link is the default (INTENT D36). A build without the `letify` feature falls
-    /// back to iroh.
-    fn default() -> Self {
-        if cfg!(feature = "letify") || !cfg!(feature = "iroh") {
-            Self::Letify
-        } else {
-            Self::Iroh
-        }
-    }
-}
-
-impl BackendKind {
-    /// Parses a backend name (`iroh`, `letify`, `letify-link`), case-insensitive.
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "iroh" => Some(Self::Iroh),
-            "letify" | "letify-link" => Some(Self::Letify),
-            _ => None,
-        }
-    }
-
-    /// Reads [`BACKEND_ENV`]; unset, empty or unknown means the default (an unknown value is
-    /// logged).
-    pub fn from_env() -> Self {
-        match std::env::var(BACKEND_ENV) {
-            Ok(v) if v.trim().is_empty() => Self::default(),
-            Ok(v) => Self::parse(&v).unwrap_or_else(|| {
-                tracing::warn!(value = %v, "{BACKEND_ENV} is not iroh or letify; using the default backend");
-                Self::default()
-            }),
-            Err(_) => Self::default(),
-        }
-    }
 }
 
 impl std::fmt::Display for BackendKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::Iroh => "iroh",
             Self::Letify => "letify",
         })
     }
@@ -86,7 +44,7 @@ impl ObserverAddr {
 }
 
 /// Settings of the letify-link backend. Plain data: no letify-link type (SPEC `FR-N5`). The
-/// iroh backend ignores all of it.
+/// in-memory backend ignores all of it.
 ///
 /// The relay a node or client uses is [`TransportConfig::relay`] with the main server written as
 /// `letify://<server peer id hex>@host:port`.
@@ -259,7 +217,7 @@ pub const RELAY_URL_ENV: &str = "EMBER_RELAY_URL";
 /// Which relay servers to use for hole-punch coordination and fallback (SPEC `FR-N2`).
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum RelayConfig {
-    /// The backend's default public relays (for iroh: n0's production relays).
+    /// The backend's default relays.
     #[default]
     Default,
     /// No relay: direct paths only (tests, LAN).
@@ -293,16 +251,15 @@ impl RelayConfig {
 
 /// The darkpyonix.dev hub's address directory (SPEC `FR-N2`, hub `FR-H2`), as plain data.
 ///
-/// The hub's `PUT`/`GET /pkarr/{key}` is the pkarr relay protocol, so the iroh backend uses
-/// iroh's own pkarr publisher and resolver against [`HubDirectory::pkarr_url`]: packets are signed
-/// with this endpoint's key and verified against the peer's key end to end, and republishing and
-/// retry are iroh's. Nothing about pkarr leaks out of this crate.
+/// The hub's `PUT`/`GET /pkarr/{key}` is the pkarr relay protocol. The letify-link backend
+/// publishes and resolves its signed address records there against [`HubDirectory::pkarr_url`]
+/// (`letify/pkarr.rs`): packets are signed with this endpoint's key and verified against the
+/// peer's key end to end. Nothing about pkarr leaks out of this crate.
 ///
 /// - **Publishing** needs no credential (the packet signature authenticates it); the hub accepts
 ///   it only once this endpoint is a registered device, so an unregistered endpoint's publishes
 ///   are refused (403) and retried with backoff until it is registered.
-/// - **Resolving** needs this device's hub token (`?token=` on the URL, which iroh keeps when it
-///   appends the key). Without a token, peers are not resolved through the hub. The token can
+/// - **Resolving** needs this device's hub token (`?token=` on the URL). Without a token, peers are not resolved through the hub. The token can
 ///   be set or cleared later with [`crate::Transport::set_directory_token`] (after registration,
 ///   or when the hub revoked this device).
 ///
@@ -388,10 +345,10 @@ pub struct TransportConfig {
     pub directory: Option<Arc<dyn AddressDirectory>>,
     /// The darkpyonix.dev address directory (publish + resolve through the hub). Optional.
     pub hub: Option<HubDirectory>,
-    /// Also use the backend's public lookup service (for iroh: n0's DNS/pkarr). Publishes this
+    /// Also use the backend's public lookup service. Publishes this
     /// peer's id and addresses to a third-party service; off by default.
     pub public_lookup: bool,
-    /// Local socket to bind (IPv4): UDP for iroh, TCP for letify. `None` = any interface,
+    /// Local socket to bind (IPv4, TCP for letify). `None` = any interface,
     /// random port.
     pub bind_addr: Option<SocketAddr>,
     /// Which backend [`crate::Transport::bind`] builds.
@@ -414,12 +371,12 @@ impl TransportConfig {
         }
     }
 
-    /// Like [`TransportConfig::new`], with the relay read from [`RELAY_URL_ENV`], the backend
-    /// from [`BACKEND_ENV`] and the letify settings from `EMBER_LETIFY_*`.
+    /// Like [`TransportConfig::new`], with the relay read from [`RELAY_URL_ENV`] and the letify
+    /// settings from `EMBER_LETIFY_*`.
     pub fn from_env(secret_key: SecretKey) -> Self {
         Self {
             relay: RelayConfig::from_env(),
-            backend: BackendKind::from_env(),
+            backend: BackendKind::default(),
             letify: LetifyConfig::from_env(),
             ..Self::new(secret_key)
         }
@@ -502,14 +459,6 @@ mod tests {
             RelayConfig::parse("https://a.example, https://b.example"),
             RelayConfig::Custom(vec!["https://a.example".into(), "https://b.example".into()])
         );
-    }
-
-    #[test]
-    fn backend_names_parse() {
-        assert_eq!(BackendKind::parse("IROH"), Some(BackendKind::Iroh));
-        assert_eq!(BackendKind::parse(" letify "), Some(BackendKind::Letify));
-        assert_eq!(BackendKind::parse("letify-link"), Some(BackendKind::Letify));
-        assert_eq!(BackendKind::parse("quic"), None);
     }
 
     #[test]

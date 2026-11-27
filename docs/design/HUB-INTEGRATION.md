@@ -9,6 +9,8 @@ PR #75). Contract: `darkpyonix-core` `docs/api/hub.openapi.yaml` and SPEC FR-H1,
 NFR-H2 as merged for review in darkpyonix-core PR #34 (branch `feat/m4-hub-ember-gaps`, base
 `feat/m4-hub-workers`). Worker source `ember/hub/worker/src/`.
 
+> Update 2026-11-27 (#1163): the iroh backend is removed. The sections below that describe iroh's pkarr publisher, resolver and hub relay are history; the letify-link backend publishes and resolves its own signed records at the hub's `/pkarr` (`ember/transport/src/letify/pkarr.rs`).
+
 > Update 2026-10-30 (`INTENT.md` D36): the relay rows below describe the iroh backend. With letify-link the main server is the relay and the hub keeps the directory and sign-in only; `relay_urls` then goes unused.
 
 ## What it does

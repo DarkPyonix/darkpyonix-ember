@@ -1,8 +1,8 @@
 //! Peer addressing and the pluggable address directory (SPEC `FR-N2`).
 //!
 //! A peer is dialed by its [`PeerId`]. How the transport finds where that peer is reachable is
-//! an [`AddressDirectory`]: today an in-memory one (tests) or iroh's own lookup; later the
-//! `darkpyonix.dev` address directory, implemented against this trait without touching callers.
+//! an [`AddressDirectory`]: an in-memory one (tests), or the `darkpyonix.dev` address directory,
+//! implemented against this trait without touching callers.
 
 use std::collections::HashMap;
 use std::fmt;

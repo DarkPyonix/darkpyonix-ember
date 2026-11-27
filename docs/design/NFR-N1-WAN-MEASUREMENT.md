@@ -17,14 +17,14 @@
 
    ```sh
    mkdir -p .scratch/nfr-n1
-   EMBER_TRANSPORT_BACKEND=letify /path/to/ember-transport-bench listen > .scratch/nfr-n1/listener.json
+   /path/to/ember-transport-bench listen > .scratch/nfr-n1/listener.json
    ```
 
 2. listener가 출력한 JSON 한 줄을 dialer의 `.scratch/nfr-n1/listener.json`으로 안전하게 전달한다. 주소에는 네트워크 정보가 포함되므로 공유 범위를 제한한다. raw TCP 기준 측정은 listener가 출력한 `tcp_port`에 dialer가 도달해야 한다. NAT와 방화벽 때문에 접근이 안 되면 같은 경로의 기준값을 확보하고 그 방법을 기록한다. 임의로 포트를 공개하면 측정 조건이 바뀌므로 변경 사항을 기록한다.
 3. dialer에서 실행한다. `--tcp-host`는 listener의 raw TCP 포트에 도달하는 IP로 바꾼다. 스크립트의 추가 인자는 `dial`에 전달된다.
 
    ```sh
-   BENCH_BIN=/path/to/ember-transport-bench EMBER_TRANSPORT_BACKEND=letify \
+   BENCH_BIN=/path/to/ember-transport-bench \
      .github/scripts/bench/run-matrix.sh home-office .scratch/nfr-n1/listener.json \
      .scratch/nfr-n1/results --tcp-host 192.0.2.10
    ```

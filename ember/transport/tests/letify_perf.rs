@@ -4,20 +4,16 @@
 //!
 //! ```text
 //! cargo test --release --features letify --test letify_perf -- --ignored --nocapture letify
-//! cargo test --release --test letify_perf -- --ignored --nocapture iroh   # the iroh backend, same measurements
 //! ```
 //!
 //! `LETIFY_PERF_MIB` sets the bulk size (default 256). The numbers are printed on stderr as
 //! `perf <name> <value> <unit>` lines to paste into the pull request and the SPEC.
-#![cfg(any(feature = "letify", feature = "iroh"))]
+#![cfg(feature = "letify")]
 
 mod common;
 
 use std::time::{Duration, Instant};
 
-#[cfg(feature = "iroh")]
-use common::iroh_pair;
-#[cfg(feature = "letify")]
 use common::letify_pair;
 use ember_transport::{BiStream, Connection};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -189,12 +185,4 @@ async fn measure(backend: &str, a: ember_transport::Transport, b: ember_transpor
 async fn nfr_n1_letify_loopback_throughput_and_small_message_latency_under_bulk() {
     let (a, b, _dir) = letify_pair().await;
     measure("letify", a, b).await;
-}
-
-#[cfg(feature = "iroh")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "measurement: see the module documentation"]
-async fn nfr_n1_iroh_loopback_throughput_and_small_message_latency_under_bulk() {
-    let (a, b, _dir) = iroh_pair().await;
-    measure("iroh", a, b).await;
 }

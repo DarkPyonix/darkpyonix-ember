@@ -1,4 +1,4 @@
-//! An axum router (HTTP + WebSocket) served over transport streams: fake and iroh.
+//! An axum router (HTTP + WebSocket) served over transport streams.
 #![cfg(feature = "http")]
 
 mod common;
@@ -88,14 +88,3 @@ async fn axum_over_fake_transport() {
     exercise(&client, &server).await;
 }
 
-#[cfg(feature = "iroh")]
-#[tokio::test]
-async fn axum_over_iroh_localhost() {
-    let (client, server, _dir) = common::iroh_pair().await;
-    serve(&server);
-    tokio::time::timeout(Duration::from_secs(20), exercise(&client, &server))
-        .await
-        .unwrap();
-    client.close().await;
-    server.close().await;
-}

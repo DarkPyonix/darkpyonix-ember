@@ -1,6 +1,6 @@
 //! The transport conformance suite against the letify-link backend on localhost (SPEC `FR-N5`:
-//! "the same suite passes against both backends"). The cases mirror `fake.rs` and
-//! `iroh_local.rs`; the addresses come from a shared in-memory directory, no internet is needed.
+//! "the same suite passes against both backends", the fake and letify-link). The cases mirror
+//! `fake.rs`; the addresses come from a shared in-memory directory, no internet is needed.
 #![cfg(feature = "letify")]
 
 mod common;

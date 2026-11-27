@@ -10,11 +10,10 @@
 //! - [`PeerGate`] admits only allowed peers and closes a revoked peer's connections (`FR-N3`);
 //!   [`Dialer`] caches one outgoing connection per (peer, service) for many streams.
 //!
-//! Backends: `iroh` (feature `iroh`, default; [`Transport::bind`]), `letify-link` (feature
-//! `letify`, chosen with [`TransportConfig::backend`] or `EMBER_TRANSPORT_BACKEND=letify`;
-//! SPEC `FR-N5`, `INTENT.md` D36) and an always-available in-memory fake ([`mem::MemNetwork`])
-//! for other crates' tests. **No backend type appears in this crate's public API**, so replacing
-//! a backend touches only this crate.
+//! Backends: `letify-link` (feature `letify`, default; [`Transport::bind`]; SPEC `FR-N5`,
+//! `INTENT.md` D36) and an always-available in-memory fake ([`mem::MemNetwork`]) for other
+//! crates' tests. The legacy iroh backend is removed (#1163). **No backend type appears in this
+//! crate's public API**, so replacing a backend touches only this crate.
 
 mod addr;
 mod config;
@@ -26,8 +25,6 @@ mod signal;
 
 #[cfg(feature = "http")]
 pub mod http;
-#[cfg(feature = "iroh")]
-mod iroh_backend;
 #[cfg(feature = "letify")]
 mod letify;
 
@@ -46,7 +43,7 @@ use tokio::sync::{mpsc, watch};
 
 pub use addr::{AddressDirectory, MemoryDirectory, PeerAddr};
 pub use config::{
-    BackendKind, HubDirectory, LetifyConfig, ObserverAddr, PkarrWatch, RelayConfig, TransportConfig, BACKEND_ENV,
+    BackendKind, HubDirectory, LetifyConfig, ObserverAddr, PkarrWatch, RelayConfig, TransportConfig,
     RELAY_URL_ENV,
 };
 pub use dialer::Dialer;
@@ -83,8 +80,8 @@ pub enum TransportError {
 pub type Result<T, E = TransportError> = std::result::Result<T, E>;
 
 /// What the application tells the transport about the device, so a backend can spend less on
-/// keepalives while the app is in the background (SPEC `FR-N5`, `NFR-N1` mobile line). The iroh
-/// and in-memory backends ignore it.
+/// keepalives while the app is in the background (SPEC `FR-N5`, `NFR-N1` mobile line). The
+/// in-memory backend ignores it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PowerState {
     /// The app is in use.
@@ -219,14 +216,14 @@ impl AsyncWrite for BiStream {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Backend seam. Backends live in this crate; replacing iroh means adding another impl here.
+// Backend seam. Backends live in this crate; replacing one means adding another impl here.
 // ---------------------------------------------------------------------------------------------
 
 #[async_trait]
 pub(crate) trait TransportBackend: Send + Sync + 'static {
     fn peer_id(&self) -> PeerId;
     fn services(&self) -> &ServiceTable;
-    /// Called after the service table changed (iroh: update the accepted ALPNs).
+    /// Called after the service table changed.
     fn services_changed(&self) {}
     async fn connect(&self, addr: PeerAddr, service: &str) -> Result<Connection>;
     fn local_addr(&self) -> PeerAddr;
@@ -300,12 +297,6 @@ impl ServiceTable {
         }
     }
 
-    /// The registered service names (ALPNs); only the iroh backend needs them.
-    #[cfg(feature = "iroh")]
-    pub(crate) fn names(&self) -> Vec<String> {
-        self.inner.lock().unwrap().keys().cloned().collect()
-    }
-
     pub(crate) fn sender(&self, service: &str) -> Option<mpsc::Sender<Connection>> {
         self.inner.lock().unwrap().get(service).map(|(_, tx)| tx.clone())
     }
@@ -337,24 +328,14 @@ impl Transport {
     }
 
     /// Binds the real peer-to-peer transport: the backend [`TransportConfig::backend`] names
-    /// (iroh by default; letify-link with the `letify` feature).
-    #[cfg(any(feature = "iroh", feature = "letify"))]
+    /// (letify-link, the only one).
+    #[cfg(feature = "letify")]
     pub async fn bind(config: TransportConfig) -> Result<Self> {
         match config.backend {
-            #[cfg(feature = "iroh")]
-            BackendKind::Iroh => {
-                let backend = iroh_backend::IrohBackend::bind(config).await?;
-                Ok(Self::from_backend(backend))
-            }
-            #[cfg(feature = "letify")]
             BackendKind::Letify => {
                 let backend = letify::LetifyBackend::bind(config).await?;
                 Ok(Self::from_backend(backend))
             }
-            #[allow(unreachable_patterns)]
-            other => Err(TransportError::Config(format!(
-                "the {other} backend is not compiled into this build"
-            ))),
         }
     }
 
@@ -407,14 +388,14 @@ impl Transport {
 
     /// Tells the backend that `peer` is admitted, so a backend that enforces admission below the
     /// gate (the letify relay on the main server) admits it too. [`PeerGate::attach`] does this
-    /// for a whole gate. The iroh and in-memory backends ignore it.
+    /// for a whole gate. The in-memory backend ignores it.
     pub fn allow_peer(&self, peer: PeerId) {
         self.inner.allow_peer(peer)
     }
 
     /// Revokes `peer` at the backend: new handshakes from it are refused and its sessions and
     /// relayed pairs are closed at once (SPEC `FR-N3`). [`PeerGate::revoke`] calls this for every
-    /// attached transport. The iroh and in-memory backends ignore it.
+    /// attached transport. The in-memory backend ignores it.
     pub fn revoke_peer(&self, peer: PeerId) {
         self.inner.revoke_peer(peer)
     }
@@ -511,8 +492,8 @@ impl Connection {
         &self.service
     }
 
-    /// Opens a new bidirectional stream. With the iroh backend the peer only learns of the
-    /// stream once the opener writes to it, so protocols should have the opener speak first.
+    /// Opens a new bidirectional stream. Protocols should have the opener speak first, so a
+    /// backend may announce the stream with its first bytes.
     pub async fn open_bi(&self) -> Result<BiStream> {
         self.inner.open_bi().await
     }

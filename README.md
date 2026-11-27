@@ -59,8 +59,8 @@ Ember is three programs.
 | `ember-app` | Wherever you sit | A cache of what the main server last sent, so it starts instantly |
 
 The client talks to `ember-server` over HTTP. `ember-server` reaches each computer over HTTP or
-over a peer-to-peer transport built on [iroh](https://github.com/n0-computer/iroh) (QUIC, with hole
-punching and a relay). The darkpyonix.dev hub lets a computer join your GitHub account with a
+over a peer-to-peer transport built on [letify-link](https://crates.io/crates/letify-link) (Noise
+sessions over TCP, with hole punching and the main server as relay). The darkpyonix.dev hub lets a computer join your GitHub account with a
 one-time code, so you do not type addresses or open ports.
 
 ---
@@ -156,7 +156,7 @@ darkpyonix-ember/
 │  ├─ node/              ember-node: carries out tool actions on each computer
 │  ├─ app/               ember-app: launcher and conversation UI on dioxus-compose
 │  ├─ client/            client core: connection, sync and state below the UI
-│  ├─ transport/         peer-to-peer connections (iroh backend and an in-memory fake)
+│  ├─ transport/         peer-to-peer connections (letify-link backend and an in-memory fake)
 │  ├─ hub/               darkpyonix.dev hub client: device registration and directory
 │  ├─ bridge/            IDE window bridge: webview and native messages
 │  ├─ editor-conn/       Rust client for a Code-OSS server

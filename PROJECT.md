@@ -100,7 +100,7 @@ The full list with status is in `docs/INTENT.md` → *Open questions*. Summary:
 | Q4 | How are a transcript's computer-specific observations invalidated on a move? |
 | Q5 | What happens to a job left running on the previous computer? |
 | Q6 | Where exactly is each agent intercepted so its native behaviour is untouched? |
-| Q7 | ~~Which peer-to-peer transport?~~ **iroh 1.0, conditionally** [user]; own implementation if `NFR-N1` is missed |
+| Q7 | ~~Which peer-to-peer transport?~~ **iroh 1.0, conditionally** [user]; own implementation if `NFR-N1` is missed. Superseded by letify-link (INTENT D36); iroh removed (#1163) |
 | Q8 | ~~Is the Tauri scaffold kept?~~ **Closed: deleted** [user, 2026-10-03] |
 | Q9 | `ember/proxy/`'s carried-over items: login, pre-distribution security holes |
 | Q10 | (from 09-22, still open) What is VS Code Web's renderer ↔ extension host wire protocol, and how stable is it? Only matters for M8. |

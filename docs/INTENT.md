@@ -1188,3 +1188,17 @@ What trust does not protect. Under D37 agents and terminals run with the full au
 
 **Status.** Draft. Not built. SPEC `FR-W7`, `FR-W7a`, `FR-W7b`, `FR-L7`.
 
+
+### D57: The JetBrains entry opens remote development through the Toolbox App
+
+**Decision.** [user, 2026-11-27, relayed by the leader: "Toolbox로 해. 근데 나는 Gateway 자체를 fork 해서 우리 vscode 처럼 다룰 생각도 하고 있긴 해."] The chooser's third entry (D32) is **JetBrains (Toolbox)**: Ember opens the Toolbox App's remote development on the user's computer for the session's computer and project, instead of a command to JetBrains Gateway. JetBrains is retiring Gateway in favour of the Toolbox App (Toolbox 2.6, 2025; `jetbrains.com/help/toolbox-app/jetbrains-gateway-migrations-guide.html`). The launch is the documented link `jetbrains://gateway/ssh/environment?h=<host>&u=<user>&p=<port>&launchIde=true&ideHint=<product code>&projectHint=<path>`, which Toolbox confirms with its own Connect dialog.
+
+- **What the node needs.** Toolbox reaches the backend over SSH (an SSH server with SFTP and port forwarding, and a free port for the IDE backend), not over Ember's transport. JetBrains documents only Linux (glibc, amd64 and arm64; not Alpine) as a backend host. *[provisional, 2026-11-27: the owner asked for every node OS; macOS and Windows nodes as backend hosts are not documented by JetBrains, so the entry is offered on Linux nodes and shown as not available on the others until that is confirmed]*
+- **Licence.** The remote IDE needs the user's own JetBrains licence. Ember ships no JetBrains binary.
+- **Later: a native thin client.** Gateway, JetBrains Client and the remote-dev backend are closed JetBrains products whose User Agreement (§3.5) forbids modifying them or making derivative works, so they cannot be forked the way Code-OSS is (D10). The owner's spec for a compose-rust thin client with a server-side Bridge plugin (`darkpyonix-core/.scratch/leader/intellij-native-thin-client-spec-2026-11-01.md`) is the clean-room route to "a JetBrains IDE like our VS Code". When it is built it becomes its own chooser entry under a new SPEC ID, and Toolbox stays as the fallback for what the Bridge cannot draw.
+
+**Why.** Toolbox is JetBrains' supported launcher for remote development now, and Gateway's own launch path is being retired.
+
+**Rejected.** Forking Gateway or JetBrains Client (closed licences, above). Keeping the Gateway command (Gateway is being deprecated).
+
+**Status.** Draft. Not built. SPEC `FR-L7`.

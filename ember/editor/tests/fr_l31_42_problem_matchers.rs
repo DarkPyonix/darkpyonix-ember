@@ -98,7 +98,7 @@ fn fr_l31_42_less_and_gulp_tsc_and_go_resolve_their_files() {
     assert_eq!((path.as_str(), m.message.as_str(), at(&m)), ("/w/a.less", "unrecognised input", (7, 1, 7, WHOLE_LINE)));
     let (path, m) = one("gulp-tsc", "src/app.ts(4,9): 2304 Cannot find name 'foo'.");
     assert_eq!(path, "/w/src/app.ts", "relative to ${{workspaceFolder}}");
-    assert_eq!((m.code, at(&m)), (Some(json!("2304")), (4, 9, 4, 9)));
+    assert_eq!((m.code.clone(), at(&m)), (Some(json!("2304")), (4, 9, 4, 9)));
     let (path, m) = one("go", "./main.go:12:3: undefined: fmt.Printx");
     assert_eq!(path, "/w/main.go");
     assert_eq!((m.message.as_str(), at(&m)), ("undefined: fmt.Printx", (12, 3, 12, 3)));

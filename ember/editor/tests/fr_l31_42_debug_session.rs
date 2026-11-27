@@ -1548,7 +1548,7 @@ fn fr_l31_42_on_task_errors_decides_before_the_question() {
         let start = rig.start_with_tasks();
         rig.task_done(start, TaskOutcome::Exited { code: Some(1), errors: 0 });
         let started = rig.methods().contains(&"$startDASession");
-        let shown = rig.ui.iter().any(|u| *u == DebugUpdate::ShowProblems);
+        let shown = rig.ui.contains(&DebugUpdate::ShowProblems);
         (rig.task_question().is_some(), started, shown)
     };
     assert_eq!(outcome("debugAnyway"), (false, true, false));

@@ -21,6 +21,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use ember_editor::problem_matcher::{CollectorEvent, ProblemCollector, ProblemMatcher, Registry};
+use dioxus_signals::ReadableExt;
 use ember_editor_conn::exthost::MarkerData;
 
 use super::editor_tasks::{resolve_vars, TaskDef, VarContext};

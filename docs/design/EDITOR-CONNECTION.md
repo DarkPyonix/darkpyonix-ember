@@ -31,16 +31,16 @@ build OSE ourselves, we always know the exact server commit. That fact carries m
 ## 2. Pinned source
 
 All citations are to `microsoft/vscode` at tag **`1.139.1`**, commit
-**`04c0d99f4fb0d8afe6ce4f0c58e31e183ac3e4b1`**: the release OSE is built from (`ember/ose/VERSION`).
+**`04c0d99f4fb0d8afe6ce4f0c58e31e183ac3e4b1`**: the release OSE is built from (`.github/scripts/ose/VERSION`).
 Paths are relative to `src/vs/`. Line numbers are at that commit.
 
 The pin has one source of truth per side, and they are checked against each other:
 
-- `ember/ose/VERSION` names the tag OSE is built from (`ember/ose/build.sh`).
+- `.github/scripts/ose/VERSION` names the tag OSE is built from (`.github/scripts/ose/build.sh`).
 - `ember_editor_conn::PINNED_VERSION` / `PINNED_COMMIT` (`ember/editor-conn/src/lib.rs`) name the tag and
   commit the crate's tables and citations come from. The unit test `pin_matches_ose_version` fails
-  if `PINNED_VERSION` differs from `ember/ose/VERSION`; the CI job `editor-conn-pin`
-  (`.github/workflows/test.yml`) clones the `ember/ose/VERSION` tag, re-runs `gen_rpc_ids.sh`, and
+  if `PINNED_VERSION` differs from `.github/scripts/ose/VERSION`; the CI job `editor-conn-pin`
+  (`.github/workflows/test.yml`) clones the `.github/scripts/ose/VERSION` tag, re-runs `gen_rpc_ids.sh`, and
   fails if `rpc_ids.rs`, `PINNED_VERSION` or `PINNED_COMMIT` differ (§5).
 - At connect time, `handshake::verify_server` compares the server's `GET /version` with
   `PINNED_COMMIT` (§3.4).
@@ -276,7 +276,8 @@ The extension host has no other source for default values.
 
 **Activation the extension host does on its own:** `*`, `workspaceContains:`, and
 `onStartupFinished` (`extHostExtensionService.ts` L671-687). `workspaceContains:` calls back into
-`MainThreadWorkspace.$checkExists`.
+`MainThreadWorkspace.$checkExists`, which the session answers with an `exists` file search through
+the extension host's own file search provider, as Code-OSS's `checkGlobFileExists` does (`FR-E9`).
 
 **Activation the renderer must send:** `$activateByEvent("onLanguage:<id>")` when a document
 opens (`services/language/common/languageService.ts` L289), `onCommand:<id>` before running a
@@ -366,8 +367,8 @@ Read "→EH" as Ember calling the extension host, and "EH→" as the extension h
 | →EH | `ExtHostConfiguration.$initializeConfiguration` | Defaults from extension manifests + Ember core defaults |
 | →EH | `ExtHostWorkspace.$initializeWorkspace` | Workspace folders as `vscode-remote` URIs |
 | →EH | `ExtHostExtensionService.$activateByEvent` | `onLanguage:`, `onCommand:`, … |
-| EH→ | `MainThreadStorage.$initializeExtensionStorage` → `undefined` | Awaited in every activation; must answer |
-| EH→ | everything else | Reply per `exthost::default_reply` (mostly `undefined`) so the extension host never stalls |
+| EH→ | `MainThreadStorage.$initializeExtensionStorage` / `$setValue` / `$registerExtensionStorageKeysToSync` | Persisted per extension (`globalState` under `globalStorageHome/ember-storage`, `workspaceState` under `workspaceStorageHome/ember-storage/<workspace-hash>`, or local `storage_dir` keyed with canonicalized authority); returns stored JSON string or `undefined` when absent, retries transient read errors with backoff before rejecting, quarantines corrupt files to `*.corrupt.<millis>-<seq>`, serializes/coalesces/retries writes with backoff, drains `deactivate()` writes after `MSG_TERMINATE` on shutdown, and propagates `shared=true` updates via `ExtHostStorage.$acceptValue` (in-process per-server `StorageHub` with lag resync plus cross-process `RemoteFs`/local directory watch) |
+| EH→ | everything else | Reply per `exthost::default_reply`, chosen per method from `coverage.toml` (`FR-E9`, Q-E8 (c)): the method's `answer` or `error`, else `[]` for an array result and `undefined` otherwise, so the extension host never stalls |
 
 **Documents (FR-E1 bridge)**
 
@@ -415,7 +416,6 @@ Read "→EH" as Ember calling the extension host, and "EH→" as the extension h
 | ---- | ------------ |
 | `ExtHostEditors.$acceptEditorPropertiesChanged` (selections, visible ranges) | Many extensions read `activeTextEditor.selection`. Needed soon after FR-E4. |
 | `$acceptConfigurationChanged` | Needed once settings can change at runtime. |
-| `MainThreadWorkspace.$checkExists` | `workspaceContains:` activation. Answers `false` for now. |
 | Implicit activation events beyond commands, languages and views | Covered by the generator work in §6 step 5. |
 | Webviews (FR-E5) | Separate design. |
 
@@ -439,7 +439,7 @@ back to 1.139.1 (§2); 1.139.1 → 1.141.0 changed neither the proxy table nor t
 
 1. **Pin per OSE build.** We build OSE ourselves (`INTENT.md` D10), so each Ember release names
    one Code-OSS commit. `ember-editor-conn` carries the tag and commit its tables came from
-   (`PINNED_VERSION`, `PINNED_COMMIT`), tied to `ember/ose/VERSION` by a unit test and by CI (§2).
+   (`PINNED_VERSION`, `PINNED_COMMIT`), tied to `.github/scripts/ose/VERSION` by a unit test and by CI (§2).
 2. **Generate, don't hand-write.** `ember/editor-conn/scripts/gen_rpc_ids.sh` regenerates the proxy
    table from `extHost.protocol.ts`. It fails if `createProxyIdentifier` appears in another file,
    because then module load order would decide the numbering. The next step is to generate the
@@ -454,9 +454,9 @@ back to 1.139.1 (§2); 1.139.1 → 1.141.0 changed neither the proxy table nor t
      public release tag: the tags are public, and the table is only the identifier order. Unknown
      commits fall back.
 4. **CI.** Done for the pinned tag: the `editor-conn-pin` job in `.github/workflows/test.yml`
-   shallow-clones `microsoft/vscode` at the `ember/ose/VERSION` tag, runs `gen_rpc_ids.sh`, and fails
+   shallow-clones `microsoft/vscode` at the `.github/scripts/ose/VERSION` tag, runs `gen_rpc_ids.sh`, and fails
    if `ember/editor-conn/src/rpc_ids.rs` or `PINNED_VERSION` / `PINNED_COMMIT` differ. So bumping
-   `ember/ose/VERSION` without regenerating the table fails the PR. Still to do: a canary that fetches
+   `.github/scripts/ose/VERSION` without regenerating the table fails the PR. Still to do: a canary that fetches
    each *new* upstream release tag, regenerates the table, diffs ids and subset signatures, and
    opens an issue on any change. That turns `PROJECT.md` Q2 into a tracked number, not a surprise.
 5. **Fail loud.** Any reply to an unknown method, a `ReplyErr` "Unknown actor", or a decode
@@ -478,7 +478,7 @@ runtime turns "protocol stability" from a research risk into a release-engineeri
    `bin/dpx-ose-server` of an unpacked OSE build; `ember/editor-conn/scripts/fetch-ose-artifact.sh`
    downloads the newest `ose` workflow artifact for the current platform and prints that path).
    It starts the server on a free port with `--without-connection-token` and a temp
-   `--server-data-dir` (with `extensions.verifySignature: false`, as `ember/ose/smoke.sh`), then over
+   `--server-data-dir` (with `extensions.verifySignature: false`, as `.github/scripts/ose/smoke.sh`), then over
    plain TCP: `verify_server`; management handshake, IPC, `getEnvironmentData`, the
    `remoteFilesystem` commands and a watch event; `scanExtensions` (the built-in
    `vscode.json-language-features` must be listed); the extension-host bootstrap, both
@@ -493,7 +493,8 @@ runtime turns "protocol stability" from a research risk into a release-engineeri
    `provide_hover(uri, pos)` picks the providers whose selectors match and fans out.
    Selector matching needs `languages.score` semantics (language, scheme, glob pattern).
    **Written (#46, CI), with step 4's three bridges:** `ember/editor/` (package `ember-editor`),
-   designed in `EDITOR-SESSION.md`. Reconnect is still to do.
+   designed in `EDITOR-SESSION.md`. After a lost connection the window starts a new session
+   (#451, `FR-L31.6`); reconnecting that resumes the session is still to do (`FR-E11`).
 4. **FR-E2 → FR-E3 → FR-E4** in that order, as `IMPLEMENTATION.md` §3 sets out. Each is a
    registry plus a request/response pair plus widget rendering.
 5. **Activation and configuration fidelity.** Port the implicit-activation generators and core
@@ -512,7 +513,8 @@ runtime turns "protocol stability" from a research risk into a release-engineeri
 | `ipc` | `IpcClient::start(conn, ctx)` → `(client, lifecycle_rx)`; `call(channel, cmd, IpcValue)`; `listen` / `unlisten`; `IpcValue`; `serialize` / `deserialize` |
 | `remote_fs` | `RemoteFs::{stat, read_file, write_file, readdir, mkdir, delete, rename, subscribe_changes, watch, unwatch}` |
 | `management` | `get_environment_data`, `scan_extensions`, `RemoteAgentConnectionContext` |
-| `exthost` | `InitDataParams::to_json`; `initialize(conn, &init)` → `(RpcPeer, RpcEvent rx)`; `bootstrap_calls`; `configuration_init_data`; typed `Call` builders for the subset; `MainThreadCall::parse`; `default_reply` |
+| `exthost` | `InitDataParams::to_json`; `initialize(conn, &init)` → `(RpcPeer, RpcEvent rx)`; `bootstrap_calls`; `configuration_init_data`; typed `Call` builders for the subset; `default_reply` |
+| `actors` | generated from `extHost.protocol.ts` at `PINNED_COMMIT`: per `MainThread*` actor a `Method` enum, `<Method>Args::{decode, encode}`, a trait whose methods default to `Outcome::Unimplemented`, and `dispatch`; `ember_editor`'s engine implements the traits it acts on |
 | `rpc` | `RpcMessage::{encode, decode}`; `RpcPeer::{start_call, call, fire, cancel, respond, connection}`; `Arg`; `Reply` |
 | `rpc_ids` | `id_of(name)`, `name_of(id)`, `PROXY_IDS` |
 | `document` | `DocumentMirror::{apply, replace_all, set_eol, position_from_byte, offset_at}`; `DocumentBridge::{open, open_in_editor, change, close, saved, set_language}` (`open_in_editor` also adds one visible, active editor) |

@@ -314,17 +314,22 @@ fn logged(logs: &LogBuf) -> String {
     String::from_utf8_lossy(&logs.0.lock().unwrap()).into_owned()
 }
 
-/// The default mode is warn (leader, 2026-11-13), until the app ships its claim: with nothing
-/// set, an owner route called with the server token alone is served, and the call is logged.
-/// Enforce is opt-in.
+/// Enforce is now the default (#784): with nothing set, an owner route called with the server
+/// token alone gets 403 `owner_required`; explicit `warn` logs and serves the call.
 #[tokio::test]
-async fn fr_s12_the_default_is_warn_and_the_call_is_logged() {
-    assert_eq!(Presence::from_value(None), Presence::Warn);
+async fn fr_s12_the_default_is_enforce_and_warn_logs_the_call() {
+    assert_eq!(Presence::from_value(None), Presence::Enforce);
     assert_eq!(Presence::from_value(Some("enforce")), Presence::Enforce);
+    assert_eq!(Presence::from_value(Some("warn")), Presence::Warn);
+    // Default (unset) refuses an owner route called with the server token alone.
+    let enforced = fx_with(Presence::for_platform(None));
+    assert_eq!(enforced.owner.presence(), Presence::Enforce);
+    let refused = call_with(&enforced.app, "GET", "/api/devices", Some(&enforced.token), None, None).await;
+    assert!(is_owner_required(&refused), "default enforce must refuse: {refused:?}");
+
+    // Explicit warn mode logs and serves owner routes.
     let (logs, _guard) = capture_logs();
-    // The mode a server gets with EMBER_OWNER_PRESENCE unset, given here and not read from the
-    // process environment, so no other test can change it.
-    let f = fx_with(Presence::for_platform(None));
+    let f = fx_with(Presence::for_platform(Some("warn")));
     assert_eq!(f.owner.presence(), Presence::Warn);
     let got = call_with(&f.app, "GET", "/api/devices", Some(&f.token), None, None).await;
     assert_eq!(got.0, StatusCode::OK, "{got:?}");
@@ -361,7 +366,7 @@ async fn fr_s12_project_patch_and_delete_need_the_owner() {
     assert_ne!(got.1["archived"], json!(true), "unchanged: {got:?}");
 
     let key = f.owner.grant(f.owner.next_claim(), who());
-    let got = call_with(&f.app, "PATCH", "/api/projects/acme", Some(&f.token), Some(&key), Some(json!({ "repository": "github.com/a/b" }))).await;
+    let got = call_with(&f.app, "PATCH", "/api/projects/acme", Some(&f.token), Some(&key), Some(json!({ "repository": "github.com/a/b", "archived": true }))).await;
     assert_eq!(got.0, StatusCode::OK, "{got:?}");
     assert_eq!(got.1["repository"], "github.com/a/b");
     let got = call_with(&f.app, "DELETE", "/api/projects/acme", Some(&f.token), Some(&key), None).await;
@@ -378,7 +383,7 @@ async fn fr_s12_project_patch_and_delete_warn_and_log() {
     let f = fx_with(Presence::Warn);
     let got = call_with(&f.app, "POST", "/api/projects", Some(&f.token), None, Some(json!({ "name": "acme" }))).await;
     assert!(got.0.is_success(), "{got:?}");
-    let got = call_with(&f.app, "PATCH", "/api/projects/acme", Some(&f.token), None, Some(json!({ "repository": "github.com/a/b" }))).await;
+    let got = call_with(&f.app, "PATCH", "/api/projects/acme", Some(&f.token), None, Some(json!({ "repository": "github.com/a/b", "archived": true }))).await;
     assert_eq!(got.0, StatusCode::OK, "{got:?}");
     let got = call_with(&f.app, "DELETE", "/api/projects/acme", Some(&f.token), None, None).await;
     assert!(got.0.is_success(), "{got:?}");
@@ -1146,6 +1151,29 @@ mod door {
         drop(door);
     }
 
+    /// #924: only a refused connection shows that no server listens on a socket file. A probe
+    /// that fails for another reason (here no permission to connect; under load also no file
+    /// descriptor left) says nothing, so the bind stops instead of taking over a live socket.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fr_s12_a_socket_that_cannot_be_probed_is_not_taken_over() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = fx();
+        let path = socket_path(f.dir.path());
+        let (cfg, _) = config(Confirm::Strict, vec![], 1);
+        let door = OwnerDoor::bind(f.dir.path(), f.owner.clone(), cfg).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let (cfg, _) = config(Confirm::Strict, vec![], 1);
+        let second = OwnerDoor::bind(f.dir.path(), f.owner.clone(), cfg);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(second.is_err(), "a socket that could not be probed must not be replaced");
+        assert!(
+            std::os::unix::net::UnixStream::connect(&path).is_ok(),
+            "the first server's socket is still there and answers"
+        );
+        drop(door);
+    }
+
     /// The Windows twin of `fr_s12_socket_is_0600_and_a_stale_file_is_replaced`: the pipe's
     /// access list, as Windows applied it, holds one entry, for this user, and is protected
     /// (nothing inherited, no Everyone, no anonymous). A second server on the same folder is
@@ -1301,7 +1329,7 @@ curl -s -m 10 -X "$1" -H "Authorization: Bearer $T" -H 'content-type: applicatio
     assert_eq!(code, 200);
     let routes = owner_routes();
     for (method, path) in &routes {
-        let (code, body) = shell(*method, format!("http://{addr}{path}")).await.unwrap();
+        let (code, body) = shell(method, format!("http://{addr}{path}")).await.unwrap();
         assert_eq!(code, 403, "{method} {path}: {body}");
         assert_eq!(body["code"], "owner_required", "{method} {path}: {body}");
     }

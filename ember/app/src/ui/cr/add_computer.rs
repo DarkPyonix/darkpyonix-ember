@@ -416,58 +416,21 @@ pub fn AddComputerSheet(ui: &AddUi) {
     let w = crate::ui::window_size::current_window_size();
     let chrome = super::components::SHEET_HEADER_CHROME_H + super::components::SHEET_FOOTER_H;
     let body_h = super::components::sheet_body_max_height(w.width_dp, w.height_dp, false, chrome).min(700.0);
-    // FR-L32.1 (#876): the bottom sheet (below 560 dp) is as tall as its content, like 새 채널,
-    // and the toolkit sheet scrolls content taller than 85 percent of the window itself. The
-    // dialog is as tall as its content when the step's estimate fits (#878: the list at 1440 left
-    // about 500 px blank); the code and confirm steps keep a fixed scrolling body.
-    // TODO(compose-rust#778, after v0.0.10): one capped body for both.
-    let wraps = super::components::sheet_wraps_content(w.width_dp);
-    let fits = add_body_estimate(ui.view.get().as_ref(), &ui.devices.get(), sample).is_some_and(|h| h <= body_h);
+    // FR-L32.1 (#876, #878, compose-rust#778, v0.0.11): the body is capped at the room left by
+    // the header and footer (`Modifier::max_height`), so a short step is only as tall as its
+    // rows and a long one scrolls inside the cap with the footer on screen.
     EmberSheet("컴퓨터 추가", ui.open.get(), close.clone(), None, || {
-        if wraps || fits {
-            cu::Column().modifier(Modifier::new().fill_max_width()).content(|| AddBody(ui, sample));
-        } else {
-            cu::ScrollColumn().modifier(Modifier::new().fill_max_width().height(body_h)).content(|| AddBody(ui, sample));
-        }
+        { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().fill_max_width().max_height(body_h), content = || AddBody(ui, sample)) };
         SheetFooter(|| {
             AppButton("닫기", None, ButtonKind::Default, true, true, false, close.clone());
         });
     });
 }
 
-/// How tall the add-computer body is for a step, an upper bound from its rows (FR-L32.1, #878):
-/// 20 px padding top and bottom and 8 between rows, the demo line (two 18 px lines) when
-/// `sample`; the list (the 32 px button, 62 px device rows or a three-line 22 px status, the
-/// three-line note), the name step (label, the 40 px field, three-line help, an error, a
-/// three-line failure, the buttons) or an outcome (four 22 px lines, the name, three 20 px lines
-/// and a button). `None` for the code and confirm steps, whose commands and fingerprints vary
-/// too much to estimate; they keep the fixed scrolling body.
-pub(crate) fn add_body_estimate(view: Option<&EnrolView>, devices: &DevicesState, sample: bool) -> Option<f32> {
-    let rows: Vec<f32> = match view {
-        None => {
-            let list: Vec<f32> = match devices {
-                DevicesState::Ready(list) if !list.is_empty() => vec![62.0; device_rows(list, sample).len()],
-                _ => vec![3.0 * 22.0],
-            };
-            let mut rows = vec![H_CTL];
-            rows.extend(list);
-            rows.push(3.0 * 18.0);
-            rows
-        }
-        Some(EnrolView::Naming) => vec![18.0, H_BTN, 3.0 * 18.0, 2.0 * 18.0, 3.0 * 18.0, H_CTL],
-        Some(EnrolView::Joined | EnrolView::Denied | EnrolView::Expired | EnrolView::Failed(_)) => {
-            vec![4.0 * 22.0, 24.0, 3.0 * 20.0, H_CTL]
-        }
-        Some(EnrolView::WaitingForNode { .. } | EnrolView::AwaitingConfirm { .. }) => return None,
-    };
-    let rows: Vec<f32> = if sample { std::iter::once(2.0 * 18.0).chain(rows).collect() } else { rows };
-    Some(2.0 * SP[4] + rows.iter().sum::<f32>() + (rows.len() - 1) as f32 * SP[1])
-}
-
 /// The add-computer sheet's body for the current step.
 fn AddBody(ui: &AddUi, sample: bool) {
     let p = ember_theme().palette;
-    cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
+    { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width().padding(SP[4]), {
         let muted = Some(paint(p.muted));
         if sample {
             Label(flow::DEMO_LINE, Fs::Xs, Weight::Regular, muted, None);
@@ -482,7 +445,7 @@ fn AddBody(ui: &AddUi, sample: bool) {
             Some(EnrolView::Expired) => Outcome(ui, flow::EXPIRED_LINE, true),
             Some(EnrolView::Failed(m)) => Outcome(ui, &m, true),
         }
-    });
+    }) };
 }
 
 fn ListBody(ui: &AddUi, sample: bool) {
@@ -530,7 +493,7 @@ fn NamingBody(ui: &AddUi) {
     }
     FailureLine(ui);
     let busy = ui.busy.get();
-    cu::Row().spacing(SP[1]).content(|| {
+    { use ::compose_rust::ui::Row; Row!(spacing = SP[1], {
         let u = ui.clone();
         AppButton("취소", None, ButtonKind::Default, true, !busy, false, move || u.reset_flow());
         let (u, name) = (ui.clone(), typed.clone());
@@ -539,7 +502,7 @@ fn NamingBody(ui: &AddUi) {
                 mint(u.clone(), n);
             }
         });
-    });
+    }) };
 }
 
 fn FailureLine(ui: &AddUi) {
@@ -684,7 +647,7 @@ fn ConfirmBody(ui: &AddUi, rows: &ConfirmRows) {
     FailureLine(ui);
     let busy = ui.busy.get();
     let Some(run) = ui.run.get() else { return };
-    cu::Row().spacing(SP[1]).content(|| {
+    { use ::compose_rust::ui::Row; Row!(spacing = SP[1], {
         let (u, r) = (ui.clone(), run.clone());
         AppButton(flow::DENY_LABEL, None, ButtonKind::Default, true, !busy && !confirmed, false, move || deny(u.clone(), r.clone()));
         let (u, r, rows) = (ui.clone(), run.clone(), rows.clone());
@@ -695,7 +658,7 @@ fn ConfirmBody(ui: &AddUi, rows: &ConfirmRows) {
             }
             confirm(u.clone(), r.clone(), rows.clone());
         });
-    });
+    }) };
 }
 
 fn Outcome(ui: &AddUi, line: &str, again: bool) {
@@ -722,28 +685,28 @@ fn Outcome(ui: &AddUi, line: &str, again: bool) {
 
 fn KV(k: &str, v: &str) {
     let p = ember_theme().palette;
-    cu::Row().spacing(SP[2]).content(|| {
+    { use ::compose_rust::ui::Row; Row!(spacing = SP[2], {
         Label(k, Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(2));
         Label(v, Fs::Sm, Weight::Regular, None, Some(2));
-    });
+    }) };
 }
 
 fn DeviceRowView(r: &DeviceRow) {
     let p = ember_theme().palette;
     let m = Modifier::new().fill_max_width().background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_MD);
-    cu::Column().spacing(SP[2]).modifier(m.padding(SP[3])).content(|| {
-        cu::Row().spacing(SP[2]).content(|| {
-            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+    { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = m.padding(SP[3]), {
+        { use ::compose_rust::ui::Row; Row!(spacing = SP[2], {
+            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), {
                 Label(&r.name, Fs::Sm, Weight::Semibold, None, Some(1));
                 Label(&r.kind, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-            });
+            }) };
             if r.sample {
                 Pill("예시", super::components::PillTone::Grey, true);
             }
             Pill(r.pill.0, r.pill.1.into(), true);
             Pill(r.online.0, r.online.1.into(), true);
-        });
-    });
+        }) };
+    }) };
 }
 
 #[cfg(test)]
@@ -757,34 +720,19 @@ mod tests {
     }
 
     #[test]
-    fn fr_l32_1_add_computer_list_name_and_outcome_fit_the_dialog() {
-        // Review r5 (project-sheet-addcomputer-1440): the list filled 700 px with about 500 blank.
-        let demo = DevicesState::Ready(demo_devices());
-        // 40 + 36 + 32 + 2 x 62 + 54 + 4 x 8 with the two demo devices.
-        assert_eq!(add_body_estimate(None, &demo, true), Some(40.0 + 36.0 + 32.0 + 124.0 + 54.0 + 4.0 * 8.0));
-        assert_eq!(add_body_estimate(None, &DevicesState::HubOff, false), Some(40.0 + 32.0 + 66.0 + 54.0 + 2.0 * 8.0));
-        for view in [None, Some(EnrolView::Naming), Some(EnrolView::Joined), Some(EnrolView::Failed("x".into()))] {
-            let h = add_body_estimate(view.as_ref(), &demo, true).expect("estimated");
-            assert!(h <= room(), "{view:?}: {h} > {}", room());
-        }
-        // The long steps keep the fixed scrolling body.
-        let waiting = EnrolView::WaitingForNode { code: "0000".into(), expires_ms: 0 };
-        assert_eq!(add_body_estimate(Some(&waiting), &demo, true), None);
-        // A long list no longer fits and scrolls.
-        let many = DevicesState::Ready((0..12).map(|i| crate::ui::add_computer::demo_devices()[i % 2].clone()).collect());
-        assert!(add_body_estimate(None, &many, false).expect("estimated") > room());
-    }
-
-    #[test]
-    fn fr_l32_1_add_computer_dialog_takes_its_content_height_when_it_fits() {
+    fn fr_l32_1_add_computer_caps_its_scroll_body() {
+        // compose-rust#778 (v0.0.11): a single ScrollColumn with Modifier::max_height replaces
+        // add_body_estimate and the fixed height, so short steps shrink to their content and
+        // long ones scroll inside the cap with the footer on screen.
         let src = include_str!("add_computer.rs");
         let production = &src[..src.find("#[cfg(test)]").unwrap()];
+        assert!(!production.contains(&["add_body", "_estimate"].concat()));
+        assert!(!production.contains(concat!("TODO(compose-rust#", "778")));
         let sheet = &production[production.find("pub fn AddComputerSheet(").unwrap()..];
         let sheet = &sheet[..sheet.find("\n}\n").unwrap()];
-        assert!(sheet.contains("let fits = add_body_estimate(ui.view.get().as_ref(), &ui.devices.get(), sample).is_some_and(|h| h <= body_h);"));
-        let plain = &sheet[sheet.find("if wraps || fits {").expect("plain branch")..];
-        let plain = &plain[..plain.find("} else {").unwrap()];
-        assert!(plain.contains("cu::Column().modifier(Modifier::new().fill_max_width()).content("), "{plain}");
-        assert!(!plain.contains(".height("), "{plain}");
+        assert!(sheet.contains("ScrollColumn!(modifier = Modifier::new().fill_max_width().max_height(body_h), content ="), "{sheet}");
+        assert!(!sheet.contains(".height(body_h)"), "{sheet}");
+        assert!(sheet.contains("super::components::SHEET_HEADER_CHROME_H + super::components::SHEET_FOOTER_H"));
+        assert_eq!(room(), 700.0);
     }
 }

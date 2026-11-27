@@ -206,7 +206,7 @@ fn base64_std(s: &str) -> Option<Vec<u8>> {
         } as u32)
     }
     let b = s.trim().as_bytes();
-    if b.len() % 4 != 0 {
+    if !b.len().is_multiple_of(4) {
         return None;
     }
     let mut out = Vec::with_capacity(b.len() / 4 * 3);
@@ -481,6 +481,24 @@ pub fn direct_addresses_from_txt(joined: &str) -> Option<Vec<std::net::SocketAdd
         .collect::<Option<_>>()?;
     let rec = AddressRecord::decode_txt(strings.as_slice(), record::unix_now()).ok()?;
     Some(rec.tcp)
+}
+
+/// The relay named in the letify address record of `peer`, as the relay URL the transport takes
+/// (`letify://<peer>@<ip>:<port>`), given the record's joined TXT text. Only an endpoint that is
+/// the relay itself (the main server) puts one in its record, so the URL names the record's own
+/// node. `None` when the text is not a valid signed record of `peer`; empty when it names no
+/// relay (FR-N2, #1044).
+pub fn relay_urls_from_txt(peer: PeerId, joined: &str) -> Option<Vec<String>> {
+    let strings: Vec<&str> = joined
+        .as_bytes()
+        .chunks(255)
+        .map(|c| std::str::from_utf8(c).ok())
+        .collect::<Option<_>>()?;
+    let rec = AddressRecord::decode_txt(strings.as_slice(), record::unix_now()).ok()?;
+    if rec.node.as_bytes() != peer.as_bytes() {
+        return None;
+    }
+    Some(rec.relay.map(|a| format!("letify://{peer}@{a}")).into_iter().collect())
 }
 
 /// Whether a DNS name is the `_letify` address record label.
@@ -1259,7 +1277,7 @@ mod tests {
         use crate::MemoryPkarrStore;
         let store = MemoryPkarrStore::new();
         let (ka, kb) = (SecretKey::generate(), SecretKey::generate());
-        let none: RecordFn = Arc::new(|| Vec::<String>::new());
+        let none: RecordFn = Arc::new(Vec::<String>::new);
         let a = PkarrNode::start(ka.clone(), Arc::new(store.clone()), none.clone(), fast(50));
         let b = PkarrNode::start(kb.clone(), Arc::new(store.clone()), none, fast(50));
         a.watch_peers(&[kb.peer_id()]);
@@ -1286,7 +1304,7 @@ mod tests {
         let txt = rec.encode_txt(&identity);
         let rec_joined = txt.concat();
         let _b = PkarrNode::start(kb.clone(), Arc::new(store.clone()), Arc::new(move || txt.clone()), fast(60_000));
-        let a = PkarrNode::start(ka, Arc::new(store.clone()), Arc::new(|| Vec::<String>::new()), fast(60_000));
+        let a = PkarrNode::start(ka, Arc::new(store.clone()), Arc::new(Vec::<String>::new), fast(60_000));
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         let found = loop {
             if let Some(found) = a.lookup(kb.peer_id()).await.unwrap() {
@@ -1302,6 +1320,17 @@ mod tests {
         assert_eq!(direct_addresses_from_txt(&joined), Some(vec!["127.0.0.1:4242".parse().unwrap()]));
         assert_eq!(direct_addresses_from_txt("not-a-record"), None);
         assert!(is_record_label("_letify.abc"));
+        assert_eq!(relay_urls_from_txt(kb.peer_id(), &joined), Some(vec![]), "no relay in this record");
+        // FR-N2, #1044: a relay's own record names it as a relay URL of the record's node.
+        let mut with_relay = AddressRecord::new(NodeId::from_bytes(*kb.peer_id().as_bytes()), record::unix_now());
+        with_relay.relay = Some("203.0.113.9:7443".parse().unwrap());
+        with_relay.transports = vec![record::DEFAULT_TRANSPORT.to_string()];
+        let relay_joined = with_relay.encode_txt(&identity).concat();
+        assert_eq!(
+            relay_urls_from_txt(kb.peer_id(), &relay_joined),
+            Some(vec![format!("letify://{}@203.0.113.9:7443", kb.peer_id())])
+        );
+        assert_eq!(relay_urls_from_txt(SecretKey::generate().peer_id(), &relay_joined), None, "a record of another node");
         // Nothing is published for an unknown key.
         assert!(a.lookup(SecretKey::generate().peer_id()).await.unwrap().is_none());
     }

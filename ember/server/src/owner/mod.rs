@@ -10,8 +10,8 @@
 //! - **How it is sent.** Header `X-Ember-Owner: <key>` beside the bearer token, on owner routes.
 //!   Missing or wrong: 403 `{"code": "owner_required"}`. 403 and not 401, so a client does not
 //!   take it for a bad server token and re-read the token file.
-//! - **The mode.** Warn by default for now: a call without a key is logged and served, until
-//!   the app ships its claim. `EMBER_OWNER_PRESENCE=enforce` refuses it ([`Presence`]).
+//! - **The mode.** Enforced by default: a call without a key is refused with 403
+//!   `owner_required`. `EMBER_OWNER_PRESENCE=warn` logs and serves it ([`Presence`]).
 //! - **How it is claimed.** Over the unix socket `<data dir>/owner.sock`, or on Windows the
 //!   named pipe `\\.\pipe\ember-owner-<hash of the data dir>` ([`door`], [`pipe_name`]). The
 //!   key lives while that connection stays open.
@@ -54,11 +54,10 @@ pub const KEY_PREFIX: &str = "eok_";
 pub const SOCKET_FILE: &str = "owner.sock";
 /// The start of the claim pipe's name on Windows; [`pipe_name`] adds the data folder's hash.
 pub const PIPE_PREFIX: &str = r"\\.\pipe\ember-owner-";
-/// `EMBER_OWNER_PRESENCE=enforce`: an owner route called without a live key gets 403
-/// `owner_required`. Unset or any other value: warn, which logs the call and serves it. Warn is
-/// the default until the app ships its claim (leader, 2026-11-13); enforce becomes the default
-/// in a later change. Unix (the socket) and Windows (the named pipe, #815) read it alike; a
-/// platform with neither door always warns.
+/// `EMBER_OWNER_PRESENCE=warn`: logs an owner route called without a live key and serves it.
+/// Unset or any other value: enforce, which refuses the call with 403 `owner_required`.
+/// Unix (the socket) and Windows (the named pipe, #815) read it alike; a platform with neither
+/// door always warns.
 pub const PRESENCE_ENV: &str = "EMBER_OWNER_PRESENCE";
 /// `EMBER_OWNER_CONFIRM=off`: a claim that passes the peer checks gets a key with no
 /// confirmation (best effort). Unset or any other value: every claim is confirmed.
@@ -67,18 +66,18 @@ pub const CONFIRM_ENV: &str = "EMBER_OWNER_CONFIRM";
 /// What the owner layer does with an owner route called without a live key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Presence {
-    /// 403 `owner_required` ([`PRESENCE_ENV`]`=enforce`).
+    /// 403 `owner_required` (the default on Unix and Windows).
     Enforce,
-    /// Log and serve (the default for now).
+    /// Log and serve ([`PRESENCE_ENV`]`=warn`).
     Warn,
 }
 
 impl Presence {
-    /// `Some("enforce")` is [`Presence::Enforce`]; everything else, unset included, warns.
+    /// `Some("warn")` is [`Presence::Warn`]; everything else, unset included, enforces.
     pub fn from_value(v: Option<&str>) -> Presence {
         match v.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
-            Some("enforce") => Presence::Enforce,
-            _ => Presence::Warn,
+            Some("warn") => Presence::Warn,
+            _ => Presence::Enforce,
         }
     }
 
@@ -139,6 +138,15 @@ pub enum OwnerEvent {
 struct Held {
     hash: [u8; 32],
     who: Claimant,
+}
+
+/// The owner a request on an owner route came from, put into the request's extensions by the
+/// owner layer when a live key was presented: the name its claimant gave (shown, never trusted
+/// for authority). The editor settings record who accepted the VS Code Server licence with it
+/// (SPEC FR-W7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnerCaller {
+    pub name: String,
 }
 
 /// The live owner keys. In memory only; a restart voids every key.
@@ -248,6 +256,24 @@ impl Owner {
         ok
     }
 
+    /// The claimant of `presented` when it is a live key. Every held hash is compared without an
+    /// early exit, as in [`Owner::check`].
+    pub fn holder_of(&self, presented: &str) -> Option<Claimant> {
+        if !presented.starts_with(KEY_PREFIX) {
+            return None;
+        }
+        let h = hash(presented);
+        let keys = self.keys.lock().unwrap_or_else(|e| e.into_inner());
+        let mut found = None;
+        for held in keys.values() {
+            let diff = held.hash.iter().zip(h.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y));
+            if diff == 0 {
+                found = Some(held.who.clone());
+            }
+        }
+        found
+    }
+
     /// True when `claim` holds a live key.
     pub fn is_live(&self, claim: u64) -> bool {
         self.keys.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&claim)
@@ -289,8 +315,9 @@ async fn guard(State(owner): State<Arc<Owner>>, mut req: Request<Body>, next: Ne
     if !owner_route(req.method(), req.uri().path()) {
         return next.run(req).await;
     }
-    let ok = presented.as_ref().and_then(|v| v.to_str().ok()).is_some_and(|k| owner.check(k.trim()));
-    if ok {
+    let who = presented.as_ref().and_then(|v| v.to_str().ok()).and_then(|k| owner.holder_of(k.trim()));
+    if let Some(who) = who {
+        req.extensions_mut().insert(OwnerCaller { name: who.name });
         return next.run(req).await;
     }
     match owner.presence {
@@ -343,16 +370,17 @@ mod tests {
     }
 
     #[test]
-    fn fr_s12_modes_default_to_strict_confirm_and_warn_presence() {
-        assert_eq!(Presence::from_value(None), Presence::Warn);
-        assert_eq!(Presence::from_value(Some("off")), Presence::Warn);
+    fn fr_s12_modes_default_to_strict_confirm_and_enforce_presence() {
+        assert_eq!(Presence::from_value(None), Presence::Enforce);
+        assert_eq!(Presence::from_value(Some("off")), Presence::Enforce);
         assert_eq!(Presence::from_value(Some("warn")), Presence::Warn);
         assert_eq!(Presence::from_value(Some(" ENFORCE ")), Presence::Enforce);
         // Unix and Windows have a door and follow the value; another platform never enforces.
         let enforced = Presence::for_platform(Some("enforce"));
         assert_eq!(enforced, if cfg!(any(unix, windows)) { Presence::Enforce } else { Presence::Warn });
         assert_eq!(Presence::for_platform(Some("warn")), Presence::Warn);
-        assert_eq!(Presence::for_platform(None), Presence::Warn);
+        let default_mode = Presence::for_platform(None);
+        assert_eq!(default_mode, if cfg!(any(unix, windows)) { Presence::Enforce } else { Presence::Warn });
         assert_eq!(Confirm::from_value(None), Confirm::Strict);
         assert_eq!(Confirm::from_value(Some("1")), Confirm::Strict);
         assert_eq!(Confirm::from_value(Some("off")), Confirm::Off);

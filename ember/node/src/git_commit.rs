@@ -146,7 +146,7 @@ pub fn merge_files(names: Vec<NameStatus>, stats: Vec<NumStat>) -> Vec<GitCommit
         GitCommitFile {
             additions: stat.map_or(0, |s| s.additions),
             deletions: stat.map_or(0, |s| s.deletions),
-            binary: stat.map_or(false, |s| s.binary),
+            binary: stat.is_some_and(|s| s.binary),
             path: n.path,
             old_path: n.old_path,
             status: n.status,

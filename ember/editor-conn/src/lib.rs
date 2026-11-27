@@ -24,23 +24,28 @@
 //! | [`trust`]     | workspace trust: restricted mode extensions, grant (FR-L31.18)   |
 //! | [`uri`]       | `UriComponents` with `$mid` marshalling                           |
 //! | [`webview`]   | `MainThreadWebviews` / panels / views / custom editors (FR-E8)    |
+//! | [`debug`]     | `ExtHostDebugService` calls and DAP messages                      |
+//! | [`coverage`]  | the protocol coverage ledger `coverage.toml` (FR-E9)              |
 //!
 //! Everything is generic over `AsyncRead + AsyncWrite`, so the same code rides a plain TCP socket,
 //! a TLS stream, or an `ember-transport` stream later.
 //!
 //! **Version pinning.** The wire format is not a public contract. All facts here were read at
 //! Code-OSS commit [`PINNED_COMMIT`] (release tag [`PINNED_VERSION`]), the release OSE is built
-//! from (`ember/ose/VERSION`); the ext-host RPC numbering in [`rpc_ids`] in particular must be
+//! from (`.github/scripts/ose/VERSION`); the ext-host RPC numbering in [`rpc_ids`] in particular must be
 //! regenerated per Code-OSS release. [`PINNED_VERSION`] / [`PINNED_COMMIT`] are the single source
 //! of truth for the pin in this crate:
 //!
-//! - a unit test fails if [`PINNED_VERSION`] differs from `ember/ose/VERSION`;
+//! - a unit test fails if [`PINNED_VERSION`] differs from `.github/scripts/ose/VERSION`;
 //! - CI (`.github/workflows/test.yml`, job `editor-conn-pin`) regenerates [`rpc_ids::PROXY_IDS`]
-//!   at the `ember/ose/VERSION` tag and fails if the table or [`PINNED_COMMIT`] differ;
+//!   at the `.github/scripts/ose/VERSION` tag and fails if the table or [`PINNED_COMMIT`] differ;
 //! - at connect time [`handshake::verify_server`] reads the server's `GET /version` and refuses any
-//!   other commit with [`Error::UnsupportedServerVersion`].
+//!   commit outside [`SUPPORTED_BUILDS`] with [`Error::UnsupportedServerVersion`].
 
+pub mod actors;
 pub mod connection;
+pub mod coverage;
+pub mod debug;
 pub mod document;
 pub mod exthost;
 pub mod frame;
@@ -57,20 +62,43 @@ pub mod trust;
 pub mod uri;
 pub mod webview;
 
-/// The Code-OSS release tag this crate is pinned to. Must equal `ember/ose/VERSION` (checked by the
+/// The Code-OSS release tag this crate is pinned to. Must equal `.github/scripts/ose/VERSION` (checked by the
 /// `pin_matches_ose_version` test and by CI).
 pub const PINNED_VERSION: &str = "1.139.1";
 /// The commit of [`PINNED_VERSION`] in `microsoft/vscode` (what an OSE server built from that tag
 /// returns from `GET /version`). [`rpc_ids::PROXY_IDS`] was generated from this commit.
 pub const PINNED_COMMIT: &str = "04c0d99f4fb0d8afe6ce4f0c58e31e183ac3e4b1";
 
-/// Refuse any server commit other than [`PINNED_COMMIT`]. A server without a commit (a dev build
+/// One Code-OSS build an editor server may be made from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SupportedBuild {
+    /// The release tag.
+    pub version: &'static str,
+    /// Its commit in `microsoft/vscode`, what the server answers on `GET /version`.
+    pub commit: &'static str,
+}
+
+/// The supported set (SPEC FR-E10, INTENT D50). The first entry is the pin the tables were
+/// generated from. A commit joins only when `scripts/gen-actors/compare.sh <commit>` admits it:
+/// the same proxy ids, and the same signature for every `bridged` method of `coverage.toml`.
+/// The admission report goes in the PR that adds the entry.
+pub const SUPPORTED_BUILDS: &[SupportedBuild] = &[SupportedBuild { version: PINNED_VERSION, commit: PINNED_COMMIT }];
+
+/// Whether an editor server built at `commit` is one this crate can speak to: a commit of
+/// [`SUPPORTED_BUILDS`]. [`check_server_commit`] and the IDE chooser both ask this, so the window
+/// and the menu in front of it cannot disagree.
+pub fn is_supported_commit(commit: &str) -> bool {
+    let commit = commit.trim();
+    SUPPORTED_BUILDS.iter().any(|b| b.commit == commit)
+}
+
+/// Refuse any server commit outside [`SUPPORTED_BUILDS`]. A server without a commit (a dev build
 /// answers `GET /version` with an empty body) or a server returning non-version text (such as an
 /// HTML page from a reverse proxy) is refused with `server: None`: its commit and proxy numbering
 /// are unknown.
 pub fn check_server_commit(server_commit: &str) -> Result<()> {
     let server_commit = server_commit.trim();
-    if server_commit == PINNED_COMMIT {
+    if is_supported_commit(server_commit) {
         Ok(())
     } else {
         let server = (!server_commit.is_empty()
@@ -161,16 +189,16 @@ pub type Result<T> = std::result::Result<T, Error>;
 mod tests {
     use super::*;
 
-    /// The pin has one source of truth: `ember/ose/VERSION` names the tag OSE is built from, and this
+    /// The pin has one source of truth: `.github/scripts/ose/VERSION` names the tag OSE is built from, and this
     /// crate must be pinned to the same tag.
     #[test]
     fn pin_matches_ose_version() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../ose/VERSION");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/scripts/ose/VERSION");
         let version = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         assert_eq!(
             version.trim(),
             PINNED_VERSION,
-            "ember/ose/VERSION and ember_editor_conn::PINNED_VERSION differ: regenerate src/rpc_ids.rs with \
+            ".github/scripts/ose/VERSION and ember_editor_conn::PINNED_VERSION differ: regenerate src/rpc_ids.rs with \
              ember/editor-conn/scripts/gen_rpc_ids.sh at the new tag and update PINNED_VERSION / PINNED_COMMIT"
         );
     }
@@ -179,6 +207,25 @@ mod tests {
     fn pinned_commit_is_a_full_sha() {
         assert_eq!(PINNED_COMMIT.len(), 40);
         assert!(PINNED_COMMIT.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+    }
+
+    #[test]
+    fn fr_e10_supported_set_starts_with_the_pin_and_holds_full_unique_shas() {
+        assert_eq!(SUPPORTED_BUILDS[0], SupportedBuild { version: PINNED_VERSION, commit: PINNED_COMMIT });
+        for (i, b) in SUPPORTED_BUILDS.iter().enumerate() {
+            assert_eq!(b.commit.len(), 40, "{b:?}");
+            assert!(b.commit.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()), "{b:?}");
+            assert!(!b.version.is_empty(), "{b:?}");
+            assert!(SUPPORTED_BUILDS[..i].iter().all(|o| o.commit != b.commit && o.version != b.version), "{b:?} listed twice");
+            assert!(is_supported_commit(b.commit) && is_supported_commit(&format!(" {}\n", b.commit)));
+        }
+    }
+
+    #[test]
+    fn fr_e10_is_supported_commit_accepts_only_the_pinned_commit() {
+        assert!(is_supported_commit(PINNED_COMMIT));
+        assert!(!is_supported_commit("0036dcb6c18a603d2168c00fa578be600987ac7b"));
+        assert!(!is_supported_commit(""));
     }
 
     #[test]

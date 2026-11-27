@@ -13,7 +13,7 @@
 //! #166 workarounds (revert when upstream lands):
 //! - No drag and drop: a send sheet picks the receiver, then the files. 파일 고르기 opens the
 //!   platform's file dialog (compose-rust#483) where the toolkit has one, which is macOS in
-//!   the v0.0.10 pin (see [`FILE_PICKER_AVAILABLE`]); elsewhere the files step says
+//!   the v0.0.11 pin (see [`FILE_PICKER_AVAILABLE`]); elsewhere the files step says
 //!   [`FILE_PICK_UNAVAILABLE`]. File drop (compose-rust#485) is in the pin and not wired yet.
 //! - No OS share sheet (FR-F7) and no live push of transfer progress: the screen re-reads the
 //!   service whenever the launcher state changes.
@@ -49,9 +49,9 @@ pub const AGENT_SEND_UNSUPPORTED: &str = "agent로 보내기는 아직 지원되
 pub const OFFLINE_TAG: &str = "오프라인";
 
 /// Whether 파일 고르기 can open the platform's file dialog (`compose_rust::FileDialog`,
-/// compose-rust#483). In the v0.0.10 pin only macOS shows one; Windows, Linux, iOS, Android and
-/// the web answer "unavailable" (TODO(compose-rust#483): the other platforms' dialogs; the issue
-/// is closed with macOS alone). Dropped files stay with compose-rust#485.
+/// compose-rust#483, in v0.0.11). On desktop in v0.0.11 only macOS shows a native dialog;
+/// Windows, Linux, iOS and Android answer "unavailable". Dropped files stay with
+/// compose-rust#485.
 pub const FILE_PICKER_AVAILABLE: bool = cfg!(target_os = "macos");
 
 /// The title of the file dialog 파일 고르기 opens.
@@ -377,6 +377,20 @@ pub fn next_state(state: TransferState, action: TransferAction) -> Option<Transf
 }
 
 /// The buttons a state offers the user, in order.
+/// The name a transfer row's action button carries for assistive technology (FR-L27.3): the
+/// mockup's `aria-label`s (`files.js`), and 다시 시도 for a failed transfer, which it does not draw.
+pub fn action_button_name(action: TransferAction) -> &'static str {
+    match action {
+        TransferAction::Pause => "일시 정지",
+        TransferAction::Resume => "이어서 전송",
+        TransferAction::Cancel => "전송 취소",
+        TransferAction::Retry => "다시 시도",
+        TransferAction::Start => "시작",
+        TransferAction::Complete => "완료",
+        TransferAction::Fail => "실패",
+    }
+}
+
 pub fn user_actions(state: TransferState) -> &'static [TransferAction] {
     use TransferAction as A;
     match state {
@@ -546,6 +560,7 @@ pub enum HistoryResult {
     Done,
     Failed,
     Declined,
+    Expired,
     Cancelled,
 }
 
@@ -555,6 +570,7 @@ impl HistoryResult {
             HistoryResult::Done => "완료",
             HistoryResult::Failed => "실패",
             HistoryResult::Declined => "거절됨",
+            HistoryResult::Expired => "만료됨",
             HistoryResult::Cancelled => "취소됨",
         }
     }
@@ -569,6 +585,8 @@ pub struct HistoryEntry {
     pub result: HistoryResult,
     /// A ready-made time text from the service.
     pub when: String,
+    /// Epoch milliseconds when the transfer ended, if known.
+    pub timestamp_ms: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -778,6 +796,7 @@ impl DemoTransferService {
                 from: "iPad Pro".into(),
             },
         ];
+        let now = crate::demo::now_ms();
         let history = vec![
             HistoryEntry {
                 name: "release-notes.md".into(),
@@ -786,6 +805,7 @@ impl DemoTransferService {
                 size: 12 << 10,
                 result: HistoryResult::Done,
                 when: "오늘 09:41".into(),
+                timestamp_ms: Some(now - 3 * 3_600_000),
             },
             HistoryEntry {
                 name: "dump.sql".into(),
@@ -794,6 +814,7 @@ impl DemoTransferService {
                 size: 48 << 20,
                 result: HistoryResult::Failed,
                 when: "어제 22:10".into(),
+                timestamp_ms: Some(now - 86_400_000),
             },
             HistoryEntry {
                 name: "photo.heic".into(),
@@ -802,6 +823,7 @@ impl DemoTransferService {
                 size: 4 << 20,
                 result: HistoryResult::Declined,
                 when: "어제 18:02".into(),
+                timestamp_ms: Some(now - 86_400_000 - 4 * 3_600_000),
             },
         ];
         let offers = vec![Offer {
@@ -891,6 +913,7 @@ impl TransferService for DemoTransferService {
                             size: o.total,
                             result: HistoryResult::Declined,
                             when: "오늘 방금".into(),
+                            timestamp_ms: Some(crate::demo::now_ms()),
                         },
                     );
                 }
@@ -915,6 +938,7 @@ impl TransferService for DemoTransferService {
                             size: t_clone.total,
                             result: HistoryResult::Cancelled,
                             when: "오늘 방금".into(),
+                            timestamp_ms: Some(crate::demo::now_ms()),
                         },
                     );
                 }
@@ -1099,9 +1123,41 @@ pub struct FilesKpi {
     pub available: bool,
 }
 
+/// Seven days in milliseconds, for the weekly sent-bytes KPI.
+pub const WEEK_MS: i64 = 7 * 86_400_000;
+
+/// Sum of bytes of completed sends (`Direction::Send`, `HistoryResult::Done`) whose timestamp
+/// falls within the last 7 days ending at `now_ms`.
+pub fn sent_week_bytes_at(history: &[HistoryEntry], now_ms: i64) -> u64 {
+    let cutoff = now_ms.saturating_sub(WEEK_MS);
+    history
+        .iter()
+        .filter(|h| h.direction == Direction::Send && h.result == HistoryResult::Done)
+        .filter(|h| h.timestamp_ms.is_some_and(|ts| ts >= cutoff))
+        .map(|h| h.size)
+        .fold(0u64, u64::saturating_add)
+}
+
+impl FilesModel {
+    /// Completed send bytes within the last 7 days ending at `now_ms`, or `None` while not ready.
+    pub fn sent_week_bytes_at(&self, now_ms: i64) -> Option<u64> {
+        self.ready.then(|| sent_week_bytes_at(&self.history, now_ms))
+    }
+
+    /// Completed send bytes within the last 7 days, or `None` while not ready.
+    pub fn sent_week_bytes(&self) -> Option<u64> {
+        self.sent_week_bytes_at(crate::demo::now_ms())
+    }
+}
+
 /// Connected devices, transfers in progress, sent this week, direct connection ratio.
 /// Only the first is known without the service; the others say [`UNAVAILABLE`].
 pub fn kpis(m: &FilesModel) -> [FilesKpi; 4] {
+    kpis_at(m, crate::demo::now_ms())
+}
+
+/// [`kpis`] evaluated at `now_ms` (for deterministic testing of the 7-day window).
+pub fn kpis_at(m: &FilesModel, now_ms: i64) -> [FilesKpi; 4] {
     let unavailable = |label| FilesKpi {
         label,
         value: UNAVAILABLE.to_string(),
@@ -1120,6 +1176,14 @@ pub fn kpis(m: &FilesModel) -> [FilesKpi; 4] {
         }
     } else {
         unavailable("전송 중")
+    };
+    let sent_week = match m.sent_week_bytes_at(now_ms) {
+        Some(bytes) => FilesKpi {
+            label: "이번 주 보낸 용량",
+            value: format_bytes(bytes),
+            available: true,
+        },
+        None => unavailable("이번 주 보낸 용량"),
     };
     let known: Vec<&Device> = m.devices.iter().filter(|d| d.path.is_some()).collect();
     let direct = if m.ready && !known.is_empty() {
@@ -1142,8 +1206,7 @@ pub fn kpis(m: &FilesModel) -> [FilesKpi; 4] {
             available: true,
         },
         in_progress,
-        // TODO(FR-F8): sum the sent bytes of the last 7 days once the history has timestamps.
-        unavailable("이번 주 보낸 용량"),
+        sent_week,
         direct,
     ]
 }
@@ -1468,10 +1531,9 @@ pub fn chip_rows(widths: &[f32], gap: f32, avail: f32) -> Vec<Vec<usize>> {
     rows
 }
 
-/// A pessimistic text width for the chips: 16 dp per Korean (non-ASCII) glyph and 9 dp per ASCII
-/// char, so a chip is never wider on screen than modelled and the rows wrap early, not late.
+/// A conservative width for recipient labels at the sheet's small text size.
 pub fn chip_text_px(text: &str) -> f32 {
-    text.chars().map(|c| if c.is_ascii() { 9.0 } else { 16.0 }).sum()
+    text.chars().map(|c| if c.is_ascii() { 8.0 } else { 14.0 }).sum()
 }
 
 /// `text` cut with an ellipsis so [`chip_text_px`] stays within `max_px`.
@@ -1496,10 +1558,10 @@ pub fn chip_width_est(label: &str, glyph: f32) -> f32 {
     12.0 + glyph + 8.0 + chip_text_px(label) + 12.0
 }
 
-/// The widest a chip's text may be in a row `avail` wide: the mockup's 200 px cap, and also so that
-/// two chips always fit one row (each at most `(avail - 8) / 2` wide, the gap being 8).
+/// The text room under the mockup's 200 px cap and the sheet's available width. Longer chips
+/// may take their own row, leaving room for more of the recipient name.
 pub fn chip_text_max_for(avail: f32, glyph: f32) -> f32 {
-    chip_text_max(glyph).min((avail - 8.0) / 2.0 - 12.0 - glyph - 8.0 - 12.0)
+    chip_text_max(glyph).min(avail - chip_width_est("", glyph)).max(0.0)
 }
 
 /// The text of a receiver chip: the name, cut to fit, plus the offline tag for an offline device
@@ -1527,6 +1589,26 @@ pub fn chip_text_max(glyph: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fr_l27_3_every_transfer_action_has_a_korean_name() {
+        use TransferState as S;
+        for state in [S::Queued, S::Sending, S::Paused, S::Failed, S::Done, S::Cancelled] {
+            for &a in user_actions(state) {
+                let name = action_button_name(a);
+                assert!(!name.is_empty() && name.chars().any(|c| ('\u{AC00}'..='\u{D7A3}').contains(&c)), "{a:?}: {name}");
+            }
+        }
+        assert_eq!(action_button_name(TransferAction::Pause), "일시 정지");
+        assert_eq!(action_button_name(TransferAction::Resume), "이어서 전송");
+        assert_eq!(action_button_name(TransferAction::Cancel), "전송 취소");
+        assert_eq!(action_button_name(TransferAction::Retry), "다시 시도");
+        // The row draws every action as a named round button, never the toolkit's unnamed close icon.
+        let row = include_str!("cr/files.rs");
+        let production = &row[..row.find("#[cfg(test)]").unwrap()];
+        assert!(production.contains("RoundGlyph(glyph, action_button_name(action), on_act)"));
+        assert!(!production.contains("IconButton(IconRole::Close, true, on_act)"));
+    }
+
     use super::*;
     use std::sync::Mutex;
 
@@ -2163,10 +2245,10 @@ mod tests {
 
     // FR-L27.5
     #[test]
-    fn fr_l27_5_pessimistic_chip_rows_never_overflow_and_two_always_fit() {
+    fn fr_l27_5_chip_rows_never_overflow_with_long_names() {
         let avail = chip_avail(390.0);
-        assert_eq!(chip_text_max_for(avail, 16.0), 99.0);
-        assert_eq!(chip_text_max_for(avail, 22.0), 93.0);
+        assert_eq!(chip_text_max_for(avail, 16.0), 152.0);
+        assert_eq!(chip_text_max_for(avail, 22.0), 146.0);
         assert_eq!(chip_text_max_for(chip_avail(1440.0), 16.0), chip_text_max(16.0));
         let names = ["이 컴퓨터", "스튜디오 PC", "second-project-codex", "second-project-claude", "a"];
         for (width, expect_more) in [(390.0, false), (700.0, true)] {
@@ -2176,14 +2258,13 @@ mod tests {
                 let glyph = if i >= 2 { 22.0 } else { 16.0 };
                 let label = chip_label(n, i == 1, chip_text_max_for(avail, glyph), fit_chip_text);
                 let w = chip_width_est(&label, glyph);
-                assert!(w <= (avail - 8.0) / 2.0 + 0.01, "{width} {n}: {w}");
+                assert!(w <= 200.0, "{width} {n}: {w}");
                 widths.push(w);
             }
             let rows = chip_rows(&widths, 8.0, avail);
             for r in &rows {
                 let sum: f32 = r.iter().map(|&i| widths[i]).sum::<f32>() + 8.0 * (r.len() as f32 - 1.0);
                 assert!(sum <= avail, "{width}: {sum}");
-                assert!(r.len() >= 2 || rows.len() == 1 || r != &rows[0], "{width}");
             }
             assert_eq!(rows.iter().any(|r| r.len() >= 3), expect_more, "{width}: {rows:?}");
         }
@@ -2579,5 +2660,71 @@ mod tests {
         }
         assert_ne!(SEND_SERVER_LOST, UNAVAILABLE);
         assert_eq!(crate::ui::files_service::NOT_CONNECTED, SEND_SERVER_LOST);
+    }
+
+    #[test]
+    fn fr_l27_sent_week_bytes_sums_only_completed_sends_within_seven_days() {
+        const NOW: i64 = 1_800_000_000_000;
+        let entry = |direction, result, size, timestamp_ms| HistoryEntry {
+            name: "f.bin".into(),
+            device: "mini".into(),
+            direction,
+            size,
+            result,
+            when: "최근 방금".into(),
+            timestamp_ms,
+        };
+        let history = vec![
+            // Included: completed sends within the 7-day window (including exact boundary).
+            entry(Direction::Send, HistoryResult::Done, 1024, Some(NOW - 60_000)),
+            entry(Direction::Send, HistoryResult::Done, 512, Some(NOW - WEEK_MS)),
+            // Excluded: receive, non-done results, older than 7 days, or missing timestamp.
+            entry(Direction::Receive, HistoryResult::Done, 10_000, Some(NOW - 60_000)),
+            entry(Direction::Send, HistoryResult::Failed, 20_000, Some(NOW - 60_000)),
+            entry(Direction::Send, HistoryResult::Declined, 30_000, Some(NOW - 60_000)),
+            entry(Direction::Send, HistoryResult::Cancelled, 40_000, Some(NOW - 60_000)),
+            entry(Direction::Send, HistoryResult::Done, 50_000, Some(NOW - WEEK_MS - 1)),
+            entry(Direction::Send, HistoryResult::Done, 60_000, None),
+        ];
+        assert_eq!(sent_week_bytes_at(&history, NOW), 1536);
+
+        let model = FilesModel {
+            devices: Vec::new(),
+            transfers: Vec::new(),
+            received: Vec::new(),
+            history,
+            ready: true,
+            lost: false,
+        };
+        let k = kpis_at(&model, NOW);
+        assert_eq!(k[2].label, "이번 주 보낸 용량");
+        assert_eq!(k[2].value, "1.5 KB");
+        assert!(k[2].available);
+    }
+
+    #[test]
+    fn fr_l27_sent_week_kpi_shows_zero_bytes_when_ready_and_unavailable_when_not() {
+        const NOW: i64 = 1_800_000_000_000;
+        let empty_ready = FilesModel {
+            devices: Vec::new(),
+            transfers: Vec::new(),
+            received: Vec::new(),
+            history: Vec::new(),
+            ready: true,
+            lost: false,
+        };
+        let k_ready = kpis_at(&empty_ready, NOW);
+        assert_eq!(k_ready[2].label, "이번 주 보낸 용량");
+        assert_eq!(k_ready[2].value, "0 B");
+        assert!(k_ready[2].available);
+
+        let not_ready = FilesModel {
+            ready: false,
+            ..empty_ready
+        };
+        let k_not_ready = kpis_at(&not_ready, NOW);
+        assert_eq!(k_not_ready[2].label, "이번 주 보낸 용량");
+        assert_eq!(k_not_ready[2].value, UNAVAILABLE);
+        assert!(!k_not_ready[2].available);
     }
 }

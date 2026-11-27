@@ -122,15 +122,139 @@ fn fr_t16_an_unsafe_channel_id_is_not_written_outside_the_dir() {
     let data = root.path().join("data");
     std::fs::create_dir_all(&data).unwrap();
     let log = JsonlLog::new(&data);
-    for bad in ["../escape", "a/b", "..", "", "a\\b", "/etc/x", "x\0y", "a.b"] {
-        assert!(log.append(bad, &user_message(1, "x")).is_err(), "{bad:?} must be refused");
+    // Only the empty id is refused; every other id is written under an encoded name (#987).
+    assert!(log.append("", &user_message(1, "x")).is_err(), "the empty id must be refused");
+    let odd = ["../escape", "a/b", "..", "a\\b", "/etc/x", "x\0y", "a.b"];
+    for id in odd {
+        assert!(log.append(id, &user_message(1, "x")).unwrap(), "{id:?} is written under an encoded name");
     }
     assert!(!root.path().join("escape.jsonl").exists());
-    let mut all = Vec::new();
-    for e in walk(root.path()) {
-        all.push(e);
+    let all = walk(root.path());
+    assert_eq!(all.len(), odd.len(), "one file per id: {all:?}");
+    let channels = data.join("channels");
+    assert!(all.iter().all(|p| p.parent() == Some(channels.as_path())), "every file is directly in channels/: {all:?}");
+}
+
+/// `s` as one URL path segment: every byte outside `A-Za-z0-9-_` percent-encoded.
+fn segment(s: &str) -> String {
+    s.bytes()
+        .map(|b| if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' { (b as char).to_string() } else { format!("%{b:02X}") })
+        .collect()
+}
+
+/// The file name `JsonlLog` gives `channel` (FR-T16, #987).
+fn name_of(log: &JsonlLog, channel: &str) -> String {
+    log.path_of(channel).unwrap().file_name().unwrap().to_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn fr_t16_a_default_channel_of_a_project_named_in_korean_or_with_a_space_takes_a_post() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let projects = ["프로젝트", "my project"];
+    for p in projects {
+        store.create_session(p, AgentKind::Scripted, "/tmp/x", None, "alpha").unwrap();
     }
-    assert!(all.iter().all(|p| !p.to_string_lossy().ends_with(".jsonl")), "nothing written: {all:?}");
+    let app = app(&store, dir.path());
+    let (_, list) = call(&app, "GET", "/api/channels", None).await;
+    for p in projects {
+        let id = list.as_array().unwrap().iter().find(|c| c["project"] == p).unwrap()["id"].as_str().unwrap().to_string();
+        assert_eq!(id, format!("default-{p}"));
+        let (st, m) = call(&app, "POST", &format!("/api/channels/{}/messages", segment(&id)), Some(json!({"text":"안녕하세요"}))).await;
+        assert_eq!(st, StatusCode::CREATED, "{p}: {m}");
+        let path = JsonlLog::new(dir.path()).path_of(&id).unwrap();
+        assert_eq!(path.parent().unwrap(), dir.path().join("channels"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        let got: Vec<Value> = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(got.len(), 1, "{p}: one line");
+        assert_eq!(got[0]["channel_id"], id.as_str());
+        assert_eq!(got[0]["seq"], m["seq"]);
+        assert_eq!(got[0]["text"], "안녕하세요");
+        // The row stays in SQLite (the append did not fail and roll it back).
+        assert_eq!(store.channel(&id).unwrap().messages.len(), 1);
+    }
+}
+
+#[test]
+fn fr_t16_file_names_keep_safe_ids_and_encode_the_rest() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = JsonlLog::new(dir.path());
+    // Safe ids keep their names, upper case included.
+    for id in ["chan-1", "default-core", "default-Web", "3f2b9c1e-0d4a-4c55-9f1e-2a7b6c8d9e01", "a_b"] {
+        assert_eq!(name_of(&log, id), format!("{id}.jsonl"));
+    }
+    let max = "a".repeat(128);
+    assert_eq!(name_of(&log, &max), format!("{max}.jsonl"));
+    // Every other id: `~`, then each byte outside a-z 0-9 - _ as %XX.
+    assert_eq!(name_of(&log, "default-프로젝트"), "~default-%ED%94%84%EB%A1%9C%EC%A0%9D%ED%8A%B8.jsonl");
+    assert_eq!(name_of(&log, "default-my project"), "~default-my%20project.jsonl");
+    assert_eq!(name_of(&log, "default-My Project"), "~default-%4Dy%20%50roject.jsonl");
+    assert_eq!(name_of(&log, ".."), "~%2E%2E.jsonl");
+    assert_eq!(name_of(&log, "~a"), "~%7Ea.jsonl");
+    let long = "a".repeat(129);
+    assert_eq!(name_of(&log, &long), format!("~{long}.jsonl"));
+    // Longer than 200 bytes encoded: `~~` and the SHA-256 of the id in lower-case hex.
+    let hashed = name_of(&log, &"가".repeat(100));
+    assert!(hashed.starts_with("~~") && hashed.ends_with(".jsonl"), "{hashed}");
+    let hex = &hashed[2..hashed.len() - ".jsonl".len()];
+    assert_eq!(hex.len(), 64);
+    assert!(hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)), "{hashed}");
+    // The empty id is refused.
+    assert!(log.path_of("").is_err());
+}
+
+#[test]
+fn fr_t16_encoded_file_names_are_distinct_and_stay_in_the_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = JsonlLog::new(dir.path());
+    let ids: Vec<String> = [
+        "..", ".", "../escape", "a/b", "a\\b", "/etc/x", "x\0y", "a.b", "a b", "A b", "a%20b", "~a", "%41", "a:b",
+        "default-프로젝트", "default-my project", "chan-1", "default-core",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .chain(["x".repeat(300), format!("{}y", "x".repeat(299)), "가".repeat(100), "나".repeat(100)])
+    .collect();
+    let mut seen = std::collections::HashSet::new();
+    for id in &ids {
+        let path = log.path_of(id).unwrap();
+        assert_eq!(path.parent().unwrap(), dir.path().join("channels"), "{id:?}");
+        let name = name_of(&log, id);
+        let stem = name.strip_suffix(".jsonl").unwrap();
+        assert!(!stem.is_empty() && stem != "." && stem != "..", "{id:?} -> {name}");
+        assert!(!stem.contains(['/', '\\', '.', ':', '\0']), "{id:?} -> {name}");
+        assert!(name.len() <= 255, "{id:?} -> {} bytes", name.len());
+        // Distinct even on a case-insensitive file system.
+        assert!(seen.insert(name.to_ascii_lowercase()), "{id:?} collides: {name}");
+    }
+    // Writing each one creates exactly one file per id, all in channels/.
+    for id in &ids {
+        assert!(log.append(id, &user_message(1, "x")).unwrap(), "{id:?}");
+    }
+    let all = walk(dir.path());
+    assert_eq!(all.len(), ids.len(), "{all:?}");
+    assert!(all.iter().all(|p| p.parent() == Some(dir.path().join("channels").as_path())), "{all:?}");
+}
+
+#[tokio::test]
+async fn fr_t16_recovery_writes_the_file_of_an_encoded_channel_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in_memory().unwrap();
+    store.create_session("프로젝트", AgentKind::Scripted, "/tmp/x", None, "alpha").unwrap();
+    let id = "default-프로젝트";
+    post(&store, id, "one");
+    post(&store, id, "two");
+    let log = JsonlLog::new(dir.path());
+    let report = log.recover(&store);
+    assert_eq!(report.repaired_lines, 2);
+    assert_eq!(report.skipped, 0);
+    let text = std::fs::read_to_string(log.path_of(id).unwrap()).unwrap();
+    let got: Vec<Value> = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(got.iter().map(|l| l["text"].as_str().unwrap()).collect::<Vec<_>>(), vec!["one", "two"]);
+    assert!(got.iter().all(|l| l["channel_id"] == id));
+    // Up to date now: a second start changes nothing.
+    let again = JsonlLog::new(dir.path()).recover(&store);
+    assert_eq!((again.repaired_lines, again.truncated_bytes, again.skipped), (0, 0, 0));
 }
 
 fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
@@ -312,7 +436,7 @@ async fn fr_t16_a_fragment_longer_than_the_window_is_skipped_untouched() {
     let (store, _, core, _, _) = fixture(dir.path()).await;
     post(&store, &core, "one");
     let mut content = b"{\"seq\":1}\n".to_vec();
-    content.extend(std::iter::repeat(b'x').take(1_200_000));
+    content.extend(std::iter::repeat_n(b'x', 1_200_000));
     write_file(dir.path(), &core, &content);
     let report = JsonlLog::new(dir.path()).recover(&store);
     assert_eq!((report.skipped, report.repaired_lines, report.truncated_bytes), (1, 0, 0));

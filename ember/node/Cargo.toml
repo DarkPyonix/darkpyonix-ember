@@ -48,12 +48,26 @@ sysinfo = { version = "=0.33.1", default-features = false, features = ["system",
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.29"
+# The relay to a DarkPyonix manager on an https url (SPEC FR-W4b, D55, #1064). `ring`, as reqwest's rustls already uses, so no aws-lc build.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+# Root certificates for that TLS relay (the set reqwest's rustls-tls already brings).
+webpki-roots = "1"
 # The enrol seal's key agreement (SPEC FR-C2d, #540). Version 2 sits on curve25519-dalek 4, which the transport's dependencies already bring into the lock file. `static_secrets`: a key made from bytes this crate drew itself.
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 zeroize = "1"
+
+# Own the OSE process tree with a Job Object. Assign the suspended launcher before it runs.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
 
 [features]
 # The letify transport backend (EMBER_TRANSPORT_BACKEND=letify; SPEC FR-N5). Already on through ember-transport's default features (INTENT D36).

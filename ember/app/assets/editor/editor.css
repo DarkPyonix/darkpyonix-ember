@@ -21,6 +21,15 @@
 .ed-ib{width:28px;height:28px;border:0;border-radius:var(--r-sm);background:none;display:grid;place-items:center;color:var(--text-2);cursor:pointer;flex:none;padding:0}
 .ed-ib:hover{background:var(--hover);color:var(--text)}
 .ed-ib.run{color:var(--c-green)}
+.ed-debug-picker,.ed-debug-toolbar{display:flex;align-items:center;gap:2px}
+.ed-debug-picker,.ed-debug-breakpoint{position:relative}
+.ed-debug-breakpoint{align-self:flex-start}
+.ed-debug-picker>.ed-pj{max-width:160px}
+.ed-debug-popup{position:absolute;top:100%;left:0;z-index:30;display:flex;flex-direction:column;gap:var(--sp1);width:240px;max-height:260px;overflow:auto;padding:var(--sp2);border:1px solid var(--line);border-radius:var(--r);background:var(--surface);color:var(--text)}
+.ed-debug-popup>.ed-pj{justify-content:flex-start;overflow:hidden}
+.ed-debug-popup input{min-width:0}
+.ed-debug-error{overflow-wrap:anywhere}
+.ed-runcfg button:disabled{opacity:.45;cursor:default}
 /* stripes */
 .ed-stripe{display:flex;flex-direction:column;align-items:center;gap:var(--sp1);padding:var(--sp2) 0;min-height:0;overflow:hidden}
 .ed-rail{grid-area:sl;display:flex;flex-direction:column;min-height:0}.ed-stripe-l{flex:1}.ed-stripe-r{grid-area:sr}.ed-stripe-b{justify-content:flex-end}
@@ -129,13 +138,54 @@ button.ed-sbi{cursor:pointer}button.ed-sbi:hover{background:var(--hover)}
  .ed{grid-template-columns:var(--stw) 0 minmax(0,1fr) var(--stw)}
  .ed-left{position:fixed;z-index:30;left:var(--stw);top:52px;bottom:var(--sbh);width:min(280px,70vw);box-shadow:var(--shadow-lg)}
  .hide-md{display:none!important}
- .ed-runcfg>.ed-pj{display:none}
+ .ed-debug-picker>.ed-pj{max-width:110px}
  .ed{grid-template-rows:52px minmax(0,1fr) 220px var(--sbh)}
 }
-@media (max-width:560px){.ed-pj:nth-of-type(2){display:none}.ed-find{display:none}.ed-runcfg{margin:0}}
+@media (max-width:560px){.ed-top>.ed-pj:nth-of-type(2){display:none}.ed-find{display:none}.ed-runcfg{margin:0}}
 .ed-twh .chev{transform:rotate(90deg)}
 .ed-top .logo-img{background:none;border-radius:0;object-fit:contain}
 .ed-msep{height:1px;background:var(--line);margin:var(--sp1) 0}
 .ed-mlab{font-size:var(--fs-2xs);color:var(--muted);padding:4px var(--sp3) 2px}
 .ed-mchk{width:16px;display:grid;place-items:center;flex:none}
 .ed-mchk svg.i{width:14px;height:14px}
+/* FR-L31.42: Run and Debug window and debug console */
+.ed-dbg-body{flex:1;overflow:auto;min-height:0;padding:var(--sp1) 0}
+.ed-dbg-sec{border-bottom:1px solid var(--line)}
+.ed-dbg-sech{display:flex;align-items:center;gap:var(--sp1);height:var(--row);padding:0 var(--sp2)}
+.ed-dbg-sect{display:flex;align-items:center;gap:6px;border:0;background:none;padding:0 var(--sp1);height:100%;cursor:pointer;font-size:var(--fs-xs);color:var(--text-2);text-transform:uppercase;letter-spacing:.04em}
+.ed-dbg-secb{padding:0 var(--sp2) var(--sp2)}
+.ed-dbg-var .ed-dbg-name,.ed-dbg-stack .ed-dbg-name,.ed-dbg-bp .ed-dbg-name{font-family:var(--mono);font-size:var(--fs-xs);white-space:nowrap}
+.ed-dbg-var .ed-dbg-name{color:var(--c-blue)}
+.ed-dbg-val{font-family:var(--mono);font-size:var(--fs-xs);color:var(--text-2);min-width:0}
+.ed-dbg-err{color:var(--c-red);font-size:var(--fs-xs);min-width:0}
+.ed-dbg-muted{color:var(--muted);font-size:var(--fs-xs)}
+.ed-dbg-pad{padding:6px var(--sp3)}
+.ed-dbg-place{font:var(--fs-2xs) var(--mono);color:var(--muted);white-space:nowrap}
+.ed-dbg-stack.muted{opacity:.6}
+.ed-dbg-bp.unverified .ed-dbg-name{color:var(--muted)}
+.ed-dbg-check{width:16px;height:16px;flex:none;display:grid;place-items:center;padding:0;border:1px solid var(--line);border-radius:var(--r-xs);background:var(--surface);cursor:pointer;color:var(--text)}
+.ed-dbg-check[aria-checked=true]{background:var(--ink);color:var(--ink-text);border-color:var(--ink)}
+.ed-dbg-check svg.i{width:12px;height:12px}
+.ed-dbg-rowbtn{width:22px;height:22px;opacity:0}
+.ed-tn:hover>.ed-dbg-rowbtn,.ed-dbg-rowbtn:focus-visible{opacity:1}
+.ed-dbg-form{padding:var(--sp1) var(--sp2)}
+.ed-dbg-input{width:100%;height:26px;padding:0 var(--sp2);border:1px solid var(--c-blue);border-radius:var(--r-sm);background:var(--surface);color:var(--text);font:var(--fs-xs) var(--mono);outline:none}
+.ed-dbg-hidden{display:none}
+/* Set Value on a variable row (F2, double-click) */
+.ed-dbg-edit{flex:1;min-width:0}
+.ed-dbg-edit .ed-dbg-input{height:20px}
+/* FR-L31.42: the debug hover (Code-OSS debugHover.css: a title, a tree, the Alt tip) on the hover card's frame */
+.ed-dbg-hover{min-width:160px}
+.ed-dbg-htitle{padding:var(--sp1) var(--sp2);border-bottom:1px solid var(--line);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ed-dbg-htree{max-height:240px;overflow:auto;padding:var(--sp1) 0}
+.ed-dbg-hval{padding:var(--sp1) var(--sp2);white-space:pre-wrap;word-break:break-all}
+.ed-dbg-tip{padding:var(--sp1) var(--sp2);border-top:1px solid var(--line)}
+.ed-dbg-welcome{display:flex;flex-direction:column;gap:var(--sp2);padding:var(--sp3) var(--sp4);font-size:var(--fs-sm)}
+.ed-dbg-welcome .ed-pj{justify-content:center}
+.ed-dbg-console{display:flex;flex-direction:column;flex:1;min-height:0}
+.ed-dbg-ctools{display:flex;align-items:center;padding:var(--sp1) var(--sp3) 0;flex:none}
+.ed-dbg-lines .tl{display:flex;align-items:baseline;gap:6px}
+.ed-dbg-res{cursor:pointer}
+.ed-dbg-restree{padding:0;overflow:visible;flex:none}
+.ed-dbg-link{border:0;background:none;padding:0;margin-left:auto;font:var(--fs-2xs) var(--mono);color:var(--muted);cursor:pointer;text-decoration:underline}
+.ed-dbg-cin{flex:none;padding:var(--sp2) var(--sp4);border-top:1px solid var(--line);font:var(--code-fs)/var(--code-lh) var(--mono)}

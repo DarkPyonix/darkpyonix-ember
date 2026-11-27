@@ -27,6 +27,17 @@ _CONFIG_META = re.compile(
 # a user setting turns it back on (see `vscodeNewWindowOp` there).
 DETACH_CONFIGURATION_DEFAULTS = {"workbench.editor.dragToOpenWindow": False}
 
+# The DarkPyonix theme is the default of Ember's VS Code runtime (SPEC FR-W6, #15). The names are
+# the theme labels in extensions/vscode-darkpyonix-theme/package.json (a theme without an `id` is
+# selected by its label). Dark is the default because Ember's own client opens dark. A user's own
+# `workbench.colorTheme` still wins; the same defaults are baked into OSE's staged copy of the theme
+# (.github/scripts/ose/stage-extensions.sh), so an OSE opened without the proxy looks the same.
+THEME_CONFIGURATION_DEFAULTS = {
+    "workbench.colorTheme": "DarkPyonix Dark",
+    "workbench.preferredDarkColorTheme": "DarkPyonix Dark",
+    "workbench.preferredLightColorTheme": "DarkPyonix Light",
+}
+
 
 def add_configuration_defaults(html: str, defaults: dict) -> str:
     """Merges `defaults` into the `configurationDefaults` of the workbench web configuration
@@ -55,8 +66,10 @@ def add_configuration_defaults(html: str, defaults: dict) -> str:
     return html[: m.start(2)] + encoded + html[m.end(2):]
 
 
-def workbench_inserts(html: str, asset_version: str, *, detach: bool) -> tuple[str, list[str]]:
+def workbench_inserts(html: str, asset_version: str, *, detach: bool,
+                      theme: bool = False) -> tuple[str, list[str]]:
     """Adds viewport, overlay CSS/JS and (when `detach`) detach.js to the workbench document.
+    With `theme`, the DarkPyonix theme becomes the default colour theme.
 
     Returns the new document and the names of what was inserted, for the log line.
     """
@@ -74,4 +87,6 @@ def workbench_inserts(html: str, asset_version: str, *, detach: bool) -> tuple[s
         html = html.replace("<head>", "<head>" + "".join(tag for _, tag in inserts), 1)
     if detach:
         html = add_configuration_defaults(html, DETACH_CONFIGURATION_DEFAULTS)
+    if theme:
+        html = add_configuration_defaults(html, THEME_CONFIGURATION_DEFAULTS)
     return html, [name for name, _ in inserts]

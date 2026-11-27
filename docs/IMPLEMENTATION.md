@@ -8,10 +8,11 @@
 > `INTENT.md` D-numbers cited below refer to the 09-22 version (in git history); their substance is
 > summarised in the current `INTENT.md` D11.
 >
-> **Status (2026-10-04).** M8 has started (#32): the Code-OSS connection layer
-> (`ember/editor-conn`) and the editor session layer (`ember/editor`) exist and their tests run
-> in CI; the overlays of Category 2 are bridged in `ember/editor` but not yet shown in the
-> client, and Categories 3 and 4 are not handled. Category 4 is still unsized (§6).
+> **Status (2026-11-22).** M8 is 1.0 work [user, 2026-11-22] (#32): the Code-OSS connection
+> layer (`ember/editor-conn`), the editor session layer (`ember/editor`) and the Ember 에디터
+> window exist and their tests run in CI. Of Category 2, diagnostics and the Problems list are
+> wired into the window (not yet checked on screen); the hover popup is not drawn yet, and hover, CodeLens and inline
+> completion have no live case (`SPEC.md` §E Status). Category 4 is still unsized (§6).
 
 ## How much of VS Code can Ember not reimplement, and what happens if it does anyway
 

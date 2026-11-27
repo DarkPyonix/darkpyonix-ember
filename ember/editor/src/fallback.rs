@@ -87,6 +87,9 @@ impl FallbackTarget {
 }
 
 /// Outcome of connecting to a server with connect-time version check and VS Code fallback.
+// The outcome is returned once per connect and destructured at once, so its size does not
+// matter; boxing `session` would change the public pattern used by the app and the tests.
+#[allow(clippy::large_enum_variant)]
 pub enum ConnectOutcome {
     Connected {
         session: EditorSession,

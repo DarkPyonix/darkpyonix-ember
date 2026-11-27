@@ -10,8 +10,9 @@
 //!
 //! Not supported yet (the row says so and does not run): tasks of other types (task providers
 //! contributed by extensions, `npm`, `typescript`, ...), `dependsOn`, and variables other than the
-//! workspace and file ones. `problemMatcher`, `presentation` and the `windows` / `osx` / `linux`
-//! overrides are read past, not applied.
+//! workspace and file ones. `presentation` and the `windows` / `osx` / `linux` overrides are
+//! read past, not applied. `problemMatcher` runs the task's output through Code-OSS's problem
+//! matchers ([`super::editor_task_problems`], FR-L31.42).
 
 use std::collections::BTreeMap;
 
@@ -55,6 +56,11 @@ pub struct TaskDef {
     /// `group` (`build`, `test`, ...).
     pub group: Option<String>,
     pub is_default: bool,
+    /// `isBackground`: a watch task that does not exit. A debug start waits for such a task until
+    /// its problem matcher's `endsPattern` matches (FR-L31.42).
+    pub is_background: bool,
+    /// `problemMatcher` as written: a `$name`, a definition, or a list of both (FR-L31.42).
+    pub problem_matcher: Option<Value>,
     /// Why this task cannot run here yet, in Korean.
     pub unsupported: Option<String>,
 }
@@ -256,6 +262,8 @@ pub fn parse_tasks_json(text: &str) -> Result<Vec<TaskDef>, String> {
             env,
             group,
             is_default,
+            is_background: t.get("isBackground").and_then(|b| b.as_bool()).unwrap_or(false),
+            problem_matcher: t.get("problemMatcher").filter(|m| !m.is_null()).cloned(),
             unsupported,
         });
     }
@@ -434,6 +442,16 @@ pub fn pick_task<'a>(tasks: &'a [TaskDef], chosen: Option<&str>) -> Option<&'a T
         .or_else(|| if runnable().count() == 1 { runnable().next() } else { None })
 }
 
+/// Why a task may not start, or `None` when it may (FR-L31.18, FR-L31.16). Restricted mode
+/// refuses every way into a task (Code-OSS's task service checks trust itself, not each button),
+/// and a window with no server address or computer has no terminal to run it in.
+pub fn run_refusal(trust: &crate::ui::workspace_trust::TrustState, can_attach: bool) -> Option<String> {
+    if let Some(reason) = crate::ui::workspace_trust::blocked(trust, crate::ui::workspace_trust::Restricted::Task) {
+        return Some(reason);
+    }
+    (!can_attach).then(|| "작업은 서버에 연결했을 때만 실행할 수 있습니다. 이 창에는 서버 주소나 컴퓨터가 없습니다.".to_owned())
+}
+
 pub mod view {
     use std::cell::RefCell;
 
@@ -442,7 +460,7 @@ pub mod view {
     use dioxus_compose::html::prelude::dioxus_signals::{ReadableExt, WritableExt};
     use dioxus_compose::html::prelude::*;
 
-    use super::{launch, pick_task, task_detail, term_launch, TaskDef, TasksLoad, VarContext};
+    use super::{launch, pick_task, run_refusal, task_detail, term_launch, TaskDef, TasksLoad, VarContext};
     use crate::editor_host::HostCommand;
     use crate::terminal_stream::{ChangeCallback, TerminalHandle};
     use crate::ui::editor::ToolWindow;
@@ -454,6 +472,32 @@ pub mod view {
         static RUN: RefCell<Option<(String, TerminalHandle)>> = const { RefCell::new(None) };
         /// The task chosen in the 실행 window, for the top bar's 실행.
         static CHOSEN: RefCell<Option<String>> = const { RefCell::new(None) };
+        /// The task output element, to read its laid-out size (FR-L31.20).
+        static TASK_MOUNT: RefCell<Option<std::rc::Rc<dioxus_elements::MountedData>>> = const { RefCell::new(None) };
+        static TASK_FIT: RefCell<crate::ui::term_fit::PanelFit> = RefCell::new(Default::default());
+    }
+
+    /// Fits the task's PTY to its output area on every render, as the terminal panel does
+    /// (FR-L31.20): the area's size from the last layout, debounced, to [`TerminalHandle::resize`].
+    fn fit_task(s: &Shared, handle: &TerminalHandle) {
+        use futures_util::FutureExt;
+        let rect = TASK_MOUNT.with(|m| {
+            let m = m.borrow();
+            let r = m.as_ref()?.get_client_rect().now_or_never()?.ok()?;
+            Some((r.size.width as f32, r.size.height as f32))
+        });
+        let step = TASK_FIT.with(|f| f.borrow_mut().step(rect, std::time::Instant::now()));
+        if let Some((cols, rows)) = step.send {
+            handle.resize(cols, rows);
+        }
+        if let Some(after) = step.wake_after {
+            let revision = s.revision;
+            crate::services::services().rt.spawn(async move {
+                tokio::time::sleep(after).await;
+                let mut revision = revision;
+                *revision.write() += 1;
+            });
+        }
     }
 
     fn bump(s: &Shared) {
@@ -478,18 +522,21 @@ pub mod view {
         s.host.send(HostCommand::LoadTasks);
     }
 
-    /// Run `task` in a new terminal on the project's computer.
-    pub fn run(s: &Shared, task: &TaskDef) {
-        if !crate::ui::editor_workbench::page::can_attach(&s.server_url, &s.computer) {
-            notice("작업은 서버에 연결했을 때만 실행할 수 있습니다. 이 창에는 서버 주소나 컴퓨터가 없습니다.");
-            return;
+    /// Run `task` in a new terminal on the project's computer. Returns its terminal, or `None`
+    /// when it was refused (the notice says why).
+    pub fn run(s: &Shared, task: &TaskDef) -> Option<TerminalHandle> {
+        let trust = s.host.state.lock().unwrap().trust;
+        let attach = crate::ui::editor_workbench::page::can_attach(&s.server_url, &s.computer);
+        if let Some(why) = run_refusal(&trust, attach) {
+            notice(why);
+            return None;
         }
         let ctx = VarContext { folder: s.folder.clone(), file: s.tabs.read().current_path().map(str::to_owned) };
         let l = match launch(task, &ctx) {
             Ok(l) => l,
             Err(e) => {
                 notice(format!("{}을(를) 실행할 수 없습니다: {e}", task.label));
-                return;
+                return None;
             }
         };
         let revision = s.revision;
@@ -497,11 +544,20 @@ pub mod view {
             let mut revision = revision;
             *revision.write() += 1;
         });
-        let handle = crate::terminal_stream::start_task(&s.server_url, &s.computer, &s.project, term_launch(l), Some(on_change));
+        let cwd = l.cwd.clone();
+        let handle = crate::terminal_stream::start_task_on(
+            crate::terminal_stream::TermReach::for_base(&s.server_url),
+            &s.computer,
+            &s.project,
+            term_launch(l),
+            Some(on_change),
+        );
+        // Its output goes through the task's problem matchers (FR-L31.42).
+        crate::ui::editor_task_problems::track(s, task, &handle, &cwd);
         // The earlier run's terminal is detached, not killed: it keeps running on the computer,
         // as a Code-OSS task terminal does until it is closed.
         RUN.with(|r| {
-            if let Some((_, old)) = r.borrow_mut().replace((task.label.clone(), handle)) {
+            if let Some((_, old)) = r.borrow_mut().replace((task.label.clone(), handle.clone())) {
                 old.detach();
             }
         });
@@ -511,6 +567,7 @@ pub mod view {
             stripes.write().toggle(ToolWindow::Run);
         }
         bump(s);
+        Some(handle)
     }
 
     /// The top bar's 실행: the chosen task, else the default build task; with none, the 실행 window opens.
@@ -518,7 +575,9 @@ pub mod view {
         let chosen = CHOSEN.with(|c| c.borrow().clone());
         match tasks_of(s) {
             Some(TasksLoad::Parsed(tasks)) => match pick_task(&tasks, chosen.as_deref()) {
-                Some(t) => run(s, &t.clone()),
+                Some(t) => {
+                    run(s, &t.clone());
+                }
                 None => {
                     notice("실행할 작업을 실행 창에서 고르세요.");
                     open(s);
@@ -574,7 +633,7 @@ pub mod view {
                                         div { style: if enabled { "" } else { "color:var(--muted);" }, "{label}" }
                                         div { style: "color:var(--muted); font-size:var(--fs-xs); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;", "{note}" }
                                     }
-                                    button { class: "ed-ib", title: "{tip}", "aria-label": "{tip}", disabled: !enabled, onclick: move |_| run(&run_s, &t), {icon("play")} }
+                                    button { class: "ed-ib", title: "{tip}", "aria-label": "{tip}", disabled: !enabled, onclick: move |_| { run(&run_s, &t); }, {icon("play")} }
                                 }
                             }
                         }
@@ -589,6 +648,8 @@ pub mod view {
         let Some((label, handle)) = run_state else {
             return rsx! { div { class: "ed-note", role: "status", "작업을 실행하면 프로젝트의 컴퓨터에서 새 터미널로 실행되고 출력이 이곳에 표시됩니다." } };
         };
+        fit_task(s, &handle);
+        let revision = s.revision;
         let state = handle.snapshot();
         let lines = state.lines.clone();
         let notice_text = state.notice();
@@ -607,6 +668,11 @@ pub mod view {
                     }
                 }
                 div { class: "ed-term", role: "log", "aria-label": "작업 출력", tabindex: "0", style: "flex:1; outline:none;",
+                    onmounted: move |event| TASK_MOUNT.with(|m| *m.borrow_mut() = Some(event.data())),
+                    onresize: move |_| {
+                        let mut revision = revision;
+                        *revision.write() += 1;
+                    },
                     onkeydown: move |event| {
                         let m = event.modifiers();
                         let name = key_name(&event.key());
@@ -632,6 +698,33 @@ pub mod view {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fr_l31_18_a_task_is_refused_in_restricted_mode_from_every_entry() {
+        use crate::ui::workspace_trust::TrustState;
+        let restricted = TrustState::at_open(Some(false));
+        let trusted = TrustState::at_open(Some(true));
+        assert!(run_refusal(&restricted, true).is_some_and(|why| why.contains("제한 모드")));
+        // Before the folder is answered for, it is restricted too.
+        assert!(run_refusal(&TrustState::at_open(None), true).is_some());
+        assert_eq!(run_refusal(&trusted, true), None);
+        assert!(run_refusal(&trusted, false).is_some_and(|why| why.contains("서버")));
+        // Every way into a task goes through `view::run`, which asks `run_refusal` first: the
+        // 실행 window's row buttons and the top bar's 실행 both call it.
+        let src = include_str!("editor_tasks.rs");
+        let run_body = &src[src.find("pub fn run(s: &Shared, task: &TaskDef)").unwrap()..];
+        let first_lines: String = run_body.lines().take(6).collect();
+        assert!(first_lines.contains("run_refusal(&trust, attach)"));
+    }
+
+    #[test]
+    fn fr_l31_20_the_task_terminal_takes_its_output_area_size() {
+        let src = include_str!("editor_tasks.rs");
+        let output = &src[src.find("fn run_output(").unwrap()..];
+        let output = &output[..output.find("\n    }\n").unwrap()];
+        assert!(output.contains("fit_task(s, &handle)"), "the task PTY is not fitted");
+        assert!(output.contains("onmounted:") && output.contains("onresize:"), "the output area does not report its size");
+    }
 
     const SAMPLE: &str = r#"{
         // See https://go.microsoft.com/fwlink/?LinkId=733558

@@ -3,10 +3,10 @@
 //! The tests:
 //!
 //! * `nfr_w1_regression_data_is_consistent` runs everywhere. It reads
-//!   `ember/ose/regression/extensions.json` and `expected.json` and checks what
-//!   `ember/ose/regress.sh` relies on: the same ids in both, a pinned version or `null`, and an
-//!   `open` file that exists in `ember/ose/regression/workspace/`.
-//! * `nfr_w1_regression_client` is the activation client of `ember/ose/regress.sh`. The extension
+//!   `.github/scripts/ose/regression/extensions.json` and `expected.json` and checks what
+//!   `.github/scripts/ose/regress.sh` relies on: the same ids in both, a pinned version or `null`, and an
+//!   `open` file that exists in `.github/scripts/ose/regression/workspace/`.
+//! * `nfr_w1_regression_client` is the activation client of `.github/scripts/ose/regress.sh`. The extension
 //!   host of an OSE only starts when a client connects, so the harness starts the server with the
 //!   listed extensions installed and then runs this test, which connects an `EditorSession`,
 //!   opens every `open` file (that sends `$activateByEvent("onLanguage:<id>")`) and waits. It
@@ -15,7 +15,7 @@
 //!
 //! ```sh
 //! export OSE_REGRESS_CLIENT='cargo test --locked --manifest-path ember/editor/Cargo.toml --test nfr_w1_extension_regression -- --ignored --nocapture'
-//! ember/ose/regress.sh "$(dirname "$(dirname "$EMBER_OSE_SERVER")")"
+//! .github/scripts/ose/regress.sh "$(dirname "$(dirname "$EMBER_OSE_SERVER")")"
 //! ```
 //!
 //! * `nfr_w1_deep_checks` is the deep client (#929), run by the same command when the harness has
@@ -29,8 +29,13 @@
 //!
 //! Environment the harness sets: `OSE_REGRESS_ADDR` (`127.0.0.1:<port>` of the running server),
 //! `OSE_REGRESS_WS` (a copy of `regression/workspace/` on the server's machine), `OSE_REGRESS_MODE`
-//! (`activation` or `deep`), `OSE_REGRESS_DEEP` (the folder for deep results). Optional:
-//! `OSE_REGRESS_SETTLE` (seconds to stay connected after the last open, default 30).
+//! (`activation`, `per-extension` or `deep`), `OSE_REGRESS_DEEP` (the folder for deep results),
+//! `OSE_REGRESS_GAPS` and `OSE_REGRESS_GAPS_BY_EXTENSION` (the FR-E9 record files). Optional:
+//! `OSE_REGRESS_SETTLE` (seconds to stay connected after the last open, default 30; per session).
+//!
+//! `OSE_REGRESS_MODE=per-extension` runs the activation client with one session per entry: a first
+//! session that opens nothing (`(startup)`), then a new session for every entry with an `open`
+//! file. Each session's records go under its label in `OSE_REGRESS_GAPS_BY_EXTENSION`.
 
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
@@ -41,7 +46,7 @@ use ember_editor::{EditorSession, SessionConfig, SessionUpdate};
 use serde_json::{json, Value};
 
 fn regression_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../ose/regression")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/scripts/ose/regression")
 }
 
 fn read_json(name: &str) -> Value {
@@ -252,32 +257,54 @@ fn nfr_w1_id_and_version_rules() {
     assert!(relative_inside("src/main.rs") && !relative_inside("../x") && !relative_inside("/etc/passwd") && !relative_inside(""));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "the activation client of ember/ose/regress.sh: needs OSE_REGRESS_ADDR and OSE_REGRESS_WS"]
-async fn nfr_w1_regression_client() {
-    let (Some(addr), Some(ws)) = (std::env::var("OSE_REGRESS_ADDR").ok(), std::env::var_os("OSE_REGRESS_WS").map(PathBuf::from)) else {
-        eprintln!("[regress-client] OSE_REGRESS_ADDR or OSE_REGRESS_WS not set; skipping");
-        return;
-    };
-    if std::env::var("OSE_REGRESS_MODE").as_deref() == Ok("deep") {
-        eprintln!("[regress-client] OSE_REGRESS_MODE=deep: the deep client runs instead; skipping");
-        return;
-    }
-    let settle = std::env::var("OSE_REGRESS_SETTLE").ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(30);
-    // The server resolves symlinks in what it reports (macOS `/var` is `/private/var`).
-    let ws = std::fs::canonicalize(&ws).unwrap_or_else(|e| panic!("OSE_REGRESS_WS {}: {e}", ws.display()));
-    let entries = entries();
+/// The label of the first session of the per-extension run, which opens nothing: what extensions
+/// that activate at startup call is kept under it, not charged to the first listed extension.
+const STARTUP: &str = "(startup)";
 
-    let config = SessionConfig::new(addr.clone(), ws.to_str().expect("a UTF-8 workspace path"));
+/// The sessions of one activation run, in order, each with its label and the entries it opens.
+/// The activation run is one session that opens every `open` entry. The per-extension run
+/// (`OSE_REGRESS_MODE=per-extension`, FR-E9) has a first session that opens nothing, then one
+/// session per entry with an `open` file; the server gives every connection its own extension host.
+fn session_plan(entries: &[Entry], per_extension: bool) -> Vec<(String, Vec<&Entry>)> {
+    let with_open = entries.iter().filter(|e| e.open.is_some());
+    if per_extension {
+        std::iter::once((STARTUP.to_owned(), Vec::new())).chain(with_open.map(|e| (e.id.clone(), vec![e]))).collect()
+    } else {
+        vec![("all".to_owned(), with_open.collect())]
+    }
+}
+
+#[test]
+fn fr_e9_per_extension_mode_opens_each_entry_in_its_own_session() {
+    let entry = |id: &str, open: Option<&str>| Entry { id: id.into(), version: None, open: open.map(String::from), deep: None };
+    let entries = [entry("a.one", Some("a.yaml")), entry("b.startup", None), entry("c.two", Some("c.py"))];
+    let plan = |per_extension| -> Vec<(String, Vec<String>)> {
+        session_plan(&entries, per_extension).into_iter().map(|(label, opens)| (label, opens.iter().map(|e| e.id.clone()).collect())).collect()
+    };
+    assert_eq!(plan(false), vec![("all".to_owned(), vec!["a.one".to_owned(), "c.two".to_owned()])]);
+    assert_eq!(
+        plan(true),
+        vec![
+            (STARTUP.to_owned(), vec![]),
+            ("a.one".to_owned(), vec!["a.one".to_owned()]),
+            ("c.two".to_owned(), vec!["c.two".to_owned()]),
+        ]
+    );
+}
+
+/// One session of the activation client: connect, open `opens` one after the other, stay `settle`
+/// seconds, disconnect. Returns the session's records and whether the connection was lost.
+async fn activation_session(addr: &str, ws: &Path, label: &str, opens: &[&Entry], settle: u64, print_scan: Option<&[Entry]>) -> (Gaps, bool) {
+    let config = SessionConfig::new(addr.to_owned(), ws.to_str().expect("a UTF-8 workspace path"));
     let (session, mut rx) = tokio::time::timeout(Duration::from_secs(180), EditorSession::connect_tcp(config))
         .await
         .expect("connect timed out")
         .unwrap_or_else(|e| panic!("connect to {addr}: {e}"));
-    println!("[regress-client] connected to {addr}, workspace {}", ws.display());
+    println!("[regress-client] {label}: connected to {addr}, workspace {}", ws.display());
 
     // What Ember's own scan sees, and what it handed to the extension host. Printed only: the
     // harness decides from the extension host log.
-    for e in &entries {
+    for e in print_scan.unwrap_or_default() {
         let scanned = session.installed_extensions().iter().find(|x| x.id.eq_ignore_ascii_case(&e.id)).map(|x| x.version.clone());
         let running = session.running_extensions().iter().any(|x| x.id.eq_ignore_ascii_case(&e.id));
         println!(
@@ -288,8 +315,9 @@ async fn nfr_w1_regression_client() {
         );
     }
 
+    let mut gaps = Gaps::default();
     let mut lost = false;
-    for e in &entries {
+    for e in opens {
         let Some(open) = &e.open else { continue };
         let path = ws.join(open);
         let uri = session.uri(path.to_str().expect("a UTF-8 path"));
@@ -300,7 +328,11 @@ async fn nfr_w1_regression_client() {
         // Wait for the answer so the opens do not pile up; a failed open is reported, not fatal.
         let answer = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
-                match rx.recv().await {
+                let update = rx.recv().await;
+                if let Some(u) = &update {
+                    gaps.observe(u);
+                }
+                match update {
                     Some(SessionUpdate::Opened { uri: u, language_id, .. }) if u.path == uri.path => return Ok(language_id),
                     Some(SessionUpdate::OpenFailed { uri: u, error }) if u.path == uri.path => return Err(error),
                     Some(SessionUpdate::ConnectionLost { reason }) => return Err(format!("connection lost: {reason}")),
@@ -327,9 +359,12 @@ async fn nfr_w1_regression_client() {
     if !lost {
         let until = tokio::time::Instant::now() + Duration::from_secs(settle);
         while let Ok(update) = tokio::time::timeout_at(until, rx.recv()).await {
+            if let Some(u) = &update {
+                gaps.observe(u);
+            }
             match update {
                 Some(SessionUpdate::ConnectionLost { reason }) => {
-                    println!("[regress-client] connection lost while settling: {reason}");
+                    println!("[regress-client] {label}: connection lost while settling: {reason}");
                     lost = true;
                     break;
                 }
@@ -339,8 +374,141 @@ async fn nfr_w1_regression_client() {
         }
     }
     session.shutdown().await;
-    assert!(!lost, "the connection to the OSE was lost before the settle time ended; the log comparison would not be trustworthy");
-    println!("[regress-client] done after {settle} s of settle time");
+    println!("[regress-client] {label}: {} protocol gap(s)", gaps.0.len());
+    (gaps, lost)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "the activation client of .github/scripts/ose/regress.sh: needs OSE_REGRESS_ADDR and OSE_REGRESS_WS"]
+async fn nfr_w1_regression_client() {
+    let (Some(addr), Some(ws)) = (std::env::var("OSE_REGRESS_ADDR").ok(), std::env::var_os("OSE_REGRESS_WS").map(PathBuf::from)) else {
+        eprintln!("[regress-client] OSE_REGRESS_ADDR or OSE_REGRESS_WS not set; skipping");
+        return;
+    };
+    let mode = std::env::var("OSE_REGRESS_MODE").unwrap_or_default();
+    if mode == "deep" {
+        eprintln!("[regress-client] OSE_REGRESS_MODE=deep: the deep client runs instead; skipping");
+        return;
+    }
+    let per_extension = mode == "per-extension";
+    let settle = std::env::var("OSE_REGRESS_SETTLE").ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(30);
+    // The server resolves symlinks in what it reports (macOS `/var` is `/private/var`).
+    let ws = std::fs::canonicalize(&ws).unwrap_or_else(|e| panic!("OSE_REGRESS_WS {}: {e}", ws.display()));
+    let entries = entries();
+
+    let mut all = Gaps::default();
+    let mut by_label = serde_json::Map::new();
+    let mut lost_in = None;
+    for (i, (label, opens)) in session_plan(&entries, per_extension).into_iter().enumerate() {
+        let scan = (i == 0).then_some(entries.as_slice());
+        let (gaps, lost) = activation_session(&addr, &ws, &label, &opens, settle, scan).await;
+        all.merge(&gaps);
+        by_label.insert(label.clone(), gaps.to_json());
+        if lost {
+            lost_in = Some(label);
+            break;
+        }
+    }
+    if let Some(path) = std::env::var_os("OSE_REGRESS_GAPS").map(PathBuf::from) {
+        println!("[regress-client] {} protocol gap(s) recorded in {}", all.0.len(), path.display());
+        std::fs::write(&path, format!("{:#}\n", all.to_json())).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+    }
+    if per_extension {
+        if let Some(path) = std::env::var_os("OSE_REGRESS_GAPS_BY_EXTENSION").map(PathBuf::from) {
+            println!("[regress-client] per-session records of {} session(s) in {}", by_label.len(), path.display());
+            std::fs::write(&path, format!("{:#}\n", Value::Object(by_label))).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+        }
+    }
+    assert!(
+        lost_in.is_none(),
+        "the connection to the OSE was lost in session {lost_in:?} before the settle time ended; the log comparison would not be trustworthy"
+    );
+    println!("[regress-client] done after {settle} s of settle time per session");
+}
+
+/// The FR-E9 records of one run: per `todo` method with a value, the session's call count and the
+/// extensions that named themselves in an argument.
+#[derive(Default)]
+struct Gaps(std::collections::BTreeMap<(String, String), (u32, BTreeSet<String>)>);
+
+impl Gaps {
+    fn observe(&mut self, u: &SessionUpdate) {
+        if let SessionUpdate::ProtocolGap { proxy, method, extension, count } = u {
+            let entry = self.0.entry((proxy.clone(), method.clone())).or_default();
+            entry.0 = entry.0.max(*count);
+            entry.1.extend(extension.clone());
+        }
+    }
+
+    /// Add another session's records: counts add up (each session counts from 1), extensions join.
+    fn merge(&mut self, other: &Gaps) {
+        for (key, (count, extensions)) in &other.0 {
+            let entry = self.0.entry(key.clone()).or_default();
+            entry.0 += count;
+            entry.1.extend(extensions.iter().cloned());
+        }
+    }
+
+    fn to_json(&self) -> Value {
+        Value::Array(
+            self.0
+                .iter()
+                .map(|((actor, method), (count, extensions))| {
+                    json!({ "actor": actor, "method": method, "count": count, "extensions": extensions })
+                })
+                .collect(),
+        )
+    }
+}
+
+#[test]
+fn fr_e9_regression_client_keeps_the_records_per_method() {
+    let gap = |method: &str, extension: Option<&str>, count| SessionUpdate::ProtocolGap {
+        proxy: "MainThreadSecretState".into(),
+        method: method.into(),
+        extension: extension.map(String::from),
+        count,
+    };
+    let mut gaps = Gaps::default();
+    gaps.observe(&gap("$getPassword", Some("b.ext"), 1));
+    gaps.observe(&gap("$getPassword", None, 2));
+    gaps.observe(&gap("$getPassword", Some("a.ext"), 3));
+    gaps.observe(&gap("$getKeys", None, 1));
+    gaps.observe(&SessionUpdate::ConnectionLost { reason: "not a gap".into() });
+    assert_eq!(
+        gaps.to_json(),
+        json!([
+            { "actor": "MainThreadSecretState", "method": "$getKeys", "count": 1, "extensions": [] },
+            { "actor": "MainThreadSecretState", "method": "$getPassword", "count": 3, "extensions": ["a.ext", "b.ext"] },
+        ])
+    );
+}
+
+#[test]
+fn fr_e9_per_extension_records_add_up_across_sessions() {
+    let gap = |method: &str, extension: Option<&str>, count| SessionUpdate::ProtocolGap {
+        proxy: "MainThreadSecretState".into(),
+        method: method.into(),
+        extension: extension.map(String::from),
+        count,
+    };
+    let (mut startup, mut one) = (Gaps::default(), Gaps::default());
+    startup.observe(&gap("$getPassword", None, 1));
+    startup.observe(&gap("$getPassword", Some("a.ext"), 2));
+    one.observe(&gap("$getPassword", Some("b.ext"), 1));
+    one.observe(&gap("$getKeys", None, 1));
+    let mut all = Gaps::default();
+    all.merge(&startup);
+    all.merge(&one);
+    assert_eq!(
+        all.to_json(),
+        json!([
+            { "actor": "MainThreadSecretState", "method": "$getKeys", "count": 1, "extensions": [] },
+            { "actor": "MainThreadSecretState", "method": "$getPassword", "count": 3, "extensions": ["a.ext", "b.ext"] },
+        ])
+    );
+    // Each session keeps its own records.
+    assert_eq!(startup.to_json(), json!([{ "actor": "MainThreadSecretState", "method": "$getPassword", "count": 2, "extensions": ["a.ext"] }]));
 }
 
 /// What the editor client still needs before the debug check can run (#445). Kept in one place so
@@ -451,7 +619,7 @@ async fn webview_check(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "the deep client of ember/ose/regress.sh (OSE_REGRESS_MODE=deep): needs OSE_REGRESS_ADDR and OSE_REGRESS_WS"]
+#[ignore = "the deep client of .github/scripts/ose/regress.sh (OSE_REGRESS_MODE=deep): needs OSE_REGRESS_ADDR and OSE_REGRESS_WS"]
 async fn nfr_w1_deep_checks() {
     if std::env::var("OSE_REGRESS_MODE").as_deref() != Ok("deep") {
         eprintln!("[regress-deep] OSE_REGRESS_MODE is not deep; skipping");

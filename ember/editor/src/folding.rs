@@ -207,12 +207,9 @@ pub fn shift_collapsed_on_edit(collapsed: &mut HashSet<u32>, range: WidgetRange,
     for line in prev {
         if line < range.start.line || (line == range.start.line && range.start.col > 0) {
             collapsed.insert(line);
-        } else if line == range.start.line && range.start.col == 0 && range.end.line == range.start.line {
-            let shifted = i64::from(line) + delta;
-            if shifted >= 0 {
-                collapsed.insert(shifted as u32);
-            }
-        } else if line > range.end.line {
+        } else if (line == range.start.line && range.start.col == 0 && range.end.line == range.start.line)
+            || line > range.end.line
+        {
             let shifted = i64::from(line) + delta;
             if shifted >= 0 {
                 collapsed.insert(shifted as u32);

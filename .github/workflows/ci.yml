@@ -2,6 +2,17 @@ name: CI
 
 on:
   workflow_dispatch:
+    inputs:
+      browser_loop:
+        description: "Run only the 50-repeat tests/browser.rs matrix (#344)"
+        type: boolean
+        required: false
+        default: false
+      browser_runs_per_shard:
+        description: "Runs per shard when browser_loop is true (5 shards x 10 = 50)"
+        type: string
+        required: false
+        default: "10"
 
 concurrency:
   group: dev-ci
@@ -12,17 +23,32 @@ permissions:
 
 jobs:
   test:
+    if: ${{ !inputs.browser_loop }}
     uses: ./.github/workflows/test.yml
     secrets: inherit
   test_ose:
+    if: ${{ !inputs.browser_loop }}
     uses: ./.github/workflows/test-ose.yml
     secrets: inherit
   test_windows_preview:
+    if: ${{ !inputs.browser_loop }}
     uses: ./.github/workflows/test-windows-preview.yml
     secrets: inherit
   test_vscode_extension:
+    if: ${{ !inputs.browser_loop }}
     uses: ./.github/workflows/test-vscode-extension.yml
     secrets: inherit
   test_intellij_plugin:
+    if: ${{ !inputs.browser_loop }}
     uses: ./.github/workflows/test-intellij-plugin.yml
+    secrets: inherit
+  test_previews:
+    if: ${{ !inputs.browser_loop }}
+    uses: ./.github/workflows/test-previews.yml
+    secrets: inherit
+  test_browser_loop:
+    if: ${{ inputs.browser_loop }}
+    uses: ./.github/workflows/test-browser-loop.yml
+    with:
+      runs_per_shard: ${{ inputs.browser_runs_per_shard }}
     secrets: inherit

@@ -6,11 +6,12 @@
 //! are `ui::monitor`'s. An offline computer is not asked and says so; a failed request keeps the
 //! last values dimmed (the cards at 55 percent opacity). The temperature meter runs on a fixed
 //! 0 to 100 degree Celsius scale (hottest sensor). Demo mode takes its samples from `demo::metrics_sample`.
+//! Under the metrics, the computer's editor settings (FR-W7a, `editor_settings`): each field
+//! inherited or overridden, and the node's last apply report.
 
 #![allow(non_snake_case)]
 
 use compose_rust::runtime::{delay, launched_effect, mutable_state_of, remember, MutableState};
-use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
 use ember_client::state::Reachability;
 use compose_rust::{Alignment, SpaceRole};
@@ -21,15 +22,17 @@ pub use crate::ui::monitor::{
     SortState,
 };
 use crate::ui::monitor::{
-    bar_fraction, bar_max, card_view, hero_parts, meter_fraction, empty_text, health_score, process_footer, ram_badge, score_tone,
-    CORE_BARS_GAP, CORE_BARS_H, CORE_BAR_ALPHA, CORE_BAR_RADIUS,
-    score_word, status_line, storage_line, CardView, FanMode, FeedStatus, FAN_MODE_AVAILABLE, FAN_MODE_REASON, POLL_SECS,
-    TOP_PROCESSES,
+    bar_fraction, bar_max, card_view, chip_badge, demo_varied_sample, hero_triple, max_process_cpu,
+    member_note, member_rows, meter_fraction, metric_badge, net_graph_svg, no_unit_wrap,
+    empty_text, health_score, power_text, process_footer, score_tone, seed_demo_feed,
+    sparkline_svg, status_badges, table_layout, temperature_readings, title_os,
+    CORE_BARS_GAP, CORE_BARS_H, CORE_BAR_ALPHA, CORE_BAR_RADIUS, GRAPH_HEIGHT,
+    score_word, status_line, storage_line, CardView, FanMode, FeedStatus, TableLayout,
+    FAN_MODE_AVAILABLE, FAN_MODE_REASON, POLL_SECS, TOP_PROCESSES,
 };
 use super::characters::{Character, CharState};
 use super::components::{
-    Choice, ChoiceButton, EmberCard, EmberSheetSized, Label, Pill, PillTone, SHEET_WIDTH_MONITOR,
-    WrapLabel,
+    Choice, ChoiceButton, EmberCard, EmberSheetSized, Label, Pill, PillTone, SheetTitle, SHEET_WIDTH_MONITOR,
 };
 use super::theme::*;
 use crate::ui::coexist::shared_ui;
@@ -41,6 +44,7 @@ fn header_label(key: SortKey) -> &'static str {
         SortKey::Name => "이름",
         SortKey::Pid => "PID",
         SortKey::Cpu => "CPU",
+        SortKey::Power => "전력",
         SortKey::Memory => "메모리",
     }
 }
@@ -67,18 +71,14 @@ pub fn mon_columns(width_dp: f32) -> usize {
     }
 }
 
-/// Column widths of the process table (dp): the name takes the rest.
-const PID_W: f32 = 72.0;
-const PWR_W: f32 = 72.0;
-const CPU_W: f32 = 96.0;
-const MEM_W: f32 = 96.0;
 const ROW_H: f32 = 36.0;
 
 /// One metrics request: the demo source, or the server through the client API on the runtime.
 async fn fetch_metrics(id: String) -> Result<ember_client::api::MetricsSample, String> {
     let s = crate::services::services();
     if s.demo.is_some() || crate::demo::active_from_env() {
-        return Ok(crate::demo::metrics_sample(crate::demo::now_ms().max(0) as u64));
+        let now = crate::demo::now_ms().max(0) as u64;
+        return Ok(demo_varied_sample(crate::demo::metrics_sample(now)));
     }
     let job = s.rt.spawn(async move {
         crate::services::services().client.api().metrics(&id, TOP_PROCESSES).await.map_err(|e| e.to_string())
@@ -95,15 +95,17 @@ pub fn MonitorSheet(chip: Option<&ComputerChip>, boxes: &[ProjectBox], on_close:
     {
         let poll = chip.is_some_and(|c| !matches!(c.reachability, Reachability::Offline));
         let id = chip.map(|c| c.id.clone()).unwrap_or_default();
-        let feed_w = feed_state.clone();
+        let feed_w = feed_state;
         let demo = crate::services::services().demo.is_some() || crate::demo::active_from_env();
         launched_effect((id.clone(), poll), move || async move {
             if !poll || id.is_empty() {
                 return;
             }
             if demo {
-                // Two samples at once, so the network card has a rate on the first frame.
-                feed_w.update(|f| f.push(crate::demo::metrics_previous(crate::demo::now_ms().max(0) as u64)));
+                // Seed a varied history so the GPU, memory, and network graphs render full curves
+                // on the first frame instead of flat lines.
+                let now = crate::demo::now_ms().max(0) as u64;
+                feed_w.update(|f| seed_demo_feed(f, now, crate::demo::metrics_sample));
             }
             loop {
                 match fetch_metrics(id.clone()).await {
@@ -115,37 +117,45 @@ pub fn MonitorSheet(chip: Option<&ComputerChip>, boxes: &[ProjectBox], on_close:
         });
     }
     let feed = feed_state.get();
-    let title = chip.map(|c| c.name.clone()).unwrap_or_else(|| "컴퓨터".to_string());
+    let name = chip.map(|c| c.name.clone()).unwrap_or_else(|| "컴퓨터".to_string());
     let window = crate::ui::window_size::current_window_size();
+    // `.mon-os`: the OS the node reports, beside the title (#389), not at 560 and below.
+    let os = title_os(&feed, window.width_dp);
+    let title = SheetTitle { text: &name, subtitle: os.as_deref() };
     let columns = mon_columns(window.width_dp);
     // The header (60), the 1 dp line under it and, where the sheet is the whole window, the
     // strip above it (FR-L33).
     let top_inset = super::components::full_screen_sheet_top_inset(window.width_dp, true, crate::ui::safe_area::safe_area());
     let body_height = super::components::sheet_body_max_height(window.width_dp, window.height_dp, true, MON_CHROME_H + top_inset).min(1200.0);
     let scroll_pad = mon_scroll_pad(window.width_dp);
-    let state = chip.map(|c| reach_pill(c.reachability));
+    let reachability = chip.map(|c| c.reachability);
 
-    // The state pill sits in the header, beside the close button (`.mon-state`).
+    // The state pill sits in the header, beside the close button (`.mon-state`), with a status dot.
     let mut actions = || {
-        if let Some((text, tone)) = state {
-            Pill(text, tone.into(), false);
-            cu::Spacer().modifier(Modifier::new().width(SP[2]));
+        if let Some(r) = reachability {
+            StatePill(r);
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
         }
     };
+    #[allow(clippy::needless_borrows_for_generic_args)]
     EmberSheetSized(&title, true, SHEET_WIDTH_MONITOR, true, on_close.clone(), Some(&mut actions), || {
-        cu::ScrollColumn()
-            .modifier(Modifier::new().fill_max_width().height(body_height).background(paint(p.bg)))
-            .content(|| {
-                cu::Column().space_role(SpaceRole::Md).modifier(Modifier::new().fill_max_width().padding(scroll_pad)).content(|| {
+        { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().fill_max_width().height(body_height).background(paint(p.bg)), {
+                { use ::compose_rust::ui::Column; Column!(space_role = SpaceRole::Md, modifier = Modifier::new().fill_max_width().padding(scroll_pad), {
                     let Some(c) = chip else {
-                        cu::Box().alignment(Alignment::Center).modifier(Modifier::new().fill_max_width().height(240.0)).content(|| {
+                        { use ::compose_rust::ui::Box; Box!(alignment = Alignment::Center, modifier = Modifier::new().fill_max_width().height(240.0), {
                             Label("컴퓨터를 찾을 수 없습니다", Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
-                        });
+                        }) };
                         return;
                     };
                     let online = matches!(c.reachability, Reachability::Online);
                     let members = computer_members(&c.projects, boxes);
-                    let mut rows = feed.processes().unwrap_or_else(|| agent_rows(&members));
+                    // The live rows with the members' agent processes marked by pid (FR-X7,
+                    // #389); before a sample, the members alone.
+                    let sessions = feed.latest().map(|s| s.sessions.clone()).unwrap_or_default();
+                    let mut rows = match feed.processes() {
+                        Some(live) => member_rows(live, &sessions, &members),
+                        None => agent_rows(&members),
+                    };
                     let cur = sort.get();
                     sort_rows(&mut rows, cur);
                     if let Some(n) = offline_notice(c.reachability) {
@@ -157,9 +167,9 @@ pub fn MonitorSheet(chip: Option<&ComputerChip>, boxes: &[ProjectBox], on_close:
                     // (the old values stay), is greyed out.
                     let stale = !online || matches!(feed.status(), FeedStatus::Failed);
                     let wrap = if stale { Modifier::new().alpha(0.55) } else { Modifier::new() };
-                    cu::Column().space_role(SpaceRole::Md).modifier(wrap.fill_max_width()).content(|| {
+                    { use ::compose_rust::ui::Column; Column!(space_role = SpaceRole::Md, modifier = wrap.fill_max_width(), {
                         Grid(columns, c, &feed, online);
-                        ProcessTable(&rows, cur, &sort, &on_close);
+                        ProcessTable(&rows, cur, &sort, window.width_dp, &on_close);
                         Label(
                             &process_footer(&feed),
                             Fs::Xs,
@@ -167,9 +177,16 @@ pub fn MonitorSheet(chip: Option<&ComputerChip>, boxes: &[ProjectBox], on_close:
                             Some(paint(p.text_2)),
                             None,
                         );
-                    });
-                });
-            });
+                        // `.mon-note`: a member row opens the session.
+                        if let Some(note) = member_note(&rows) {
+                            Label(note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                        }
+                    }) };
+                    // The computer's editor settings (FR-W7a): not dimmed with the metrics, since
+                    // the last apply report is what an unreachable computer still has.
+                    super::editor_settings::ComputerEditorSection(&c.id);
+                }) };
+            }) };
     });
 }
 
@@ -184,23 +201,41 @@ pub fn mon_scroll_pad(width_dp: f32) -> f32 {
     if width_dp <= 560.0 { 16.0 } else { 20.0 }
 }
 
+/// Header reachability pill with a leading 8 dp status dot beside the label (`.mon-state`).
+fn StatePill(reachability: Reachability) {
+    let p = ember_theme().palette;
+    let (text, _) = reach_pill(reachability);
+    let online = matches!(reachability, Reachability::Online);
+    let (fg, bg, dot_color) = if online {
+        (p.green.strong, p.green.soft, p.green.strong)
+    } else {
+        (p.muted, p.surface_2, p.muted)
+    };
+    let frame = Modifier::new()
+        .height(H_PILL)
+        .background(paint(bg))
+        .shape_role(compose_rust::ShapeRole::Full);
+    let frame = if online { frame } else { frame.border(1.0, paint(p.line)) };
+    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = frame, {
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(10.0)) };
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().size(8.0, 8.0).background(paint(dot_color)).shape_role(compose_rust::ShapeRole::Full)) };
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(6.0)) };
+        Label(text, Fs::Xs, Weight::Medium, Some(paint(fg)), Some(1));
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(10.0)) };
+    }) };
+}
+
 /// `.mon-off`: a red soft banner with the notice, for a computer that is not online.
 fn OfflineBanner(title: &str) {
     let p = ember_theme().palette;
-    cu::Row()
-        .alignment(Alignment::TopStart)
-        .space_role(SpaceRole::Sm)
-        .modifier(
-            Modifier::new()
+    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::TopStart, space_role = SpaceRole::Sm, modifier = Modifier::new()
                 .fill_max_width()
                 .background(paint(p.red.soft))
                 .corner_radius(CORNER_MD)
-                .padding(SP[2]),
-        )
-        .content(|| {
+                .padding(SP[2]), {
             // The glyph's circle fills 18 of 24 units, so 24 px draws the mockup's 20 px mark.
             super::shell::NavIcon(super::shell::ICON_INFO_SVG, p.red.strong.to_argb(), 24.0);
-            cu::Column().spacing(2.0).content(|| {
+            { use ::compose_rust::ui::Column; Column!(spacing = 2.0, {
                 Label(title, Fs::Md, Weight::Semibold, Some(paint(p.red.strong)), None);
                 Label(
                     "마지막 연결 시각은 아직 알 수 없습니다. 아래는 마지막으로 받은 값입니다.",
@@ -209,20 +244,17 @@ fn OfflineBanner(title: &str) {
                     Some(paint(p.text_2)),
                     None,
                 );
-            });
-        });
+            }) };
+        }) };
 }
 
 /// A red soft notice for a failed request; the cards keep the last values.
 fn FailureNotice(detail: &str) {
     let p = ember_theme().palette;
-    cu::Column()
-        .spacing(2.0)
-        .modifier(Modifier::new().fill_max_width().background(paint(p.red.soft)).corner_radius(CORNER_MD).padding(SP[2]))
-        .content(|| {
+    { use ::compose_rust::ui::Column; Column!(spacing = 2.0, modifier = Modifier::new().fill_max_width().background(paint(p.red.soft)).corner_radius(CORNER_MD).padding(SP[2]), {
             Label("지표를 읽지 못했습니다", Fs::Md, Weight::Semibold, Some(paint(p.red.strong)), Some(1));
             Label(detail, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(2));
-        });
+        }) };
 }
 
 /// The metric cards: the status card first, then CPU, GPU, memory, temperature, disk, network
@@ -237,26 +269,38 @@ fn Grid(columns: usize, c: &ComputerChip, feed: &MonitorFeed, online: bool) {
     let min = card_min_height(columns);
     let fill = min.is_some();
     for chunk in cards.chunks(columns) {
-        cu::Row().space_role(SpaceRole::Md).equal_height(fill).modifier(Modifier::new().fill_max_width()).content(|| {
+        { use ::compose_rust::ui::Row; Row!(space_role = SpaceRole::Md, intrinsic_size = fill, modifier = Modifier::new().fill_max_width(), {
             for card in chunk.iter().copied() {
                 let cell = Modifier::new().weight(1.0);
                 // A Box stacks the card on a zero-width floor as high as the card minimum, so
                 // the cell is max(200, its card) and the row takes its tallest cell.
-                cu::Box().modifier(if fill { cell.fill_max_height() } else { cell }).content(|| {
+                { use ::compose_rust::ui::Box; Box!(modifier = if fill { cell.fill_max_height() } else { cell }, {
                     if let Some(h) = min {
-                        cu::Spacer().modifier(Modifier::new().width(0.0).height(h));
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(0.0).height(h)) };
                     }
                     match card {
                         Card::Status => StatusCard(c, feed, online, fill),
-                        Card::Metric(Metric::Fans) => FanCard(fill),
-                        Card::Metric(m) => MetricCard(m, card_view(m, feed), empty_text(m, online, feed.status()), meter_fraction(m, feed), fill),
+                        Card::Metric(Metric::Fans) => FanCard(feed, fill),
+                        Card::Metric(Metric::Temperature) => TemperatureCard(feed, online, fill),
+                        Card::Metric(m) => {
+                            let badge = feed.latest().and_then(|s| metric_badge(m, s));
+                            MetricCard(
+                                m,
+                                card_view(m, feed),
+                                badge,
+                                empty_text(m, online, feed.status()),
+                                meter_fraction(m, feed),
+                                feed.net_tx_series(),
+                                fill,
+                            )
+                        }
                     }
-                });
+                }) };
             }
             for _ in chunk.len()..columns {
-                cu::Spacer().modifier(Modifier::new().weight(1.0));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
             }
-        });
+        }) };
     }
 }
 
@@ -283,54 +327,65 @@ pub fn card_min_height(columns: usize) -> Option<f32> {
     (columns > 1).then_some(200.0)
 }
 
-/// `.mon-card`: a 16 px icon, a 13 px semibold `--text-2` label and an optional badge on the
-/// right (`.mon-badge`). With `fill` the card takes its grid row's height.
-fn MonCard(icon: &'static str, label: &str, badge: Option<(&str, PillTone)>, fill: bool, body: impl FnOnce()) {
+/// `.mon-card`: a 16 px icon, a 13 px semibold `--text-2` label and its badges on the right
+/// (`.mon-badge`, the status card has up to three). With `fill` the card takes its grid row's
+/// height.
+fn MonCard(icon: &'static str, label: &str, badges: &[(&str, PillTone)], fill: bool, body: impl FnOnce()) {
     let p = ember_theme().palette;
     super::components::EmberCardSized(false, true, fill, None, None, None, || {
         let m = Modifier::new().fill_max_width();
-        cu::Column().spacing(SP[2]).modifier(m).content(|| {
-            cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Xs).modifier(Modifier::new().fill_max_width()).content(|| {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = m, {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, space_role = SpaceRole::Xs, modifier = Modifier::new().fill_max_width(), {
                 super::shell::NavIcon(icon, p.muted.to_argb(), 16.0);
-                // A long label wraps to a second line, breaking a long token inside itself
-                // (compose-rust#443, v0.0.8), instead of clipping with an ellipsis.
-                cu::Box().modifier(Modifier::new().weight(1.0)).content(|| {
-                    WrapLabel(label, Fs::Sm, Weight::Semibold, Some(paint(p.text_2)), Some(2));
-                });
-                if let Some((text, tone)) = badge {
-                    Pill(text, tone, true);
+                Label(label, Fs::Sm, Weight::Semibold, Some(paint(p.text_2)), Some(1));
+                if badges.len() > 1 {
+                    { use ::compose_rust::ui::Box; Box!(alignment = Alignment::CenterEnd, modifier = Modifier::new().weight(1.0), {
+                        { use ::compose_rust::ui::FlowRow; FlowRow!(horizontal_spacing = 4.0, vertical_spacing = 4.0, {
+                            for (text, tone) in badges.iter().copied() {
+                                Pill(text, tone, true);
+                            }
+                        }) };
+                    }) };
+                } else {
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
+                    for (text, tone) in badges.iter().copied() {
+                        Pill(text, tone, true);
+                    }
                 }
-            });
+            }) };
             body();
-        });
+        }) };
     });
 }
 
 /// The status card (`.mon-score`): the health score with its word, the main disk's free space,
-/// the score ring in its tone, the RAM badge, and the assigned projects. Without a score the
+/// the score ring in its tone, the chip, RAM and OS badges, and the assigned projects. Without a score the
 /// card says why over an empty track (FR-L21, #389).
 fn StatusCard(c: &ComputerChip, feed: &MonitorFeed, online: bool, fill: bool) {
     let p = ember_theme().palette;
     let latest = feed.latest();
     let score = latest.and_then(health_score);
-    let badge = latest.and_then(ram_badge);
+    // Chip, RAM and OS, as reported (#389).
+    let badges = latest.map(status_badges).unwrap_or_default();
+    let header: Vec<(&str, PillTone)> = badges.iter().map(|b| (b.as_str(), PillTone::Grey)).collect();
     let storage = latest.and_then(storage_line);
-    MonCard(super::shell::ICON_GAUGE_SVG, "상태", badge.as_deref().map(|b| (b, PillTone::Grey)), fill, || {
-        cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Md).modifier(Modifier::new().fill_max_width()).content(|| {
-            cu::Column().spacing(4.0).modifier(Modifier::new().weight(1.0)).content(|| {
+    MonCard(super::shell::ICON_GAUGE_SVG, "상태", &header, fill, || {
+        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, space_role = SpaceRole::Md, modifier = Modifier::new().fill_max_width(), {
+            { use ::compose_rust::ui::Column; Column!(spacing = 4.0, modifier = Modifier::new().weight(1.0), {
                 match score {
                     Some(n) => {
-                        cu::Row().alignment(Alignment::BottomStart).space_role(SpaceRole::Sm).content(|| {
+                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::BottomStart, space_role = SpaceRole::Sm, {
                             Label(&n.to_string(), Fs::Xl4, Weight::Semibold, None, Some(1));
                             Label(score_word(n), Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
-                        });
+                        }) };
                         if let Some(line) = &storage {
-                            Label(line, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(2));
+                            let line = no_unit_wrap(line);
+                            Label(&line, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(2));
                         }
                     }
                     None => Label(&status_line(feed, online), Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(3)),
                 }
-            });
+            }) };
             let fill = score.map(|n| {
                 let tone = match score_tone(n) {
                     crate::ui::components::PillTone::Green => p.green.strong,
@@ -340,15 +395,15 @@ fn StatusCard(c: &ComputerChip, feed: &MonitorFeed, online: bool, fill: bool) {
                 (tone.to_argb(), n as f32 / 100.0)
             });
             super::home::ring_image(72.0, 8.0, fill.as_slice());
-        });
+        }) };
         if c.projects.is_empty() {
             Label("할당된 프로젝트가 없습니다", Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(3));
         } else {
-            cu::Row().space_role(SpaceRole::Xs).modifier(Modifier::new().fill_max_width()).content(|| {
+            { use ::compose_rust::ui::Row; Row!(space_role = SpaceRole::Xs, modifier = Modifier::new().fill_max_width(), {
                 for pr in c.projects.iter() {
                     Pill(&display_name(pr), PillTone::Grey, true);
                 }
-            });
+            }) };
         }
         if score.is_some() {
             Label(&status_line(feed, online), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
@@ -361,33 +416,106 @@ fn StatusCard(c: &ComputerChip, feed: &MonitorFeed, online: bool, fill: bool) {
 /// (FR-X7, TODO(#389)). The mode buttons are radio buttons to assistive technology, with 자동
 /// checked (`Choice::Radio`, compose-rust#473, v0.0.9). `Row::radio_group` (#545) moves focus
 /// between toolkit `RadioButton`s only, so the row does not claim it for pill buttons.
-fn FanCard(fill: bool) {
+fn FanCard(feed: &MonitorFeed, fill: bool) {
     let p = ember_theme().palette;
-    MonCard(metric_icon(Metric::Fans), Metric::Fans.title(), None, fill, || {
-        cu::Row().alignment(Alignment::BottomStart).space_role(SpaceRole::Xs).content(|| {
+    let badge = feed.latest().and_then(|s| metric_badge(Metric::Fans, s));
+    let header_badge: Vec<(&str, PillTone)> = badge.iter().map(|(text, tone)| (text.as_str(), PillTone::from(*tone))).collect();
+    MonCard(metric_icon(Metric::Fans), Metric::Fans.title(), &header_badge, fill, || {
+        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::BottomStart, space_role = SpaceRole::Xs, {
             Label("-", Fs::Xl4, Weight::Semibold, Some(paint(p.muted)), Some(1));
             Label("RPM", Fs::Lg, Weight::Medium, Some(paint(p.muted)), Some(1));
             Label(empty_text(Metric::Fans, true, FeedStatus::Live), Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
-        });
-        cu::Row().space_role(SpaceRole::Xs).modifier(Modifier::new().fill_max_width()).content(|| {
+        }) };
+        { use ::compose_rust::ui::Row; Row!(space_role = SpaceRole::Xs, modifier = Modifier::new().fill_max_width(), {
             for mode in FanMode::ALL {
                 ChoiceButton(mode.label(), Choice::Radio, mode == FanMode::Auto, true, FAN_MODE_AVAILABLE, || {});
             }
-        });
+        }) };
         Label(FAN_MODE_REASON, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
     });
 }
 
-fn MetricCard(metric: Metric, view: Option<CardView>, empty: &str, meter: Option<f32>, fill: bool) {
+/// The temperature card: CPU and GPU readings side by side (`.mon-temps`) with one
+/// tone-colored meter bar per sensor (`.mon-tbars`), and the chip name as the footer.
+fn TemperatureCard(feed: &MonitorFeed, online: bool, fill: bool) {
     let p = ember_theme().palette;
-    MonCard(metric_icon(metric), metric.title(), None, fill, || match view.as_ref() {
-        Some(v) => {
-            HeroValue(&v.headline);
-            Bars(metric, &v.bars);
-            if let Some(f) = meter {
-                Meter(f);
+    let badge = feed.latest().and_then(|s| metric_badge(Metric::Temperature, s));
+    let header_badge: Vec<(&str, PillTone)> = badge.iter().map(|(text, tone)| (text.as_str(), PillTone::from(*tone))).collect();
+    MonCard(metric_icon(Metric::Temperature), Metric::Temperature.title(), &header_badge, fill, || {
+        let Some(s) = feed.latest() else {
+            Label(empty_text(Metric::Temperature, online, feed.status()), Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(3));
+            return;
+        };
+        let readings = temperature_readings(s);
+        if readings.is_empty() {
+            HeroValue("-", false);
+            Label("이 컴퓨터가 온도를 알려주지 않습니다", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+            return;
+        }
+        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::BottomStart, spacing = SP[5], modifier = Modifier::new().fill_max_width(), {
+            for r in &readings {
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::BottomStart, spacing = SP[0], {
+                    Label(&r.label, Fs::Xs, Weight::Medium, Some(paint(p.muted)), Some(1));
+                    Label(&format!("{}", r.celsius.round() as i64), Fs::Xl2, Weight::Semibold, None, Some(1));
+                    Label("\u{00B0}C", Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
+                }) };
             }
-            // `.mon-f`: the card's footer lines, 12 `muted`, under the chart (review M2).
+        }) };
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
+            for r in &readings {
+                let color = match r.tone {
+                    crate::ui::components::PillTone::Red => p.red.strong,
+                    crate::ui::components::PillTone::Orange => p.orange.strong,
+                    crate::ui::components::PillTone::Green => p.green.strong,
+                    _ => p.blue.strong,
+                };
+                TonedMeter(bar_fraction(r.celsius, 100.0), color);
+            }
+        }) };
+        if let Some(chip) = chip_badge(s) {
+            Label(&chip, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+        }
+    });
+}
+
+fn MetricCard(
+    metric: Metric,
+    view: Option<CardView>,
+    badge: Option<(String, crate::ui::components::PillTone)>,
+    empty: &str,
+    meter: Option<f32>,
+    net_tx: &[f32],
+    fill: bool,
+) {
+    let p = ember_theme().palette;
+    let header_badge: Vec<(&str, PillTone)> = badge.iter().map(|(text, tone)| (text.as_str(), PillTone::from(*tone))).collect();
+    MonCard(metric_icon(metric), metric.title(), &header_badge, fill, || match view.as_ref() {
+        Some(v) => {
+            HeroValue(&v.headline, !fill);
+            match metric {
+                Metric::Cpu => Bars(metric, &v.bars),
+                Metric::Gpu if !v.bars.is_empty() => {
+                    SvgGraph(sparkline_svg(&v.bars, 100.0, p.orange.strong.to_argb(), false));
+                }
+                Metric::Memory if v.bars.len() >= 2 => {
+                    SvgGraph(sparkline_svg(&v.bars, 100.0, p.blue.strong.to_argb(), true));
+                }
+                Metric::Network if v.bars.len() >= 2 && net_tx.len() >= 2 => {
+                    SvgGraph(net_graph_svg(
+                        net_tx,
+                        &v.bars,
+                        p.green.strong.to_argb(),
+                        p.blue.strong.to_argb(),
+                        p.line.to_argb(),
+                    ));
+                }
+                _ => {
+                    Bars(metric, &v.bars);
+                    if let Some(f) = meter {
+                        Meter(f);
+                    }
+                }
+            }
             for line in v.lines.iter().take(4) {
                 Label(line, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
             }
@@ -396,34 +524,48 @@ fn MetricCard(metric: Metric, view: Option<CardView>, empty: &str, meter: Option
     });
 }
 
-/// `.mon-big`: the number at 40/600 and its unit at 15/500 `muted` beside it, bottoms aligned,
-/// 4 apart; whole numbers for a percent or a temperature (`hero_parts`, review M1).
-fn HeroValue(headline: &str) {
+fn SvgGraph(doc: String) {
+    if doc.is_empty() {
+        return;
+    }
+    { use ::compose_rust::ui::Image; Image!(compose_rust::asset(compose_rust::AssetKind::Svg, super::shell::leak_doc(doc)), modifier = Modifier::new().fill_max_width().height(GRAPH_HEIGHT)) };
+}
+
+/// `.mon-big`: the number at 40/600 (32/600 on a phone), its unit at 15/500 `muted`, and an
+/// optional qualifier (`여유`, `받기`) at 13/400 `muted` beside it, bottoms aligned on one line.
+fn HeroValue(headline: &str, compact: bool) {
     let p = ember_theme().palette;
-    let (number, unit) = hero_parts(headline);
-    cu::Row().alignment(Alignment::BottomStart).spacing(SP[0]).content(|| {
-        Label(&number, Fs::Xl4, Weight::Semibold, None, Some(1));
+    let (number, unit, sub) = hero_triple(headline);
+    let num_fs = if compact { Fs::Xl3 } else { Fs::Xl4 };
+    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::BottomStart, spacing = SP[0], {
+        Label(&number, num_fs, Weight::Semibold, None, Some(1));
         if !unit.is_empty() {
             Label(&unit, Fs::Lg, Weight::Medium, Some(paint(p.muted)), Some(1));
         }
-    });
+        if !sub.is_empty() {
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[0])) };
+            Label(&sub, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
+        }
+    }) };
 }
 
 /// One value against a track (`.mon-bar`): the track in `track`, the fill in the accent, both
 /// rounded.
 fn Meter(fraction: f32) {
+    TonedMeter(fraction, ember_theme().palette.blue.strong);
+}
+
+fn TonedMeter(fraction: f32, color: compose_rust::Color) {
     let p = ember_theme().palette;
     let f = bar_fraction(fraction, 1.0);
-    cu::Row()
-        .modifier(Modifier::new().fill_max_width().height(8.0).background(paint(p.track)).corner_radius(4.0).clip(true))
-        .content(move || {
+    { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width().height(8.0).background(paint(p.track)).corner_radius(4.0).clip(true), content = move || {
             if f > 0.0 {
-                cu::Spacer().modifier(Modifier::new().weight(f).height(8.0).background(paint(p.blue.strong)).corner_radius(4.0));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(f).height(8.0).background(paint(color)).corner_radius(4.0)) };
             }
             if f < 1.0 {
-                cu::Spacer().modifier(Modifier::new().weight(1.0 - f).height(8.0));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0 - f).height(8.0)) };
             }
-        });
+        }) };
 }
 
 /// A row of thin bars drawn from the bottom: the CPU's cores as the mockup's `.mon-cores` (44
@@ -437,7 +579,7 @@ fn Bars(metric: Metric, bars: &[f32]) {
     let max = bar_max(metric, bars);
     let cores = metric == Metric::Cpu;
     let (h_all, gap, tone) = if cores { (CORE_BARS_H, CORE_BARS_GAP, p.green.strong) } else { (32.0, 2.0, p.blue.strong) };
-    cu::Row().alignment(Alignment::BottomStart).spacing(gap).modifier(Modifier::new().fill_max_width().height(h_all)).content(|| {
+    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::BottomStart, spacing = gap, modifier = Modifier::new().fill_max_width().height(h_all), {
         for v in bars.iter().copied() {
             let h = (bar_fraction(v, max) * h_all).max(1.0);
             let bar = Modifier::new().weight(1.0).height(h).background(paint(tone));
@@ -446,27 +588,31 @@ fn Bars(metric: Metric, bars: &[f32]) {
             } else {
                 bar
             };
-            cu::Spacer().modifier(bar);
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = bar) };
         }
-    });
+    }) };
 }
 
 /// `.mon-tablebox`: a card with a sticky header and 1 px row dividers.
-fn ProcessTable(rows: &[ProcessRow], cur: SortState, sort: &MutableState<SortState>, on_close: &(impl FnMut() + Clone + 'static)) {
+fn ProcessTable(rows: &[ProcessRow], cur: SortState, sort: &MutableState<SortState>, width_dp: f32, on_close: &(impl FnMut() + Clone + 'static)) {
     let p = ember_theme().palette;
     let ui = shared_ui().clone();
+    let layout = table_layout(width_dp);
+    let max_cpu = max_process_cpu(rows);
     EmberCard(false, true, None, Some(0.0), None, || {
-        cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
+        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), {
             // Header: 12 px muted, the sorted one in `--text`, numbers right-aligned.
-            cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width().height(H_CTL)).content(|| {
-                cu::Spacer().modifier(Modifier::new().width(SP[3]));
-                for key in [SortKey::Name, SortKey::Pid, SortKey::Cpu, SortKey::Memory] {
-                    let sort = sort.clone();
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width().height(H_CTL), {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[3])) };
+                // The mockup's columns (`COLS`): 이름, PID, CPU, 전력, 메모리.
+                for key in [SortKey::Name, SortKey::Pid, SortKey::Cpu, SortKey::Power, SortKey::Memory] {
+                    let sort = *sort;
                     let (width, end) = match key {
                         SortKey::Name => (None, false),
-                        SortKey::Pid => (Some(PID_W), true),
-                        SortKey::Cpu => (Some(CPU_W), true),
-                        SortKey::Memory => (Some(MEM_W), true),
+                        SortKey::Pid => (Some(layout.pid_w), true),
+                        SortKey::Cpu => (Some(layout.cpu_w), true),
+                        SortKey::Power => (Some(layout.pwr_w), true),
+                        SortKey::Memory => (Some(layout.mem_w), true),
                     };
                     let ink = if cur.key == key { p.text } else { p.muted };
                     let text = match key {
@@ -483,78 +629,100 @@ fn ProcessTable(rows: &[ProcessRow], cur: SortState, sort: &MutableState<SortSta
                         move || sort.set(toggle_sort(sort.get_untracked(), key)),
                         || Label(&text, Fs::Xs, Weight::Medium, Some(paint(ink)), Some(1)),
                     );
-                    // The power column sits before CPU; the node reports no power yet, so it
-                    // is a label only (`th.c-pwr`).
-                    if key == SortKey::Pid {
-                        cu::Box().alignment(Alignment::CenterEnd).modifier(Modifier::new().width(PWR_W).height(H_CTL)).content(|| {
-                            Label("전력", Fs::Xs, Weight::Medium, Some(paint(p.muted)), Some(1));
-                        });
-                    }
                 }
-                cu::Spacer().modifier(Modifier::new().width(SP[3]));
-            });
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[3])) };
+            }) };
             for (i, r) in rows.iter().enumerate() {
-                cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().fill_max_width().height(1.0).background(paint(p.line))) };
                 let _ = i;
                 let (ui, mut close) = (ui.clone(), on_close.clone());
-                ProcessRowView(r, move |id: String| {
+                ProcessRowViewWith(r, layout, max_cpu, move |id: String| {
                     close();
                     ui.go(Route::Conversation(id));
                 });
             }
             if rows.is_empty() {
-                cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
-                cu::Box().alignment(Alignment::Center).modifier(Modifier::new().fill_max_width().height(64.0)).content(|| {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().fill_max_width().height(1.0).background(paint(p.line))) };
+                { use ::compose_rust::ui::Box; Box!(alignment = Alignment::Center, modifier = Modifier::new().fill_max_width().height(64.0), {
                     Label("이 컴퓨터에서 실행 중인 팀원이 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
-                });
+                }) };
             }
-        });
+        }) };
     });
 }
 
+/// One row of the process table using the desktop column layout.
+#[cfg(test)]
+fn ProcessRowView(row: &ProcessRow, on_open: impl FnMut(String) + 'static) {
+    ProcessRowViewWith(row, table_layout(1440.0), 100.0, on_open);
+}
+
 /// One row of the process table. A member's agent process (`tr.mine`) has a 3 px blue bar, a
-/// 12 % blue wash and the member name in blue, and opens its session (FR-L21).
-/// The row is the container's `on_click` (compose-rust#372), named by its text.
-fn ProcessRowView(row: &ProcessRow, mut on_open: impl FnMut(String) + 'static) {
+/// 12 % blue wash and the member name in blue, and opens its session.
+fn ProcessRowViewWith(row: &ProcessRow, layout: TableLayout, max_cpu: f32, mut on_open: impl FnMut(String) + 'static) {
     let p = ember_theme().palette;
     let session = row.session.clone();
     let mine = session.is_some();
     let fill = if mine { paint(super::compat::mix(p.surface, p.blue.strong, 0.12)) } else { paint(p.surface) };
     let content = || {
-        cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width().height(ROW_H)).content(|| {
+        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width().height(ROW_H), {
             if mine {
-                cu::Spacer().modifier(Modifier::new().width(3.0).height(ROW_H).background(paint(p.blue.strong)));
-                cu::Spacer().modifier(Modifier::new().width(SP[3] - 3.0));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(3.0).height(ROW_H).background(paint(p.blue.strong))) };
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[3] - 3.0)) };
             } else {
-                cu::Spacer().modifier(Modifier::new().width(SP[3]));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[3])) };
             }
-            cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Sm).modifier(Modifier::new().weight(1.0)).content(|| {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, space_role = SpaceRole::Sm, modifier = Modifier::new().weight(1.0), {
                 if mine {
+                    // `.mon-who`: the member's character and name in blue, then the process
+                    // (the OS process name of a matched row, else the agent).
                     Character(&row.agent, row.leader, 22.0, &row.name, "", CharState::default(), None);
-                    Label(&row.agent, Fs::Sm, Weight::Medium, Some(paint(p.text)), Some(1));
                     let who = if row.leader { format!("{} (리더)", row.name) } else { row.name.clone() };
                     Label(&who, Fs::Xs, Weight::Medium, Some(paint(p.blue.strong)), Some(1));
+                    Label(row.process.as_deref().unwrap_or(row.agent.as_str()), Fs::Sm, Weight::Medium, Some(paint(p.text)), Some(1));
                 } else {
-                    super::shell::NavIcon(super::shell::ICON_CPU_SVG, p.muted.to_argb(), 14.0);
+                    // `.mon-pi`: 22 x 22 rounded icon tile aligned with the 22 dp member avatar.
+                    { use ::compose_rust::ui::Box; Box!(alignment = Alignment::Center, modifier = Modifier::new().size(22.0, 22.0).background(paint(p.surface_2)).corner_radius(CORNER_XS).border(1.0, paint(p.line)), {
+                        super::shell::NavIcon(super::shell::ICON_CPU_SVG, p.muted.to_argb(), 14.0);
+                    }) };
                     Label(&row.name, Fs::Sm, Weight::Medium, Some(paint(p.text)), Some(1));
                 }
-            });
+            }) };
             let cell = |w: f32, text: String| {
-                cu::Box().alignment(Alignment::CenterEnd).modifier(Modifier::new().width(w)).content(|| {
+                { use ::compose_rust::ui::Box; Box!(alignment = Alignment::CenterEnd, modifier = Modifier::new().width(w), {
                     Label(&text, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
-                });
+                }) };
             };
-            cell(PID_W, row.pid.map_or_else(|| "-".to_string(), |v| v.to_string()));
-            cell(PWR_W, "-".to_string());
-            cell(CPU_W, cpu_text(row.cpu));
-            cell(MEM_W, mem_text(row.mem));
-            cu::Spacer().modifier(Modifier::new().width(SP[3]));
-        });
+            cell(layout.pid_w, row.pid.map_or_else(|| "-".to_string(), |v| v.to_string()));
+            // In-cell CPU bar beside the numeric percent: blue for member rows, muted track fill
+            // for other processes, scaled against the busiest visible process.
+            { use ::compose_rust::ui::Box; Box!(alignment = Alignment::CenterEnd, modifier = Modifier::new().width(layout.cpu_w), {
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterEnd, spacing = SP[1], {
+                    if let (Some(bar_w), Some(pct)) = (layout.cpu_bar_w, row.cpu) {
+                        let f = bar_fraction(pct, max_cpu);
+                        let bar_color = if mine { p.blue.strong } else { p.muted };
+                        let r = layout.cpu_bar_h / 2.0;
+                        { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().width(bar_w).height(layout.cpu_bar_h).background(paint(p.track)).corner_radius(r).clip(true), content = move || {
+                                if f > 0.0 {
+                                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(f).height(layout.cpu_bar_h).background(paint(bar_color)).corner_radius(r)) };
+                                }
+                                if f < 1.0 {
+                                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0 - f).height(layout.cpu_bar_h)) };
+                                }
+                            }) };
+                    }
+                    Label(&cpu_text(row.cpu), Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
+                }) };
+            }) };
+            cell(layout.pwr_w, power_text(row.power));
+            cell(layout.mem_w, mem_text(row.mem));
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[3])) };
+        }) };
     };
     let box_modifier = Modifier::new().fill_max_width().background(fill);
     match session {
         Some(id) => super::components::Clickable(box_modifier, Alignment::CenterStart, move || on_open(id.clone()), content),
-        None => cu::Box().modifier(box_modifier).content(content),
+        None => { use ::compose_rust::ui::Box; Box!(modifier = box_modifier, content = content) },
     }
 }
 
@@ -571,10 +739,10 @@ pub fn preview() {
         (boxes, chips)
     });
     // The sheet opens over the shell, as it does in the app.
-    cu::Box().modifier(Modifier::new().fill_max_size()).content(|| {
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_size(), {
         super::shell::shell();
         MonitorSheet(chips.get(index), &boxes, || {});
-    });
+    }) };
 }
 
 #[cfg(test)]
@@ -648,8 +816,9 @@ mod tests {
             safe_area_top: top,
             safe_area_leading: leading,
             safe_area_trailing: 0.0,
+            safe_area_bottom: 0.0,
         };
-        let (bytes, _) = host.dispatch(HostEvent { node_id: 0, handler_id: 0, payload }).expect("dispatch");
+        let (bytes, _) = host.dispatch(HostEvent::new(0, 0, payload)).expect("dispatch");
         let text: String = compose_rust::protocol::decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")).collect();
         compose_rust::window::reset_window_size();
         text
@@ -764,7 +933,7 @@ mod tests {
         let text = composed_text(ui);
         // The big value is split into the number and its unit, a percent as a whole number
         // (`hero_parts`, review M1), so each is its own quoted text.
-        for want in ["\"25\"", "\"50\"", "스왑 1.0 GB / 4.0 GB", "\"60\"", "\"2.0\"", "KB/s", "GPU를 읽을 수 없습니다", "프로세스 321개 실행 중입니다", "준비 중입니다"] {
+        for want in ["\"25\"", "\"50\"", "스왑 1.0 GB / 4.0 GB", "\"40\"", "\"여유\"", "60 B 사용 \u{00B7} 60%", "\"2.0\"", "KB/s", "GPU를 읽을 수 없습니다", "프로세스 321개 실행 중입니다", "준비 중입니다", "부하 25%"] {
             assert!(text.contains(want), "missing {want}");
         }
     }
@@ -840,6 +1009,8 @@ mod tests {
                     cpu: Some(12.5),
                     mem: Some(256),
                     session: None,
+                    power: None,
+                    process: None,
                 };
                 ProcessRowView(&row, |_| {});
             }))
@@ -901,7 +1072,8 @@ mod tests {
         assert_eq!(floors, 8, "{all}");
         let production = include_str!("monitor.rs").split("#[cfg(test)]").next().unwrap();
         let grid = production.split("fn Grid(").nth(1).unwrap().split("\n}\n").next().unwrap();
-        assert!(grid.contains(".equal_height(fill)"), "{grid}");
+        assert!(grid.contains("intrinsic_size = fill"), "{grid}");
+
         assert!(grid.contains("cell.fill_max_height()"), "{grid}");
         let card = production.split("fn MonCard(").nth(1).unwrap().split("\n}\n").next().unwrap();
         assert!(card.contains("EmberCardSized(false, true, fill,"), "{card}");
@@ -910,7 +1082,7 @@ mod tests {
 
     fn cpu_card() {
         let view = CardView { headline: "23.1%".into(), lines: vec!["코어 8개".into()], bars: vec![50.0, 100.0] };
-        MetricCard(Metric::Cpu, Some(view), "", None, false);
+        MetricCard(Metric::Cpu, Some(view), None, "", None, &[], false);
     }
 
     /// Review M1, M2: the big value is the whole number with its unit beside it in a smaller
@@ -966,7 +1138,7 @@ mod tests {
         use compose_rust::protocol::{Mutation, PropertyValue};
         use compose_rust::PropertyKind;
         let _guard = crate::services::test_guard();
-        let mut host = Host::new(|| Box::new(Recomposer::new(|| FanCard(false))));
+        let mut host = Host::new(|| Box::new(Recomposer::new(|| FanCard(&MonitorFeed::default(), false))));
         let batch = compose_rust::protocol::decode_batch(host.rebuild().expect("rebuild")).expect("decode");
         let text: String = batch.iter().map(|m| format!("{m:?}")).collect();
         assert!(text.contains(FAN_MODE_REASON));
@@ -1000,5 +1172,176 @@ mod tests {
                 at = parent(id);
             }
         }
+    }
+
+    // ---- #389: chip and OS badges, member rows and power ----
+
+    fn telemetry_feed() -> MonitorFeed {
+        let s: ember_client::api::MetricsSample = serde_json::from_value(serde_json::json!({
+            "at_ms": 1000,
+            "chip": "Apple M2 Pro",
+            "os_name": "macOS",
+            "os_version": "15.2",
+            "cpu": {"total_percent": 25.0, "cores": [10.0, 40.0]},
+            "memory": {"total_bytes": 17179869184u64, "used_bytes": 8589934592u64,
+                       "swap_total_bytes": 0, "swap_used_bytes": 0},
+            "processes": [{"pid": 7, "name": "claude", "cpu_percent": 3.0, "memory_bytes": 1048576, "power_watts": 2.34}],
+            "sessions": [{"pid": 7, "session": "s1"}],
+            "process_count": 9
+        }))
+        .unwrap();
+        let mut f = MonitorFeed::default();
+        f.push(s);
+        f
+    }
+
+    #[test]
+    fn fr_l21_the_status_card_draws_chip_ram_and_os_badges() {
+        let _guard = crate::services::test_guard();
+        fn ui() {
+            StatusCard(&chip(), &telemetry_feed(), true, false);
+        }
+        let text = composed_text(ui);
+        let at = |want: &str| text.find(&format!("\"{want}\"")).unwrap_or_else(|| panic!("missing {want}: {text}"));
+        // The mockup's order: chip, RAM, OS.
+        assert!(at("Apple M2 Pro") < at("16.0 GB") && at("16.0 GB") < at("macOS 15.2"));
+    }
+
+    #[test]
+    fn fr_l21_a_member_row_shows_the_member_the_process_and_the_power() {
+        let _guard = crate::services::test_guard();
+        fn ui() {
+            let f = telemetry_feed();
+            let s = f.latest().unwrap();
+            let members = [crate::ui::project::Member {
+                session_id: "s1".into(),
+                name: "ember-리더".into(),
+                task: String::new(),
+                agent: "claude-code".into(),
+                status: ember_client::LauncherStatus::Running,
+                leader: true,
+                updated_at: 0,
+            }];
+            let rows = crate::ui::monitor::member_rows(crate::ui::monitor::process_rows(s), &s.sessions, &members);
+            assert!(rows[0].session.is_some());
+            ProcessRowView(&rows[0], |_| {});
+        }
+        let text = composed_text(ui);
+        for want in ["\"ember-리더 (리더)\"", "\"claude\"", "\"2.3\"", "\"7\""] {
+            assert!(text.contains(want), "missing {want}: {text}");
+        }
+        // The columns follow the mockup: 이름, PID, CPU, 전력, 메모리.
+        let production = include_str!("monitor.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(production.contains("[SortKey::Name, SortKey::Pid, SortKey::Cpu, SortKey::Power, SortKey::Memory]"));
+    }
+
+    #[test]
+    fn fr_l21_temperature_card_draws_cpu_and_gpu_side_by_side_with_toned_bars() {
+        let _guard = crate::services::test_guard();
+        fn ui() {
+            let s: ember_client::api::MetricsSample = serde_json::from_value(serde_json::json!({
+                "at_ms": 1000,
+                "chip": "Apple M4 Pro",
+                "temperatures": [
+                    {"label": "CPU die", "celsius": 56.0},
+                    {"label": "GPU die", "celsius": 74.0}
+                ]
+            }))
+            .unwrap();
+            let mut f = MonitorFeed::default();
+            f.push(s);
+            TemperatureCard(&f, true, false);
+        }
+        let text = composed_text(ui);
+        for want in ["\"CPU\"", "\"56\"", "\"GPU\"", "\"74\"", "\"Apple M4 Pro\""] {
+            assert!(text.contains(want), "missing {want}: {text}");
+        }
+        let p = ember_theme().palette;
+        let green = format!("{:?}", compose_rust::schema::Modifier::Background(paint(p.green.strong)));
+        let orange = format!("{:?}", compose_rust::schema::Modifier::Background(paint(p.orange.strong)));
+        assert!(text.contains(&green), "CPU 56C bar should be green");
+        assert!(text.contains(&orange), "GPU 74C bar should be orange");
+    }
+
+    #[test]
+    fn fr_l21_gpu_memory_and_network_cards_emit_svg_graphs_when_series_has_two_points() {
+        let _guard = crate::services::test_guard();
+        fn ui() {
+            let mk = |at_ms: u64, rx: u64, tx: u64, gpu: f32, used: u64| -> ember_client::api::MetricsSample {
+                serde_json::from_value(serde_json::json!({
+                    "at_ms": at_ms,
+                    "cpu": {"total_percent": 20.0, "cores": [20.0]},
+                    "memory": {"total_bytes": 1000u64, "used_bytes": used, "swap_total_bytes": 0, "swap_used_bytes": 0},
+                    "network": [{"interface": "en0", "rx_bytes": rx, "tx_bytes": tx}],
+                    "gpu": {"devices": [{"name": "Apple M4", "utilization_percent": gpu}]}
+                }))
+                .unwrap()
+            };
+            let mut f = MonitorFeed::default();
+            f.push(mk(1000, 0, 0, 10.0, 500));
+            f.push(mk(2000, 2000, 400, 15.0, 520));
+            f.push(mk(3000, 5000, 900, 12.0, 540));
+            for m in [Metric::Gpu, Metric::Memory, Metric::Network] {
+                MetricCard(m, card_view(m, &f), None, "", meter_fraction(m, &f), f.net_tx_series(), false);
+            }
+        }
+        let text = composed_text(ui);
+        assert!(text.matches("Height(44.0)").count() >= 3, "GPU, memory and network each emit a 44 dp SVG graph: {text}");
+    }
+
+    #[test]
+    fn fr_l21_online_state_pill_draws_status_dot_next_to_label() {
+        let _guard = crate::services::test_guard();
+        fn online_ui() {
+            StatePill(Reachability::Online);
+        }
+        fn offline_ui() {
+            StatePill(Reachability::Offline);
+        }
+        let p = ember_theme().palette;
+        let online_text = composed_text(online_ui);
+        let green = format!("{:?}", compose_rust::schema::Modifier::Background(paint(p.green.strong)));
+        assert!(online_text.contains("\"온라인\""), "missing online label: {online_text}");
+        assert!(online_text.contains("Width(8.0)") && online_text.contains("Height(8.0)"), "missing 8 dp dot: {online_text}");
+        assert!(online_text.contains(&green), "online dot must use green.strong: {online_text}");
+
+        let offline_text = composed_text(offline_ui);
+        let muted = format!("{:?}", compose_rust::schema::Modifier::Background(paint(p.muted)));
+        assert!(offline_text.contains("\"오프라인\""), "missing offline label: {offline_text}");
+        assert!(offline_text.contains("Width(8.0)") && offline_text.contains("Height(8.0)"), "missing 8 dp offline dot: {offline_text}");
+        assert!(offline_text.contains(&muted), "offline dot must use muted: {offline_text}");
+    }
+
+    #[test]
+    fn fr_l21_fan_card_shows_load_chip_when_feed_has_sample() {
+        let _guard = crate::services::test_guard();
+        fn ui() {
+            FanCard(&live_feed(), false);
+        }
+        let text = composed_text(ui);
+        assert!(text.contains("\"부하 25%\""), "fan card must display CPU load chip: {text}");
+    }
+
+    #[test]
+    fn fr_l21_disk_hero_and_status_storage_keep_gb_from_wrapping() {
+        let _guard = crate::services::test_guard();
+        fn ui() {
+            let mut feed = MonitorFeed::default();
+            let now = 1_700_000_000_000u64;
+            seed_demo_feed(&mut feed, now, crate::demo::metrics_sample);
+            feed.push(demo_varied_sample(crate::demo::metrics_sample(now)));
+            Grid(4, &chip(), &feed, true);
+        }
+        let mut host = Host::new(|| Box::new(Recomposer::new(ui)));
+        let batch = compose_rust::protocol::decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let text: String = batch.iter().map(|m| format!("{m:?}")).collect();
+        // Disk hero splits free space into 210 + GB + 여유 on single-line labels.
+        assert!(has_text_with_max_lines_1(&batch, "210"), "disk hero number must be single-line");
+        assert!(has_text_with_max_lines_1(&batch, "GB"), "disk hero GB unit must be single-line");
+        assert!(has_text_with_max_lines_1(&batch, "여유"), "disk hero sub label must be single-line");
+        // Status card storage line binds 210.0 and GB with NBSP so GB never wraps alone.
+        assert!(text.contains("210.0\\u{a0}GB"), "status storage line must bind GB with NBSP: {text}");
+        // Seeded demo feed emits 44 dp SVG graphs for GPU, Memory, and Network.
+        assert!(text.matches("Height(44.0)").count() >= 4, "CPU cores + GPU + Memory + Network graphs expected: {text}");
     }
 }

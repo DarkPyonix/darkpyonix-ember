@@ -67,6 +67,56 @@ class WorkbenchInsertsTest(unittest.TestCase):
         self.assertEqual(twice.count("/__detach.js"), 1)
 
 
+class ThemeDefaultTest(unittest.TestCase):
+    """The DarkPyonix theme is the default colour theme of the proxied workbench (FR-W6, #15)."""
+
+    THEME_PACKAGE = PROXY.parents[1] / "extensions" / "vscode-darkpyonix-theme" / "package.json"
+
+    def test_theme_defaults_are_added(self):
+        doc, _ = workbench_inserts(WORKBENCH, "1", detach=False, theme=True)
+        defaults = settings_of(doc)["configurationDefaults"]
+        self.assertEqual(defaults["workbench.colorTheme"], "DarkPyonix Dark")
+        self.assertEqual(defaults["workbench.preferredDarkColorTheme"], "DarkPyonix Dark")
+        self.assertEqual(defaults["workbench.preferredLightColorTheme"], "DarkPyonix Light")
+        self.assertNotIn("workbench.editor.dragToOpenWindow", defaults)
+
+    def test_theme_and_detach_together(self):
+        doc, _ = workbench_inserts(WORKBENCH, "1", detach=True, theme=True)
+        defaults = settings_of(doc)["configurationDefaults"]
+        self.assertIs(defaults["workbench.editor.dragToOpenWindow"], False)
+        self.assertEqual(defaults["workbench.colorTheme"], "DarkPyonix Dark")
+        again, _ = workbench_inserts(doc, "1", detach=True, theme=True)
+        self.assertEqual(again, doc)
+
+    def test_a_given_theme_default_wins(self):
+        cfg = dict(CONFIG, configurationDefaults={"workbench.colorTheme": "Default Light Modern"})
+        doc = WORKBENCH.replace(html_lib.escape(json.dumps(CONFIG), quote=True),
+                                html_lib.escape(json.dumps(cfg), quote=True))
+        out, _ = workbench_inserts(doc, "1", detach=False, theme=True)
+        self.assertEqual(settings_of(out)["configurationDefaults"]["workbench.colorTheme"],
+                         "Default Light Modern")
+
+    def test_names_are_the_theme_labels(self):
+        labels = {t["label"] for t in json.loads(self.THEME_PACKAGE.read_text(encoding="utf-8"))
+                  ["contributes"]["themes"]}
+        for value in html_rewrite.THEME_CONFIGURATION_DEFAULTS.values():
+            self.assertIn(value, labels)
+
+    def test_on_when_the_theme_is_a_default_extension(self):
+        import os
+        from unittest import mock
+        from dpx.vscode import runtime
+        with mock.patch.dict(os.environ, {"DPX_DEFAULT_EXTENSIONS": ""}):
+            self.assertFalse(runtime.theme_is_default_extension())
+        with mock.patch.dict(os.environ, {"DPX_DEFAULT_EXTENSIONS": "darkpyonix.vscode-darkpyonix-theme"}):
+            self.assertTrue(runtime.theme_is_default_extension())
+        with mock.patch.dict(os.environ, {"DPX_DEFAULT_EXTENSIONS": "/x/vscode-darkpyonix-theme-0.0.2.vsix"}):
+            self.assertTrue(runtime.theme_is_default_extension())
+        env = {k: v for k, v in os.environ.items() if k != "DPX_DEFAULT_EXTENSIONS"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertTrue(runtime.theme_is_default_extension())
+
+
 class ConfigurationDefaultsTest(unittest.TestCase):
     def test_existing_defaults_win(self):
         cfg = dict(CONFIG, configurationDefaults={"workbench.editor.dragToOpenWindow": True, "a": 1})
@@ -95,6 +145,7 @@ class ProxyWiringTest(unittest.TestCase):
         inject = (PROXY / "dpx" / "vscode" / "inject.py").read_text(encoding="utf-8")
         self.assertIn("html_rewrite.workbench_inserts(", inject)
         self.assertIn("detach=TAB_DETACH", inject)
+        self.assertIn("theme=runtime.theme_is_default_extension()", inject)
 
     def test_asset_is_public_like_overlay(self):
         from dpx.auth.gate import is_public_path

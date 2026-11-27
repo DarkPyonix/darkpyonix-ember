@@ -133,10 +133,10 @@ pub fn decode_as(bytes: &[u8], encoding: Encoding) -> Result<String, DocError> {
         }
         Encoding::Utf16Le | Encoding::Utf16Be => {
             let body = bytes.strip_prefix(encoding.bom()).unwrap_or(bytes);
-            if body.len() % 2 != 0 {
+            if !body.len().is_multiple_of(2) {
                 return Err(DocError::BadEncoding(encoding.label()));
             }
-            let units = body.chunks_exact(2).map(|c| match encoding {
+            let units = body.as_chunks::<2>().0.iter().map(|c| match encoding {
                 Encoding::Utf16Le => u16::from_le_bytes([c[0], c[1]]),
                 _ => u16::from_be_bytes([c[0], c[1]]),
             });

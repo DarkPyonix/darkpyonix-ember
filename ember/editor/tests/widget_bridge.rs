@@ -7,7 +7,7 @@ use ember_editor::engine::{ReadPurpose, Token};
 use ember_editor::languages::LanguageRegistry;
 use ember_editor::{
     apply_text_change, BridgeAction, CoreOptions, Decoration, DecorationId, DecorationKind, Effect, HoverPhase, Input,
-    SessionCore, Severity, WidgetBridge, WidgetCommand, WidgetEvent, WidgetPos, WidgetRange,
+    SessionCore, SessionUpdate, Severity, WidgetBridge, WidgetCommand, WidgetEvent, WidgetPos, WidgetRange,
     DECORATION_RECORD_LEN,
 };
 use ember_editor_conn::exthost::Call;
@@ -658,4 +658,213 @@ fn bridge_closed_clears_markers_for_that_file() {
     bridge.apply(ember_editor::SessionUpdate::Closed { uri: u1 });
     assert_eq!(bridge.problems().len(), 1);
     assert_eq!(bridge.problems()[0].uri.path, "/w/b.rs");
+}
+
+// A click on the explorer row (or the tab) of a document that is already open sends
+// `Input::Open` again. The window must keep showing the buffer as unsaved: before this fix the
+// bridge rebuilt the document from the second `Opened` with `dirty: false`, so the tab lost its
+// unsaved mark and closing it skipped the save prompt.
+#[test]
+fn fr_l31_6_reopening_an_unsaved_document_keeps_it_unsaved() {
+    let t0 = Instant::now();
+    let langs = LanguageRegistry::from_extensions(&[json!({
+        "contributes": {"languages": [{"id": "markdown", "extensions": [".md"]}]}
+    })]);
+    let mut core = SessionCore::new(langs, CoreOptions::default(), t0);
+    let mut bridge = WidgetBridge::new();
+    let u = uri("/w/README.md");
+
+    core.handle(t0, Input::Open { uri: u.clone() });
+    let fx = core.handle(t0, Input::FileRead { uri: u.clone(), purpose: ReadPurpose::Open, result: Ok(b"# ws\n".to_vec()) });
+    apply_all(&mut bridge, &fx);
+    let generation = bridge.document(&u).expect("opened").generation;
+
+    let (u_ev, gen_ev, chg_ev) = bridge.on_code_changed(&u, 1, WidgetRange::empty(p(0, 4)), "hello".into()).unwrap();
+    let fx = core.handle(t0, Input::Widget { uri: u_ev, generation: gen_ev, event: chg_ev });
+    apply_all(&mut bridge, &fx);
+    assert!(bridge.document(&u).unwrap().dirty, "typing makes the buffer unsaved");
+
+    // The second open, as the explorer row click sends it.
+    let fx = core.handle(t0, Input::Open { uri: u.clone() });
+    assert!(fx.iter().all(|e| !matches!(e, Effect::ReadFile { .. })), "an open document is not read again");
+    assert!(
+        fx.iter().any(|e| matches!(e, Effect::Ui(SessionUpdate::Dirty { dirty: true, .. }))),
+        "the engine says again that the buffer is unsaved"
+    );
+    apply_all(&mut bridge, &fx);
+    let doc = bridge.document(&u).unwrap();
+    assert!(doc.dirty, "reopening keeps the unsaved mark");
+    assert_eq!(doc.generation, generation);
+    assert_eq!(doc.text, "# wshello\n", "the typed text stays in the buffer");
+    assert_eq!(doc.version, 1, "the widget version is not reset by a reopen");
+}
+
+// The bridge alone: a second `Opened` with the same generation keeps what the first one built
+// up (unsaved mark, version, pending edits), and a new generation replaces it.
+#[test]
+fn fr_l31_6_bridge_keeps_document_state_on_a_repeated_opened() {
+    let mut bridge = WidgetBridge::new();
+    let u = uri("/src/main.rs");
+    let opened = |generation: u64, text: &str| {
+        vec![Effect::Ui(SessionUpdate::Opened {
+            uri: u.clone(),
+            generation,
+            text: text.to_string(),
+            language_id: "rust".to_string(),
+            tab_width: 4,
+        })]
+    };
+    apply_all(&mut bridge, &opened(7, "fn a() {}"));
+    bridge.on_code_changed(&u, 3, WidgetRange::empty(p(0, 9)), "\n".to_string()).unwrap();
+    apply_all(&mut bridge, &[Effect::Ui(SessionUpdate::Dirty { uri: u.clone(), dirty: true })]);
+
+    apply_all(&mut bridge, &opened(7, "fn a() {}\n"));
+    let doc = bridge.document(&u).unwrap();
+    assert!(doc.dirty);
+    assert_eq!(doc.version, 3);
+
+    // A reload gives a new generation: that is a new widget, so the state starts over.
+    apply_all(&mut bridge, &opened(8, "fn b() {}"));
+    let doc = bridge.document(&u).unwrap();
+    assert!(!doc.dirty);
+    assert_eq!(doc.version, 0);
+    assert_eq!(doc.generation, 8);
+}
+
+// FR-L31.42: debug updates are not dropped on the way to the window. The bridge passes each one on
+// and keeps the shown session, where it is stopped and the threads a pause goes to.
+#[test]
+fn fr_l31_42_bridge_passes_debug_updates_and_follows_the_shown_session() {
+    use ember_editor::debugger::{DebugUpdate, FrameInfo, SessionInfo, SessionState, ThreadInfo};
+
+    let session = |id: &str, state: SessionState, thread_id: Option<i64>| SessionInfo {
+        id: id.into(),
+        name: "Python".into(),
+        debug_type: "debugpy".into(),
+        request: "launch".into(),
+        parent: None,
+        state,
+        thread_id,
+        frame_id: None,
+        can_set_variables: false,
+        no_debug: false,
+    };
+    let stopped = || SessionState::Stopped { reason: "breakpoint".into(), thread_id: Some(7), description: None, text: None };
+    let frame = |uri: Option<UriComponents>| FrameInfo {
+        id: 70,
+        name: "main".into(),
+        uri,
+        source_name: Some("main.py".into()),
+        line: 4,
+        column: 3,
+        hint: None,
+    };
+    let stack = |session: &str, uri: Option<UriComponents>| {
+        SessionUpdate::Debug(DebugUpdate::CallStack { session: session.into(), thread_id: 7, frames: vec![frame(uri)], total_frames: Some(1) })
+    };
+    let main = uri("/w/main.py");
+    let mut bridge = WidgetBridge::new();
+
+    // Running, with no thread chosen yet: a pause goes to the first listed thread.
+    let running = DebugUpdate::Sessions { sessions: vec![session("a", SessionState::Running, None)], active: Some("a".into()) };
+    assert_eq!(bridge.apply(SessionUpdate::Debug(running.clone())), BridgeAction::Debug(running));
+    assert_eq!(bridge.debug().pause_thread(), None);
+    bridge.apply(SessionUpdate::Debug(DebugUpdate::Threads {
+        session: "a".into(),
+        threads: vec![ThreadInfo { id: 5, name: "MainThread".into(), stopped: false }, ThreadInfo { id: 6, name: "worker".into(), stopped: false }],
+    }));
+    assert_eq!(bridge.debug().pause_thread(), Some(5));
+
+    // A call stack of a session that is not stopped, or not shown, marks nothing.
+    bridge.apply(stack("a", Some(main.clone())));
+    assert_eq!(bridge.debug().stopped_line(&main), None);
+    bridge.apply(SessionUpdate::Debug(DebugUpdate::Sessions {
+        sessions: vec![session("a", stopped(), Some(7)), session("b", stopped(), Some(7))],
+        active: Some("a".into()),
+    }));
+    bridge.apply(stack("b", Some(main.clone())));
+    assert_eq!(bridge.debug().stopped_line(&main), None);
+    // The shown session's top frame is the stopped line; a frame without a file leaves none.
+    bridge.apply(stack("a", None));
+    assert_eq!(bridge.debug().stopped_at, None);
+    bridge.apply(stack("a", Some(main.clone())));
+    assert_eq!(bridge.debug().stopped_line(&main), Some(4));
+    assert_eq!(bridge.debug().pause_thread(), Some(7));
+
+    // Showing the other session takes the mark away.
+    bridge.apply(SessionUpdate::Debug(DebugUpdate::Sessions {
+        sessions: vec![session("a", stopped(), Some(7)), session("b", stopped(), Some(7))],
+        active: Some("b".into()),
+    }));
+    assert_eq!(bridge.debug().stopped_at, None);
+
+    // Updates the bridge keeps nothing of still reach the window.
+    let failed = DebugUpdate::StartFailed { message: "no launch.json".into() };
+    assert_eq!(bridge.apply(SessionUpdate::Debug(failed.clone())), BridgeAction::Debug(failed));
+
+    // A lost connection ends every session with it.
+    bridge.apply(SessionUpdate::ConnectionLost { reason: "gone".into() });
+    assert_eq!(*bridge.debug(), ember_editor::DebugView::default());
+}
+
+// FR-L31.42: a frame selected below the top one is the focused frame, marked apart from the top
+// frame (Code-OSS `debug-focused-stack-frame-line`); selecting the top frame again, or the thread
+// running on, takes it away.
+#[test]
+fn fr_l31_42_bridge_keeps_a_focused_lower_frame_apart_from_the_top_frame() {
+    use ember_editor::debugger::{DebugUpdate, FrameInfo, SessionInfo, SessionState};
+
+    let main = uri("/w/main.py");
+    let util = uri("/w/util.py");
+    let session = |state: SessionState, frame_id: Option<i64>| SessionInfo {
+        id: "a".into(),
+        name: "Python".into(),
+        debug_type: "debugpy".into(),
+        request: "launch".into(),
+        parent: None,
+        state,
+        thread_id: Some(7),
+        frame_id,
+        can_set_variables: false,
+        no_debug: false,
+    };
+    let stopped = || SessionState::Stopped { reason: "breakpoint".into(), thread_id: Some(7), description: None, text: None };
+    let frame = |id: i64, uri: &UriComponents, line: u32| FrameInfo {
+        id,
+        name: format!("f{id}"),
+        uri: Some(uri.clone()),
+        source_name: None,
+        line,
+        column: 1,
+        hint: None,
+    };
+    let sessions = |state: SessionState, frame_id: Option<i64>| {
+        SessionUpdate::Debug(DebugUpdate::Sessions { sessions: vec![session(state, frame_id)], active: Some("a".into()) })
+    };
+    let mut bridge = WidgetBridge::new();
+    bridge.apply(sessions(stopped(), Some(1)));
+    bridge.apply(SessionUpdate::Debug(DebugUpdate::CallStack {
+        session: "a".into(),
+        thread_id: 7,
+        frames: vec![frame(1, &util, 9), frame(2, &main, 4)],
+        total_frames: Some(2),
+    }));
+    assert_eq!(bridge.debug().stopped_line(&util), Some(9));
+    assert_eq!(bridge.debug().focused_frame(), None, "the top frame is focused");
+    // The debug hover evaluates in the focused frame (Code-OSS `focusedStackFrame`).
+    assert_eq!(bridge.debug().focused_location().map(|at| (at.frame_id, at.uri)), Some((1, util.clone())));
+
+    bridge.apply(sessions(stopped(), Some(2)));
+    assert_eq!(bridge.debug().focused_line(&main), Some(4));
+    assert_eq!(bridge.debug().focused_location().map(|at| (at.frame_id, at.uri)), Some((2, main.clone())));
+    assert_eq!(bridge.debug().focused_line(&util), None);
+    assert_eq!(bridge.debug().stopped_line(&util), Some(9), "the top frame keeps its mark");
+
+    bridge.apply(sessions(stopped(), Some(1)));
+    assert_eq!(bridge.debug().focused_frame(), None);
+    bridge.apply(sessions(stopped(), Some(2)));
+    bridge.apply(sessions(SessionState::Running, Some(2)));
+    assert_eq!(bridge.debug().focused_frame(), None, "running on clears both marks");
+    assert_eq!(bridge.debug().stopped_at, None);
+    assert_eq!(bridge.debug().focused_location(), None, "no hover while running");
 }

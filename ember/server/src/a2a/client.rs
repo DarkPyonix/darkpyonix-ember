@@ -33,9 +33,11 @@ Terminal access (FR-T9):
 Teams (FR-T7):
   ember-a2a team list [--json]
       Your team: members (name, session, agent, status) and tasks.
-  ember-a2a team spawn <name> [--agent <kind>] [--account <id>] [--computer <id>]
-                       [--title <title>] <first prompt...>
+  ember-a2a team spawn <name> [--agent <kind>] [--computer <id>] [--title <title>]
+                       [--profile default] [--account <id>] <first prompt...>
       Start a teammate session in this project; the first spawn makes you the leader.
+      The teammate runs under its harness's profile (accounts and routing). --account
+      pins one account, for verification and debugging only.
   ember-a2a team end <name>
       Stop a teammate (leader only).
   ember-a2a task list [--json]
@@ -64,6 +66,9 @@ Channels (FR-T12):
       most). Use `-` (or no text) to read the text from stdin. `channel_post` is accepted too.
   ember-a2a mcp
       The stdio MCP server exposing the tool `channel_post`, started by the harness, not for people.
+  ember-a2a mcp ember
+      The stdio MCP server `ember` exposing `list_agents` and `send_message` (the same calls as
+      `list` and `send`), started by the harness, not for people.
 
 Environment (set by Ember for every agent session):
   EMBER_URL, EMBER_RUNTIME_TOKEN";
@@ -454,11 +459,14 @@ fn dechunk(mut data: &[u8]) -> anyhow::Result<Vec<u8>> {
 pub fn run(args: &[String]) -> i32 {
     // `mcp` owns stdout for protocol frames, so it never goes through the `println!` below.
     if args.first().map(String::as_str) == Some("mcp") {
-        if args.len() > 1 {
-            eprintln!("ember-a2a: mcp takes no arguments\n\n{USAGE}");
-            return 2;
-        }
-        return super::mcp::run_stdio();
+        return match &args[1..] {
+            [] => super::mcp::run_stdio(),
+            [server] if server == super::mcp_native::SERVER_NAME => super::mcp_native::run_stdio(),
+            _ => {
+                eprintln!("ember-a2a: mcp takes no argument or `ember`\n\n{USAGE}");
+                2
+            }
+        };
     }
     match run_inner(args) {
         Ok(out) => {
@@ -595,7 +603,7 @@ fn run_team(args: &[String]) -> Result<String, CliError> {
             Ok(format_team(&v))
         }
         "spawn" => {
-            let a = parse_args(rest, &["agent", "account", "computer", "title"], &[])?;
+            let a = parse_args(rest, &["agent", "profile", "account", "computer", "title"], &[])?;
             let (name, words) = a
                 .positional
                 .split_first()
@@ -605,6 +613,7 @@ fn run_team(args: &[String]) -> Result<String, CliError> {
                 "name": name,
                 "prompt": prompt,
                 "agent": a.flags.get("agent"),
+                "profile": a.flags.get("profile"),
                 "account": a.flags.get("account"),
                 "computer": a.flags.get("computer"),
                 "title": a.flags.get("title"),
@@ -897,7 +906,7 @@ fn format_schedules(v: &Value) -> String {
         .join("\n")
 }
 
-fn format_targets(v: &Value) -> String {
+pub(crate) fn format_targets(v: &Value) -> String {
     let rows = v.as_array().cloned().unwrap_or_default();
     if rows.is_empty() {
         return "No other sessions to message.".into();
@@ -1057,6 +1066,12 @@ mod tests {
         assert!(matches!(run_inner(&args(&["channel"])), Err(CliError::Usage(_))));
         assert!(matches!(run_inner(&args(&["channel", "shout"])), Err(CliError::Usage(_))));
         assert!(matches!(run_inner(&args(&["channel", "post"])), Err(CliError::Usage(_))));
+    }
+
+    #[test]
+    fn fr_t2_mcp_usage_names_the_ember_server() {
+        assert!(USAGE.contains("ember-a2a mcp ember\n"));
+        assert!(USAGE.contains("`list_agents` and `send_message`"));
     }
 
     #[test]

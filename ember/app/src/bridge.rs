@@ -22,124 +22,49 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use dioxus_compose::prelude::*;
 use tokio::sync::{broadcast::error::RecvError, Notify};
 
 use ember_client::state::Input;
-use ember_client::wire::{DailyUsage, DetectedAgent};
 use ember_client::{Changes, LauncherStatus};
 
 use crate::model::merge_computers;
-use crate::server::{Account, ChatGptAccount};
 use crate::services::{services, Services};
 
 /// How often accounts, agents and computer reachability are refreshed.
 pub const REFRESH_EVERY: Duration = Duration::from_secs(30);
 
-/// The UI's view of live data. All fields are sync signals, so the struct is `Copy` and can
-/// be written from worker threads.
-#[derive(Clone, Copy)]
-pub struct Live {
-    /// Projects, session records/status, computers, connection.
-    pub launcher: SyncSignal<u64>,
-    /// Any transcript.
-    pub transcripts: SyncSignal<u64>,
-    /// The message outbox (queued-message indicator).
-    pub outbox: SyncSignal<u64>,
-    /// Any team (members, tasks: FR-T7).
-    pub teams: SyncSignal<u64>,
-    pub accounts: SyncSignal<Vec<Account>>,
-    /// ChatGPT plan accounts (FR-U4); empty when sign-in is off.
-    pub chatgpt: SyncSignal<Vec<ChatGptAccount>>,
-    pub agents: SyncSignal<Vec<DetectedAgent>>,
-    /// Tokens per account per UTC day, last 14 days (FR-U7); empty until loaded.
-    pub usage: SyncSignal<Vec<DailyUsage>>,
-}
-
-impl Live {
-    /// Create the signals. Call once, in the root component.
-    pub fn use_live() -> Live {
-        Live {
-            launcher: use_signal_sync(|| 0),
-            transcripts: use_signal_sync(|| 0),
-            outbox: use_signal_sync(|| 0),
-            teams: use_signal_sync(|| 0),
-            accounts: use_signal_sync(Vec::new),
-            chatgpt: use_signal_sync(Vec::new),
-            agents: use_signal_sync(Vec::new),
-            usage: use_signal_sync(Vec::new),
-        }
-    }
-
-    fn bump(mut sig: SyncSignal<u64>) {
-        *sig.write() += 1;
-    }
-
-    fn bump_all(&self) {
-        Self::bump(self.launcher);
-        Self::bump(self.transcripts);
-        Self::bump(self.outbox);
-        Self::bump(self.teams);
-        if let Some(s) = crate::services::try_services() {
-            s.ui.live.bump_all();
-        }
-    }
-}
-
 static BRIDGE_STARTED: OnceLock<()> = OnceLock::new();
 
-/// Start the runtime bridge tasks once for [`crate::ui::coexist::SharedLive`] (#220), without
-/// requiring a Dioxus component tree.
+/// Start the runtime bridge tasks once for [`crate::ui::coexist::SharedLive`] (#220).
 pub fn start_shared() {
     if BRIDGE_STARTED.set(()).is_err() {
         return;
     }
     let s = services();
     let refresh = Arc::new(Notify::new());
-    s.spawn(changes_task(s, None, refresh.clone()));
-    s.spawn(refresh_task(s, None, refresh));
+    s.spawn(changes_task(s, refresh.clone()));
+    s.spawn(refresh_task(s, refresh));
 }
 
-/// Start the bridge tasks once, from the root component.
-pub fn use_bridge(live: Live) {
-    use_hook(move || {
-        let s = services();
-        let _ = s.live.set(live);
-        if BRIDGE_STARTED.set(()).is_err() {
-            // Already running; the first set of tasks stays.
-            return;
-        }
-        let refresh = Arc::new(Notify::new());
-        s.spawn(changes_task(s, Some(live), refresh.clone()));
-        s.spawn(refresh_task(s, Some(live), refresh));
-    });
-}
-
-fn bump_all(s: &'static Services, live: Option<Live>) {
+fn bump_all(s: &'static Services) {
     s.ui.live.bump_all();
-    if let Some(live) = live.or_else(|| s.live.get().copied()) {
-        Live::bump(live.launcher);
-        Live::bump(live.transcripts);
-        Live::bump(live.outbox);
-        Live::bump(live.teams);
-    }
 }
 
-async fn changes_task(s: &'static Services, live: Option<Live>, refresh: Arc<Notify>) {
+async fn changes_task(s: &'static Services, refresh: Arc<Notify>) {
     let mut changes = s.client.subscribe();
     let mut revision = s.client.watch_revision();
     // Anything that changed before this subscription existed.
-    bump_all(s, live);
+    bump_all(s);
     let mut lagged = false;
     let mut prints = Fingerprints::default();
     loop {
         tokio::select! {
             r = changes.recv() => match r {
-                Ok(ch) => on_changes(s, live, &ch, &mut prints),
+                Ok(ch) => on_changes(s, &ch, &mut prints),
                 Err(RecvError::Lagged(n)) => {
                     tracing::debug!("ui bridge lagged by {n} changes; redrawing everything");
                     lagged = true;
-                    bump_all(s, live);
+                    bump_all(s);
                 }
                 Err(RecvError::Closed) => return,
             },
@@ -150,7 +75,7 @@ async fn changes_task(s: &'static Services, live: Option<Live>, refresh: Arc<Not
                 if lagged {
                     // Changes were dropped: the revision is the only reliable signal now.
                     lagged = false;
-                    bump_all(s, live);
+                    bump_all(s);
                     refresh.notify_one();
                     let open: Vec<String> = s.client.read(|st| st.open_sessions().cloned().collect());
                     for id in open {
@@ -199,29 +124,39 @@ impl Fingerprints {
     }
 }
 
-fn on_changes(s: &'static Services, live: Option<Live>, ch: &Changes, prints: &mut Fingerprints) {
-    let live = live.or_else(|| s.live.get().copied());
+/// Whether the channels and the routines screens read again after `ch` (PR-1, #1049): a channel
+/// message or a schedule push, or a resync or a connection change (push lagged, or it
+/// reconnected), when either may have been missed. These screens hold what they read themselves, so the push is their signal in
+/// place of a timer.
+fn pushed_reads(ch: &Changes) -> (bool, bool) {
+    let missed = ch.resync_all || ch.connection;
+    (!ch.channels.is_empty() || missed, ch.schedules || missed)
+}
+
+fn on_changes(s: &'static Services, ch: &Changes, prints: &mut Fingerprints) {
     let sessions_changed = prints.changed(s, &ch.sessions);
     // A project change without session changes is the project list itself (a project created
     // or its assignment changed, FR-L4); with session changes the fingerprints decide.
     let projects_changed = ch.projects && ch.sessions.is_empty();
     if sessions_changed || projects_changed || ch.computers || ch.connection {
-        if let Some(live) = live {
-            Live::bump(live.launcher);
-        }
         crate::ui::coexist::SharedLive::bump(&s.ui.live.launcher);
     }
     if !ch.transcripts.is_empty() {
-        if let Some(live) = live {
-            Live::bump(live.transcripts);
-        }
         crate::ui::coexist::SharedLive::bump(&s.ui.live.transcripts);
     }
     if !ch.teams.is_empty() {
-        if let Some(live) = live {
-            Live::bump(live.teams);
-        }
         crate::ui::coexist::SharedLive::bump(&s.ui.live.teams);
+    }
+    let (channels, schedules) = pushed_reads(ch);
+    if channels {
+        crate::ui::coexist::SharedLive::bump(&s.ui.live.channels);
+    }
+    if schedules {
+        crate::ui::coexist::SharedLive::bump(&s.ui.live.schedules);
+    }
+    if !ch.transfers.is_empty() || ch.resync_all || ch.connection {
+        // The files screen reads its snapshot now instead of at its next beat (FR-L27.8).
+        crate::ui::files_service::poke();
     }
     // Turn boundaries show up as session status changes.
     for id in &ch.sessions {
@@ -229,11 +164,11 @@ fn on_changes(s: &'static Services, live: Option<Live>, ch: &Changes, prints: &m
     }
 }
 
-async fn refresh_task(s: &'static Services, live: Option<Live>, refresh: Arc<Notify>) {
+async fn refresh_task(s: &'static Services, refresh: Arc<Notify>) {
     let mut first = true;
     let mut full = true;
     loop {
-        refresh_once(s, live, first, full).await;
+        refresh_once(s, first, full).await;
         first = false;
         full = tokio::select! {
             _ = tokio::time::sleep(REFRESH_EVERY) => true,
@@ -249,9 +184,9 @@ async fn refresh_task(s: &'static Services, live: Option<Live>, refresh: Arc<Not
 /// `full`: probe computers and re-read accounts and agents; otherwise (after the bridge
 /// lagged) only reload the projects and their assignments, which push keeps current
 /// otherwise.
-async fn refresh_once(s: &'static Services, live: Option<Live>, first: bool, full: bool) {
+async fn refresh_once(s: &'static Services, first: bool, full: bool) {
     if full {
-        refresh_slow(s, live, first).await;
+        refresh_slow(s, first).await;
     } else if s.demo.is_some() {
         // Demo only (#199): nothing to reload.
     } else if let Err(e) = s.client.load_projects().await {
@@ -439,8 +374,7 @@ async fn fetch_project_days(s: &'static Services) {
     }
 }
 
-async fn refresh_slow(s: &'static Services, live: Option<Live>, first: bool) {
-    let live = live.or_else(|| s.live.get().copied());
+async fn refresh_slow(s: &'static Services, first: bool) {
     // Demo only (#199): the same signals, filled from the demo source; no request is made.
     if s.demo.is_some() {
         let now = crate::demo::now_ms();
@@ -448,18 +382,12 @@ async fn refresh_slow(s: &'static Services, live: Option<Live>, first: bool) {
         let gpt = crate::demo::chatgpt_accounts(now);
         let usg = crate::demo::usage(now);
         let agt = crate::demo::agents();
-        s.ui.live.accounts.set(acc.clone());
-        s.ui.live.chatgpt.set(gpt.clone());
-        s.ui.live.usage.set(usg.clone());
-        s.ui.live.agents.set(agt.clone());
+        s.ui.live.accounts.set(acc);
+        s.ui.live.chatgpt.set(gpt);
+        s.ui.live.usage.set(usg);
+        s.ui.live.agents.set(agt);
         fetch_usage_summary(s).await;
         fetch_project_days(s).await;
-        if let Some(mut live) = live {
-            live.accounts.set(acc);
-            live.chatgpt.set(gpt);
-            live.usage.set(usg);
-            live.agents.set(agt);
-        }
         return;
     }
     // Computers: list at once without probing so the list renders before reachability is
@@ -473,30 +401,15 @@ async fn refresh_slow(s: &'static Services, live: Option<Live>, first: bool) {
     }
     match s.server.accounts().await {
         Ok(a) => {
-            s.ui.live.accounts.set(a.clone());
-            if let Some(mut live) = live {
-                if *live.accounts.peek() != a {
-                    live.accounts.set(a);
-                }
-            }
+            s.ui.live.accounts.set(a);
         }
         Err(e) => tracing::debug!("accounts refresh failed: {e}"),
     }
     let g = s.server.chatgpt_accounts().await.unwrap_or_default();
-    s.ui.live.chatgpt.set(g.clone());
-    if let Some(mut live) = live {
-        if *live.chatgpt.peek() != g {
-            live.chatgpt.set(g);
-        }
-    }
+    s.ui.live.chatgpt.set(g);
     match s.client.api().usage(Some(14)).await {
         Ok(u) => {
-            s.ui.live.usage.set(u.clone());
-            if let Some(mut live) = live {
-                if *live.usage.peek() != u {
-                    live.usage.set(u);
-                }
-            }
+            s.ui.live.usage.set(u);
         }
         Err(e) => tracing::debug!("usage refresh failed: {e}"),
     }
@@ -509,12 +422,7 @@ async fn refresh_slow(s: &'static Services, live: Option<Live>, first: bool) {
         Ok(a) => {
             s.ui.live.agents_checked_ms
                 .set(Some(crate::ui::agents::latest_detected_at(&a).unwrap_or_else(|| crate::demo::now_ms().max(0) as u64)));
-            s.ui.live.agents.set(a.clone());
-            if let Some(mut live) = live {
-                if *live.agents.peek() != a {
-                    live.agents.set(a);
-                }
-            }
+            s.ui.live.agents.set(a);
         }
         Err(e) => tracing::debug!("agents refresh failed: {e}"),
     }
@@ -551,5 +459,28 @@ mod github_poll_tests {
         assert!(!should_poll_github(false, Some(Duration::from_secs(100)), gap, false));
         assert!(!should_poll_github(true, Some(Duration::from_secs(100)), gap, true));
         assert!(!should_poll_github(true, Some(Duration::from_secs(10)), gap, false));
+    }
+}
+
+#[cfg(test)]
+mod push_read_tests {
+    use super::*;
+
+    /// A channel message or a schedule push makes its screen read again, and a resync makes
+    /// both read again; other changes leave them alone (PR-1, #1049).
+    #[test]
+    fn pr_1_channel_and_schedule_pushes_drive_their_screens() {
+        let mut ch = Changes::default();
+        assert_eq!(pushed_reads(&ch), (false, false));
+        ch.channels.insert("c1".into());
+        assert_eq!(pushed_reads(&ch), (true, false));
+        let ch = Changes { schedules: true, ..Default::default() };
+        assert_eq!(pushed_reads(&ch), (false, true));
+        let ch = Changes { resync_all: true, ..Default::default() };
+        assert_eq!(pushed_reads(&ch), (true, true));
+        let ch = Changes { connection: true, ..Default::default() };
+        assert_eq!(pushed_reads(&ch), (true, true));
+        let ch = Changes { projects: true, ..Default::default() };
+        assert_eq!(pushed_reads(&ch), (false, false));
     }
 }

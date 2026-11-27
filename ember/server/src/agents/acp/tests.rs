@@ -290,6 +290,7 @@ async fn mcp_servers_are_passed_to_session_new() {
         command: "/usr/bin/npx".into(),
         args: vec!["-y".into(), "x".into()],
         startup_timeout_secs: None,
+        always_load: false,
         env: vec![],
     }];
     let (mut run, mut rx) = start(FakeOptions::default(), s).await.unwrap();
@@ -1249,6 +1250,7 @@ fn channel_server(token: &str) -> McpServer {
         command: "/opt/ember/ember-a2a".into(),
         args: vec!["mcp".into()],
         startup_timeout_secs: Some(10),
+        always_load: false,
         env: vec![
             ("EMBER_URL".into(), "http://127.0.0.1:8740".into()),
             ("EMBER_RUNTIME_TOKEN".into(), token.into()),

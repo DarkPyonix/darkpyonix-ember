@@ -3,8 +3,8 @@
 
 use ember_app::prefs::{self, Prefs};
 use ember_app::ui::editor_states::{
-    compare_rows, connection_banner, doc_bar, is_deleted, manual_save_gate, reopen_plan, should_auto_save, tab_label, tab_label_style,
-    visible_compare_rows, AutoSave, AutoSaveTimer, BarTone, CompareKind, CompareView, DocAction, Reopen, SaveTrigger, AUTO_SAVE_DELAY_MS,
+    compare_rows, connection_banner, doc_bar, is_deleted, manual_save_gate, reconnect_plan, reopen_plan, should_auto_save, tab_label, tab_label_style,
+    visible_compare_rows, AutoSave, AutoSaveTimer, BarTone, CompareKind, CompareView, DocAction, Reconnect, Reopen, SaveTrigger, TabBuffer, AUTO_SAVE_DELAY_MS,
     CONFLICT_SAVE_NOTICE,
 };
 use ember_editor::ExternalChange;
@@ -38,6 +38,14 @@ fn fr_l31_save_states_a_dirty_buffer_changed_on_disk_offers_compare_overwrite_an
 }
 
 #[test]
+fn fr_l31_6_b3_window_a_stale_save_bar_says_so_in_korean() {
+    let english = "the file changed on disk after it was opened or last saved, so nothing was written";
+    let bar = doc_bar("a.json", Some(ExternalChange::ChangedWhileDirty), Some(english)).expect("a bar");
+    assert_eq!(bar.text, "a.json을(를) 저장하지 못했습니다: 파일이 디스크에서 바뀌어 저장하지 않았습니다. 비교한 뒤 다시 저장하면 덮어씁니다");
+    assert!(!bar.text.contains("nothing was written"));
+}
+
+#[test]
 fn fr_l31_save_states_a_manual_save_waits_for_the_conflict_choice() {
     assert_eq!(manual_save_gate(None), Ok(()));
     assert_eq!(manual_save_gate(Some(ExternalChange::Deleted)), Ok(()), "saving a deleted file writes it again");
@@ -66,7 +74,31 @@ fn fr_l31_save_states_the_connection_banner_offers_reconnect_until_it_runs() {
 }
 
 #[test]
-fn fr_l31_save_states_after_a_reconnect_every_tab_is_put_back_with_its_buffer() {
+fn fr_l31_save_states_after_a_reconnect_only_tabs_with_unsaved_edits_are_put_back_with_their_buffer() {
+    let tabs = vec![
+        ("/w/a.rs".to_string(), Some(TabBuffer { dirty: true, text: "fn a() {}\n".to_string(), base: Some("fn a() {\n".to_string()) })),
+        ("/w/b.rs".to_string(), None),
+        ("/w/c.rs".to_string(), Some(TabBuffer { dirty: true, text: "typed while lost\n".to_string(), base: None })),
+        ("/w/d.rs".to_string(), Some(TabBuffer { dirty: false, text: "as the old file was\n".to_string(), base: Some("as the old file was\n".to_string()) })),
+    ];
+    assert_eq!(
+        reconnect_plan(&tabs, Some("/w/c.rs")),
+        vec![
+            Reconnect::Restore { path: "/w/a.rs".into(), text: "fn a() {}\n".into(), base: Some("fn a() {\n".into()) },
+            Reconnect::Open("/w/b.rs".into()),
+            Reconnect::Restore { path: "/w/c.rs".into(), text: "typed while lost\n".into(), base: None },
+            // A clean tab is opened again and takes the file as it is now, not the text it showed.
+            Reconnect::Open("/w/d.rs".into()),
+            Reconnect::Focus("/w/c.rs".into()),
+        ]
+    );
+    assert_eq!(reconnect_plan(&[], None), vec![]);
+    // A current path that is not a tab is not focused.
+    assert_eq!(reconnect_plan(&tabs[1..2], Some("/w/x.rs")), vec![Reconnect::Open("/w/b.rs".into())]);
+}
+
+#[test]
+fn fr_l31_save_states_a_backup_puts_every_buffer_it_holds_back() {
     let tabs = vec![
         ("/w/a.rs".to_string(), Some("fn a() {}\n".to_string())),
         ("/w/b.rs".to_string(), None),
@@ -82,7 +114,6 @@ fn fr_l31_save_states_after_a_reconnect_every_tab_is_put_back_with_its_buffer() 
         ]
     );
     assert_eq!(reopen_plan(&[], None), vec![]);
-    // A current path that is not a tab is not focused.
     assert_eq!(reopen_plan(&tabs[1..2], Some("/w/x.rs")), vec![Reopen::Open("/w/b.rs".into())]);
 }
 

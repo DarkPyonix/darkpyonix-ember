@@ -317,8 +317,13 @@ async fn only_the_leader_spawns_and_ends_teammates() {
     assert!(!v["ended_at"].is_null());
     assert!(!w.sessions.is_live(&alice).await);
     assert!(notices(&w.sessions, &alice).iter().any(|n| n.contains("ended by the team leader")));
+    // After FR-T2a an ended teammate's token is revoked with her agent run, so the call is
+    // refused at authentication. SPEC FR-T2a: "A revoked or expired runtime token is refused with
+    // 401 on every A2A route, before any team or scope check (which answers 403)." The old 403
+    // came from a still-valid token of a member who had left. Either way the ended teammate
+    // cannot reach team data.
     let (st, _) = agent(&w, &alice, "GET", "/api/a2a/team/tasks", None).await;
-    assert_eq!(st, StatusCode::FORBIDDEN);
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
     let (st, _) = agent(&w, &lead, "DELETE", "/api/a2a/team/members/alice", None).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
 
@@ -532,7 +537,7 @@ async fn a_mention_delivers_a_copy_with_the_users_text() {
     wait_for("the user's message, unchanged", || user_messages(&w.sessions, &a).last().is_some_and(|m| m == text)).await;
     wait_for("mention delivery", || user_messages(&w.sessions, &b).len() == 1).await;
     let got = &user_messages(&w.sessions, &b)[0];
-    assert!(got.starts_with(&format!("[ember a2a] Message msg_")) && got.contains(&format!("from session {a} \"alpha\"")), "{got}");
+    assert!(got.starts_with("[ember a2a] Message msg_") && got.contains(&format!("from session {a} \"alpha\"")), "{got}");
     assert!(got.contains(&format!("The user mentioned this session in session {a} (\"alpha\") and wrote:\n\n{text}")), "{got}");
     assert!(got.contains(&format!("ember-a2a send {a} --reply-to")), "{got}");
     let n = notices(&w.sessions, &a);
@@ -626,4 +631,145 @@ async fn the_cli_runs_a_team_over_http() {
     assert_eq!(out.status.code(), Some(2), "nothing to update is a usage error");
     let out = cli(&["team", "spawn", "bob", "--bogus", "x"]).await.unwrap();
     assert_eq!(out.status.code(), Some(2));
+}
+
+// ---- FR-T7 across computers and accounts (#82) -----------------------------------------------
+
+/// An account router that records what each spawn requested and picks `profile-default` when
+/// nothing was requested (the harness's profile, D30).
+fn recording_router(w: &World) -> Arc<Mutex<Vec<Option<String>>>> {
+    let asked: Arc<Mutex<Vec<Option<String>>>> = Arc::new(Mutex::new(Vec::new()));
+    let a = asked.clone();
+    w.sessions.set_account_router(Arc::new(move |_agent, requested: Option<&str>| {
+        a.lock().unwrap().push(requested.map(String::from));
+        Ok(Some((requested.unwrap_or("profile-default").to_string(), "test".to_string())))
+    }));
+    asked
+}
+
+// FR-T7, D30, Q-T3 [leader, 2026-11-22]: a teammate runs under its harness's profile; `default`
+// names that profile, a named profile is refused until the server stores profiles (FR-L17), and
+// the leader's instructions do not ask it to choose an account.
+#[tokio::test]
+async fn fr_t7_spawn_follows_the_harness_profile() {
+    let w = world();
+    let lead = leader(&w, "lead").await;
+    let asked = recording_router(&w);
+
+    let alice = spawn(&w, &lead, "alice", "go").await;
+    let rec = w.sessions.store().session(&alice).unwrap().unwrap();
+    assert_eq!(rec.account_id.as_deref(), Some("profile-default"));
+    let (st, v) = agent(&w, &lead, "POST", "/api/a2a/team/members",
+        Some(json!({ "name": "bob", "prompt": "go", "profile": "default" }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{v}");
+    assert_eq!(asked.lock().unwrap().clone(), vec![None, None], "the profile decides, not the leader");
+
+    let before = w.sessions.store().sessions(None).unwrap().len();
+    let (st, v) = agent(&w, &lead, "POST", "/api/a2a/team/members",
+        Some(json!({ "name": "carol", "prompt": "go", "profile": "fast" }))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    assert!(v.to_string().contains("FR-L17"), "{v}");
+    let (st, v) = agent(&w, &lead, "POST", "/api/a2a/team/members",
+        Some(json!({ "name": "carol", "prompt": "go", "profile": "default", "account": "acct-2" }))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    assert!(v.to_string().contains("exclusive"), "{v}");
+    assert_eq!(w.sessions.store().sessions(None).unwrap().len(), before, "a refused spawn creates nothing");
+
+    let text = w.agents.instructions(&lead);
+    assert!(text.contains("team spawn <name>") && text.contains("profile"), "{text}");
+    assert!(!text.contains("--account"), "{text}");
+}
+
+// FR-T7 (#82): `--account` still pins one account, for verification and debugging.
+#[tokio::test]
+async fn fr_t7_account_flag_still_works() {
+    let w = world();
+    let lead = leader(&w, "lead").await;
+    let asked = recording_router(&w);
+    let (st, v) = agent(&w, &lead, "POST", "/api/a2a/team/members",
+        Some(json!({ "name": "alice", "prompt": "go", "account": "acct-2" }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{v}");
+    let alice = v["member"]["session_id"].as_str().unwrap();
+    assert_eq!(w.sessions.store().session(alice).unwrap().unwrap().account_id.as_deref(), Some("acct-2"));
+    assert_eq!(asked.lock().unwrap().clone(), vec![Some("acct-2".to_string())]);
+}
+
+// FR-T7, Q-T4 [leader, 2026-11-20] (#82): a spawn onto a computer without the leader's directory
+// is refused with the reason, before any session is created or moved.
+#[tokio::test]
+async fn fr_t7_spawn_is_refused_when_the_directory_is_missing() {
+    let w = world();
+    let lead = leader(&w, "lead").await;
+    let checked: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let moved: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let (c, m) = (checked.clone(), moved.clone());
+    w.a2a.set_dir_checker(Arc::new(move |computer: String, path: String| {
+        c.lock().unwrap().push((computer.clone(), path.clone()));
+        Box::pin(async move {
+            if computer == "has-dir" { Ok(()) } else { Err(format!("computer {computer} has no directory {path}")) }
+        }) as futures::future::BoxFuture<'static, Result<(), String>>
+    }));
+    w.a2a.set_computer_setter(Arc::new(move |session: String, computer: String| {
+        m.lock().unwrap().push((session, computer));
+        Box::pin(async { Ok(()) }) as futures::future::BoxFuture<'static, Result<(), String>>
+    }));
+    let cwd = w.sessions.store().session(&lead).unwrap().unwrap().cwd;
+
+    let before = w.sessions.store().sessions(None).unwrap().len();
+    let (st, v) = agent(&w, &lead, "POST", "/api/a2a/team/members",
+        Some(json!({ "name": "alice", "prompt": "go", "computer": "no-dir" }))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    let msg = v.to_string();
+    assert!(msg.contains("teammate alice was not started") && msg.contains("no-dir") && msg.contains("same path"), "{msg}");
+    assert_eq!(w.sessions.store().sessions(None).unwrap().len(), before, "nothing created");
+    assert!(moved.lock().unwrap().is_empty(), "nothing moved");
+    assert_eq!(checked.lock().unwrap().clone(), vec![("no-dir".to_string(), cwd.clone())]);
+
+    // The main server and a computer with the directory are not refused.
+    spawn(&w, &lead, "bob", "go").await;
+    let (st, v) = agent(&w, &lead, "POST", "/api/a2a/team/members",
+        Some(json!({ "name": "carol", "prompt": "go", "computer": "has-dir" }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{v}");
+    assert_eq!(checked.lock().unwrap().len(), 2, "the main server is not checked");
+    assert_eq!(moved.lock().unwrap().len(), 1);
+}
+
+// FR-T7, D20, Q-T5 [leader, 2026-11-20] (#82): when a teammate moves between its computer and the
+// main server, its leader is told once per move, the team is pushed again, and the team view
+// names each member's designated and current computer.
+#[tokio::test]
+async fn fr_t7_leader_is_told_once_when_a_teammate_falls_back() {
+    let w = world();
+    let lead = leader(&w, "lead").await;
+    let alice = spawn(&w, &lead, "alice", "go").await;
+    finish_turn(&w.sessions, &alice, 1).await;
+    let a = alice.clone();
+    w.a2a.set_placement_lookup(Arc::new(move |sid: &str| {
+        if sid == a { (Some("pi-id".into()), Some("local".into())) } else { (None, None) }
+    }));
+    let mut pushes = w.sessions.subscribe();
+
+    w.a2a.teammate_moved(&alice, "pi", "this server", true).await;
+    let said = "Teammate alice is now working on \"this server\" (moved from \"pi\")";
+    wait_for("the move notice", || inbox(&w, &lead).contains(said)).await;
+    let got = inbox(&w, &lead);
+    assert_eq!(got.matches(said).count(), 1, "{got}");
+    assert!(got.contains("stopped answering") && !got.to_lowercase().contains("invalid"), "{got}");
+    let team = loop {
+        if let Push::TeamUpdated { team } = pushes.recv().await.unwrap() {
+            break team;
+        }
+    };
+    let alice_view = team.members.iter().find(|m| m.name == "alice").unwrap();
+    assert_eq!(alice_view.designated_computer.as_deref(), Some("pi-id"));
+    assert_eq!(alice_view.current_computer.as_deref(), Some("local"));
+    let lead_view = team.members.iter().find(|m| m.name == "lead").unwrap();
+    assert_eq!((lead_view.designated_computer.as_deref(), lead_view.current_computer.as_deref()), (None, None));
+
+    // A session outside any team, and the leader itself, move without a team notice.
+    let outsider = new_session(&w.sessions, "outsider");
+    w.a2a.teammate_moved(&outsider, "pi", "this server", true).await;
+    w.a2a.teammate_moved(&lead, "pi", "this server", true).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(inbox(&w, &lead).matches("[Ember team notice]").count(), 1);
 }

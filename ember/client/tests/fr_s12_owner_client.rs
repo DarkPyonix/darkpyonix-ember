@@ -216,3 +216,26 @@ async fn fr_s12_client_claims_a_key_the_server_accepts() {
     let err = api.set_approve_all("nope", true).await.unwrap_err();
     assert!(err.is_owner_required(), "{err:?}");
 }
+
+/// The app finds the claim door in the folder the server made, with or without `HOME`: a
+/// Windows app started from the Start menu has only `USERPROFILE` (#1042).
+#[test]
+fn fr_s12_client_and_server_agree_on_the_data_folder() {
+    use std::ffi::OsString;
+    let cases: &[&[(&str, &str)]] = &[
+        &[("HOME", "/h")],
+        &[("USERPROFILE", "/u")],
+        &[("HOME", ""), ("USERPROFILE", "/u")],
+        &[("HOME", "/h"), ("USERPROFILE", "/u")],
+        &[("EMBER_DATA_DIR", "/d"), ("USERPROFILE", "/u")],
+    ];
+    for case in cases {
+        let var = |name: &str| case.iter().find(|(k, _)| *k == name).map(|(_, v)| OsString::from(*v));
+        let server = ember_server::runtime_dir::data_dir_from_vars(var);
+        assert_eq!(
+            owner::OwnerEndpoint::for_vars(var),
+            owner::OwnerEndpoint::for_dir(Some(&server), None),
+            "{case:?}"
+        );
+    }
+}

@@ -5,17 +5,15 @@
 //! The decisions (grouping, ordering, unread badges, bubble side, date dividers, filter and
 //! search, wire to room mapping, after-seq merging) are `ui::channels`' plain functions, used as
 //! they are. [`ChannelsScreen`] reads the server's channels (FR-T10, `GET /api/channels`), loads
-//! the open room's messages, polls `?after=seq` every [`POLL_EVERY`] while a room is open (the
-//! effect is keyed on the open room, so closing the room or leaving the screen stops it) and
+//! the open room's messages once, and reads `?after=seq` again when the server pushes a channel
+//! message or push reconnects (PR-1, #1049: the bridge bumps `live.channels`; no timer), and
 //! sends with `POST`. In demo mode the sample rooms stand in. [`ChannelsScreenWith`] takes rooms,
 //! for the preview window. Unread counts are not built on the server, so no badge is drawn.
 
 #![allow(non_snake_case)]
 
-use std::time::Duration;
-
 use compose_rust::runtime::{
-    delay, launched_effect, mutable_state_of, remember, remember_with_key, MutableState,
+    launched_effect, mutable_state_of, remember, remember_with_key, MutableState,
 };
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
@@ -67,19 +65,11 @@ fn local_tz() -> i64 {
 pub fn Avatar(name: &str, harness: &str, size: f32) {
     let (fg, bg) = pill_colors(harness_tone(harness).into(), ember_theme().palette);
     let initial: String = name.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
-    cu::Box()
-        .modifier(
-            Modifier::new()
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                 .size(size, size)
                 .background(paint(bg))
-                .shape_role(compose_rust::ShapeRole::Full),
-        )
-        .alignment(Alignment::Center)
-        .content(|| Label(&initial, Fs::Sm, Weight::Semibold, Some(paint(fg)), None));
+                .shape_role(compose_rust::ShapeRole::Full), alignment = Alignment::Center, content = || Label(&initial, Fs::Sm, Weight::Semibold, Some(paint(fg)), None)) };
 }
-
-/// How often an open room asks the server for messages after the last seq it has.
-pub const POLL_EVERY: Duration = Duration::from_secs(2);
 
 /// What the live screen holds: the rooms read from the server and the state of that read.
 #[derive(Clone)]
@@ -134,7 +124,8 @@ impl Feed {
         self.rooms.get_untracked().iter().find(|r| r.id == id).map(|r| last_seq(&r.messages)).unwrap_or(0)
     }
 
-    /// Loads the room's latest messages once, then polls `after=seq` until cancelled.
+    /// Loads the room's latest messages once. Later messages come by [`Feed::catch_up`], on a
+    /// push (PR-1).
     async fn follow(&self, id: String) {
         let first = {
             let id = id.clone();
@@ -146,21 +137,29 @@ impl Feed {
                 tracing::warn!("channel messages failed: {e}");
                 notice::post("메시지를 불러오지 못했습니다. 잠시 뒤 다시 시도합니다.".to_string())
             }
-            None => return,
+            None => {}
         }
-        loop {
-            delay(POLL_EVERY).await;
-            let after = self.after(&id);
-            let answer = {
-                let id = id.clone();
-                on_runtime(async move { crate::services::services().client.api().channel_messages(&id, &ember_client::channels::MessagesQuery { after: Some(after), ..Default::default() }).await }).await
-            };
-            match answer {
-                Some(Ok(list)) if !list.is_empty() => self.merge(&id, list.iter().map(message_from).collect()),
-                // A failed poll is tried again on the next beat; the room stays as it is.
-                Some(_) => {}
-                None => return,
+    }
+
+    /// A channel message was pushed or push reconnected (PR-1, #1049): the list (unread counts)
+    /// is read again, and the open room `open` reads the messages after its last seq and is
+    /// marked read when any came. A failed read leaves things as they are until the next push.
+    async fn catch_up(&self, open: Option<String>) {
+        self.refresh().await;
+        let Some(id) = open else { return };
+        let after = self.after(&id);
+        let answer = {
+            let id = id.clone();
+            on_runtime(async move { crate::services::services().client.api().channel_messages(&id, &ember_client::channels::MessagesQuery { after: Some(after), ..Default::default() }).await }).await
+        };
+        match answer {
+            Some(Ok(list)) if !list.is_empty() => {
+                self.merge(&id, list.iter().map(message_from).collect());
+                self.mark_read(&id);
             }
+            Some(Ok(_)) => {}
+            Some(Err(e)) => tracing::warn!("channel catch-up failed: {e}"),
+            None => {}
         }
     }
 
@@ -264,21 +263,33 @@ fn ChannelsView(rooms: Vec<Room>, load: Load, feed: Option<Feed>) {
     // Nothing to draw yet (loading) or nothing could be read (failed): say so, plainly. An empty
     // answer falls through to the list, which has the new-channel button.
     if let Some(text) = empty_text(&load, rooms.len()).filter(|_| load != Load::Ready) {
-        cu::Box().alignment(Alignment::Center).modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
-            cu::Column().alignment(Alignment::Center).space_role(SpaceRole::Sm).content(|| {
+        { use ::compose_rust::ui::Box; Box!(alignment = Alignment::Center, modifier = Modifier::new().fill_max_width().fill_max_height(), {
+            { use ::compose_rust::ui::Column; Column!(alignment = Alignment::Center, space_role = SpaceRole::Sm, {
                 Label("채널", Fs::Xl3, Weight::Medium, None, Some(1));
                 Label(&text, Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
-            });
-        });
+            }) };
+        }) };
         return;
     }
 
-    // Load and poll the open room's messages; the effect ends when the room or the screen closes.
+    // Load the open room's messages; the effect ends when the room or the screen closes.
     if let Some(f) = feed.clone() {
         let key = cur.clone();
+        let loader = f.clone();
         launched_effect(key.clone(), move || async move {
             if let Some(id) = key {
-                f.follow(id).await;
+                loader.follow(id).await;
+            }
+        });
+        // A pushed channel message (or a reconnect) since this screen opened: read again
+        // (PR-1, #1049). The count at the first composition is the baseline, so opening the
+        // screen does not read twice.
+        let pushed = crate::services::try_services().map(|s| s.ui.live.channels.get()).unwrap_or(0);
+        let baseline = remember(|| pushed);
+        let open_room = cur.clone();
+        launched_effect(pushed, move || async move {
+            if pushed != baseline {
+                f.catch_up(open_room).await;
             }
         });
     }
@@ -296,27 +307,24 @@ fn ChannelsView(rooms: Vec<Room>, load: Load, feed: Option<Feed>) {
             });
         }
         None => {
-            cu::Box()
-                .alignment(Alignment::Center)
-                .modifier(Modifier::new().fill_max_width().fill_max_height())
-                .content(|| {
+            { use ::compose_rust::ui::Box; Box!(alignment = Alignment::Center, modifier = Modifier::new().fill_max_width().fill_max_height(), {
                     // The mockup opens the first room, so its only empty wording is the list's
                     // "채널이 없습니다". A filter that hides every room keeps the old prompt.
                     let text = if rooms.is_empty() { "채널이 없습니다" } else { "선택한 채널이 없습니다" };
                     Label(text, Fs::Md, Weight::Regular, Some(paint(p.muted)), None)
-                });
+                }) };
         }
     };
     if split {
-        cu::Row().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
-            cu::Column().modifier(Modifier::new().width(list_width(window.width_dp)).fill_max_height()).content(list);
-            cu::Spacer().modifier(Modifier::new().width(1.0).fill_max_height().background(paint(p.line)));
-            cu::Column().modifier(Modifier::new().weight(1.0).fill_max_height()).content(detail);
-        });
+        { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width().fill_max_height(), {
+            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().width(list_width(window.width_dp)).fill_max_height(), content = list) };
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(1.0).fill_max_height().background(paint(p.line))) };
+            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0).fill_max_height(), content = detail) };
+        }) };
     } else if show_room {
-        cu::Column().modifier(Modifier::new().fill_max_width().fill_max_height()).content(detail);
+        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width().fill_max_height(), content = detail) };
     } else {
-        cu::Column().modifier(Modifier::new().fill_max_width().fill_max_height()).content(list);
+        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width().fill_max_height(), content = list) };
     }
     super::new_channel::NewChannelSheet(&new_ch, &rooms, feed.clone(), &open);
 }
@@ -342,21 +350,18 @@ fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>,
     // On a phone the list is the page itself: on `surface-2` it left a band of `bg` above it
     // (the window's top inset) and around the tab bar (captures channels-list-390, 2026-11-15).
     let pane = if narrow { p.bg } else { p.surface_2 };
-    cu::Column().modifier(Modifier::new().fill_max_width().fill_max_height().background(paint(pane))).content(|| {
+    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width().fill_max_height().background(paint(pane)), {
         // `.ph`: 16 above and at the sides, 8 below; the title 18/600 and the 32 dp "+".
-        cu::Spacer().modifier(Modifier::new().height(LIST_HEAD_PAD_TOP));
-        cu::Row()
-            .alignment(Alignment::CenterStart)
-            .modifier(Modifier::new().fill_max_width().height(H_CTL))
-            .content(|| {
-                cu::Spacer().modifier(Modifier::new().width(LIST_HEAD_PAD_SIDE));
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(LIST_HEAD_PAD_TOP)) };
+        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width().height(H_CTL), {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(LIST_HEAD_PAD_SIDE)) };
                 Label("채널", list_title_size(), Weight::Semibold, None, Some(1));
-                cu::Spacer().modifier(Modifier::new().weight(1.0));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                 // FR-T10, #499: the button opens the 새 채널 sheet; in demo it says why not.
                 super::new_channel::NewChannelButton(new_ch, live, current.project.clone());
-                cu::Spacer().modifier(Modifier::new().width(LIST_HEAD_PAD_SIDE));
-            });
-        cu::Spacer().modifier(Modifier::new().height(LIST_HEAD_PAD_BOTTOM));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(LIST_HEAD_PAD_SIDE)) };
+            }) };
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(LIST_HEAD_PAD_BOTTOM)) };
         // v0.0.7: #376 and #374 fixed (`TextField::text`); workaround kept until checked on a
         // display (a controlled value must not move the caret), so the field is uncontrolled.
         // `.searchbox{display:none}` up to 900 dp: no search field on a phone. Its margin is
@@ -370,14 +375,14 @@ fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>,
                     query.set(f);
                 });
             });
-            cu::Spacer().modifier(Modifier::new().height(SP[1]));
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[1])) };
         }
         // `.seg.scrollx` with `padding: 0 12 8`: bordered segments 8 apart (CH5).
-        cu::ScrollRow().modifier(Modifier::new().fill_max_width().height(H_CTL)).content(|| {
-            cu::Spacer().modifier(Modifier::new().width(LIST_PANE_INSET));
+        { use ::compose_rust::ui::ScrollRow; ScrollRow!(modifier = Modifier::new().fill_max_width().height(H_CTL), {
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(LIST_PANE_INSET)) };
             for (i, c) in chips.iter().enumerate() {
                 if i > 0 {
-                    cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[1])) };
                 }
                 let (filter, c2) = (filter.clone(), c.clone());
                 let text = c.as_ref().map(|x| display_name(x)).unwrap_or_else(|| "전체".to_string());
@@ -387,10 +392,10 @@ fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>,
                     filter.set(f);
                 });
             }
-            cu::Spacer().modifier(Modifier::new().width(LIST_PANE_INSET));
-        });
-        cu::Spacer().modifier(Modifier::new().height(SP[1]));
-        cu::ScrollColumn().modifier(Modifier::new().fill_max_width().weight(1.0)).content(|| {
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(LIST_PANE_INSET)) };
+        }) };
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[1])) };
+        { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().fill_max_width().weight(1.0), {
             if let Load::Failed(why) = load {
                 // Rooms stay on screen through a failed refresh; the reason is told once.
                 let _ = why;
@@ -404,25 +409,25 @@ fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>,
                 });
             }
             // The mockup list is flat, one row per room, newest first; the project is a chip.
-            cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
+            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), {
                 for s in sections.iter() {
                     for r in s.rooms.iter() {
                         let members = rooms.iter().find(|x| x.id == r.id).map(|x| x.members.clone()).unwrap_or_default();
                         RoomItem(r, &s.project, &members, selected.as_deref() == Some(r.id.as_str()), open, feed.clone());
                     }
                 }
-            });
-        });
-    });
+            }) };
+        }) };
+    }) };
 }
 
 /// The list pane's content inset: 12 in from each side (`margin: 0 var(--sp3)`).
 fn ListInset(content: impl FnOnce()) {
-    cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
-        cu::Spacer().modifier(Modifier::new().width(LIST_PANE_INSET));
-        cu::Column().modifier(Modifier::new().weight(1.0)).content(content);
-        cu::Spacer().modifier(Modifier::new().width(LIST_PANE_INSET));
-    });
+    { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width(), {
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(LIST_PANE_INSET)) };
+        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), content = content) };
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(LIST_PANE_INSET)) };
+    }) };
 }
 
 /// A filter segment (`.seg button`): 32 high, a pill, 13/500, `surface` on a 1 dp `line` border
@@ -440,11 +445,11 @@ pub fn SegChip(text: &str, selected: bool, on_click: impl FnMut() + 'static) {
         Alignment::Center,
         on_click,
         || {
-            cu::Row().alignment(Alignment::CenterStart).content(|| {
-                cu::Spacer().modifier(Modifier::new().width(SP[2]));
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
                 Label(text, Fs::Sm, Weight::Medium, Some(paint(fg)), Some(1));
-                cu::Spacer().modifier(Modifier::new().width(SP[2]));
-            });
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
+            }) };
         },
     );
 }
@@ -472,10 +477,7 @@ fn RoomIcon(room_id: &str, project: &str, size: f32) {
         RoomMotif::Wave => ROOM_WAVE_SVG,
         RoomMotif::Spark => ROOM_SPARK_SVG,
     };
-    cu::Box()
-        .alignment(Alignment::Center)
-        .modifier(Modifier::new().size(size, size).background(paint(a.soft)).corner_radius(CORNER_MD))
-        .content(|| super::shell::NavIcon(svg, a.strong.to_argb(), size * 0.6));
+    { use ::compose_rust::ui::Box; Box!(alignment = Alignment::Center, modifier = Modifier::new().size(size, size).background(paint(a.soft)).corner_radius(CORNER_MD), content = || super::shell::NavIcon(svg, a.strong.to_argb(), size * 0.6)) };
 }
 
 /// One room in the list: the container's `on_click` (compose-rust#372), named by its text.
@@ -505,31 +507,31 @@ fn RoomItem(row: &RoomRow, project: &str, _members: &[Member], selected: bool, o
             open.set(Some(id.clone()));
         },
         || {
-            cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
                 // Row = 44 icon + 2 x 10 padding = 64 high. The row runs edge to edge, so a 6 dp
                 // spacer at each end puts the icon 16 in, at the list title's 16 (#630); 12
                 // between the icon, the text and the time (`.room-item { gap: var(--sp3) }`).
                 let side = ROOM_ROW_PAD_H - ROOM_ROW_PAD_V;
-                cu::Spacer().modifier(Modifier::new().width(side));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(side)) };
                 RoomIcon(&row.id, project, ROOM_ICON);
-                cu::Spacer().modifier(Modifier::new().width(ROOM_ROW_GAP));
-                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                    cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Xs).content(|| {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(ROOM_ROW_GAP)) };
+                { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), {
+                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, space_role = SpaceRole::Xs, {
                         Label(&row.name, Fs::Md, Weight::Medium, Some(paint(p.text)), Some(1));
                         Label(&row.member_count.to_string(), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                    });
+                    }) };
                     let last = if row.last_text.is_empty() { "메시지가 없습니다".to_string() } else { row.last_text.clone() };
                     Label(&last, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
-                });
-                cu::Spacer().modifier(Modifier::new().width(ROOM_ROW_GAP));
-                cu::Column().alignment(Alignment::CenterEnd).content(|| {
+                }) };
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(ROOM_ROW_GAP)) };
+                { use ::compose_rust::ui::Column; Column!(alignment = Alignment::CenterEnd, {
                     Label(&time, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                     if row.unread > 0 {
                         super::shell::RedBadge(row.unread as usize);
                     }
-                });
-                cu::Spacer().modifier(Modifier::new().width(side));
-            });
+                }) };
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(side)) };
+            }) };
         },
     );
 }
@@ -540,18 +542,14 @@ fn RoomView(room: &Room, show_back: bool, live: Option<Feed>, on_back: impl FnMu
     let items = feed(room, me_id(room), local_tz());
     let owner = super::channel_owner::OwnerState::new(&room.id);
     // `.room{background:var(--room)}`: the room is on `--surface`, not the page.
-    cu::Column().modifier(Modifier::new().fill_max_width().fill_max_height().background(paint(p.surface))).content(|| {
+    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width().fill_max_height().background(paint(p.surface)), {
         // `.topbar` on one line (review CH7): 20 in, the 30 dp room mark, the name at 14/600, the
         // member count, "• project" 12/500 `text-2` (not at 560 dp and below, `.hide-sm`), then
         // the round buttons right after the title (`.topbar > * { flex: none }`), 8 apart.
         let width = crate::ui::window_size::current_window_size().width_dp;
         let title = super::home::fit_label(&room.name, room_title_max(width), Fs::Md.size());
-        cu::Row()
-            .spacing(SP[1])
-            .alignment(Alignment::CenterStart)
-            .modifier(Modifier::new().fill_max_width().height(ROOM_HEAD_H))
-            .content(|| {
-                cu::Spacer().modifier(Modifier::new().width(ROOM_HEAD_PAD - SP[1]));
+        { use ::compose_rust::ui::Row; Row!(spacing = SP[1], alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width().height(ROOM_HEAD_H), {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(ROOM_HEAD_PAD - SP[1])) };
                 if show_back {
                     // `.icon-btn.sm.backbtn`: an icon-only 32 px square named 뒤로 (review CH8).
                     super::components::BackButton(on_back);
@@ -560,11 +558,11 @@ fn RoomView(room: &Room, show_back: bool, live: Option<Feed>, on_back: impl FnMu
                 Label(&title, Fs::Md, Weight::Semibold, None, Some(1));
                 Label(&room.members.len().to_string(), Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
                 if room_head_shows_project(width) {
-                    cu::Row().alignment(Alignment::CenterStart).spacing(SP[0]).content(|| {
+                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[0], {
                         super::compat::Dot(crate::model::Tone::Neutral);
                         let project = super::home::fit_label(&display_name(&room.project), 160.0, Fs::Xs.size());
                         Label(&project, Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(1));
-                    });
+                    }) };
                 }
                 // The members button opens the owner sheet (FR-T14, FR-T15, FR-T17), named "멤버"
                 // (compose-rust v0.0.7, #429). The more glyph does nothing yet, so it is hidden
@@ -584,32 +582,27 @@ fn RoomView(room: &Room, show_back: bool, live: Option<Feed>, on_back: impl FnMu
                     );
                 }
                 for svg in [super::shell::ICON_MORE_SVG] {
-                    cu::Box()
-                        .alignment(Alignment::Center)
-                        .modifier(
-                            Modifier::new()
+                    { use ::compose_rust::ui::Box; Box!(alignment = Alignment::Center, modifier = Modifier::new()
                                 .size(H_CTL, H_CTL)
                                 .background(paint(p.surface))
                                 .border(1.0, paint(p.line))
                                 .shape_role(compose_rust::ShapeRole::Full)
-                                .hidden(true),
-                        )
-                        .content(|| super::shell::NavIcon(svg, p.text_2.to_argb(), 16.0));
+                                .hidden(true), content = || super::shell::NavIcon(svg, p.text_2.to_argb(), 16.0)) };
                 }
-                cu::Spacer().modifier(Modifier::new().weight(1.0));
-            });
-        cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
-        cu::ScrollColumn().modifier(Modifier::new().fill_max_width().weight(1.0)).content(|| {
-            cu::Column().spacing(6.0).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
+            }) };
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().fill_max_width().height(1.0).background(paint(p.line))) };
+        { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().fill_max_width().weight(1.0), {
+            { use ::compose_rust::ui::Column; Column!(spacing = 6.0, modifier = Modifier::new().fill_max_width().padding(SP[4]), {
                 for item in items.iter() {
                     match item {
                         FeedItem::Divider(d) => {
                             // `.datediv`: the label centered between two 1 px rules.
-                            cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Sm).modifier(Modifier::new().fill_max_width().height(32.0)).content(|| {
-                                cu::Spacer().modifier(Modifier::new().weight(1.0).height(1.0).background(paint(p.line)));
+                            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, space_role = SpaceRole::Sm, modifier = Modifier::new().fill_max_width().height(32.0), {
+                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0).height(1.0).background(paint(p.line))) };
                                 Label(d, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
-                                cu::Spacer().modifier(Modifier::new().weight(1.0).height(1.0).background(paint(p.line)));
-                            });
+                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0).height(1.0).background(paint(p.line))) };
+                            }) };
                         }
                         FeedItem::Bubble(b) => {
                             let harness = room.member(&b.from).map(|m| m.harness.clone()).unwrap_or_default();
@@ -617,11 +610,11 @@ fn RoomView(room: &Room, show_back: bool, live: Option<Feed>, on_back: impl FnMu
                         }
                     }
                 }
-            });
-        });
+            }) };
+        }) };
         InputBar(&room.id, live.clone());
         super::channel_owner::MembersSheet(&room.id, &room.name, &owner, live.is_some());
-    });
+    }) };
 }
 
 /// `.inputbar`: a white pill with a 1 px border, 740 wide at most and centered, holding a plus
@@ -664,29 +657,20 @@ fn InputBar(room_id: &str, live: Option<Feed>) {
     let window = crate::ui::window_size::current_window_size().width_dp;
     let room_w = if window > 900.0 { window - list_width(window) - 1.0 - 234.0 } else { window };
     let width = (room_w - 32.0).clamp(240.0, 740.0);
-    cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width().padding(SP[3])).content(|| {
-        cu::Spacer().modifier(Modifier::new().weight(1.0));
-        cu::Row()
-            .space_role(SpaceRole::Sm)
-            .alignment(Alignment::CenterStart)
-            .modifier(
-                Modifier::new()
+    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width().padding(SP[3]), {
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
+        { use ::compose_rust::ui::Row; Row!(space_role = SpaceRole::Sm, alignment = Alignment::CenterStart, modifier = Modifier::new()
                     .width(width)
                     .height(50.0)
                     .background(paint(p.surface))
                     .border(1.0, paint(p.line))
-                    .shape_role(compose_rust::ShapeRole::Full),
-            )
-            .content(|| {
+                    .shape_role(compose_rust::ShapeRole::Full), {
                 let _generation = generation.get();
-                cu::Spacer().modifier(Modifier::new().width(6.0));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(6.0)) };
                 // The attach (+) and emoji glyphs do nothing yet, so they are hidden from
                 // assistive technology (compose-rust v0.0.7, #429) until they have a handler.
                 for svg in [super::shell::ICON_PLUS_SVG] {
-                    cu::Box()
-                        .alignment(Alignment::Center)
-                        .modifier(Modifier::new().size(H_CTL, H_CTL).hidden(true))
-                        .content(|| super::shell::NavIcon(svg, p.text_2.to_argb(), 18.0));
+                    { use ::compose_rust::ui::Box; Box!(alignment = Alignment::Center, modifier = Modifier::new().size(H_CTL, H_CTL).hidden(true), content = || super::shell::NavIcon(svg, p.text_2.to_argb(), 18.0)) };
                 }
                 // FR-L10.2 (#844): the pill draws the frame, so the field is bare (mockup
                 // `.cin input{border:0;background:none}`), 40 px tall inside the 50 px pill.
@@ -707,20 +691,17 @@ fn InputBar(room_id: &str, live: Option<Feed>) {
                     })),
                     ..Default::default()
                 });
-                cu::Box()
-                    .alignment(Alignment::Center)
-                    .modifier(Modifier::new().size(H_CTL, H_CTL).hidden(true))
-                    .content(|| super::shell::NavIcon(super::shell::ICON_SMILE_SVG, p.text_2.to_argb(), 18.0));
+                { use ::compose_rust::ui::Box; Box!(alignment = Alignment::Center, modifier = Modifier::new().size(H_CTL, H_CTL).hidden(true), content = || super::shell::NavIcon(super::shell::ICON_SMILE_SVG, p.text_2.to_argb(), 18.0)) };
                 // Sending is for the server's rooms; the sample rooms (demo) cannot send.
                 let sending = state.get() == SendState::Sending;
                 let can_send = live.is_some() && !sending && !draft.get().trim().is_empty();
                 let (draft, send) = (draft.clone(), send.clone());
                 // The visible label "전송" names the send button.
                 AppButton(if sending { "전송 중" } else { "전송" }, None, ButtonKind::Primary, false, can_send, false, move || send(draft.get_untracked()));
-                cu::Spacer().modifier(Modifier::new().width(6.0));
-            });
-        cu::Spacer().modifier(Modifier::new().weight(1.0));
-    });
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(6.0)) };
+            }) };
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
+    }) };
 }
 
 fn BubbleRow(bubble: &BubbleView, harness: &str, project: &str) {
@@ -728,36 +709,24 @@ fn BubbleRow(bubble: &BubbleView, harness: &str, project: &str) {
     let mine = bubble.side == Side::Right;
     let (fill, ink) = if mine { (p.ink, p.ink_text) } else { (p.surface_2, p.text) };
     let stamp = || {
-        cu::Column()
-            .alignment(if mine { Alignment::BottomEnd } else { Alignment::BottomStart })
-            .content(|| {
+        { use ::compose_rust::ui::Column; Column!(alignment = if mine { Alignment::BottomEnd } else { Alignment::BottomStart }, {
                 if let Some(n) = bubble.unread {
                     Label(&n.to_string(), Fs::Xs, Weight::Semibold, Some(paint(p.orange.strong)), None);
                 }
                 Label(&bubble.time, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
-            });
+            }) };
     };
     let body = || {
-        cu::Box()
-            .modifier(Modifier::new().background(paint(fill)).corner_radius(CORNER_BUBBLE).padding(SP[2]))
-            .content(|| Label(&bubble.text, Fs::Md, Weight::Regular, Some(paint(ink)), None));
+        { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().background(paint(fill)).corner_radius(CORNER_BUBBLE).padding(SP[2]), content = || Label(&bubble.text, Fs::Md, Weight::Regular, Some(paint(ink)), None)) };
     };
     if mine {
-        cu::Row()
-            .space_role(SpaceRole::Xs)
-            .alignment(Alignment::BottomEnd)
-            .modifier(Modifier::new().fill_max_width())
-            .content(|| {
-                cu::Spacer().modifier(Modifier::new().weight(1.0));
+        { use ::compose_rust::ui::Row; Row!(space_role = SpaceRole::Xs, alignment = Alignment::BottomEnd, modifier = Modifier::new().fill_max_width(), {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                 stamp();
                 body();
-            });
+            }) };
     } else {
-        cu::Row()
-            .space_role(SpaceRole::Sm)
-            .alignment(Alignment::TopStart)
-            .modifier(Modifier::new().fill_max_width())
-            .content(|| {
+        { use ::compose_rust::ui::Row; Row!(space_role = SpaceRole::Sm, alignment = Alignment::TopStart, modifier = Modifier::new().fill_max_width(), {
                 if bubble.show_avatar {
                     let name = bubble.name.clone().unwrap_or_default();
                     match crate::ui::channels::avatar_kind(bubble.is_agent, harness) {
@@ -768,11 +737,11 @@ fn BubbleRow(bubble: &BubbleView, harness: &str, project: &str) {
                         crate::ui::channels::AvatarKind::Letter => Avatar(&name, harness, 36.0),
                     }
                 } else {
-                    cu::Spacer().modifier(Modifier::new().width(36.0));
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(36.0)) };
                 }
-                cu::Column().space_role(SpaceRole::Xs).content(|| {
+                { use ::compose_rust::ui::Column; Column!(space_role = SpaceRole::Xs, {
                     if let Some(n) = bubble.name.clone() {
-                        cu::Row().space_role(SpaceRole::Xs).alignment(Alignment::CenterStart).content(|| {
+                        { use ::compose_rust::ui::Row; Row!(space_role = SpaceRole::Xs, alignment = Alignment::CenterStart, {
                             Label(&n, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
                             if bubble.is_agent {
                                 Pill("에이전트", PillTone::Orange, true);
@@ -780,15 +749,15 @@ fn BubbleRow(bubble: &BubbleView, harness: &str, project: &str) {
                             if bubble.guest {
                                 Pill("게스트", PillTone::Grey, true);
                             }
-                        });
+                        }) };
                     }
-                    cu::Row().space_role(SpaceRole::Xs).alignment(Alignment::BottomStart).content(|| {
+                    { use ::compose_rust::ui::Row; Row!(space_role = SpaceRole::Xs, alignment = Alignment::BottomStart, {
                         body();
                         stamp();
-                    });
-                });
-                cu::Spacer().modifier(Modifier::new().weight(1.0));
-            });
+                    }) };
+                }) };
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
+            }) };
     }
 }
 
@@ -866,9 +835,9 @@ pub fn sample_rooms() -> Vec<Room> {
 #[compose_rust::runtime::Composable]
 pub fn preview_channels() {
     let p = ember_theme().palette;
-    cu::Box().modifier(Modifier::new().fill_max_size().background(paint(p.bg))).content(|| {
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_size().background(paint(p.bg)), {
         ChannelsScreenWith(sample_rooms());
-    });
+    }) };
 }
 
 #[cfg(test)]
@@ -937,10 +906,7 @@ mod tests {
             .iter()
             .map(|m| format!("{m:?}"))
             .collect();
-        let event = HostEvent {
-            node_id: 0,
-            handler_id: 0,
-            payload: EventPayload::WindowSizeChanged {
+        let event = HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
                 width_dp: width,
                 height_dp: 900.0,
                 class,
@@ -948,8 +914,8 @@ mod tests {
                 safe_area_top: 0.0,
                 safe_area_leading: 0.0,
                 safe_area_trailing: 0.0,
-            },
-        };
+                safe_area_bottom: 0.0,
+            });
         let (bytes, _) = host.dispatch(event).expect("dispatch");
         text.extend(decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")));
         compose_rust::window::reset_window_size();
@@ -988,6 +954,74 @@ mod tests {
         let items = feed(&rooms[0], "me", 0);
         assert!(items.iter().any(|i| matches!(i, FeedItem::Divider(_))));
         assert!(items.iter().any(|i| matches!(i, FeedItem::Bubble(b) if b.side == Side::Right)));
+    }
+
+    #[test]
+    fn fr_l12_opening_and_closing_channels_and_switching_rooms_repeatedly_does_not_touch_released_owner_state() {
+        use compose_rust::protocol::{decode_batch, HostEvent};
+        use compose_rust::{EventPayload, WindowHeightClass, WindowSizeClass};
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let ui = crate::services::test_services().ui.clone();
+        ui.set_menu(crate::ui::NavMenu::Projects);
+
+        let mut host = Host::new(|| Box::new(Recomposer::new(super::super::shell::shell)));
+        let _ = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        // Set desktop 1440x900 so split view opens `RoomView` with `OwnerState` and `MembersSheet`.
+        let (bytes, _) = host
+            .dispatch(HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
+                    width_dp: 1440.0,
+                    height_dp: 900.0,
+                    class: WindowSizeClass::Expanded,
+                    height_class: WindowHeightClass::Medium,
+                    safe_area_top: 0.0,
+                    safe_area_leading: 0.0,
+                    safe_area_trailing: 0.0,
+                    safe_area_bottom: 0.0,
+                }))
+            .expect("resize to desktop");
+        let _ = decode_batch(bytes).expect("decode resize");
+
+        // Switch into 채널 and back to 프로젝트 repeatedly: leaving 채널 disposes `RoomView` and
+        // `OwnerState`, which previously panicked at `channel_owner.rs:158` inside `MembersSheet`'s
+        // `on_dispose` cleanup.
+        for round in 0..5 {
+            ui.set_menu(crate::ui::NavMenu::Channels);
+            let bytes = host.render_frame((round * 2 + 1) * 16_000_000).expect("render channels");
+            let text: String = decode_batch(bytes).expect("decode channels").iter().map(|m| format!("{m:?}")).collect();
+            assert!(text.contains("배포 논의"), "round {round} should render channels: {text}");
+
+            ui.set_menu(crate::ui::NavMenu::Projects);
+            let bytes = host.render_frame((round * 2 + 2) * 16_000_000).expect("render projects");
+            let _ = decode_batch(bytes).expect("decode projects");
+        }
+
+        // Also switch between rooms inside `ChannelsScreenWith` repeatedly and open/close the
+        // owner sheet so `OwnerState::new(room_id)` keys are replaced and disposed cleanly.
+        let active_room = compose_rust::runtime::mutable_state_of(0_usize);
+        let sheet_open = compose_rust::runtime::mutable_state_of(false);
+        let r_state = active_room;
+        let s_state = sheet_open;
+        let mut room_host = compose_rust::ComposeHost::with_content(move || {
+            let rooms = sample_rooms();
+            let idx = r_state.get();
+            if idx < rooms.len() {
+                let room = &rooms[idx];
+                let owner = super::super::channel_owner::OwnerState::new(&room.id);
+                if s_state.get() {
+                    owner.open.set(true);
+                }
+                RoomView(room, false, None, || {});
+            }
+        });
+        let _ = decode_batch(room_host.rebuild().expect("rebuild room host")).expect("decode");
+        for step in 0..6 {
+            sheet_open.set(step % 2 == 0);
+            active_room.set(step % 4); // 0, 1, 2, and 3 (unmounted)
+            let bytes = room_host.render_frame((step as u64 + 1) * 16_000_000).expect("render room switch");
+            let _ = decode_batch(bytes).expect("decode room switch");
+        }
+        compose_rust::window::reset_window_size();
     }
 }
 

@@ -1,6 +1,12 @@
 //! FR-S8 wiring: the adapters start their agent under `ember-shim` through the shared spawn
 //! helper; the agent outlives the server, a new server reattaches from the stored offset, and
 //! `EMBER_SESSION_SHIM=off` keeps direct children.
+//!
+//! Every test that can start a shim holds a [`ShimGuard`] on its shim directory (#923): it kills
+//! what the test started on scope exit, also on a panic, and fails the test if a shim of that
+//! directory, or a process in such a shim's session, still runs after the test's own cleanup.
+
+mod shim_guard;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -19,6 +25,7 @@ use ember_server::events::{AgentEvent, ApprovalDecision, SessionStatus, TurnOutc
 use ember_server::session::{SessionError, Sessions};
 use ember_server::session_shim::{pid_alive, scan};
 use ember_server::store::Store;
+use shim_guard::ShimGuard;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
 
@@ -63,6 +70,7 @@ async fn fr_s8_agent_survives_dropping_the_server_and_a_new_one_reattaches_witho
     let _g = LOCK.lock().await;
     std::env::remove_var("EMBER_SESSION_SHIM");
     let shims = tempfile::tempdir().unwrap();
+    let _guard = ShimGuard::new(&[shims.path()]);
     let work = tempfile::tempdir().unwrap();
     let store = install(shims.path());
 
@@ -137,6 +145,7 @@ async fn fr_s8_offsets_persist_in_the_store_across_reopen() {
 async fn fr_s8_session_shim_off_keeps_direct_spawn() {
     let _g = LOCK.lock().await;
     let shims = tempfile::tempdir().unwrap();
+    let _guard = ShimGuard::new(&[shims.path()]);
     let work = tempfile::tempdir().unwrap();
     install(shims.path());
     std::env::set_var("EMBER_SESSION_SHIM", "off");
@@ -160,6 +169,7 @@ async fn fr_s8_without_a_session_id_or_runtime_the_spawn_is_direct() {
     let proc = spawn_agent(fake_agent_cmd("s-none", work.path(), 1)).await.unwrap();
     assert!(matches!(proc.handle, ProcHandle::Direct(_)));
     let shims = tempfile::tempdir().unwrap();
+    let _guard = ShimGuard::new(&[shims.path()]);
     install(shims.path());
     let mut cmd = fake_agent_cmd("x", work.path(), 1);
     cmd.env.retain(|(k, _)| k != SESSION_ENV);
@@ -182,6 +192,7 @@ async fn fr_s8_claude_adapter_runs_under_the_shim() {
     let _g = LOCK.lock().await;
     std::env::remove_var("EMBER_SESSION_SHIM");
     let shims = tempfile::tempdir().unwrap();
+    let _guard = ShimGuard::new(&[shims.path()]);
     let work = tempfile::tempdir().unwrap();
     install(shims.path());
     let (tx, mut rx) = mpsc::channel(64);
@@ -245,6 +256,30 @@ async fn wait_for(what: &str, mut ok: impl FnMut() -> bool) {
     panic!("timed out waiting for {what}");
 }
 
+/// A named pipe at `path` (mode 0600).
+#[cfg(unix)]
+fn make_fifo(path: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+    // SAFETY: a valid NUL-terminated path; mkfifo only creates a file.
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0, "mkfifo {}", path.display());
+}
+
+/// Write one line to the named pipe at `path`; the open waits for the reader (the fixture).
+#[cfg(unix)]
+async fn open_fifo(path: &Path) {
+    let path = path.to_path_buf();
+    let write = tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        std::fs::OpenOptions::new().write(true).open(&path)?.write_all(b"go\n")
+    });
+    tokio::time::timeout(Duration::from_secs(60), write)
+        .await
+        .expect("the fixture opened its gate")
+        .unwrap()
+        .unwrap();
+}
+
 fn events_of(store: &Store, id: &str) -> Vec<AgentEvent> {
     store.events_after(id, 0).unwrap().into_iter().map(|e| e.event).collect()
 }
@@ -268,6 +303,7 @@ async fn fr_s8_shim_killed_mid_turn_triggers_native_resume_on_next_message() {
     let _g = LOCK.lock().await;
     std::env::remove_var("EMBER_SESSION_SHIM");
     let shims = tempfile::tempdir().unwrap();
+    let _guard = ShimGuard::new(&[shims.path()]);
     let work = tempfile::tempdir().unwrap();
     let store = install(shims.path());
     let bin = crate_dir().join("tests/fixtures/claude/fake-claude.sh");
@@ -300,6 +336,7 @@ async fn fr_s8_crash_between_stdout_read_and_store_commit_replays_event() {
     let _g = LOCK.lock().await;
     std::env::remove_var("EMBER_SESSION_SHIM");
     let shims = tempfile::tempdir().unwrap();
+    let _guard = ShimGuard::new(&[shims.path()]);
     let work = tempfile::tempdir().unwrap();
     let store = install(shims.path());
 
@@ -353,6 +390,8 @@ async fn fr_s8_crash_between_stdout_read_and_store_commit_replays_event() {
         rest.extend(tick(&l));
     }
     assert_eq!(rest, (3..=10).collect::<Vec<_>>(), "nothing after it is lost: {rest:?}");
+    // The final acknowledgement is written by the bridge's task on this runtime: let it run.
+    _guard.settle().await;
     clear_runtime();
 }
 
@@ -361,6 +400,7 @@ async fn fr_s8_failed_event_store_never_acknowledges_later_output() {
     let _g = LOCK.lock().await;
     std::env::remove_var("EMBER_SESSION_SHIM");
     let shims = tempfile::tempdir().unwrap();
+    let _guard = ShimGuard::new(&[shims.path()]);
     let work = tempfile::tempdir().unwrap();
     let store = install(shims.path());
     let gate = require_commit("s-store-failed");
@@ -394,6 +434,7 @@ async fn fr_s8_pending_approval_restored_and_answerable_after_server_crash() {
     let _g = LOCK.lock().await;
     std::env::remove_var("EMBER_SESSION_SHIM");
     let shims = tempfile::tempdir().unwrap();
+    let _guard = ShimGuard::new(&[shims.path()]);
     let work = tempfile::tempdir().unwrap();
     let store = install(shims.path());
     let bin = crate_dir().join("tests/fixtures/claude/fake-claude-approval.sh");
@@ -438,11 +479,13 @@ async fn fr_s8_pending_approval_restored_and_answerable_after_server_crash() {
 /// Codex cannot be rejoined as it runs (its `initialize` needs a fresh process), but a turn in
 /// flight when the server died is drained from the surviving app-server into the store before
 /// that process is stopped.
+#[cfg(unix)]
 #[tokio::test]
 async fn fr_s8_codex_mid_turn_output_drained_and_persisted_after_server_crash() {
     let _g = LOCK.lock().await;
     std::env::remove_var("EMBER_SESSION_SHIM");
     let shims = tempfile::tempdir().unwrap();
+    let _guard = ShimGuard::new(&[shims.path()]);
     let work = tempfile::tempdir().unwrap();
     let store = install(shims.path());
     let bin = crate_dir().join("tests/fixtures/codex/fake-app-server.sh");
@@ -450,6 +493,11 @@ async fn fr_s8_codex_mid_turn_output_drained_and_persisted_after_server_crash() 
         .create_session("p", AgentKind::Codex, work.path().to_str().unwrap(), None, "t")
         .unwrap()
         .id;
+    // The fake pauses its turn after tick 2 until the gate is opened (#924): the turn is still
+    // running when the server dies however slow this machine is, instead of the test having to
+    // see two deltas within the 4.6 s the rest of the turn used to take.
+    let gate = work.path().join("codex-gate");
+    make_fifo(&gate);
 
     {
         let (store, bin, id) = (store.clone(), bin.clone(), id.clone());
@@ -471,6 +519,7 @@ async fn fr_s8_codex_mid_turn_output_drained_and_persisted_after_server_crash() 
     assert!(!ended(&store, &id), "the turn is still running when the server dies");
     let pid = scan(shims.path()).into_iter().find(|m| m.session == id).expect("the shim survives").agent_pid;
     assert!(pid_alive(pid));
+    open_fifo(&gate).await;
 
     let sessions =
         Sessions::new(store.clone(), vec![Arc::new(CodexAdapter::new(bin)) as Arc<dyn AgentAdapter>]);
@@ -487,7 +536,7 @@ async fn fr_s8_codex_mid_turn_output_drained_and_persisted_after_server_crash() 
         .collect();
     assert!(text.contains("tick 25 "), "the last delta arrived: {text}");
     assert!(
-        events.iter().any(|e| *e == AgentEvent::TurnEnded { outcome: TurnOutcome::Completed }),
+        events.contains(&AgentEvent::TurnEnded { outcome: TurnOutcome::Completed }),
         "{events:?}"
     );
     assert_eq!(store.session(&id).unwrap().unwrap().status, SessionStatus::Finished);
@@ -504,6 +553,7 @@ async fn fr_s8_acp_mid_turn_output_drained_and_persisted_after_server_crash() {
     let _g = LOCK.lock().await;
     std::env::remove_var("EMBER_SESSION_SHIM");
     let shims = tempfile::tempdir().unwrap();
+    let _guard = ShimGuard::new(&[shims.path()]);
     let work = tempfile::tempdir().unwrap();
     let store = install(shims.path());
     let config = || AcpConfig {
@@ -561,7 +611,7 @@ async fn fr_s8_acp_mid_turn_output_drained_and_persisted_after_server_crash() {
         "the message was completed: {events:?}"
     );
     assert!(
-        events.iter().any(|e| *e == AgentEvent::TurnEnded { outcome: TurnOutcome::Completed }),
+        events.contains(&AgentEvent::TurnEnded { outcome: TurnOutcome::Completed }),
         "{events:?}"
     );
     assert_eq!(store.session(&id).unwrap().unwrap().status, SessionStatus::Finished);
@@ -578,6 +628,7 @@ async fn fr_s8_acp_drain_stores_each_tool_call_once() {
     let _g = LOCK.lock().await;
     std::env::remove_var("EMBER_SESSION_SHIM");
     let shims = tempfile::tempdir().unwrap();
+    let _guard = ShimGuard::new(&[shims.path()]);
     let work = tempfile::tempdir().unwrap();
     let store = install(shims.path());
     let config = || AcpConfig {
@@ -640,7 +691,7 @@ async fn fr_s8_acp_drain_stores_each_tool_call_once() {
     assert_eq!(calls(&events, "t2"), 1, "the call that started during the drain is stored once: {events:?}");
     assert_eq!(results(&events, "t2"), vec![("two".to_string(), false)], "{events:?}");
     assert!(
-        events.iter().any(|e| *e == AgentEvent::TurnEnded { outcome: TurnOutcome::Completed }),
+        events.contains(&AgentEvent::TurnEnded { outcome: TurnOutcome::Completed }),
         "{events:?}"
     );
     assert_eq!(store.session(&id).unwrap().unwrap().status, SessionStatus::Finished);
@@ -654,6 +705,7 @@ async fn fr_s8_update_server_with_three_sessions_running_none_stops_or_loses_tur
     let _g = LOCK.lock().await;
     std::env::remove_var("EMBER_SESSION_SHIM");
     let shims = tempfile::tempdir().unwrap();
+    let _guard = ShimGuard::new(&[shims.path()]);
     let store = install(shims.path());
     let bin = crate_dir().join("tests/fixtures/claude/fake-claude-ticks.sh");
     let dirs: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
@@ -731,6 +783,7 @@ async fn fr_s8_antigravity_turn_survives_server_restart() {
     let _g = LOCK.lock().await;
     std::env::remove_var("EMBER_SESSION_SHIM");
     let shims = tempfile::tempdir().unwrap();
+    let _guard = ShimGuard::new(&[shims.path()]);
     let work = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let store = install(shims.path());
@@ -792,11 +845,12 @@ async fn fr_s8_per_session_memory_limit_from_the_start_request_ends_only_that_se
     std::env::remove_var("EMBER_SESSION_MEM_LIMIT_MB");
     std::env::set_var("EMBER_SESSION_MEM_POLL_MS", "100");
     let shims = tempfile::tempdir().unwrap();
+    let _guard = ShimGuard::new(&[shims.path()]);
     let work = tempfile::tempdir().unwrap();
     let _store = install(shims.path());
 
     let hog = spawn_agent(memhog_cmd("s-hog", work.path(), Some(1))).await.unwrap();
-    let mut free = spawn_agent(memhog_cmd("s-free", work.path(), None)).await.unwrap();
+    let free = spawn_agent(memhog_cmd("s-free", work.path(), None)).await.unwrap();
     let ProcHandle::Shim { exited: hog_exited, .. } = &hog.handle else { panic!("runs under a shim") };
     let mut hog_exited = hog_exited.clone();
     tokio::time::timeout(Duration::from_secs(20), hog_exited.wait_for(|v| *v))
@@ -807,6 +861,9 @@ async fn fr_s8_per_session_memory_limit_from_the_start_request_ends_only_that_se
     assert!(!*free_exited.borrow(), "the session without a limit continues");
     let pid = free.pid.expect("pid");
     assert!(pid_alive(pid));
+    // Both sessions end as the server ends them; the ended one is acknowledged too (#923), so
+    // neither shim lingers.
+    let _ = hog.handle.shutdown(Duration::from_millis(200)).await;
     let _ = free.handle.shutdown(Duration::from_millis(200)).await;
     std::env::remove_var("EMBER_SESSION_MEM_POLL_MS");
     clear_runtime();
@@ -886,6 +943,7 @@ async fn fr_s8_recovery_drains_a_running_acp_session_in_the_background_and_guard
     let _g = LOCK.lock().await;
     std::env::remove_var("EMBER_SESSION_SHIM");
     let shims = tempfile::tempdir().unwrap();
+    let _guard = ShimGuard::new(&[shims.path()]);
     let work = tempfile::tempdir().unwrap();
     let store = install(shims.path());
     let kind = AcpAdapter::new(acp_recovery_config()).unwrap().kind();
@@ -957,7 +1015,7 @@ async fn fr_s8_recovery_drains_a_running_acp_session_in_the_background_and_guard
         "the message was completed: {events:?}"
     );
     assert!(
-        events.iter().any(|e| *e == AgentEvent::TurnEnded { outcome: TurnOutcome::Completed }),
+        events.contains(&AgentEvent::TurnEnded { outcome: TurnOutcome::Completed }),
         "{events:?}"
     );
     assert_eq!(status_of(&store, &id), SessionStatus::Finished);
@@ -972,6 +1030,7 @@ async fn fr_s8_recovery_keeps_a_rejoined_session_mid_turn_and_marks_an_orphan_id
     let _g = LOCK.lock().await;
     std::env::remove_var("EMBER_SESSION_SHIM");
     let shims = tempfile::tempdir().unwrap();
+    let _guard = ShimGuard::new(&[shims.path()]);
     let work = tempfile::tempdir().unwrap();
     let store = install(shims.path());
     let bin = crate_dir().join("tests/fixtures/claude/fake-claude-approval.sh");
@@ -1054,4 +1113,48 @@ async fn fr_s8_recovery_without_shims_marks_every_mid_turn_session_idle() {
     assert_eq!(status_of(&store, &running), SessionStatus::Idle);
     assert_eq!(status_of(&store, &waiting), SessionStatus::Idle);
     assert_eq!(status_of(&store, &done), SessionStatus::Finished);
+}
+
+/// #923: a session the server had to kill is acknowledged, so its shim exits at once instead of
+/// lingering for its linger time (an hour by default).
+#[cfg(unix)]
+#[tokio::test]
+async fn fr_s8_shutdown_after_kill_lets_the_shim_exit() {
+    let _g = LOCK.lock().await;
+    std::env::remove_var("EMBER_SESSION_SHIM");
+    std::env::remove_var("EMBER_SESSION_MEM_LIMIT_MB");
+    let shims = tempfile::tempdir().unwrap();
+    let _guard = ShimGuard::new(&[shims.path()]);
+    let work = tempfile::tempdir().unwrap();
+    install(shims.path());
+    // memhog ignores its stdin, so closing it does not end the session: shutdown has to kill.
+    let proc = spawn_agent(memhog_cmd("s-kill", work.path(), None)).await.unwrap();
+    let shim = scan(shims.path()).into_iter().find(|m| m.session == "s-kill").expect("a shim").shim_pid;
+    proc.handle.shutdown(Duration::from_millis(200)).await.unwrap();
+    shim_guard::wait_ended(shim, "the shim after shutdown").await;
+    drop(proc.stdout);
+    clear_runtime();
+}
+
+/// #923: the same when the adapter dropped its reader of the agent's output before the shutdown
+/// (the bridge still learns the end of the agent and acknowledges it).
+#[cfg(unix)]
+#[tokio::test]
+async fn fr_s8_shutdown_after_the_reader_was_dropped_lets_the_shim_exit() {
+    let _g = LOCK.lock().await;
+    std::env::remove_var("EMBER_SESSION_SHIM");
+    std::env::remove_var("EMBER_SESSION_MEM_LIMIT_MB");
+    let shims = tempfile::tempdir().unwrap();
+    let _guard = ShimGuard::new(&[shims.path()]);
+    let work = tempfile::tempdir().unwrap();
+    install(shims.path());
+    let proc = spawn_agent(fake_agent_cmd("s-dropped", work.path(), 1000)).await.unwrap();
+    let shim = scan(shims.path()).into_iter().find(|m| m.session == "s-dropped").expect("a shim").shim_pid;
+    let mut lines = BufReader::new(proc.stdout).lines();
+    tokio::time::timeout(Duration::from_secs(15), lines.next_line()).await.unwrap().unwrap().unwrap();
+    drop(lines);
+    // fake-agent keeps ticking after its stdin closes: shutdown has to kill it.
+    proc.handle.shutdown(Duration::from_millis(200)).await.unwrap();
+    shim_guard::wait_ended(shim, "the shim after shutdown").await;
+    clear_runtime();
 }

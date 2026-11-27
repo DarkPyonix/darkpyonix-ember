@@ -29,9 +29,9 @@ use ember_server::store::Store;
 ///   exits, and `POST /api/server-token/rotate` does the same on a running server (#369)
 /// - Owner presence (FR-S12, #784): owner routes also need the in-memory owner key, claimed over
 ///   `<data dir>/owner.sock` (Windows: the named pipe `\\.\pipe\ember-owner-<hash>`, #815) by
-///   the app or by `ember-server owner <verb>` (a terminal only). The default mode is warn: a
-///   call without a key is logged and served, until the app ships its claim.
-///   `EMBER_OWNER_PRESENCE=enforce` refuses it with 403, on Windows too;
+///   the app or by `ember-server owner <verb>` (a terminal only). The default mode is enforce:
+///   a call without a key is refused with 403, on Windows too (#784).
+///   `EMBER_OWNER_PRESENCE=warn` logs and serves it instead;
 ///   `EMBER_OWNER_CONFIRM=off` grants a claim without the console code (best effort)
 /// - `EMBER_IDLE_SECS`: release an agent process after this long without activity (default 300)
 /// - `EMBER_CLAUDE_BIN`: the Claude Code CLI (default `claude` on `PATH`)
@@ -51,11 +51,17 @@ use ember_server::store::Store;
 /// - `EMBER_CHROME_BIN`: the browser for remote browsing (default: found on the machine)
 /// - `EMBER_BROWSER_MCP`: `chrome-devtools`, `playwright` or `off` (default): give agents the
 ///   project's browser as an MCP server, run with `npx`/`bunx` (`EMBER_BROWSER_MCP_RUNNER`)
-/// - `EMBER_IDE_COMPUTERS`, `EMBER_IDE_URL`, `EMBER_PUBLIC_URL`: "Open IDE" targets per
-///   computer, until ember node reports them (see `api::ide::IdeConfig`)
+/// - `EMBER_IDE_COMPUTERS`, `EMBER_PUBLIC_URL`: "Open IDE" details per computer (Gateway SSH
+///   host, OS, server URL; see `api::ide::IdeConfig`). `EMBER_IDE_URL` is no longer read: the
+///   VS Code target goes through the relay (D55)
 /// - `EMBER_AGENT_URL`: the server URL given to agents for A2A (default derived from
 ///   `EMBER_LISTEN`, with an unspecified address replaced by loopback)
 /// - `EMBER_A2A=0`: agent-to-agent messaging starts off until a user turns it on
+/// - `EMBER_A2A_TOKEN_IDLE_SECS` (default 86400), `EMBER_A2A_TOKEN_MAX_SECS` (default 604800),
+///   `EMBER_A2A_TOKEN_CHECK_SECS` (default 60): lifetimes of an agent's A2A runtime token
+///   (FR-T2a). A live agent run refreshes its token every check, so the idle lifetime ends only
+///   a token no live run holds; past the absolute lifetime an idle run is released and its next
+///   start mints a fresh token, while a run mid-turn keeps its token until the turn ends
 /// - `EMBER_EXEC_BIN`: the `ember-exec` shim for Claude Code on other computers (default: next
 ///   to this executable)
 /// - `EMBER_MOUNT`: `auto` (default), `nfs`, `fuse` or `off`. Mounts a Claude Code session's
@@ -92,6 +98,7 @@ use ember_server::store::Store;
 ///   only the guest routes and `/join`, never the owner API. `EMBER_GUEST_LISTEN_ALLOW_REMOTE=1`
 ///   is required for a non-loopback address; `EMBER_GUEST_ALLOWED_HOSTS` and
 ///   `EMBER_GUEST_PUBLIC_URL` name the hosts guests use. See `guest_door`.
+///
 /// `ember-server __keep-pty …` is the local node's PTY keeper (FR-P6): dispatched before any
 /// runtime or logging starts, as in `ember-node`, so a keeper holds one fd and little memory.
 fn main() -> anyhow::Result<()> {
@@ -117,9 +124,8 @@ async fn serve_main() -> anyhow::Result<()> {
     // Keys in the OS keystore where available (FR-S13, EMBER_KEYSTORE=file|os|auto).
     ember_node::keystore::install_from_env()?;
 
-    let data_dir = std::env::var_os("EMBER_DATA_DIR").map(PathBuf::from).unwrap_or_else(|| {
-        PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".ember")
-    });
+    // `EMBER_DATA_DIR`, else `<HOME or USERPROFILE>/.ember`: the folder the app looks in (#1042).
+    let data_dir = ember_server::runtime_dir::data_dir_from_vars(|name| std::env::var_os(name));
     std::fs::create_dir_all(&data_dir)?;
     // FR-A11 (#784): agy homes and the OSE data root live in the data dir's sibling runtime dir;
     // a data dir from before is moved once (idempotent).
@@ -286,6 +292,7 @@ async fn serve_main() -> anyhow::Result<()> {
     let store_for_mcp = store.clone();
     let store_for_channels = store.clone();
     let store_for_guest = store.clone();
+    let store_for_editor = store.clone();
     // One `Enrol` for the whole process: the owner's routes (mint, confirm, deny) and the enrol door
     // (redeem, poll, from step C3a) share its failure windows and its pending-token map, which live per instance.
     let enrol = computers::enrol::Enrol::with_server_key(store.clone(), server_key, transport_on);
@@ -392,12 +399,45 @@ async fn serve_main() -> anyhow::Result<()> {
         a2a.set_computer_setter(Arc::new(move |session_id: String, computer_id: String| {
             let (computers, sessions) = (computers.clone(), sessions.clone());
             Box::pin(async move {
-                computers
-                    .switch(&sessions, &session_id, &computer_id)
-                    .await
-                    .map(|_| ())
-                    .map_err(|e| e.to_string())
+                computers.switch(&sessions, &session_id, &computer_id).await.map_err(|e| e.to_string())?;
+                // Designated too, so the D20 fallback moves the teammate to the main server
+                // when that computer stops answering, and back (FR-T7, #82).
+                computers.designate(&session_id, Some(&computer_id)).map_err(|e| e.to_string())
             }) as futures::future::BoxFuture<'static, Result<(), String>>
+        }));
+    }
+    // `team spawn --computer` refuses a computer without the leader's directory (FR-T7, #82).
+    {
+        let computers = computers.clone();
+        a2a.set_dir_checker(Arc::new(move |computer_id: String, path: String| {
+            let computers = computers.clone();
+            Box::pin(async move {
+                let node = computers.client(&computer_id).map_err(|e| e.to_string())?;
+                match node.stat(&path).await {
+                    Ok(st) if st.kind == ember_node::proto::FileKind::Dir => Ok(()),
+                    Ok(_) => Err(format!("{path} on computer {computer_id} is not a directory")),
+                    Err(e) => Err(format!("computer {computer_id} has no directory {path} ({e})")),
+                }
+            }) as futures::future::BoxFuture<'static, Result<(), String>>
+        }));
+    }
+    // Team views show where each member runs, and a teammate's move reaches its leader (#82).
+    {
+        let c = computers.clone();
+        a2a.set_placement_lookup(Arc::new(move |session_id: &str| c.placement(session_id)));
+        // FR-T8 reports name the computer and the account label, never the account id (#82 P3).
+        let (c, s, acc) = (computers.clone(), sessions.clone(), accounts.clone());
+        a2a.set_report_context(Arc::new(move |rec: &ember_server::store::SessionRecord| {
+            ember_server::a2a::report::TurnContext {
+                computer: c.current(&s, &rec.id).ok().map(|cur| cur.computer.name),
+                account_label: rec.account_id.as_deref().and_then(|id| acc.get(id).ok().flatten()).map(|a| a.label),
+            }
+        }));
+        let weak = Arc::downgrade(&a2a);
+        computers.on_move(Arc::new(move |out: &computers::SwitchOutcome, fell_back: bool| {
+            let Some(a2a) = weak.upgrade() else { return };
+            let (sid, from, to) = (out.session_id.clone(), out.previous.name.clone(), out.computer.name.clone());
+            tokio::spawn(async move { a2a.teammate_moved(&sid, &from, &to, fell_back).await });
         }));
     }
 
@@ -515,7 +555,9 @@ async fn serve_main() -> anyhow::Result<()> {
     // runs in the background, so the start does not wait for an agent's turn; a draining
     // session stays running and refuses messages as busy until its drain ends.
     a2a.install_hooks();
-    sessions.recover_after_restart(shim_runtime.as_ref()).await?;
+    let recovery = sessions.recover_after_restart(shim_runtime.as_ref()).await?;
+    // FR-T2a: only a rejoined or draining agent can still hold a runtime token.
+    a2a.settle_tokens_after_restart(&recovery);
     // After binding, so agents woken by queued messages can reach the API.
     a2a.start();
     // Scheduled tasks (FR-A8): the first tick reports triggers missed while the server was down.
@@ -561,19 +603,27 @@ async fn serve_main() -> anyhow::Result<()> {
             tracing::warn!("local node did not start for ember-term: {e}");
         }
     }
-    let ose = Arc::new(ember_server::ose::OseManager::default().with_terminal_env(
-        ember_server::ose::TerminalEnv {
-            ember_term_dir,
-            local_node_state_dir: local_node_options.state_dir.clone(),
-        },
+    // The local computer's extension commands still run the OSE binary of this machine (FR-L31.14).
+    let ose = Arc::new(ember_server::ose::OseManager::default());
+    // FR-W4c (D55, #1064): the local computer's editor launches and relays go to the DarkPyonix
+    // manager of this machine, named by the local node's `manager.json`, else the environment.
+    let editor = Arc::new(ember_node::editor_manager::EditorRelays::new(
+        ember_node::editor_manager::ManagerSource::discover(local_node_options.state_dir.clone()),
     ));
-    // A SIGKILL of the previous server skips the token file drop (#521).
-    ose.sweep_stale_tokens();
+    // FR-W7, FR-W7a (D56): the editor settings, applied to each computer through its manager; the
+    // local computer through the manager above, in this process.
+    let editor_settings = Arc::new(
+        ember_server::editor_settings::EditorSettingsService::new(store_for_editor, computers.clone(), editor.clone())
+            .with_local_state_dir(local_node_options.state_dir.clone()),
+    );
+    // FR-W7a: a computer registered or enrolled from now on gets its effective settings at once.
+    editor_settings.apply_on_registration();
     let transfers = ember_server::transfers::TransferManager::new(
         &data_dir,
         Some(devices.clone()),
         Some(computers.clone()),
     );
+    transfers.publish_updates_to(sessions.clone());
     // The guest router is built only when the door is on, wrapped only by the door's guards, and
     // never merged into `app` (not under auth::protect either).
     let guest_app = guest_door.as_ref().map(|d| {
@@ -604,8 +654,9 @@ async fn serve_main() -> anyhow::Result<()> {
         .merge(ember_server::api::harnesses::router(sessions.clone(), computers.clone()))
         .merge(ember_server::api::git::router(sessions.clone(), computers.clone()))
         .merge(ember_server::api::integrations::router(sessions.clone(), computers.clone()))
-        .merge(ember_server::api::ide::router_with_computers_and_ose(sessions.clone(), ide, computers.clone(), ose.clone()))
-        .merge(ember_server::api::ide_extensions::router(computers.clone(), ose))
+        .merge(ember_server::api::ide::router_with_computers_and_editor(sessions.clone(), ide, computers.clone(), editor.clone()))
+        .merge(ember_server::api::ide_extensions::router(computers.clone(), ose.clone()))
+        .merge(ember_server::editor_settings::router(editor_settings))
         .merge(ember_server::schedules::api::agent_router(scheduler.clone(), a2a.clone()))
         .merge(ember_server::schedules::api::router(scheduler))
         .merge(ember_server::mcp::api::router(mcp))
@@ -749,11 +800,20 @@ async fn serve_main() -> anyhow::Result<()> {
         }
         (t, _) => t,
     };
+    let computer_status = tokio::spawn({
+        let computers = computers.clone();
+        let sessions = sessions.clone();
+        async move { computers::status_push::run(&computers, &sessions).await }
+    });
+    let shutdown_ose = ose.clone();
     let served = axum::serve(listener, local_app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            shutdown_ose.shutdown();
         })
         .await;
+    computer_status.abort();
+    ose.shutdown();
     let _ = stop_tx.send(true);
     if let Some(mut task) = guest_task {
         if tokio::time::timeout(std::time::Duration::from_secs(5), &mut task).await.is_err() {
@@ -777,4 +837,21 @@ async fn serve_main() -> anyhow::Result<()> {
     // Unmount project directories served from other computers.
     computers.shutdown().await;
     Ok(())
+}
+
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+
+        if let Ok(mut terminate) = signal(SignalKind::terminate()) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {},
+                _ = terminate.recv() => {},
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }

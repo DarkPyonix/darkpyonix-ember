@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use ember_editor_conn::exthost;
 use ember_editor_conn::language::{self as calls, CodeActionTrigger, CompletionTrigger, LanguageFeature, SignatureTrigger};
-use ember_editor_conn::rpc::{Arg, IncomingRequest, Reply};
+use ember_editor_conn::rpc::Reply;
 use ember_editor_conn::uri::UriComponents;
 use serde_json::Value;
 
@@ -18,7 +18,7 @@ use super::{Effect, Pending, ReadPurpose, SessionCore, SessionUpdate, Token};
 use crate::coords::{WidgetPos, WidgetRange};
 use crate::document::decode;
 use crate::language::assist::{parse_code_actions, parse_rename_location, parse_signature_help, word_at};
-use crate::language::completion::{expand_snippet, inflate_item, parse_suggest_result};
+use crate::language::completion::{inflate_item, parse_suggest_result};
 use crate::language::edits::{apply_text_edits, parse_text_edits, reject_reason, widget_order};
 use crate::language::navigation::{merge_locations, parse_document_symbols, parse_locations};
 use crate::language::{CodeAction, CompletionItem, EditSummary, Feature, LanguageRequest, LanguageUpdate, Location, TextEdit, WorkspaceEdit};
@@ -174,7 +174,7 @@ impl SessionCore {
     }
 
     /// Send `edits`, written against widget version `version`, to the document's widget.
-    fn lang_edit_widget(&mut self, uri: &UriComponents, version: u32, edits: &[TextEdit]) {
+    pub(super) fn lang_edit_widget(&mut self, uri: &UriComponents, version: u32, edits: &[TextEdit]) {
         for edit in widget_order(edits) {
             let request_id = self.edit_request_id();
             self.ui(SessionUpdate::Command {
@@ -360,11 +360,21 @@ impl SessionCore {
             item.additional_edits = full.additional_edits;
             item.command = full.command.or(item.command);
         }
-        // TODO(compose-rust#556): a snippet goes in as plain text and the caret stays after it.
-        let text = if item.is_snippet { expand_snippet(&item.insert_text).0 } else { item.insert_text.clone() };
-        let mut edits = vec![TextEdit { range: item.insert_range, text }];
-        edits.extend(item.additional_edits.iter().cloned());
-        self.lang_edit_widget(&uri, version, &edits);
+        if item.is_snippet {
+            self.ui(SessionUpdate::Command {
+                uri: uri.clone(),
+                command: WidgetCommand::InsertSnippet {
+                    base_version: version,
+                    range: item.insert_range,
+                    snippet: item.insert_text.clone(),
+                },
+            });
+            self.lang_edit_widget(&uri, version, &item.additional_edits);
+        } else {
+            let mut edits = vec![TextEdit { range: item.insert_range, text: item.insert_text.clone() }];
+            edits.extend(item.additional_edits.iter().cloned());
+            self.lang_edit_widget(&uri, version, &edits);
+        }
         self.lang_end_completion(None);
         self.lang_ui(LanguageUpdate::CompletionApplied { uri });
         if let Some(command) = item.command {
@@ -442,7 +452,8 @@ impl SessionCore {
     // ---- formatting -----------------------------------------------------------------------------
 
     fn lang_format(&mut self, ctx: Ctx, range: Option<WidgetRange>) {
-        let (tab, spaces) = (self.opts.tab_width, self.opts.insert_spaces);
+        let own = self.docs.get(&ctx.key).map(|d| d.indentation());
+        let (tab, spaces) = own.map_or((self.opts.tab_width, self.opts.insert_spaces), |i| (i.tab_size, i.insert_spaces));
         let whole = self.lang_providers(KindTag::DocumentFormatting, &ctx).first().map(|(h, _)| *h);
         let ranged = self.lang_providers(KindTag::RangeFormatting, &ctx).first().map(|(h, _)| *h);
         let call = match (range, whole, ranged) {
@@ -531,7 +542,9 @@ impl SessionCore {
         match result {
             Ok(v) => match (reject_reason(&v), WorkspaceEdit::from_json(&v)) {
                 (Some(reason), _) => self.lang_ui(LanguageUpdate::RenameRejected { uri, reason: Some(reason) }),
-                (None, Some(edit)) => self.lang_apply_workspace_edit(edit, Feature::Rename),
+                (None, Some(edit)) => {
+                    self.lang_apply_workspace_edit(edit, Feature::Rename);
+                }
                 (None, None) => self.lang_ui(LanguageUpdate::RenameRejected { uri, reason: None }),
             },
             Err(error) => self.lang_ui(LanguageUpdate::Failed { uri, feature: Feature::Rename, error }),
@@ -543,14 +556,32 @@ impl SessionCore {
     /// Apply the text edits of a workspace edit: open documents through their widget, other files
     /// by reading, editing and writing them. Answered with `WorkspaceEditApplied` when every file
     /// is done.
-    pub(super) fn lang_apply_workspace_edit(&mut self, edit: WorkspaceEdit, feature: Feature) {
+    ///
+    /// A document that is open but not the one the window shows has no widget to take the edits: they
+    /// go into the session's buffer, which is the source of truth, the document becomes unsaved, and the
+    /// widget gets the text when it is shown. Returns `false` when such an edit did not fit its document.
+    pub(super) fn lang_apply_workspace_edit(&mut self, edit: WorkspaceEdit, feature: Feature) -> bool {
+        let mut all_applied = true;
         self.lang.seq += 1;
         let id = self.lang.seq;
         let mut job = WorkspaceEditJob { feature, files: HashMap::new(), remaining: 0, summary: EditSummary { unsupported: edit.unsupported, ..Default::default() } };
         for (uri, edits) in edit.files {
             let key = uri.key();
-            match self.docs.get(&key).map(|d| (d.uri.clone(), d.widget_version())) {
-                Some((doc_uri, version)) => {
+            match self.docs.get(&key).map(|d| (d.uri.clone(), d.widget_version(), d.widget_text())) {
+                Some((doc_uri, _, text)) if self.active.as_deref().is_some_and(|a| a != key) => {
+                    match apply_text_edits(&text, &edits) {
+                        Ok(edited) => {
+                            self.restore_doc(&key, &edited, None);
+                            job.summary.files += 1;
+                            job.summary.edits += edits.len();
+                        }
+                        Err(error) => {
+                            all_applied = false;
+                            job.summary.failures.push((doc_uri.path.clone(), error));
+                        }
+                    }
+                }
+                Some((doc_uri, version, _)) => {
                     self.lang_edit_widget(&doc_uri, version, &edits);
                     job.summary.files += 1;
                     job.summary.edits += edits.len();
@@ -567,6 +598,7 @@ impl SessionCore {
         } else {
             self.lang.edit_jobs.insert(id, job);
         }
+        all_applied
     }
 
     pub(super) fn on_workspace_edit_read(&mut self, id: u64, uri: UriComponents, result: Result<Vec<u8>, String>) {
@@ -584,7 +616,7 @@ impl SessionCore {
                 bytes.extend_from_slice(text.as_bytes());
                 let token = self.token();
                 self.lang.edit_writes.insert(token, (id, edits.len()));
-                self.out.push(Effect::WriteFile { uri, bytes, token });
+                self.out.push(Effect::WriteFile { uri, bytes, token, expect: None });
             }
             Err(error) => self.lang_edit_file_done(id, Err((uri.path.clone(), error))),
         }
@@ -620,14 +652,14 @@ impl SessionCore {
     /// `MainThreadBulkEdits.$tryApplyWorkspaceEdit(dto, undoRedoGroupId?, isRefactoring?)` →
     /// `boolean` (extHost.protocol.ts L344): an extension's `workspace.applyEdit`, which is how
     /// the command of many code actions makes its change. Answered `true` once the edits are on
-    /// their way; a file that then fails is reported in the summary.
-    pub(super) fn on_try_apply_workspace_edit(&mut self, r: &IncomingRequest) {
-        let edit = r.args.first().and_then(Arg::as_json).and_then(WorkspaceEdit::from_json);
-        let applied = edit.is_some();
-        if let Some(edit) = edit {
-            self.lang_apply_workspace_edit(edit, Feature::CodeActions);
-        }
-        self.respond(r.req, Ok(Reply::Json(Value::Bool(applied))));
+    /// their way (open documents the window is not showing are edited before the answer); a file
+    /// that then fails is reported in the summary.
+    pub(super) fn on_try_apply_workspace_edit(&mut self, req: u32, dto: &Value) {
+        let applied = match WorkspaceEdit::from_json(dto) {
+            Some(edit) => self.lang_apply_workspace_edit(edit, Feature::CodeActions),
+            None => false,
+        };
+        self.respond(req, Ok(Reply::Json(Value::Bool(applied))));
     }
 
     // ---- code actions ---------------------------------------------------------------------------

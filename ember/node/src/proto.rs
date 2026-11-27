@@ -65,8 +65,21 @@ pub enum ErrorCode {
     TooLarge,
     /// The file receiver (FR-F16): not enough free space for an offer (507).
     NoSpace,
+    /// The file receiver: the offer expired before an answer (410).
+    Expired,
     /// The file receiver: the receive mode refuses the offer (403).
     Forbidden,
+    /// The editor launch (FR-W4b, D55): no DarkPyonix manager is known on this computer (503).
+    ManagerNotInstalled,
+    /// The editor launch: the manager has no editor server of that runtime installed (503).
+    OseNotInstalled,
+    /// The editor launch: the manager did not answer (502).
+    ManagerUnreachable,
+    /// The editor launch: the manager refused for another reason (502).
+    ManagerError,
+    /// `/exec-server` (FR-X5, #1047): no codex binary on this computer, neither
+    /// `EMBER_NODE_CODEX_BIN` nor `codex` on `PATH` (503).
+    CodexNotInstalled,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -128,6 +141,31 @@ pub struct MetricsSample {
     pub processes: Vec<ProcessMetrics>,
     /// How many processes the computer runs in all (the list above is cut to the top).
     pub process_count: u32,
+    /// The processor's name as the OS reports it (`Apple M2 Pro`); `None` when it says nothing.
+    /// Absent from an older node (#389).
+    #[serde(default)]
+    pub chip: Option<String>,
+    /// The OS name (`macOS`, the `NAME` of `/etc/os-release`); `None` where the node cannot read it.
+    #[serde(default)]
+    pub os_name: Option<String>,
+    /// The OS version (`15.2`, `VERSION_ID`); `None` where the node cannot read it.
+    #[serde(default)]
+    pub os_version: Option<String>,
+    /// Why [`ProcessMetrics::power_watts`] is empty, when it is.
+    #[serde(default)]
+    pub power_reason: Option<String>,
+    /// The agent processes of Ember sessions among this computer's processes. The node leaves it
+    /// empty; the server fills it for the computer its agents run on (FR-X7, #389).
+    #[serde(default)]
+    pub sessions: Vec<SessionProcess>,
+}
+
+/// One agent process of an Ember session (FR-X7): the client marks the process row with that
+/// pid as the member's.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionProcess {
+    pub pid: u32,
+    pub session: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -190,6 +228,10 @@ pub struct ProcessMetrics {
     pub cpu_percent: f32,
     /// Resident memory.
     pub memory_bytes: u64,
+    /// Power drawn by the process, in watts, where the OS gives it; `None` otherwise (see
+    /// [`MetricsSample::power_reason`]). Absent from an older node (#389).
+    #[serde(default)]
+    pub power_watts: Option<f32>,
 }
 
 /// `GET /metrics?top=<n>`: how many processes to list (default 20, at most 200).

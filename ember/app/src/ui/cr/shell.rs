@@ -3,11 +3,7 @@
 //!
 //! The decisions (menu order and labels, the screen a menu shows, which bottom tab a menu
 //! belongs to, which layout a window size gets, the badges) are the plain functions and enums of
-//! `ui::shell`, re-exported here and tested there; this file draws them. They move here when
-//! the Dioxus shell is deleted (phase 8).
-//!
-//! Content: the screens are still on dioxus-compose, so the content area shows a placeholder
-//! per menu until each screen lands in its phase.
+//! `ui::shell`, re-exported here and tested there; this file draws them.
 //!
 //! The window controls' strip (macOS traffic lights, Windows caption buttons, a Linux desktop's
 //! own) is reserved from the toolkit's reported safe area on every system (FR-L33,
@@ -30,9 +26,9 @@ pub use crate::ui::shell::{
     active_menu, avatar_initial, badge_text, caption_reserved_width, nav_badge, nav_mode,
     screen_for, tab_badge, tab_for_menu, toggled_collapse, tinted_svg, BottomTab, NavBadge,
     NavCounts, NavMenu, Screen, ShellMode, BOTTOM_TABS, DEMO_USER, ICON_GEAR_SVG, ICON_MOON_SVG,
-    ICON_MORE_SVG, ICON_SUN_SVG, MORE_MENUS, ORG_NAME, PLACEHOLDER_TEXT, WINDOWS_CAPTION_HEIGHT_DP,
+    ICON_MORE_SVG, ICON_SUN_SVG, MORE_MENUS, ORG_NAME, WINDOWS_CAPTION_HEIGHT_DP,
 };
-use super::components::{Clickable, EmberSheet, Label};
+use super::components::{Clickable, EmberSheet, Label, NamedClickable};
 use super::theme::*;
 pub const ICON_SEARCH_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" fill=\"none\" viewBox=\"0 0 24 24\" stroke-width=\"1.5\" stroke=\"currentColor\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" d=\"m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z\"/></svg>";
 pub const ICON_MENU_SVG: &str = include_str!("../../../assets/nav/menu.svg");
@@ -67,8 +63,18 @@ fn transparent() -> Paint {
 // ---------------------------------------------------------------------------------------------
 
 /// Go to a menu. Projects and a conversation are real screens; the rest only change the menu.
+/// When the 루틴 screen's form is open and dirty, leaving 루틴 for another menu asks the discard
+/// question first (FR-L25, #596).
 pub fn choose(ui: &SharedUi, menu: NavMenu) {
-    let in_conversation = matches!(ui.route.get_untracked(), Route::Conversation(_));
+    let route = ui.route.get_untracked();
+    if active_menu(&route, ui.menu.get_untracked()) == NavMenu::Routines
+        && menu != NavMenu::Routines
+        && ui.routine_form_dirty.get_untracked()
+    {
+        ui.routine_pending_leave.set(Some(crate::ui::routines::Leave::NavMenu(menu)));
+        return;
+    }
+    let in_conversation = matches!(route, Route::Conversation(_));
     match menu {
         NavMenu::Projects => ui.go(Route::Projects),
         NavMenu::Sessions => {
@@ -87,6 +93,18 @@ pub fn choose(ui: &SharedUi, menu: NavMenu) {
     }
     ui.detail_open.set(false);
     ui.set_menu(menu);
+}
+
+/// Open the global search screen, asking the discard question first when leaving a dirty routine
+/// form on 루틴 (FR-L25, #596).
+pub fn open_search(ui: &SharedUi) {
+    if active_menu(&ui.route.get_untracked(), ui.menu.get_untracked()) == NavMenu::Routines
+        && ui.routine_form_dirty.get_untracked()
+    {
+        ui.routine_pending_leave.set(Some(crate::ui::routines::Leave::Search));
+        return;
+    }
+    ui.go(Route::Search);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -127,7 +145,7 @@ fn icon_bytes(svg: &'static str, size: f32, argb: u32) -> &'static [u8] {
 /// no such glyphs).
 pub fn NavIcon(svg: &'static str, argb: u32, size: f32) {
     let id = compose_rust::asset(AssetKind::Svg, icon_bytes(svg, size, argb));
-    cu::Image(id).modifier(Modifier::new().size(size, size));
+    { use ::compose_rust::ui::Image; Image!(id, modifier = Modifier::new().size(size, size)) };
 }
 
 /// The 18 px red count badge (`.redbadge`): white 11 px number on `red`.
@@ -136,26 +154,21 @@ pub fn RedBadge(n: usize) {
     let text = badge_text(n);
     let narrow = text.chars().count() <= 1;
     let width = if narrow { Some(18.0) } else { None };
-    cu::Box()
-        .modifier(
-            Modifier::new()
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                 .width_if(width)
                 .height(18.0)
                 .background(paint(p.red.strong))
-                .corner_radius(9.0),
-        )
-        .alignment(Alignment::Center)
-        .content(|| {
-            cu::Row().alignment(Alignment::Center).content(|| {
+                .corner_radius(9.0), alignment = Alignment::Center, {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::Center, {
                 if !narrow {
-                    cu::Spacer().modifier(Modifier::new().width(5.0));
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(5.0)) };
                 }
                 Label(&text, Fs::Xs2, Weight::Semibold, Some(paint(compose_rust::Color::rgb(0xffffff))), None);
                 if !narrow {
-                    cu::Spacer().modifier(Modifier::new().width(5.0));
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(5.0)) };
                 }
-            });
-        });
+            }) };
+        }) };
 }
 
 /// One sidebar row: 38 px pill, icon, label, then a muted count or a red badge at the right.
@@ -172,12 +185,12 @@ pub fn NavRow(menu: NavMenu, active: bool, badge: NavBadge, on_click: impl FnMut
         Alignment::CenterStart,
         on_click,
         || {
-            cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                cu::Spacer().modifier(Modifier::new().width(SP[2]));
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
                 NavIcon(menu.svg(), fg.to_argb(), 18.0);
-                cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
                 Label(menu.label(), Fs::Md, Weight::Medium, Some(paint(fg)), Some(1));
-                cu::Spacer().modifier(Modifier::new().weight(1.0));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                 match badge {
                     NavBadge::None => {}
                     NavBadge::Count(n) => {
@@ -186,38 +199,53 @@ pub fn NavRow(menu: NavMenu, active: bool, badge: NavBadge, on_click: impl FnMut
                     }
                     NavBadge::Alert(n) => RedBadge(n),
                 }
-                cu::Spacer().modifier(Modifier::new().width(SP[2]));
-            });
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
+            }) };
         },
     );
 }
 
 /// One rail item: a 44 px rounded square with the icon centred and the red badge at its top
-/// right corner.
+/// right corner. Its accessible name is `menu.label()`, matching the visible tooltip (`core.js`,
+/// FR-L10, #501).
 pub fn RailItem(menu: NavMenu, active: bool, badge: NavBadge, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let fg = if active { p.ink_text } else { p.text_2 };
     let bg = if active { paint(p.ink) } else { transparent() };
-    Clickable(
+    let tip = menu.label().to_string();
+    NamedClickable(
+        menu.label(),
         Modifier::new().size(44.0, 44.0).background(bg).corner_radius(12.0),
         Alignment::Center,
         on_click,
-        || {
-            NavIcon(menu.svg(), fg.to_argb(), 20.0);
-            if let NavBadge::Alert(n) = badge {
-                cu::Box()
-                    .modifier(Modifier::new().fill_max_width().fill_max_height())
-                    .alignment(Alignment::TopEnd)
-                    .content(|| {
-                        // `.nav .redbadge`: top 2, right 0.
-                        cu::Column().content(|| {
-                            cu::Spacer().modifier(Modifier::new().height(2.0));
-                            RedBadge(n);
-                        });
-                    });
-            }
+        move || {
+            { use ::compose_rust::ui::Tooltip; Tooltip!(tip, content = move || {
+                NavIcon(menu.svg(), fg.to_argb(), 20.0);
+                if let NavBadge::Alert(n) = badge {
+                    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().fill_max_height(), alignment = Alignment::TopEnd, {
+                            // `.nav .redbadge`: top 2, right 0.
+                            { use ::compose_rust::ui::Column; Column!({
+                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(2.0)) };
+                                RedBadge(n);
+                            }) };
+                        }) };
+                }
+            }) };
         },
     );
+}
+
+/// The Korean accessible name and tooltip of a rail footer tool button (`core.js` `.sidetools`,
+/// FR-L10, #501).
+pub fn rail_tool_label(label: &str) -> &'static str {
+    match label {
+        "검색" => super::a11y::SEARCH,
+        "설정" => super::a11y::SETTINGS,
+        "데모 초기화" => super::a11y::DEMO_RESET,
+        s if s.starts_with("테마") => super::a11y::THEME,
+        s if s.starts_with("플랫폼") => super::a11y::PLATFORM,
+        _ => super::a11y::SETTINGS,
+    }
 }
 
 /// A footer tool row (theme, settings): icon and label in the sidebar, icon alone in the rail.
@@ -225,11 +253,18 @@ pub fn RailItem(menu: NavMenu, active: bool, badge: NavBadge, on_click: impl FnM
 pub fn ToolRow(svg: &'static str, label: &str, rail: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     if rail {
-        Clickable(
+        let a11y = rail_tool_label(label);
+        let tip = a11y.to_string();
+        NamedClickable(
+            a11y,
             Modifier::new().size(44.0, 40.0).corner_radius(CORNER_SM),
             Alignment::Center,
             on_click,
-            || NavIcon(svg, p.muted.to_argb(), 20.0),
+            move || {
+                { use ::compose_rust::ui::Tooltip; Tooltip!(tip, {
+                    NavIcon(svg, p.muted.to_argb(), 20.0);
+                }) };
+            },
         );
         return;
     }
@@ -238,44 +273,52 @@ pub fn ToolRow(svg: &'static str, label: &str, rail: bool, on_click: impl FnMut(
         Alignment::CenterStart,
         on_click,
         || {
-            cu::Row().alignment(Alignment::CenterStart).content(|| {
-                cu::Spacer().modifier(Modifier::new().width(SP[2]));
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
                 NavIcon(svg, p.muted.to_argb(), 18.0);
-                cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
                 Label(label, Fs::Sm, Weight::Medium, Some(paint(p.muted)), Some(1));
-            });
+            }) };
         },
     );
 }
 
 /// The brand block: mark, "Ember" 15 px semibold and the org line 12 px muted. A click folds
-/// or unfolds the sidebar (the mockup's logo button).
+/// or unfolds the sidebar (the mockup's logo button, `aria-label="사이드바 접기/펼치기"`, #501).
 pub fn Brand(compact: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let size = 32.0;
     let mark = crate::ui::shell::mark_svg_for(size).as_bytes();
     let m = Modifier::new().fill_max_width_if(!compact);
-    Clickable(m, if compact { Alignment::Center } else { Alignment::CenterStart }, on_click, || {
-        // A Box centers both children on the cross axis: the logo against the two-line text.
-        cu::Box().alignment(Alignment::CenterStart).content(|| {
-            if !compact {
-                cu::Row().alignment(Alignment::CenterStart).content(|| {
-                    // 6 side padding, the 32 px mark, then the 10 px gap.
-                    cu::Spacer().modifier(Modifier::new().width(6.0 + size + 10.0));
-                    cu::Column().spacing(6.0).content(|| {
-                        Label("Ember", Fs::Lg, Weight::Semibold, None, None);
-                        Label(ORG_NAME, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
-                    });
-                });
-            }
-            cu::Row().content(|| {
-                if !compact {
-                    cu::Spacer().modifier(Modifier::new().width(6.0));
-                }
-                cu::Image(compose_rust::asset(AssetKind::Svg, mark))
-                    .modifier(Modifier::new().size(size, size));
-            });
+    if compact {
+        let tip = super::a11y::SIDEBAR_TOGGLE.to_string();
+        NamedClickable(super::a11y::SIDEBAR_TOGGLE, m, Alignment::Center, on_click, move || {
+            { use ::compose_rust::ui::Tooltip; Tooltip!(tip, {
+                { use ::compose_rust::ui::Box; Box!(alignment = Alignment::CenterStart, {
+                    { use ::compose_rust::ui::Row; Row!({
+                        { use ::compose_rust::ui::Image; Image!(compose_rust::asset(AssetKind::Svg, mark), modifier = Modifier::new().size(size, size)) };
+                    }) };
+                }) };
+            }) };
         });
+        return;
+    }
+    Clickable(m, Alignment::CenterStart, on_click, || {
+        // A Box centers both children on the cross axis: the logo against the two-line text.
+        { use ::compose_rust::ui::Box; Box!(alignment = Alignment::CenterStart, {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, {
+                // 6 side padding, the 32 px mark, then the 10 px gap.
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(6.0 + size + 10.0)) };
+                { use ::compose_rust::ui::Column; Column!(spacing = 6.0, {
+                    Label("Ember", Fs::Lg, Weight::Semibold, None, None);
+                    Label(ORG_NAME, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                }) };
+            }) };
+            { use ::compose_rust::ui::Row; Row!({
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(6.0)) };
+                { use ::compose_rust::ui::Image; Image!(compose_rust::asset(AssetKind::Svg, mark), modifier = Modifier::new().size(size, size)) };
+            }) };
+        }) };
     });
 }
 
@@ -284,24 +327,16 @@ pub fn Brand(compact: bool, on_click: impl FnMut() + 'static) {
 pub fn UserRow(rail: bool) {
     let p = ember_theme().palette;
     let (name, handle) = DEMO_USER;
-    cu::Row()
-        .alignment(Alignment::CenterStart)
-        .modifier(Modifier::new().fill_max_width())
-        .content(|| {
+    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
             if rail {
-                cu::Spacer().modifier(Modifier::new().weight(1.0));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
             } else {
-                cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[1])) };
             }
-            cu::Box()
-                .modifier(
-                    Modifier::new()
+            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                         .size(28.0, 28.0)
                         .background(paint(p.blue.strong))
-                        .corner_radius(14.0),
-                )
-                .alignment(Alignment::Center)
-                .content(|| {
+                        .corner_radius(14.0), alignment = Alignment::Center, {
                     Label(
                         &avatar_initial(name),
                         Fs::Sm,
@@ -309,17 +344,17 @@ pub fn UserRow(rail: bool) {
                         Some(paint(compose_rust::Color::rgb(0xffffff))),
                         None,
                     );
-                });
+                }) };
             if rail {
-                cu::Spacer().modifier(Modifier::new().weight(1.0));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
             } else {
-                cu::Spacer().modifier(Modifier::new().width(SP[2]));
-                cu::Column().spacing(4.0).content(|| {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
+                { use ::compose_rust::ui::Column; Column!(spacing = 4.0, {
                     Label(name, Fs::Sm, Weight::Semibold, None, Some(1));
                     Label(handle, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                });
+                }) };
             }
-        });
+        }) };
 }
 
 /// Whether the demo-only sidebar/phone-menu rows (`플랫폼: 기타`, `데모 초기화`) are shown.
@@ -345,20 +380,14 @@ pub fn Sidebar(rail: bool, active: NavMenu, counts: NavCounts, on_collapse: impl
     let demo_tools = show_demo_tools();
     let plat_ios = remember(|| mutable_state_of(false));
     let plat_label = if plat_ios.get() { "플랫폼: iOS" } else { "플랫폼: 기타" };
-    cu::Row().modifier(Modifier::new().fill_max_height()).content(|| {
-        cu::Column()
-            .modifier(Modifier::new().width(width - 1.0).fill_max_height().background(paint(p.bg)))
-            .content(|| {
-                cu::Row().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
-                    cu::Spacer().modifier(Modifier::new().width(side));
-                    cu::Column()
-                        .spacing(2.0)
-                        .alignment(if rail { Alignment::TopCenter } else { Alignment::TopStart })
-                        .modifier(Modifier::new().weight(1.0).fill_max_height())
-                        .content(|| {
-                            cu::Spacer().modifier(Modifier::new().height(top));
+    { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_height(), {
+        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().width(width - 1.0).fill_max_height().background(paint(p.bg)), {
+                { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width().fill_max_height(), {
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(side)) };
+                    { use ::compose_rust::ui::Column; Column!(spacing = 2.0, alignment = if rail { Alignment::TopCenter } else { Alignment::TopStart }, modifier = Modifier::new().weight(1.0).fill_max_height(), {
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(top)) };
                             Brand(rail, on_collapse);
-                            cu::Spacer().modifier(Modifier::new().height(below_brand));
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(below_brand)) };
                             for menu in NavMenu::ALL {
                                 let u = ui.clone();
                                 let badge = nav_badge(menu, &counts);
@@ -368,19 +397,19 @@ pub fn Sidebar(rail: bool, active: NavMenu, counts: NavCounts, on_collapse: impl
                                     NavRow(menu, menu == active, badge, move || choose(&u, menu));
                                 }
                             }
-                            cu::Spacer().modifier(Modifier::new().weight(1.0));
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                             // `.sidetools`: 8 margin, a 1 px `--line` border, 8 padding.
-                            cu::Spacer().modifier(Modifier::new().height(SP[1]));
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[1])) };
                             // In the rail the border spans the 44 px tool width only.
                             let divider = Modifier::new().height(1.0).background(paint(p.line));
-                            cu::Spacer().modifier(if rail { divider.width(44.0) } else { divider.fill_max_width() });
-                            cu::Spacer().modifier(Modifier::new().height(4.0));
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = if rail { divider.width(44.0) } else { divider.fill_max_width() }) };
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(4.0)) };
                             let u = ui.clone();
                             ToolRow(theme_svg, &format!("테마: {}", pref.label()), rail, move || {
                                 u.set_theme_pref(u.theme_pref.get_untracked().next());
                             });
                             let us = ui.clone();
-                            ToolRow(ICON_SEARCH_SVG, "검색", rail, move || us.go(Route::Search));
+                            ToolRow(ICON_SEARCH_SVG, "검색", rail, move || open_search(&us));
                             ToolRow(ICON_GEAR_SVG, "설정", rail, on_settings);
                             if demo_tools {
                                 let pl = plat_ios.clone();
@@ -396,15 +425,15 @@ pub fn Sidebar(rail: bool, active: NavMenu, counts: NavCounts, on_collapse: impl
                                 });
                             }
                             // `.me`: 8 margin and 12 padding above the avatar.
-                            cu::Spacer().modifier(Modifier::new().height(16.0));
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(16.0)) };
                             UserRow(rail);
-                            cu::Spacer().modifier(Modifier::new().height(bottom));
-                        });
-                    cu::Spacer().modifier(Modifier::new().width(side));
-                });
-            });
-        cu::Spacer().modifier(Modifier::new().width(1.0).fill_max_height().background(paint(p.line)));
-    });
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(bottom)) };
+                        }) };
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(side)) };
+                }) };
+            }) };
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(1.0).fill_max_height().background(paint(p.line))) };
+    }) };
 }
 
 /// The floating bottom bar: five equal-width tabs, icon above an 11 px label, red badges.
@@ -414,23 +443,18 @@ pub fn BottomBar(active: NavMenu, counts: NavCounts, on_choose: impl FnMut(Botto
     let theme = ember_theme();
     let p = theme.palette;
     let marked = tab_for_menu(active);
-    cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
-        cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
-            cu::Spacer().modifier(Modifier::new().width(TABBAR_SIDE_GAP));
-            cu::Box()
-                .modifier(
-                    with_shadows(Modifier::new(), theme.shadow_md())
+    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), {
+        { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width(), {
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(TABBAR_SIDE_GAP)) };
+            { use ::compose_rust::ui::Box; Box!(modifier = with_shadows(Modifier::new(), theme.shadow_md())
                         .weight(1.0)
                         .height(TABBAR_H)
                         .background(paint(p.surface))
                         .border(1.0, paint(p.line))
-                        .corner_radius(TABBAR_RADIUS),
-                )
-                .alignment(Alignment::Center)
-                .content(|| {
-                    cu::Row().alignment(Alignment::Center).modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
+                        .corner_radius(TABBAR_RADIUS), alignment = Alignment::Center, {
+                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::Center, modifier = Modifier::new().fill_max_width().fill_max_height(), {
                         // `.side` padding 6 4: the tabs sit 4 px inside the border.
-                        cu::Spacer().modifier(Modifier::new().width(SP[0]));
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[0])) };
                         for tab in BOTTOM_TABS {
                             let mut choose_tab = on_choose.clone();
                             let ink = if tab == marked { p.text } else { p.muted };
@@ -443,39 +467,33 @@ pub fn BottomBar(active: NavMenu, counts: NavCounts, on_choose: impl FnMut(Botto
                                 || {
                                   // The pill fills its cell (`.nav.tab{flex:1 1 0;min-width:0}` at 560
                                   // and below): a fixed 70 dp pill overflowed a 360 window (FR-L28.1).
-                                  cu::Box()
-                                    .modifier(Modifier::new().fill_max_width().height(52.0).background(bg).corner_radius(20.0))
-                                    .alignment(Alignment::Center)
-                                    .content(|| {
-                                    cu::Box().modifier(Modifier::new().fill_max_width().fill_max_height()).alignment(Alignment::Center).content(|| {
-                                        cu::Column().alignment(Alignment::TopCenter).spacing(2.0).content(|| {
+                                  { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().height(52.0).background(bg).corner_radius(20.0), alignment = Alignment::Center, {
+                                    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().fill_max_height(), alignment = Alignment::Center, {
+                                        { use ::compose_rust::ui::Column; Column!(alignment = Alignment::TopCenter, spacing = 2.0, {
                                             NavIcon(tab.svg(), ink.to_argb(), 18.0);
                                             Label(tab.label(), Fs::Xs2, Weight::Medium, Some(paint(ink)), Some(1));
-                                        });
+                                        }) };
                                         // `.nav.tab .redbadge`: top 0, right 4, on the tab itself.
                                         if let Some(n) = tab_badge(tab, &counts) {
-                                            cu::Box()
-                                                .modifier(Modifier::new().fill_max_width().fill_max_height())
-                                                .alignment(Alignment::TopEnd)
-                                                .content(|| {
-                                                    cu::Row().content(|| {
+                                            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().fill_max_height(), alignment = Alignment::TopEnd, {
+                                                    { use ::compose_rust::ui::Row; Row!({
                                                         RedBadge(n);
-                                                        cu::Spacer().modifier(Modifier::new().width(SP[0]));
-                                                    });
-                                                });
+                                                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[0])) };
+                                                    }) };
+                                                }) };
                                         }
-                                    });
-                                    });
+                                    }) };
+                                    }) };
                                 },
                             );
                         }
-                        cu::Spacer().modifier(Modifier::new().width(SP[0]));
-                    });
-                });
-            cu::Spacer().modifier(Modifier::new().width(TABBAR_SIDE_GAP));
-        });
-        cu::Spacer().modifier(Modifier::new().height(TABBAR_BOTTOM_GAP));
-    });
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[0])) };
+                    }) };
+                }) };
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(TABBAR_SIDE_GAP)) };
+        }) };
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(TABBAR_BOTTOM_GAP)) };
+    }) };
 }
 
 /// Whether the phone layout draws its floating bottom bar. A detail view (an open conversation
@@ -495,12 +513,13 @@ pub fn PhoneMenu(open: compose_rust::runtime::MutableState<bool>, on_settings: i
     let demo_tools = show_demo_tools();
     let plat_ios = remember(|| mutable_state_of(false));
     let plat_label = if plat_ios.get() { "플랫폼: iOS" } else { "플랫폼: 기타" };
-    cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::TopStart).content(|| {
-        cu::Spacer().modifier(Modifier::new().weight(1.0));
-        cu::Column().alignment(Alignment::TopEnd).content(|| {
-            cu::Spacer().modifier(Modifier::new().height(10.0));
+    { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width(), alignment = Alignment::TopStart, {
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
+        { use ::compose_rust::ui::Column; Column!(alignment = Alignment::TopEnd, {
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(10.0)) };
             let o = open.clone();
-            Clickable(
+            NamedClickable(
+                super::a11y::MENU,
                 with_shadows(Modifier::new(), theme.shadow_sm())
                     .size(H_CTL, H_CTL)
                     .background(paint(p.surface))
@@ -511,18 +530,14 @@ pub fn PhoneMenu(open: compose_rust::runtime::MutableState<bool>, on_settings: i
                 || NavIcon(ICON_MENU_SVG, p.text_2.to_argb(), 16.0),
             );
             if open.get() {
-                cu::Spacer().modifier(Modifier::new().height(4.0));
-                cu::Box()
-                    .modifier(
-                        with_shadows(Modifier::new(), theme.shadow_lg())
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(4.0)) };
+                { use ::compose_rust::ui::Box; Box!(modifier = with_shadows(Modifier::new(), theme.shadow_lg())
                             .width(168.0)
                             .background(paint(p.surface))
                             .border(1.0, paint(p.line))
                             .corner_radius(CORNER_MD)
-                            .padding(4.0),
-                    )
-                    .content(|| {
-                        cu::Column().content(|| {
+                            .padding(4.0), {
+                        { use ::compose_rust::ui::Column; Column!({
                             let (u, o) = (ui.clone(), open.clone());
                             menu_item(theme_svg, "테마 전환", move || {
                                 u.set_theme_pref(u.theme_pref.get_untracked().next());
@@ -531,7 +546,7 @@ pub fn PhoneMenu(open: compose_rust::runtime::MutableState<bool>, on_settings: i
                             let (u, o) = (ui.clone(), open.clone());
                             menu_item(ICON_SEARCH_SVG, "검색", move || {
                                 o.set(false);
-                                u.go(Route::Search);
+                                open_search(&u);
                             });
                             let (o, mut s) = (open.clone(), on_settings.clone());
                             menu_item(ICON_GEAR_SVG, "설정", move || {
@@ -554,12 +569,12 @@ pub fn PhoneMenu(open: compose_rust::runtime::MutableState<bool>, on_settings: i
                                     }
                                 });
                             }
-                        });
-                    });
+                        }) };
+                    }) };
             }
-        });
-        cu::Spacer().modifier(Modifier::new().width(SP[2]));
-    });
+        }) };
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
+    }) };
 }
 
 /// `.pmenu-pop button`: 38 px high, 10 px side padding, 8 px gap.
@@ -570,25 +585,14 @@ fn menu_item(svg: &'static str, label: &str, on_click: impl FnMut() + 'static) {
         Alignment::CenterStart,
         on_click,
         || {
-            cu::Row().alignment(Alignment::CenterStart).content(|| {
-                cu::Spacer().modifier(Modifier::new().width(10.0));
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(10.0)) };
                 NavIcon(svg, p.text.to_argb(), 18.0);
-                cu::Spacer().modifier(Modifier::new().width(SP[0] * 2.0));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[0] * 2.0)) };
                 Label(label, Fs::Sm, Weight::Regular, Some(paint(p.text)), Some(1));
-            });
+            }) };
         },
     );
-}
-
-/// A menu whose screen is not built yet ("준비 중입니다").
-pub fn Placeholder(menu: NavMenu) {
-    // A `Box` centers on both axes; a `Column`'s alignment is the horizontal one only.
-    cu::Box().alignment(Alignment::Center).modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
-        cu::Column().alignment(Alignment::Center).space_role(SpaceRole::Sm).content(|| {
-            Label(menu.label(), Fs::Xl3, PAGE_TITLE_WEIGHT, None, None);
-            Label(PLACEHOLDER_TEXT, Fs::Md, Weight::Regular, Some(paint(ember_theme().palette.muted)), None);
-        });
-    });
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -629,63 +633,44 @@ pub fn shell() {
     });
 
     let content = || {
-        cu::Column().modifier(Modifier::new().weight(1.0).fill_max_width().fill_max_height()).content(|| {
+        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0).fill_max_width().fill_max_height(), {
             // The strip the reported window controls cover above the content (FR-L33): a
             // leading set where the content touches the left edge (bottom tabs), a trailing set
             // (Windows caption, a Linux desktop's own) always, its width kept clear at the right.
             // Computed in `shell`, beside `mode`, so one read of the window size drives both.
             if strip.content_strip > 0.0 {
-                cu::Row()
-                    .modifier(Modifier::new().fill_max_width().height(strip.content_strip))
-                    .content(|| {
-                        cu::Spacer().modifier(Modifier::new().weight(1.0));
+                { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width().height(strip.content_strip), {
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                         if strip.trailing > 0.0 {
-                            cu::Spacer().modifier(Modifier::new().width(strip.trailing));
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(strip.trailing)) };
                         }
-                    });
+                    }) };
             }
-            cu::Column().modifier(Modifier::new().weight(1.0).fill_max_width()).content(|| {
-                // TODO(#220 phases 4-7): each screen replaces its placeholder as it moves.
+            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0).fill_max_width(), {
                 if ui.characters.get().is_some() {
                     super::characters_screen::CharactersScreen();
-                } else if matches!(screen, Screen::Search) {
-                    super::search::SearchScreen();
-                } else if matches!(screen, Screen::Channels) {
-                    super::channels::ChannelsScreen();
-                } else if matches!(screen, Screen::Launcher) {
-                    super::project::ProjectScreen();
-                } else if matches!(screen, Screen::Files) {
-                    super::files::FilesScreen();
-                } else if matches!(screen, Screen::Home) {
-                    super::home::HomeScreen();
-                } else if matches!(screen, Screen::VersionControl) {
-                    super::vcs::VcsScreen();
-                } else if matches!(screen, Screen::Agents) {
-                    super::agents::AgentsScreen();
-                } else if matches!(screen, Screen::Routines) {
-                    super::routines::RoutinesScreen();
-                } else if let Screen::Conversation(ref id) = screen {
-                    super::session::SessionScreen(Some(id.clone()));
-                } else if matches!(screen, Screen::Placeholder(NavMenu::Sessions)) {
-                    super::session::SessionScreen(None);
                 } else {
-                    let menu = match &screen {
-                        Screen::Conversation(_) => NavMenu::Sessions,
-                        Screen::Placeholder(m) => *m,
-                        _ => active,
-                    };
-                    Placeholder(menu);
+                    match &screen {
+                        Screen::Search => super::search::SearchScreen(),
+                        Screen::Channels => super::channels::ChannelsScreen(),
+                        Screen::Launcher => super::project::ProjectScreen(),
+                        Screen::Files => super::files::FilesScreen(),
+                        Screen::Home => super::home::HomeScreen(),
+                        Screen::VersionControl => super::vcs::VcsScreen(),
+                        Screen::Agents => super::agents::AgentsScreen(),
+                        Screen::Routines => super::routines::RoutinesScreen(),
+                        Screen::Sessions => super::session::SessionScreen(None),
+                        Screen::Conversation(id) => super::session::SessionScreen(Some(id.clone())),
+                    }
                 }
-            });
-        });
+            }) };
+        }) };
     };
 
-    cu::Box()
-        .modifier(Modifier::new().fill_max_width().fill_max_height().background(paint(theme.palette.bg)))
-        .content(|| {
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().fill_max_height().background(paint(theme.palette.bg)), {
             if mode == ShellMode::BottomTabs {
                 let detail = ui.detail_open.get();
-                cu::Column().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
+                { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width().fill_max_height(), {
                     content();
                     if bottom_bar_shown(detail) {
                         let u = ui.clone();
@@ -695,14 +680,14 @@ pub fn shell() {
                             BottomTab::More => more.set(true),
                         });
                     }
-                });
+                }) };
                 let s = settings_open.clone();
                 // The mockup hides the menu while a detail view (an open room) is shown.
                 if !detail {
                     PhoneMenu(phone_menu.clone(), move || s.set(true));
                 }
             } else {
-                cu::Row().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
+                { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width().fill_max_height(), {
                     let c = collapsed.clone();
                     let s = settings_open.clone();
                     Sidebar(
@@ -713,12 +698,12 @@ pub fn shell() {
                         move || s.set(true),
                     );
                     content();
-                });
+                }) };
             }
 
             let close = more_open.clone();
             EmberSheet("더보기", more_open.get(), move || close.set(false), None, || {
-                cu::Column().modifier(Modifier::new().fill_max_width().padding_role(SpaceRole::Md)).space_role(SpaceRole::Sm).content(|| {
+                { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width().padding_role(SpaceRole::Md), space_role = SpaceRole::Sm, {
                     for menu in MORE_MENUS {
                         let (u, more) = (ui.clone(), more_open.clone());
                         NavRow(menu, menu == active, NavBadge::None, move || {
@@ -735,21 +720,21 @@ pub fn shell() {
                     let (more, u) = (more_open.clone(), ui.clone());
                     ToolRow(ICON_SEARCH_SVG, "검색", false, move || {
                         more.set(false);
-                        u.go(Route::Search);
+                        open_search(&u);
                     });
                     let (more, settings) = (more_open.clone(), settings_open.clone());
                     ToolRow(ICON_GEAR_SVG, "설정", false, move || {
                         more.set(false);
                         settings.set(true);
                     });
-                });
+                }) };
             });
             let close = settings_open.clone();
             super::settings::SettingsSheet(settings_open.get(), move || close.set(false));
             super::new_session::NewSessionDialog();
             // The owner claim's code entry and requests (FR-S12, #842).
             super::owner_claim::OwnerClaimSheet();
-        });
+        }) };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -876,6 +861,7 @@ pub fn launch_parts(pref: ThemePref) -> (compose_rust::LaunchBuilder, fn()) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::cr::a11y;
 
     #[test]
     fn fr_l10_choosing_a_menu_changes_the_menu_and_leaves_a_conversation() {
@@ -920,10 +906,7 @@ mod tests {
         // Nothing reported yet: the phone layout.
         assert!(has_text(&first, "BottomTabs"));
         let mut report = |width: f32, class: WindowSizeClass| {
-            let event = HostEvent {
-                node_id: 0,
-                handler_id: 0,
-                payload: EventPayload::WindowSizeChanged {
+            let event = HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
                     width_dp: width,
                     height_dp: 900.0,
                     class,
@@ -931,8 +914,8 @@ mod tests {
                     safe_area_top: 0.0,
                     safe_area_leading: 0.0,
                     safe_area_trailing: 0.0,
-                },
-            };
+                    safe_area_bottom: 0.0,
+                });
             let (bytes, _) = host.dispatch(event).expect("dispatch");
             decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")).collect::<String>()
         };
@@ -955,10 +938,7 @@ mod tests {
         assert!(has_text(&first, "Sidebar"));
         assert!(!has_text(&first, "BottomTabs"));
         let mut report = |width: f32, height: f32, class: WindowSizeClass| {
-            let event = HostEvent {
-                node_id: 0,
-                handler_id: 0,
-                payload: EventPayload::WindowSizeChanged {
+            let event = HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
                     width_dp: width,
                     height_dp: height,
                     class,
@@ -966,8 +946,8 @@ mod tests {
                     safe_area_top: 0.0,
                     safe_area_leading: 0.0,
                     safe_area_trailing: 0.0,
-                },
-            };
+                    safe_area_bottom: 0.0,
+                });
             let (bytes, _) = host.dispatch(event).expect("dispatch");
             decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")).collect::<String>()
         };
@@ -1002,10 +982,7 @@ mod tests {
         let first = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
         assert!(has_text(&first, "inset 0 strip 0"), "nothing reported yet");
         let mut report = |width: f32, top: f32, leading: f32| {
-            let event = HostEvent {
-                node_id: 0,
-                handler_id: 0,
-                payload: EventPayload::WindowSizeChanged {
+            let event = HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
                     width_dp: width,
                     height_dp: 900.0,
                     class: WindowSizeClass::from_width_dp(width),
@@ -1013,8 +990,8 @@ mod tests {
                     safe_area_top: top,
                     safe_area_leading: leading,
                     safe_area_trailing: 0.0,
-                },
-            };
+                    safe_area_bottom: 0.0,
+                });
             let (bytes, _) = host.dispatch(event).expect("dispatch");
             decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")).collect::<String>()
         };
@@ -1040,11 +1017,12 @@ mod tests {
         let src = include_str!("shell.rs");
         let production = src.split("#[cfg(test)]").next().unwrap();
         assert!(
-            production.contains("cu::Column().modifier(Modifier::new().weight(1.0).fill_max_width().fill_max_height())"),
+            production.contains("Column!(modifier = Modifier::new().weight(1.0).fill_max_width().fill_max_height(), {"),
             "the shell content column must fill the width"
         );
         assert!(
-            production.contains("cu::Column().modifier(Modifier::new().weight(1.0).fill_max_width())"),
+            production.contains("Column!(modifier = Modifier::new().weight(1.0).fill_max_width(), {"
+),
             "the screen column inside it must fill the width"
         );
     }
@@ -1093,7 +1071,7 @@ mod tests {
         let ui = shared_ui();
         ui.go(Route::Projects);
         let (node_id, handler_id) = handlers[index];
-        sidebar.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("click sidebar search");
+        sidebar.dispatch(HostEvent::new(node_id, handler_id, EventPayload::Clicked)).expect("click sidebar search");
         assert_eq!(ui.route.get_untracked(), Route::Search);
 
         let mut rail = Host::new(|| Box::new(Recomposer::new(rail_probe)));
@@ -1105,7 +1083,7 @@ mod tests {
         assert_eq!(rail_handlers.len(), handlers.len());
         ui.go(Route::Projects);
         let (node_id, handler_id) = rail_handlers[index];
-        rail.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("click rail search");
+        rail.dispatch(HostEvent::new(node_id, handler_id, EventPayload::Clicked)).expect("click rail search");
         assert_eq!(ui.route.get_untracked(), Route::Search);
         ui.go(Route::Projects);
     }
@@ -1189,7 +1167,7 @@ mod tests {
             ui.go(Route::Projects);
             ui.set_menu(other);
             let (node_id, handler_id) = handlers[index];
-            sidebar.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("click sidebar row");
+            sidebar.dispatch(HostEvent::new(node_id, handler_id, EventPayload::Clicked)).expect("click sidebar row");
             assert_eq!(ui.menu.get_untracked(), menu, "the sidebar row {} changes the menu", menu.label());
 
             let mut rail = Host::new(|| Box::new(Recomposer::new(rail_probe)));
@@ -1201,7 +1179,7 @@ mod tests {
             ui.go(Route::Projects);
             ui.set_menu(other);
             let (node_id, handler_id) = rail_handlers[index];
-            rail.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("click rail item");
+            rail.dispatch(HostEvent::new(node_id, handler_id, EventPayload::Clicked)).expect("click rail item");
             assert_eq!(ui.menu.get_untracked(), menu, "the rail item {} changes the menu", menu.label());
         }
         // 프로젝트 also leaves a conversation for the project list (the issue's completion check).
@@ -1214,7 +1192,7 @@ mod tests {
             (handlers, index)
         };
         let (node_id, handler_id) = handlers[index.expect("the 프로젝트 row")];
-        sidebar.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("click 프로젝트");
+        sidebar.dispatch(HostEvent::new(node_id, handler_id, EventPayload::Clicked)).expect("click 프로젝트");
         assert_eq!(ui.route.get_untracked(), Route::Projects);
         assert_eq!(ui.menu.get_untracked(), NavMenu::Projects);
         ui.go(Route::Projects);
@@ -1237,7 +1215,7 @@ mod tests {
         };
         ui.go(Route::Projects);
         let (node_id, handler_id) = handlers[index.expect("the phone menu 검색 row is clickable")];
-        host.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("click 검색");
+        host.dispatch(HostEvent::new(node_id, handler_id, EventPayload::Clicked)).expect("click 검색");
         assert_eq!(ui.route.get_untracked(), Route::Search);
         ui.go(Route::Projects);
     }
@@ -1375,12 +1353,144 @@ mod tests {
         let _guard = crate::services::test_guard();
         let mut host = Host::new(|| Box::new(Recomposer::new(shell)));
         let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
-        // The shell mounts SettingsSheet (with theme, keymap, default IDE and archived toggle)
-        // instead of the old "준비 중입니다" placeholder.
+        // The shell mounts SettingsSheet (with theme, keymap and archived toggle) instead of the
+        // old "준비 중입니다" placeholder. No device-wide default IDE (FR-W7b: per project).
         assert!(has_text(&batch, "설정"));
         assert!(has_text(&batch, "화면 테마"));
         assert!(has_text(&batch, "에디터 단축키"));
-        assert!(has_text(&batch, "기본 IDE"));
+        assert!(!has_text(&batch, "기본 IDE"));
         assert!(has_text(&batch, "보관된 세션 표시"));
+    }
+
+    #[Composable]
+    fn rail_with_demo_probe() {
+        let theme = ember_theme();
+        let theme_svg = if theme.scheme == Scheme::Dark { ICON_MOON_SVG } else { ICON_SUN_SVG };
+        { use ::compose_rust::ui::Column; Column!({
+            Sidebar(true, NavMenu::Sessions, NavCounts::default(), || {}, || {});
+            ToolRow(ICON_CPU_SVG, "플랫폼: 기타", true, || {});
+            ToolRow(NavMenu::Routines.svg(), "데모 초기화", true, || {});
+            ToolRow(theme_svg, "테마: 시스템", false, || {});
+        }) };
+    }
+
+    #[test]
+    fn fr_l10_every_rail_icon_button_carries_its_korean_accessible_label_and_tooltip() {
+        // #501: every icon-only button in the rail (the compact logo button, the eight nav items,
+        // and the footer tool buttons) and the phone menu icon button must carry a Korean
+        // accessible label (`Modifier::label`, `Role::Button`, `click_action`) that matches its
+        // visible tooltip (`core.js`).
+        use compose_rust::protocol::{decode_batch, Mutation, PropertyValue};
+        use compose_rust::{Host, PropertyKind, Recomposer};
+        use std::collections::HashMap;
+
+        let _guard = crate::services::test_guard();
+
+        let extract_buttons = |content: fn()| {
+            let mut host = Host::new(move || Box::new(Recomposer::new(content)));
+            let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+            let mut click_nodes = Vec::new();
+            let mut mods: HashMap<u32, Vec<String>> = HashMap::new();
+            let mut widgets: HashMap<u32, String> = HashMap::new();
+            let mut parents: HashMap<u32, u32> = HashMap::new();
+            let mut texts: HashMap<u32, String> = HashMap::new();
+            let mut names: HashMap<u32, String> = HashMap::new();
+            for m in &batch {
+                match m {
+                    Mutation::Create { node_id, widget } => {
+                        widgets.insert(*node_id, format!("{widget:?}"));
+                    }
+                    Mutation::Insert { parent_id, node_id, .. } => {
+                        parents.insert(*node_id, *parent_id);
+                    }
+                    Mutation::SetProp { node_id, property: PropertyKind::OnClick, .. } => {
+                        click_nodes.push(*node_id);
+                    }
+                    Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                        texts.insert(*node_id, s.to_string());
+                    }
+                    Mutation::SetProp { node_id, property: PropertyKind::AccessibleName, value: PropertyValue::String(s) } => {
+                        names.insert(*node_id, s.to_string());
+                    }
+                    Mutation::SetModifier { node_id, modifier, .. } => {
+                        mods.entry(*node_id).or_default().push(format!("{modifier:?}"));
+                    }
+                    _ => {}
+                }
+            }
+            (click_nodes, mods, widgets, parents, texts, names)
+        };
+
+        // 1. Standard rail (`Sidebar(true, ...)`): 1 logo + 8 nav items + 3 footer tools = 12 buttons.
+        let (rail_clicks, rail_mods, rail_widgets, rail_parents, rail_texts, rail_names) = extract_buttons(rail_probe);
+        let expected_standard: Vec<&str> = std::iter::once(a11y::SIDEBAR_TOGGLE)
+            .chain(NavMenu::ALL.iter().map(|m| m.label()))
+            .chain([a11y::THEME, a11y::SEARCH, a11y::SETTINGS])
+            .collect();
+        assert_eq!(rail_clicks.len(), expected_standard.len(), "standard rail button count");
+
+        for (&node_id, &want_label) in rail_clicks.iter().zip(expected_standard.iter()) {
+            let m = rail_mods.get(&node_id).unwrap_or_else(|| panic!("no modifiers on rail button {want_label}"));
+            let sem = m
+                .iter()
+                .find(|s| s.starts_with("Semantics"))
+                .unwrap_or_else(|| panic!("rail button {want_label} (node {node_id}) has no Semantics modifier: {m:?}"));
+            assert_eq!(
+                rail_names.get(&node_id).map(String::as_str),
+                Some(want_label),
+                "rail button {want_label} missing AccessibleName: {rail_names:?}"
+            );
+            assert!(
+                sem.contains("Button"),
+                "rail button {want_label} semantics missing Role::Button: {sem}"
+            );
+            // Check that a Tooltip child under this button carries the matching Korean tooltip text.
+            let has_matching_tooltip = rail_widgets.iter().any(|(&wid, wname)| {
+                if wname != "Tooltip" {
+                    return false;
+                }
+                let mut cur = Some(wid);
+                let mut under = false;
+                while let Some(c) = cur {
+                    if c == node_id {
+                        under = true;
+                        break;
+                    }
+                    cur = rail_parents.get(&c).copied();
+                }
+                under && rail_texts.get(&wid).map(String::as_str) == Some(want_label)
+            });
+            assert!(
+                has_matching_tooltip,
+                "rail button {want_label} (node {node_id}) has no matching Tooltip({want_label:?})"
+            );
+        }
+
+        // 2. Demo rail tool buttons ("플랫폼 미리보기 전환", "데모 초기화") also carry their Korean labels and tooltips.
+        let (demo_clicks, demo_mods, _, _, _, demo_names) = extract_buttons(rail_with_demo_probe);
+        for want_label in [a11y::PLATFORM, a11y::DEMO_RESET] {
+            let found = demo_clicks.iter().any(|nid| {
+                demo_names.get(nid).map(String::as_str) == Some(want_label)
+                    && demo_mods
+                        .get(nid)
+                        .map(|ms| ms.iter().any(|s| s.starts_with("Semantics") && s.contains("Button")))
+                        .unwrap_or(false)
+            });
+            assert!(found, "demo rail tool button {want_label} carries AccessibleName and Role::Button");
+        }
+
+        // 3. PhoneMenu trigger button carries `a11y::MENU` ("메뉴").
+        let (pm_clicks, pm_mods, _, _, _, pm_names) = extract_buttons(phone_menu_probe);
+        let trigger = pm_clicks.first().expect("phone menu trigger button");
+        let trigger_mods = pm_mods.get(trigger).expect("phone menu trigger modifiers");
+        assert_eq!(
+            pm_names.get(trigger).map(String::as_str),
+            Some(a11y::MENU),
+            "phone menu trigger carries AccessibleName 메뉴: {pm_names:?}"
+        );
+        assert!(
+            trigger_mods.iter().any(|s| s.starts_with("Semantics") && s.contains("Button")),
+            "phone menu trigger carries Role::Button: {trigger_mods:?}"
+        );
     }
 }

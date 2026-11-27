@@ -12,9 +12,9 @@
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
-use compose_rust::runtime::{key, launched_effect, mutable_state_of, remember, remember_with_key, MutableState};
+use compose_rust::runtime::{delay, key, launched_effect, mutable_state_of, remember, remember_with_key, MutableState};
 use crate::ui::window_size::current_window_size;
-use crate::ui::vcs::{can_approve_pr, merge_method_text, pr_created_notice, pr_merge_method_label, pr_review_notice, PR_DELETE_BRANCH_LABEL, PR_DELETE_BRANCH_NOTE, PR_MERGE_METHODS, PR_SELF_APPROVAL_DISALLOWED, copy_sha_to_clipboard, filter_history_entries, HistoryFilter, branch_switch_allowed, branch_matches, branch_bar_text, BRANCH_SWITCH_NOTE, BRANCH_CREATE_NOTE, STASH_NOW_NOTE, commit_action_branch_line, commit_failure_reloads_snapshot, commit_action_gate, commit_action_key, commit_detail_from, commit_detail_view, commit_files_shown, fetch_commit_detail, file_stat_text, run_branch_from, run_commit_cherry_pick, run_commit_revert, snapshot_dirty, CommitAction, CommitDetailLoad, CommitDetailView, choice_label, fetch_conflict, run_resolve, ConflictChoice, ConflictStep, cancel_preview, confirm, ResolveTap, ConflictFile, ConflictLoad, ConflictSegment, fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, fetch_prs, prs_from, PrEntry, PrFilter, PrLoad, section_count_with, section_count_with_branches, fetch_branches, branches_from, split_branches, branch_bar_fractions, worktree_tail, branch_create_body, stash_now_gate, stash_now_error, BranchEntry, BranchLoad, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text, CONFLICT_PREVIEW_LINES, amend_warning, amend_button_label, amend_tap, AmendTap, armed_label_visible, delete_tap, stash_button_label, stash_button_text, stash_tap, stash_tap_key, DeleteTap, STASH_DIRTY_WARNING, STASH_POP_NOTE, section_count_with_team, team_rows, team_rows_with_pr_load, resolve_team_pr_load, apply_team_row_snapshot_and_mode, MemberCwd, TeamMember, TeamRow, TeamPrStatus, fetch_pr_detail, pr_detail_from, run_pr_review, run_pr_merge, run_pr_create, review_request_gate, pr_create_gate, review_tap, ReviewTap, pr_action_key, review_button_label, review_draft_key, is_stale_head, clean_body, merge_button_state, merge_button_text, MERGE_METHOD_TEXT, PrDetailLoad, PrDetailView, CheckClass, ReviewerState, banner_sub, banner_title, fetch_merge_state, banner_button_text, merge_tap, merge_tap_key, run_merge_abort, run_merge_commit, MergeAction, MergeLoad, MergeView, MERGE_ABORT_NOTE, MERGE_COMMIT_NOTE, merge_answer_reloads, pick_all_key, pick_all_note, pick_all_text};
+use crate::ui::vcs::{can_approve_pr, merge_method_text, pr_created_notice, pr_merge_method_label, pr_review_notice, PR_DELETE_BRANCH_LABEL, PR_DELETE_BRANCH_NOTE, PR_MERGE_METHODS, PR_SELF_APPROVAL_DISALLOWED, copy_sha_to_clipboard, filter_history_entries, HistoryFilter, branch_switch_allowed, branch_matches, branch_bar_text, BRANCH_SWITCH_NOTE, BRANCH_CREATE_NOTE, STASH_NOW_NOTE, commit_action_branch_line, commit_failure_reloads_snapshot, commit_action_gate, commit_action_key, commit_detail_from, commit_detail_view, commit_files_shown, fetch_commit_detail, file_stat_text, run_branch_from, run_commit_cherry_pick, run_commit_revert, snapshot_dirty, CommitAction, CommitDetailLoad, CommitDetailView, choice_label, fetch_conflict, run_resolve, ConflictChoice, ConflictStep, cancel_preview, confirm, ResolveTap, ConflictFile, ConflictLoad, ConflictSegment, fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, fetch_prs, prs_from, PrEntry, PrFilter, PrLoad, section_count_with, section_count_with_branches, fetch_branches, branches_from, split_branches, branch_bar_fractions, worktree_tail, branch_create_body, stash_now_gate, stash_now_error, BranchEntry, BranchLoad, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text, CONFLICT_PREVIEW_LINES, amend_warning, amend_button_label, amend_tap, AmendTap, armed_label_visible, delete_tap, disarm_if_matches, stash_button_label, stash_button_text, stash_tap, stash_tap_key, DeleteTap, STASH_ARM_TIMEOUT_MS, STASH_DIRTY_WARNING, STASH_POP_NOTE, section_count_with_team, team_rows, team_rows_with_pr_load, resolve_team_pr_load, apply_team_row_snapshot_and_mode, MemberCwd, TeamMember, TeamRow, TeamPrStatus, fetch_pr_detail, pr_detail_from, run_pr_review, run_pr_merge, run_pr_create, review_request_gate, pr_create_gate, review_tap, ReviewTap, pr_action_key, review_button_label, review_draft_key, is_stale_head, clean_body, merge_button_state, merge_button_text, MERGE_METHOD_TEXT, PrDetailLoad, PrDetailView, CheckClass, ReviewerState, banner_sub, banner_title, fetch_merge_state, banner_button_text, merge_tap, merge_tap_key, run_merge_abort, run_merge_commit, MergeAction, MergeLoad, MergeView, MERGE_ABORT_NOTE, MERGE_COMMIT_NOTE, merge_answer_reloads, pick_all_key, pick_all_note, pick_all_text};
 use ember_client::api::{GitPrMergeMethod, GitPrReviewAction};
 use serde_json::{json, Value};
 use compose_rust::ui as cu;
@@ -39,7 +39,7 @@ use crate::ui::Route;
 
 use super::components::{
     AppButton, ButtonKind, Choice, ChoiceButton, ChoiceRow, EmberCard, EmberField, EmberSheetSized, FieldOptions, InsetPanel, Label, PopExtra, PopKind, PopMenu, PopRow, PopoverMenuWith,
-    Clickable, DataNamedOverlay, NamedClickable, Pill, PillTone, Txt,
+    Clickable, NamedClickable, NamedClickableOn, NamedDisabled, Pill, PillTone, Txt,
 };
 use super::notice;
 use super::shell::NavIcon;
@@ -335,24 +335,23 @@ const ICON_TICK_SVG: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="curr
 /// A stage check (`.vcs-cb`): a painted `side` px square over an invisible toolkit checkbox that
 /// fills a [`STAGE_CHECK_HIT_W`] by `hit_h` tap area. A tap calls `on_toggle`.
 fn StageCheck(check: Check, side: f32, hit_h: f32, on_toggle: impl FnMut() + 'static) {
+    StageCheckWith(Modifier::new(), check, side, hit_h, on_toggle);
+}
+
+fn StageCheckWith(modifier: Modifier, check: Check, side: f32, hit_h: f32, on_toggle: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let look = stage_check_look(check, &p);
     let mut on_toggle = on_toggle;
-    cu::Box().modifier(Modifier::new().width(STAGE_CHECK_HIT_W.max(side)).height(hit_h.max(side))).alignment(Alignment::Center).content(move || {
-        cu::Box()
-            .modifier(Modifier::new().size(side, side).background(paint(look.fill)).border(STAGE_CHECK_BORDER, paint(look.border)).corner_radius(STAGE_CHECK_RADIUS))
-            .alignment(Alignment::Center)
-            .content(move || match look.mark {
+    { use ::compose_rust::ui::Box; Box!(modifier = modifier.width(STAGE_CHECK_HIT_W.max(side)).height(hit_h.max(side)), alignment = Alignment::Center, content = move || {
+        { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().size(side, side).background(paint(look.fill)).border(STAGE_CHECK_BORDER, paint(look.border)).corner_radius(STAGE_CHECK_RADIUS), alignment = Alignment::Center, content = move || match look.mark {
                 CheckMark::None => {}
                 CheckMark::Tick => NavIcon(ICON_TICK_SVG, look.mark_color.to_argb(), side - 4.0),
                 CheckMark::Dash => {
-                    cu::Box().modifier(Modifier::new().width(side - 6.0 - 2.0 * STAGE_CHECK_BORDER).height(2.0).background(paint(look.mark_color)).corner_radius(1.0));
+                    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().width(side - 6.0 - 2.0 * STAGE_CHECK_BORDER).height(2.0).background(paint(look.mark_color)).corner_radius(1.0)) };
                 }
-            });
-        cu::Checkbox(check == Check::On)
-            .modifier(Modifier::new().fill_max_size().alpha(0.0))
-            .on_change(move |_| on_toggle());
-    });
+            }) };
+        { use ::compose_rust::ui::Checkbox; Checkbox!(check == Check::On, move |_| on_toggle(), modifier = Modifier::new().fill_max_size().alpha(0.0)) };
+    }) };
 }
 
 /// Height of a 충돌 list row (`.vcs-file`, `vcs.css:59`, #694).
@@ -370,20 +369,22 @@ pub const CONFLICT_GLYPH: f32 = 14.0;
 fn ConflictFileRow(path: &str, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let shown = path.to_string();
-    cu::Box()
-        .modifier(Modifier::new().fill_max_width().height(CONFLICT_ROW_H).corner_radius(CORNER_SM))
-        .alignment(Alignment::CenterStart)
-        .content(move || {
-            cu::Row().alignment(Alignment::CenterStart).spacing(CONFLICT_ROW_GAP).modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
+    NamedClickable(
+        path,
+        Modifier::new().fill_max_width().height(CONFLICT_ROW_H).corner_radius(CORNER_SM),
+        Alignment::CenterStart,
+        on_click,
+        move || {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = CONFLICT_ROW_GAP, modifier = Modifier::new().fill_max_width().fill_max_height(), {
                 // `.vcs-cflist .vcs-file{padding-left:10px}`; the row gap adds 6.
-                cu::Spacer().modifier(Modifier::new().width(10.0 - CONFLICT_ROW_GAP));
-                cu::Box().modifier(Modifier::new().size(CONFLICT_TILE, CONFLICT_TILE).background(paint(p.orange.soft)).corner_radius(CORNER_XS)).alignment(Alignment::Center).content(|| {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(10.0 - CONFLICT_ROW_GAP)) };
+                { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().size(CONFLICT_TILE, CONFLICT_TILE).background(paint(p.orange.soft)).corner_radius(CORNER_XS), alignment = Alignment::Center, {
                     NavIcon(ICON_WARN_SVG, p.orange.strong.to_argb(), CONFLICT_GLYPH);
-                });
+                }) };
                 Txt(&shown, TypeRole::Mono, Some(paint(p.text)), Some(1), Some(TextOverflow::Ellipsis), Some(1.0), None);
-            });
-            DataNamedOverlay(&shown, true, None, on_click);
-        });
+            }) };
+        },
+    );
 }
 
 /// FR-L19 (audit P2, #517): the text of the screen's own inputs, buttons and chips is the small
@@ -414,11 +415,11 @@ pub const VCS_PILL_PAD_X: f32 = 14.0;
 
 /// The label of a painted small pill between its two side spaces, on one line.
 fn PillLabel(text: &str, fs: Fs, ink: Color) {
-    cu::Row().alignment(Alignment::CenterStart).content(|| {
-        cu::Spacer().modifier(Modifier::new().width(VCS_PILL_PAD_X));
+    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, {
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(VCS_PILL_PAD_X)) };
         Label(text, fs, Weight::Medium, Some(paint(ink)), Some(1));
-        cu::Spacer().modifier(Modifier::new().width(VCS_PILL_PAD_X));
-    });
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(VCS_PILL_PAD_X)) };
+    }) };
 }
 
 /// A single choice among a few values (the history filter, the PR state filter, the merge
@@ -447,16 +448,16 @@ fn VcsRadioRow<T: Copy + PartialEq + Send + 'static>(
 pub fn Unavailable(section: Section) {
     let p = ember_theme().palette;
     EmberCard(false, true, None, Some(SP[3]), None, || {
-        cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-            cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[2], modifier = Modifier::new().fill_max_width(), {
                 Label(section.label(), Fs::Lg, Weight::Semibold, None, None);
-                cu::Spacer().modifier(Modifier::new().weight(1.0));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                 Pill(SOON, PillTone::Grey, true);
-            });
-            cu::Spacer().modifier(Modifier::new().height(SP[0]));
+            }) };
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[0])) };
             // TODO(server, #168): this section needs the repository endpoints listed there.
             Label(&soon_line(section.label()), Fs::Md, Weight::Regular, Some(paint(p.text_2)), None);
-        });
+        }) };
     });
 }
 
@@ -498,9 +499,9 @@ pub fn remote_button_labels() -> [&'static str; 4] {
 /// A 32 px circle icon button in a 44 dp box that takes the press. The box is the control: a
 /// named, clickable container (`NamedClickable`, compose-rust#429), round so the press tint and
 /// the focus ring are circles. It asks for 44 by 44 and takes what its row gives: a row with a
-/// height (the 원격 cell's 36, the files header's 52) keeps that height, and the box is then as
-/// tall as the row at most (FR-L19.1, #415; a press area larger than the row is
-/// TODO(compose-rust#472, after v0.0.10): a 44 by 44 hit area that does not grow the node).
+/// height (the 원격 cell's 36, the files header's 52) keeps that height, and `min_touch_target`
+/// (compose-rust#472, v0.0.11) keeps a 44 by 44 hit area without growing the node (FR-L19.1,
+/// #415).
 fn CircleIconButton(
     icon: &'static str,
     label: &'static str,
@@ -509,22 +510,20 @@ fn CircleIconButton(
     let p = ember_theme().palette;
     NamedClickable(
         label,
-        Modifier::new().size(ICON_TOUCH_TARGET, ICON_TOUCH_TARGET).shape_role(ShapeRole::Full),
+        Modifier::new()
+            .size(ICON_TOUCH_TARGET, ICON_TOUCH_TARGET)
+            .min_touch_target(ICON_TOUCH_TARGET)
+            .shape_role(ShapeRole::Full),
         Alignment::Center,
         on_click,
         move || {
-            cu::Box()
-                .modifier(
-                    Modifier::new()
+            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                         .size(32.0, 32.0)
                         .background(paint(p.surface))
                         .border(1.0, paint(p.line))
-                        .shape_role(ShapeRole::Full),
-                )
-                .alignment(Alignment::Center)
-                .content(move || {
+                        .shape_role(ShapeRole::Full), alignment = Alignment::Center, content = move || {
                     NavIcon(icon, p.text_2.to_argb(), 16.0);
-                });
+                }) };
         },
     );
 }
@@ -537,23 +536,23 @@ pub const VCS_SEL_H: f32 = 36.0;
 /// One picker of the repository bar: its icon, the value and a chevron on one line.
 fn BarSelector(icon: &'static str, name: &str, expanded: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
-    cu::Box()
-        .modifier(Modifier::new().fill_max_width().height(VCS_SEL_H))
-        .content(move || {
-            cu::Row()
-                .alignment(Alignment::CenterStart)
-                .modifier(Modifier::new().fill_max_size())
-                .content(|| {
+    // The painted box itself is the control: named by the value it shows (a repository or a
+    // branch, compose-rust#831) and saying whether its menu is open (FR-L10.4).
+    NamedClickable(
+        name,
+        Modifier::new().fill_max_width().height(VCS_SEL_H).expanded(expanded),
+        Alignment::TopStart,
+        on_click,
+        move || {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_size(), {
                     NavIcon(icon, p.text.to_argb(), 18.0);
-                    cu::Spacer().modifier(Modifier::new().width(6.0));
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(6.0)) };
                     Label(name, Fs::Md, Weight::Semibold, Some(paint(p.text)), Some(1));
-                    cu::Spacer().modifier(Modifier::new().width(6.0));
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(6.0)) };
                     NavIcon(ICON_CHEVRON_DOWN_SVG, p.muted.to_argb(), 16.0);
-                });
-            // The clear button over the row is the control: named by the value it shows (a
-            // repository or a branch, so data), and it says whether its menu is open (FR-L10.4).
-            DataNamedOverlay(name, true, Some(expanded), on_click);
-        });
+                }) };
+        },
+    );
 }
 
 /// Selector row for repository in the bar.
@@ -639,33 +638,25 @@ fn RemoteMainButton(
     let pill_fg = if enabled { p.ink } else { p.surface_2 };
     let label = action.label();
 
-    cu::Box()
-        .modifier(
-            Modifier::new()
-                .size(100.0, 32.0)
-                .background(paint(btn_bg))
-                .shape_role(ShapeRole::Full),
-        )
-        .alignment(Alignment::Center)
-        .content(move || {
-            cu::Row()
-                .alignment(Alignment::Center)
-                .spacing(6.0)
-                .modifier(Modifier::new().fill_max_size())
-                .content(|| {
-                    cu::Spacer().modifier(Modifier::new().width(SP[0]));
+    NamedClickableOn(
+        &label,
+        Modifier::new()
+            .size(100.0, 32.0)
+            .background(paint(btn_bg))
+            .shape_role(ShapeRole::Full),
+        Some(btn_bg),
+        Alignment::Center,
+        on_click,
+        move || {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::Center, spacing = 6.0, modifier = Modifier::new().fill_max_size(), {
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[0])) };
                     NavIcon(action_icon, btn_fg.to_argb(), 16.0);
                     Label(action_text, Fs::Sm, Weight::Medium, Some(paint(btn_fg)), Some(1));
                     if let Some(n) = action_count {
-                        cu::Box()
-                            .modifier(
-                                Modifier::new()
+                        { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                                     .size(20.0, 20.0)
                                     .background(paint(pill_bg))
-                                    .shape_role(ShapeRole::Full),
-                            )
-                            .alignment(Alignment::Center)
-                            .content(|| {
+                                    .shape_role(ShapeRole::Full), alignment = Alignment::Center, {
                                 Label(
                                     &n.to_string(),
                                     Fs::Xs,
@@ -673,12 +664,12 @@ fn RemoteMainButton(
                                     Some(paint(pill_fg)),
                                     Some(1),
                                 );
-                            });
+                            }) };
                     }
-                    cu::Spacer().modifier(Modifier::new().width(SP[0]));
-                });
-            DataNamedOverlay(&label, true, None, on_click);
-        });
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[0])) };
+                }) };
+        },
+    );
 }
 
 /// Ahead/behind counters with arrows and relative fetch age.
@@ -686,18 +677,15 @@ fn RemoteSubNote(snap: Option<&RepoSnapshot>) {
     let p = ember_theme().palette;
     match snap {
         Some(s) => {
-            cu::Row()
-                .alignment(Alignment::CenterStart)
-                .spacing(4.0)
-                .content(|| {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = 4.0, {
                     let up_fg = if s.ahead > 0 { p.text } else { p.muted };
                     NavIcon(ICON_ARROW_UP_SVG, up_fg.to_argb(), 12.0);
                     Label(&s.ahead.to_string(), Fs::Xs, Weight::Regular, Some(paint(up_fg)), Some(1));
-                    cu::Spacer().modifier(Modifier::new().width(4.0));
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(4.0)) };
                     let down_fg = if s.behind > 0 { p.text } else { p.muted };
                     NavIcon(ICON_ARROW_DOWN_SVG, down_fg.to_argb(), 12.0);
                     Label(&s.behind.to_string(), Fs::Xs, Weight::Regular, Some(paint(down_fg)), Some(1));
-                    cu::Spacer().modifier(Modifier::new().width(4.0));
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(4.0)) };
                     Label(
                         &format!("\u{00b7} {}", fetched_text(s.fetched_age_secs)),
                         Fs::Xs,
@@ -705,7 +693,7 @@ fn RemoteSubNote(snap: Option<&RepoSnapshot>) {
                         Some(paint(p.text_2)),
                         Some(1),
                     );
-                });
+                }) };
         }
         None => {
             SmallNote(SOON);
@@ -716,10 +704,10 @@ fn RemoteSubNote(snap: Option<&RepoSnapshot>) {
 // EmberCard's inner row does not expand its content to the card width.
 fn VcsCard(content: impl FnOnce()) {
     let p = ember_theme().palette;
-    cu::Box().modifier(Modifier::new().fill_max_width().background(paint(p.surface))
-        .border(1.0, paint(p.line)).corner_radius(CORNER_LG)).content(|| {
-        cu::Column().modifier(Modifier::new().fill_max_width()).content(content);
-    });
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().background(paint(p.surface))
+        .border(1.0, paint(p.line)).corner_radius(CORNER_LG), {
+        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), content = content) };
+    }) };
 }
 
 /// How the repository bar lays out its three cells (`.vcs-bar`, `vcs.css`).
@@ -784,18 +772,13 @@ pub fn branch_pop_width(window_width_dp: f32) -> f32 {
 
 /// A row of the branch popover is 40 high (`.vcs-poprow{height:40px}`).
 pub const BRANCH_POP_ROW_H: f32 = 40.0;
+/// The tallest the branch popover's list grows before scrolling (`.vcs-poplist{max-height:300px}`,
+/// compose-rust#778, v0.0.11 `Modifier::max_height`).
+pub const BRANCH_POP_LIST_MAX_H: f32 = 300.0;
 /// The gap between the control and the box. The mockup hangs the box from the cell
 /// (`.vcs-pop{top:calc(100% - 4px)}`), under the 추적 line; a `Popover` has one anchor, the
 /// control, so the box sits 4 under the control and covers that line.
 pub const BRANCH_POP_OFFSET: f32 = 4.0;
-
-/// The height of the popover's list when it must scroll (`.vcs-poplist{max-height:300px}`):
-/// `None` while `rows` rows fit in 300, so the list is as tall as its rows. The toolkit has no
-/// maximum height (TODO(compose-rust#778, after v0.0.10): cap the list at 300 instead), so the
-/// list takes a fixed 300 from the row count.
-pub fn branch_pop_list_height(rows: usize) -> Option<f32> {
-    (rows as f32 * BRANCH_POP_ROW_H > 300.0).then_some(300.0)
-}
 
 /// What the popover says when no branch matches the search (mockup `vcsPopList`).
 pub const BRANCH_POP_EMPTY: &str = "일치하는 브랜치가 없습니다";
@@ -823,16 +806,16 @@ fn BranchPopRow(name: &str, current: bool, on_click: impl FnMut() + 'static) {
         Alignment::CenterStart,
         on_click,
         || {
-            cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                cu::Spacer().modifier(Modifier::new().width(10.0));
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(10.0)) };
                 NavIcon(if current { super::components::ICON_CHECK_SVG } else { ICON_GIT_SVG }, p.text.to_argb(), 16.0);
-                cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[1])) };
                 // Zero wide and weighted, so a long name is cut and does not widen the box.
-                cu::Box().alignment(Alignment::CenterStart).modifier(Modifier::new().width(0.0).weight(1.0)).content(|| {
+                { use ::compose_rust::ui::Box; Box!(alignment = Alignment::CenterStart, modifier = Modifier::new().width(0.0).weight(1.0), {
                     Txt(name, TypeRole::Mono, Some(paint(p.text)), Some(1), Some(TextOverflow::Ellipsis), None, None);
-                });
-                cu::Spacer().modifier(Modifier::new().width(10.0));
-            });
+                }) };
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(10.0)) };
+            }) };
         },
     );
 }
@@ -854,30 +837,30 @@ pub(super) fn BranchMenu(open: MutableState<bool>, text: &str, branches: &[Strin
     let width = branch_pop_width(current_window_size().width_dp);
     let branches = branches.to_vec();
     let current = current.map(str::to_string);
-    cu::Popover(is_open)
-        .placement(compose_rust::PopoverPlacement::Bottom)
-        .align(compose_rust::PopoverAlign::Start)
-        .offset(BRANCH_POP_OFFSET)
-        .on_dismiss(move || dismiss.set(false))
-        .modifier(
-            // `elevation(0)`: the box casts its own shadow (as `PopoverMenu`).
-            with_shadows(Modifier::new(), theme.shadow_lg())
-                .elevation(0.0)
-                .width(width)
-                .background(paint(p.surface))
-                .border(1.0, paint(p.line))
-                .corner_radius(CORNER_LG)
-                .role(cu::Role::Menu)
-                .label(super::a11y::BRANCH_PICKER),
-        )
-        .anchor(|| BranchSelector(text, is_open, move || toggle.set(!toggle.get_untracked())))
-        .content(move || {
+    // `elevation(0)`: the box casts its own shadow (as `PopoverMenu`).
+    let modifier = with_shadows(Modifier::new(), theme.shadow_lg())
+        .elevation(0.0)
+        .width(width)
+        .background(paint(p.surface))
+        .border(1.0, paint(p.line))
+        .corner_radius(CORNER_LG)
+        .role(cu::Role::Menu)
+        .label(super::a11y::BRANCH_PICKER);
+    { use ::compose_rust::ui::Popover; Popover!(
+        is_open,
+        move || dismiss.set(false),
+        placement = compose_rust::PopoverPlacement::Bottom,
+        align = compose_rust::PopoverAlign::Start,
+        offset = BRANCH_POP_OFFSET,
+        modifier = modifier,
+        anchor = Some(|| BranchSelector(text, is_open, move || toggle.set(!toggle.get_untracked()))),
+        content = move || {
             if !is_open {
                 return;
             }
-            cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
+            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), content = move || {
                 // `.vcs-pophead{padding:10px}`.
-                cu::Box().modifier(Modifier::new().fill_max_width().padding(10.0)).content(|| {
+                { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().padding(10.0), {
                     let q_state = query.clone();
                     EmberField(FieldOptions {
                         fill_max_width: true,
@@ -888,19 +871,18 @@ pub(super) fn BranchMenu(open: MutableState<bool>, text: &str, branches: &[Strin
                         on_value_change: Some(Box::new(move |v| q_state.set(v))),
                         ..Default::default()
                     });
-                });
+                }) };
                 // `.vcs-poplist{padding:0 6px 6px}`.
                 let shown = branch_menu_rows(&branches, &query.get());
-                let list_h = branch_pop_list_height(shown.len());
                 let list_actions = actions.clone();
                 let list_open = open.clone();
                 let rows = move || {
                     if branches.is_empty() {
                         Label(&soon_line("브랜치 목록"), Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
                     } else if shown.is_empty() {
-                        cu::Box().modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
+                        { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().padding(SP[2]), {
                             Label(BRANCH_POP_EMPTY, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
-                        });
+                        }) };
                     }
                     for idx in shown.iter().copied() {
                         let Some(name) = branches.get(idx).cloned() else { continue };
@@ -913,22 +895,15 @@ pub(super) fn BranchMenu(open: MutableState<bool>, text: &str, branches: &[Strin
                         });
                     }
                 };
-                cu::Row().modifier(Modifier::new().fill_max_width()).content(move || {
-                    cu::Spacer().modifier(Modifier::new().width(6.0));
-                    match list_h {
-                        Some(h) => {
-                            cu::ScrollColumn().modifier(Modifier::new().width(0.0).weight(1.0).height(h)).content(rows);
-                        }
-                        None => {
-                            cu::Column().modifier(Modifier::new().width(0.0).weight(1.0)).content(rows);
-                        }
-                    }
-                    cu::Spacer().modifier(Modifier::new().width(6.0));
-                });
-                cu::Spacer().modifier(Modifier::new().height(6.0));
+                { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width(), content = move || {
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(6.0)) };
+                    { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().width(0.0).weight(1.0).max_height(BRANCH_POP_LIST_MAX_H), content = rows) };
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(6.0)) };
+                }) };
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(6.0)) };
                 // `.vcs-popfoot{border-top:1px solid var(--line);padding:10px;gap:8px}`.
-                cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
-                cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width().padding(10.0)).content(move || {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().fill_max_width().height(1.0).background(paint(p.line))) };
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width().padding(10.0), content = move || {
                     let value = new_branch.clone();
                     key(generation.get(), || {
                         EmberField(FieldOptions {
@@ -953,9 +928,10 @@ pub(super) fn BranchMenu(open: MutableState<bool>, text: &str, branches: &[Strin
                             });
                         }
                     });
-                });
-            });
-        });
+                }) };
+            }) };
+        },
+    ) };
 }
 
 /// The bar of three: repository, current branch, remote origin in ONE split card.
@@ -1001,7 +977,7 @@ fn RepoBarWithActions(
     let p_projects = projects.to_vec();
     let on_pick_proj = on_pick.clone();
 
-    cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
+    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), content = move || {
         let (project_menu_c, branch_menu_c) = (project_menu.clone(), branch_menu.clone());
         let p = ember_theme().palette;
         let remote_actions = actions.clone();
@@ -1013,90 +989,90 @@ fn RepoBarWithActions(
             let p_name = proj_name.clone();
             let r_line = repo_line.clone();
             let (p_list, p_pick) = (p_projects.clone(), on_pick_proj.clone());
-            cu::Column().modifier(m.padding(pad)).spacing(SP[1]).content(move || {
+            { use ::compose_rust::ui::Column; Column!(modifier = m.padding(pad), spacing = SP[1], content = move || {
                 SmallNote("저장소");
                 RepoMenu(p_open, &p_name, &p_list, chosen_proj, p_pick);
                 SmallNote(&r_line);
-            });
+            }) };
         };
         let branch_cell = move |m: Modifier| {
             let b_open = branch_menu_c.clone();
             let b_text = branch_text.clone();
             let u_text = upstream.clone();
             let (b_list, b_current, b_actions) = (branches.clone(), current_branch.clone(), branch_actions.clone());
-            cu::Column().modifier(m.padding(pad)).spacing(SP[1]).content(move || {
+            { use ::compose_rust::ui::Column; Column!(modifier = m.padding(pad), spacing = SP[1], content = move || {
                 SmallNote("현재 브랜치");
                 // The popover hangs from the control (FR-L10.4, #888; it was a centred dialog).
                 BranchMenu(b_open, &b_text, &b_list, b_current.as_deref(), has, b_actions);
                 SmallNote(&u_text);
-            });
+            }) };
         };
         let remote_cell = move |m: Modifier| {
             let remote_actions = remote_actions.clone();
-            cu::Column().modifier(m.padding(pad)).spacing(SP[1]).content(move || {
+            { use ::compose_rust::ui::Column; Column!(modifier = m.padding(pad), spacing = SP[1], content = move || {
                 SmallNote("원격 origin");
                 // The pickers' height (FR-L19.1, #415): the 44 dp boxes of the round buttons do not
                 // make this cell's value line taller than the other two.
-                cu::Row().modifier(Modifier::new().fill_max_width().height(VCS_SEL_H)).alignment(Alignment::CenterStart).spacing(10.0).content(move || {
+                { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width().height(VCS_SEL_H), alignment = Alignment::CenterStart, spacing = 10.0, content = move || {
                     RemoteControls(action, has, remote_actions.clone());
-                });
+                }) };
                 RemoteSubNote(snap);
-            });
+            }) };
         };
         let line_v = move || {
-            cu::Box().modifier(Modifier::new().width(1.0).fill_max_height().background(paint(p.line)));
+            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().width(1.0).fill_max_height().background(paint(p.line))) };
         };
         let line_h = move || {
-            cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().height(1.0).background(paint(p.line))) };
         };
         VcsCard(move || match grid {
             RepoBarGrid::One => {
-                cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
+                { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), content = move || {
                     repo_cell(Modifier::new().fill_max_width());
                     line_h();
                     branch_cell(Modifier::new().fill_max_width());
                     line_h();
                     remote_cell(Modifier::new().fill_max_width());
-                });
+                }) };
             }
             RepoBarGrid::TwoRemoteBelow => {
                 // `@media (max-width:900px)`, `@container (max-width:760px)`: two columns, then
                 // 원격 across both under a line.
-                cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
-                    cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::TopStart).equal_height(true).content(move || {
+                { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), content = move || {
+                    { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width(), alignment = Alignment::TopStart, intrinsic_size = true, content = move || {
                         repo_cell(Modifier::new().weight(1.0).fill_max_height());
                         line_v();
                         branch_cell(Modifier::new().weight(1.0).fill_max_height());
-                    });
+                    }) };
                     line_h();
                     remote_cell(Modifier::new().fill_max_width());
-                });
+                }) };
             }
             RepoBarGrid::Three => {
                 // No fixed height (#407): the row sizes to its tallest column and `equal_height`
                 // stretches the others, so the URL line and the ahead/behind line are never cut.
-                cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::TopStart).equal_height(true).content(move || {
+                { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width(), alignment = Alignment::TopStart, intrinsic_size = true, content = move || {
                     repo_cell(Modifier::new().weight(1.1).fill_max_height());
                     line_v();
                     branch_cell(Modifier::new().weight(1.1).fill_max_height());
                     line_v();
                     remote_cell(Modifier::new().weight(1.0).fill_max_height());
-                });
+                }) };
             }
         });
-    });
+    }) };
 }
 
 fn RemoteControls(action: RemoteAction, enabled: bool, actions: Option<Actions>) {
     let main = actions.clone();
     RemoteMainButton(action, enabled, move || { if let Some(a) = &main { a.remote(action); } });
-    cu::Row().spacing(4.0).content(move || {
+    { use ::compose_rust::ui::Row; Row!(spacing = 4.0, content = move || {
         let labels = remote_button_labels();
         for (icon, label, action) in [(ICON_FETCH_SVG, labels[0], RemoteAction::Fetch), (ICON_ARROW_DOWN_SVG, labels[1], RemoteAction::Pull(0)), (ICON_ARROW_UP_SVG, labels[2], RemoteAction::Push(0))] {
             let a = actions.clone();
             CircleIconButton(icon, label, move || { if let Some(a) = &a { a.remote(action); } });
         }
-    });
+    }) };
 }
 
 /// Section list on the left (wide windows) with counts.
@@ -1113,7 +1089,7 @@ fn SectionListWithSample(
     mut on_pick: impl FnMut(Section) + Clone + 'static,
 ) {
     let p = ember_theme().palette;
-    cu::Column().modifier(Modifier::new().width(200.0)).spacing(2.0).content(|| {
+    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().width(200.0), spacing = 2.0, {
         for sec in Section::ALL {
             let is_active = sec == active;
             let bg = if is_active { paint(p.surface) } else { Paint::Literal(Color::argb(0)) };
@@ -1143,27 +1119,19 @@ fn SectionListWithSample(
             }
 
             NamedClickable(sec.label(), m, Alignment::TopStart, move || pick(sec), move || {
-                    cu::Row()
-                        .alignment(Alignment::CenterStart)
-                        .modifier(Modifier::new().fill_max_size())
-                        .content(move || {
-                            cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_size(), content = move || {
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
                             NavIcon(section_svg(sec), fg.to_argb(), 18.0);
-                            cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[1])) };
                             Label(sec.label(), Fs::Sm, Weight::Medium, Some(paint(fg)), Some(1));
-                            cu::Spacer().modifier(Modifier::new().weight(1.0));
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                             if let Some(n) = count {
                                 if sec == Section::Conflicts && n > 0 {
-                                    cu::Box()
-                                        .modifier(
-                                            Modifier::new()
+                                    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                                                 .height(18.0)
                                                 .background(paint(p.orange.strong))
                                                 .shape_role(ShapeRole::Full)
-                                                .padding(2.0),
-                                        )
-                                        .alignment(Alignment::Center)
-                                        .content(|| {
+                                                .padding(2.0), alignment = Alignment::Center, {
                                             Label(
                                                 &format!(" {n} "),
                                                 Fs::Xs,
@@ -1171,7 +1139,7 @@ fn SectionListWithSample(
                                                 Some(Paint::Literal(Color::argb(0xffff_ffff))),
                                                 Some(1),
                                             );
-                                        });
+                                        }) };
                                 } else {
                                     Label(
                                         &n.to_string(),
@@ -1182,11 +1150,11 @@ fn SectionListWithSample(
                                     );
                                 }
                             }
-                            cu::Spacer().modifier(Modifier::new().width(SP[2]));
-                        });
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
+                        }) };
             });
         }
-    });
+    }) };
 }
 
 /// Section pills above the panes (medium and compact windows).
@@ -1265,28 +1233,25 @@ fn SectionPill(sec: Section, on: bool, count: Option<usize>, on_click: impl FnMu
         m = with_shadows(m.background(paint(fill)).border(1.0, paint(line)), theme.shadow_sm());
     }
     Clickable(m, Alignment::Center, on_click, move || {
-        cu::Row().alignment(Alignment::CenterStart).content(move || {
-            cu::Spacer().modifier(Modifier::new().width(SP[2]));
+        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, content = move || {
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
             NavIcon(section_svg(sec), ink.to_argb(), 18.0);
-            cu::Spacer().modifier(Modifier::new().width(SP[2]));
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
             Label(sec.label(), Fs::Sm, Weight::Medium, Some(paint(ink)), Some(1));
             if let Some(n) = count.filter(|n| *n > 0) {
-                cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
                 if sec == Section::Conflicts {
-                    cu::Row()
-                        .alignment(Alignment::CenterStart)
-                        .modifier(Modifier::new().height(18.0).background(paint(p.orange.strong)).shape_role(ShapeRole::Full))
-                        .content(|| {
-                            cu::Spacer().modifier(Modifier::new().width(7.0));
+                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().height(18.0).background(paint(p.orange.strong)).shape_role(ShapeRole::Full), {
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(7.0)) };
                             Label(&n.to_string(), Fs::Xs, Weight::Semibold, Some(Paint::Literal(Color::argb(0xffff_ffff))), Some(1));
-                            cu::Spacer().modifier(Modifier::new().width(7.0));
-                        });
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(7.0)) };
+                        }) };
                 } else {
                     Label(&n.to_string(), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 }
             }
-            cu::Spacer().modifier(Modifier::new().width(SP[2]));
-        });
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
+        }) };
     });
 }
 
@@ -1295,12 +1260,12 @@ fn SectionPill(sec: Section, on: bool, count: Option<usize>, on_click: impl FnMu
 /// composer's grey `PickChip`s with a name only (reviews r7 and r8, #878).
 fn SectionPillsWithCounts(active: Section, width: f32, view_w: f32, count_of: &dyn Fn(Section) -> Option<usize>, on_pick: impl FnMut(Section) + Clone + 'static) {
     let pills = || {
-        cu::Row().spacing(SP[0] + 2.0).alignment(Alignment::CenterStart).content(|| {
+        { use ::compose_rust::ui::Row; Row!(spacing = SP[0] + 2.0, alignment = Alignment::CenterStart, {
             for sec in Section::ALL {
                 let mut pick = on_pick.clone();
                 SectionPill(sec, sec == active, count_of(sec), move || pick(sec));
             }
-        });
+        }) };
     };
     if section_pills_scroll(width) {
         // One row that scrolls sideways (`.vcs-nav{flex-direction:row;overflow-x:auto;gap:6px}`).
@@ -1324,7 +1289,7 @@ fn SectionPillsWithCounts(active: Section, width: f32, view_w: f32, count_of: &d
                 target.scroll_to(to);
             });
         }
-        cu::ScrollRow().scroll_state(&scroll).modifier(Modifier::new().fill_max_width()).content(pills);
+        { use ::compose_rust::ui::ScrollRow; ScrollRow!(scroll_state = &scroll, modifier = Modifier::new().fill_max_width(), content = pills) };
     } else {
         pills();
     }
@@ -1356,12 +1321,12 @@ pub fn PaneTabs(
     mut on_pick: impl FnMut(PaneTab) + Clone + 'static,
 ) {
     // Equal segments across the width (`.vcs-subs.seg`, `vcs.css` at 560 px and below).
-    cu::Row().modifier(Modifier::new().fill_max_width()).spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
+    { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width(), spacing = SP[1], alignment = Alignment::CenterStart, {
         for t in pane_tabs(section).iter().copied() {
             let mut pick = on_pick.clone();
             PaneTabSegment(t.label(), Some(t) == active, move || pick(t));
         }
-    });
+    }) };
 }
 
 /// One file diff with a check per changed line and per hunk.
@@ -1385,50 +1350,50 @@ fn DiffViewAtWidth(file: &FileDiff, staging: &MutableState<Staging>, pane_width:
 
     let wraps = diff_header_wraps(pane_width);
     let stage_chip = format!("{on}/{total}줄 스테이징");
-    cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
+    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), {
         if wraps {
             // Two lines (FR-L19): the path first, the counts and the staging chip below it.
-            cu::Column().modifier(Modifier::new().fill_max_width().padding(SP[2])).spacing(SP[1]).content(|| {
-                cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
-                    cu::Box().modifier(Modifier::new().size(20.0, 20.0).background(paint(tone_fill)).corner_radius(CORNER_XS)).alignment(Alignment::Center).content(|| {
+            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width().padding(SP[2]), spacing = SP[1], {
+                { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width(), alignment = Alignment::CenterStart, spacing = SP[1], {
+                    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().size(20.0, 20.0).background(paint(tone_fill)).corner_radius(CORNER_XS), alignment = Alignment::Center, {
                         Label(file.status.letter(), Fs::Xs2, Weight::Semibold, Some(paint(tone_text)), Some(1));
-                    });
+                    }) };
                     Txt(&file.path, TypeRole::Mono, Some(paint(p.text)), Some(1), Some(TextOverflow::Ellipsis), None, None);
-                });
-                cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+                }) };
+                { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width(), alignment = Alignment::CenterStart, spacing = SP[1], {
                     Label(&format!("+{}", file.added()), Fs::Xs, Weight::Medium, Some(paint(p.green.strong)), Some(1));
                     Label(&format!("-{}", file.removed()), Fs::Xs, Weight::Medium, Some(paint(p.red.strong)), Some(1));
                     Pill(&stage_chip, PillTone::Grey, true);
-                });
-            });
+                }) };
+            }) };
         } else {
         // File header row (52 px)
-        cu::Row().modifier(Modifier::new().fill_max_width().height(52.0).padding(SP[2])).alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
-            cu::Box().modifier(Modifier::new().size(20.0, 20.0).background(paint(tone_fill)).corner_radius(CORNER_XS)).alignment(Alignment::Center).content(|| {
+        { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width().height(52.0).padding(SP[2]), alignment = Alignment::CenterStart, spacing = SP[1], {
+            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().size(20.0, 20.0).background(paint(tone_fill)).corner_radius(CORNER_XS), alignment = Alignment::Center, {
                 Label(file.status.letter(), Fs::Xs2, Weight::Semibold, Some(paint(tone_text)), Some(1));
-            });
-            cu::Spacer().modifier(Modifier::new().width(SP[0]));
+            }) };
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[0])) };
             Txt(&file.path, TypeRole::Mono, Some(paint(p.text)), Some(1), Some(TextOverflow::Ellipsis), None, None);
-            cu::Spacer().modifier(Modifier::new().weight(1.0));
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
             Label(&format!("+{}", file.added()), Fs::Xs, Weight::Medium, Some(paint(p.green.strong)), Some(1));
             Label(&format!("-{}", file.removed()), Fs::Xs, Weight::Medium, Some(paint(p.red.strong)), Some(1));
             Pill(&stage_chip, PillTone::Grey, true);
-        });
+        }) };
         }
 
-        cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+        { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().height(1.0).background(paint(p.line))) };
 
         if file.binary {
-            cu::Box().modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
+            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().padding(SP[2]), {
                 Label("이진 파일은 차이를 보여 주지 않습니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
-            });
+            }) };
         }
 
         for (hi, h) in file.hunks.iter().enumerate() {
             // One row (`.vcs-hh`, `vcs.css:87-88`): the mono header takes the rest and is cut with an
             // ellipsis, so a long header never overlaps the right-aligned action.
-            cu::Row().modifier(Modifier::new().fill_max_width().height(VCS_HUNK_HEADER_H).background(paint(p.surface_2))).alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
-                cu::Spacer().modifier(Modifier::new().width(SP[2]));
+            { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width().height(VCS_HUNK_HEADER_H).background(paint(p.surface_2)), alignment = Alignment::CenterStart, spacing = SP[1], {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
                 Txt(&h.header, TypeRole::Mono, Some(paint(p.muted)), Some(1), Some(TextOverflow::Ellipsis), Some(1.0), None);
                 let st_hunk = staging.clone();
                 let f_hunk = file.clone();
@@ -1448,67 +1413,71 @@ fn DiffViewAtWidth(file: &FileDiff, staging: &MutableState<Staging>, pane_width:
                     move || {
                         PillLabel("이 덩어리 전체", VCS_CONTROL_FS, p.text);
                     });
-                cu::Spacer().modifier(Modifier::new().width(SP[2]));
-            });
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
+            }) };
 
-            cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().height(1.0).background(paint(p.line))) };
 
-            // Hunk lines (each exactly 21.0 px high, spacing 0.0)
-            cu::Column().modifier(Modifier::new().fill_max_width()).spacing(0.0).content(|| {
-                for (li, l) in h.lines.iter().enumerate() {
-                    let bg = match l.kind {
-                        LineKind::Add => paint(p.green.soft),
-                        LineKind::Del => paint(p.red.soft),
-                        LineKind::Context => Paint::Literal(Color::argb(0)),
-                    };
-                    cu::Row().modifier(Modifier::new().fill_max_width().height(21.0).background(bg)).alignment(Alignment::CenterStart).content(|| {
-                        if l.is_change() {
-                            let is_line_staged = staging.get().file(&file.path).is_some_and(|s| s.is_staged(hi, li));
-                            let st_line = staging.clone();
-                            let f_line = file.clone();
-                            let line_check = if is_line_staged { Check::On } else { Check::Off };
-                            StageCheck(line_check, STAGE_LINE_CHECK_SIDE, 21.0, move || {
-                                let mut s = st_line.get();
-                                s.file_mut(&f_line.path).toggle_line(&f_line, hi, li);
-                                st_line.set(s);
-                            });
-                        } else {
-                            cu::Spacer().modifier(Modifier::new().width(STAGE_CHECK_HIT_W));
-                        }
-
-                        let old_str = l.old_no.map(|n| format!("{:>4}", n)).unwrap_or_else(|| "    ".to_string());
-                        let new_str = l.new_no.map(|n| format!("{:>4}", n)).unwrap_or_else(|| "    ".to_string());
-                        let sign_str = match l.kind {
-                            LineKind::Add => "+",
-                            LineKind::Del => "-",
-                            LineKind::Context => " ",
+            // Hunk lines (each exactly 21.0 px high, spacing 0.0) inside a horizontal ScrollRow so
+            // long lines scroll sideways while the sticky check column stays pinned at the start edge.
+            { use ::compose_rust::ui::ScrollRow; ScrollRow!(modifier = Modifier::new().fill_max_width(), {
+                { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().min_width(pane_width), spacing = 0.0, {
+                    for (li, l) in h.lines.iter().enumerate() {
+                        let bg = match l.kind {
+                            LineKind::Add => paint(p.green.soft),
+                            LineKind::Del => paint(p.red.soft),
+                            LineKind::Context => Paint::Literal(Color::argb(0)),
                         };
+                        let sticky_bg = match l.kind {
+                            LineKind::Add => paint(p.green.soft),
+                            LineKind::Del => paint(p.red.soft),
+                            LineKind::Context => paint(p.surface),
+                        };
+                        { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().min_width(pane_width).height(21.0).background(bg), alignment = Alignment::CenterStart, {
+                            // compose-rust#424 (v0.0.11 `Modifier::sticky`): the line check stays
+                            // pinned at the start edge when a diff row scrolls sideways.
+                            if l.is_change() {
+                                let is_line_staged = staging.get().file(&file.path).is_some_and(|s| s.is_staged(hi, li));
+                                let st_line = staging.clone();
+                                let f_line = file.clone();
+                                let line_check = if is_line_staged { Check::On } else { Check::Off };
+                                StageCheckWith(Modifier::new().sticky().background(sticky_bg), line_check, STAGE_LINE_CHECK_SIDE, 21.0, move || {
+                                    let mut s = st_line.get();
+                                    s.file_mut(&f_line.path).toggle_line(&f_line, hi, li);
+                                    st_line.set(s);
+                                });
+                            } else {
+                                { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().sticky().width(STAGE_CHECK_HIT_W).height(21.0).background(sticky_bg)) };
+                            }
 
-                        cu::Box().modifier(Modifier::new().width(32.0)).alignment(Alignment::CenterEnd).content(|| {
-                            Label(&old_str, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                        });
-                        cu::Spacer().modifier(Modifier::new().width(4.0));
-                        cu::Box().modifier(Modifier::new().width(32.0)).alignment(Alignment::CenterEnd).content(|| {
-                            Label(&new_str, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                        });
-                        cu::Spacer().modifier(Modifier::new().width(4.0));
-                        cu::Box().modifier(Modifier::new().width(14.0)).alignment(Alignment::Center).content(|| {
-                            Label(sign_str, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                        });
-                        cu::Spacer().modifier(Modifier::new().width(4.0));
-                        cu::Text(&l.text)
-                            .type_role(TypeRole::Mono)
-                            .font_size(Fs::Xs2.size())
-                            .line_height(Fs::Xs2.line_height())
-                            .color(paint(p.text))
-                            .max_lines(1)
-                            .word_break(compose_rust::WordBreak::KeepAll)
-                            .overflow(TextOverflow::Ellipsis);
-                    });
-                }
-            });
+                            let old_str = l.old_no.map(|n| format!("{:>4}", n)).unwrap_or_else(|| "    ".to_string());
+                            let new_str = l.new_no.map(|n| format!("{:>4}", n)).unwrap_or_else(|| "    ".to_string());
+                            let sign_str = match l.kind {
+                                LineKind::Add => "+",
+                                LineKind::Del => "-",
+                                LineKind::Context => " ",
+                            };
+
+                            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().width(32.0), alignment = Alignment::CenterEnd, {
+                                Label(&old_str, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                            }) };
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(4.0)) };
+                            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().width(32.0), alignment = Alignment::CenterEnd, {
+                                Label(&new_str, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                            }) };
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(4.0)) };
+                            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().width(14.0), alignment = Alignment::Center, {
+                                Label(sign_str, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                            }) };
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(4.0)) };
+                            { use ::compose_rust::ui::Text; Text!(&l.text, type_role = crate::ui::fonts::text_role(TypeRole::Mono), font_size = Fs::Xs2.size(), line_height = Fs::Xs2.line_height(), color = paint(p.text), max_lines = 1, word_break = compose_rust::WordBreak::KeepAll) };
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
+                        }) };
+                    }
+                }) };
+            }) };
         }
-    });
+    }) };
 }
 
 fn FilesHeader(
@@ -1525,30 +1494,30 @@ fn FilesHeader(
     // `.vcs-ph{min-height:52px;padding:10px var(--sp4)}`: 52 high with 16 at the sides and no
     // padding above or below, so the stash button's 44 dp box fits whole (FR-L19.1, #415: at 48
     // with 12 all round the row had 24 for it).
-    cu::Row().modifier(Modifier::new().fill_max_width().height(VCS_FILES_HEAD_ROW_H)).alignment(Alignment::CenterStart).content(move || {
-        cu::Spacer().modifier(Modifier::new().width(VCS_FILES_HEAD_PAD_X));
-        cu::Row().modifier(Modifier::new().weight(1.0)).alignment(Alignment::CenterStart).spacing(SP[1]).content(move || {
+    { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width().height(VCS_FILES_HEAD_ROW_H), alignment = Alignment::CenterStart, content = move || {
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(VCS_FILES_HEAD_PAD_X)) };
+        { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().weight(1.0), alignment = Alignment::CenterStart, spacing = SP[1], content = move || {
             StageCheck(all, STAGE_CHECK_SIDE, 24.0, move || {
                 let mut s = st_toggle.get();
                 s.toggle_all(&d_toggle);
                 st_toggle.set(s);
             });
-            cu::Spacer().modifier(Modifier::new().width(SP[0]));
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[0])) };
             Label(&format!("변경 파일 {}", diffs_len), Fs::Sm, Weight::Semibold, Some(paint(p.text)), Some(1));
             // The note takes the room that is left and no more, so the button after it keeps
             // its width (unweighted, the note took the row and the button was not drawn).
-            cu::Box().modifier(Modifier::new().weight(1.0)).alignment(Alignment::CenterEnd).content(|| {
+            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().weight(1.0), alignment = Alignment::CenterEnd, {
                 Label(STASH_NOW_NOTE, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(2));
-            });
+            }) };
             CircleIconButton(ICON_STASH_SVG, remote_button_labels()[3], move || {
                 match &stash {
                     Some(a) => a.stash_now(diffs_len),
                     None => notice::post(soon_line("스태시")),
                 }
             });
-        });
-        cu::Spacer().modifier(Modifier::new().width(VCS_FILES_HEAD_PAD_X));
-    });
+        }) };
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(VCS_FILES_HEAD_PAD_X)) };
+    }) };
 }
 
 /// A row of the changes tree and the padding around the rows (`FilesTree`).
@@ -1579,8 +1548,8 @@ pub fn tree_height(rows: usize) -> f32 {
 /// The tallest the tree stands in the changes card, so the commit box under it stays on screen
 /// (`.vcs-tree{max-height:360px;overflow:auto}`; review r8: at 1440 the commit button was below
 /// the fold). `pane_h` is the height the two panes have when it is known (the sheet): the tree
-/// then also leaves room for the header and the commit box, down to three rows. The toolkit has
-/// no maximum height (TODO(compose-rust#778, after v0.0.10)), so a taller tree is given this height and scrolls.
+/// then also leaves room for the header and the commit box, down to three rows. Capped with
+/// `Modifier::max_height` (compose-rust#778, v0.0.11).
 pub fn tree_cap(max: f32, pane_h: Option<f32>) -> f32 {
     match pane_h {
         Some(h) => (h - VCS_FILES_HEAD_H - VCS_COMMIT_BOX_EST_H).clamp(VCS_TREE_MIN_H, max),
@@ -1588,8 +1557,8 @@ pub fn tree_cap(max: f32, pane_h: Option<f32>) -> f32 {
     }
 }
 
-/// The height a scrolling tree is given inside `cap`: its top padding and as many whole rows as
-/// fit, so at rest the box under it starts where a row ends instead of cutting one in half
+/// The height a scrolling tree is capped at inside `cap`: its top padding and as many whole rows
+/// as fit, so at rest the box under it starts where a row ends instead of cutting one in half
 /// (review r10, the 1024 sheet). At least one row.
 pub fn tree_view_height(cap: f32) -> f32 {
     let rows = ((cap - VCS_TREE_PAD) / VCS_TREE_ROW_H).floor().max(1.0);
@@ -1613,7 +1582,8 @@ pub fn page_pane_height(window_h: f32, pad: f32) -> f32 {
     (window_h - VCS_PAGE_ABOVE_PANES - pad).max(0.0)
 }
 
-/// [`FilesTree`] no taller than `cap`: a longer tree scrolls inside that height.
+/// [`FilesTree`] capped at `tree_view_height(cap)` (`Modifier::max_height`, compose-rust#778,
+/// v0.0.11): a shorter tree is as tall as its rows and a longer one scrolls inside the cap.
 fn FilesTreeCapped(
     diffs: &[FileDiff],
     staging: &MutableState<Staging>,
@@ -1622,15 +1592,9 @@ fn FilesTreeCapped(
     on_tab: impl FnMut(PaneTab) + Clone + 'static,
     cap: f32,
 ) {
-    let paths: Vec<String> = diffs.iter().map(|d| d.path.clone()).collect();
-    let rows = build_tree(&paths, &folded.get()).len();
-    if !diffs.is_empty() && tree_height(rows) > cap {
-        cu::ScrollColumn().modifier(Modifier::new().fill_max_width().height(tree_view_height(cap))).content(|| {
-            FilesTree(diffs, staging, folded, selected, on_tab);
-        });
-    } else {
+    { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().fill_max_width().max_height(tree_view_height(cap)), {
         FilesTree(diffs, staging, folded, selected, on_tab);
-    }
+    }) };
 }
 
 fn FilesTree(
@@ -1646,38 +1610,43 @@ fn FilesTree(
     let sel = selected.get().min(diffs.len().saturating_sub(1));
     let st = staging.get();
 
-    cu::Column().modifier(Modifier::new().fill_max_width().padding(SP[1])).spacing(0.0).content(move || {
+    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width().padding(SP[1]), spacing = 0.0, content = move || {
         if diffs.is_empty() {
-            cu::Box().modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
+            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().padding(SP[2]), {
                 Label("변경 사항이 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
-            });
+            }) };
         } else {
             for row in rows.iter().cloned() {
                 match row {
                     TreeRow::Dir { label, path, depth, open } => {
                         let f_state = folded.clone();
                         let pth = path.clone();
-                        cu::Box()
-                            .modifier(
-                                Modifier::new()
-                                    .fill_max_width()
-                                    .height(34.0)
-                                    .corner_radius(CORNER_XS),
-                            )
-                            .content(move || {
-                                cu::Row()
-                                    .alignment(Alignment::CenterStart)
-                                    .modifier(Modifier::new().fill_max_size())
-                                    .content(|| {
+                        let dir_label = label.clone();
+                        NamedClickable(
+                            &dir_label,
+                            Modifier::new()
+                                .fill_max_width()
+                                .height(34.0)
+                                .corner_radius(CORNER_XS),
+                            Alignment::TopStart,
+                            move || {
+                                let mut f = f_state.get();
+                                if !f.remove(&pth) {
+                                    f.insert(pth.clone());
+                                }
+                                f_state.set(f);
+                            },
+                            move || {
+                                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_size(), {
                                         if depth > 0 {
-                                            cu::Spacer().modifier(Modifier::new().width(depth as f32 * 14.0));
+                                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(depth as f32 * 14.0)) };
                                         }
-                                        cu::Spacer().modifier(Modifier::new().width(4.0));
+                                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(4.0)) };
                                         let chev_svg = if open { ICON_CHEVRON_DOWN_SVG } else { ICON_CHEVRON_RIGHT_SVG };
                                         NavIcon(chev_svg, p.muted.to_argb(), 14.0);
-                                        cu::Spacer().modifier(Modifier::new().width(4.0));
+                                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(4.0)) };
                                         NavIcon(ICON_FOLDER_SVG, p.muted.to_argb(), 15.0);
-                                        cu::Spacer().modifier(Modifier::new().width(6.0));
+                                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(6.0)) };
                                         Label(
                                             &label,
                                             Fs::Xs,
@@ -1685,15 +1654,9 @@ fn FilesTree(
                                             Some(paint(p.text_2)),
                                             Some(1),
                                         );
-                                    });
-                                DataNamedOverlay(&label, true, None, move || {
-                                    let mut f = f_state.get();
-                                    if !f.remove(&pth) {
-                                        f.insert(pth.clone());
-                                    }
-                                    f_state.set(f);
-                                });
-                            });
+                                    }) };
+                            },
+                        );
                     }
                     TreeRow::File { index, name, depth } => {
                         let is_selected = index == sel;
@@ -1712,34 +1675,33 @@ fn FilesTree(
                         let mut on_tab_file = on_tab.clone();
                         let d_file = diff_file.clone();
 
-                        cu::Row()
-                            .modifier(
-                                Modifier::new()
+                        { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new()
                                     .fill_max_width()
                                     .height(34.0)
                                     .background(bg)
-                                    .corner_radius(CORNER_XS),
-                            )
-                            .alignment(Alignment::CenterStart)
-                            .content(move || {
+                                    .corner_radius(CORNER_XS), alignment = Alignment::CenterStart, content = move || {
                                 if depth > 0 {
-                                    cu::Spacer().modifier(Modifier::new().width(depth as f32 * 14.0));
+                                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(depth as f32 * 14.0)) };
                                 }
-                                cu::Spacer().modifier(Modifier::new().width(4.0));
+                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(4.0)) };
                                 StageCheck(is_staged, STAGE_CHECK_SIDE, 34.0, move || {
                                     let mut s = st_file.get();
                                     s.toggle_file(&d_file);
                                     st_file.set(s);
                                 });
-                                cu::Spacer().modifier(Modifier::new().width(4.0));
+                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(4.0)) };
                                 let file_name = name.clone();
-                                cu::Box()
-                                    .modifier(Modifier::new().weight(1.0).height(34.0))
-                                    .content(move || {
-                                        cu::Row()
-                                            .alignment(Alignment::CenterStart)
-                                            .modifier(Modifier::new().fill_max_size())
-                                            .content(|| {
+                                let file_label = file_name.clone();
+                                NamedClickable(
+                                    &file_label,
+                                    Modifier::new().weight(1.0).height(34.0),
+                                    Alignment::TopStart,
+                                    move || {
+                                        sel_state.set(index);
+                                        on_tab_file(tab_after_select(PaneTab::Files));
+                                    },
+                                    move || {
+                                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_size(), {
                                                 Label(
                                                     &file_name,
                                                     Fs::Sm,
@@ -1747,16 +1709,11 @@ fn FilesTree(
                                                     Some(paint(p.text)),
                                                     Some(1),
                                                 );
-                                                cu::Spacer().modifier(Modifier::new().weight(1.0));
-                                                cu::Box()
-                                                    .modifier(
-                                                        Modifier::new()
+                                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
+                                                { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                                                             .size(18.0, 18.0)
                                                             .background(paint(tone_fill))
-                                                            .corner_radius(CORNER_XS),
-                                                    )
-                                                    .alignment(Alignment::Center)
-                                                    .content(|| {
+                                                            .corner_radius(CORNER_XS), alignment = Alignment::Center, {
                                                         Label(
                                                             letter,
                                                             Fs::Xs2,
@@ -1764,20 +1721,17 @@ fn FilesTree(
                                                             Some(paint(tone_text)),
                                                             Some(1),
                                                         );
-                                                    });
-                                                cu::Spacer().modifier(Modifier::new().width(SP[1]));
-                                            });
-                                        DataNamedOverlay(&file_name, true, None, move || {
-                                            sel_state.set(index);
-                                            on_tab_file(tab_after_select(PaneTab::Files));
-                                        });
-                                    });
-                            });
+                                                    }) };
+                                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[1])) };
+                                            }) };
+                                    },
+                                );
+                            }) };
                     }
                 }
             }
         }
-    });
+    }) };
 }
 
 fn FilesPane(
@@ -1797,11 +1751,11 @@ fn FilesPane(
     let p = ember_theme().palette;
 
     VcsCard(move || {
-        cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
+        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), content = move || {
             FilesHeader(None, diffs_len, &all_checks, &st_clone, &d_clone);
-            cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().height(1.0).background(paint(p.line))) };
             FilesTree(&d_clone, &st_clone, &fold_clone, &sel_clone, on_tab);
-        });
+        }) };
     });
 }
 
@@ -1810,15 +1764,15 @@ fn DiffPane(diffs: &[FileDiff], selected: usize, staging: &MutableState<Staging>
     let selected_file = diffs.get(selected).cloned();
     let st_diff = staging.clone();
     VcsCard(move || {
-        cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
+        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), content = move || {
             if let Some(file) = selected_file {
                 DiffViewAtWidth(&file, &st_diff, width);
             } else {
-                cu::Box().modifier(Modifier::new().fill_max_width().padding(SP[3])).content(|| {
+                { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().padding(SP[3]), {
                     Label("변경 사항이 없습니다. 작업 트리가 깨끗합니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
-                });
+                }) };
             }
-        });
+        }) };
     });
 }
 
@@ -1847,16 +1801,12 @@ fn CommitBox(
     let warning = if is_amend { commit.as_ref().and_then(|(_, snap, _)| amend_warning(snap)) } else { None };
     let is_armed = warning.is_some() && armed.get() != 0;
 
-    cu::Column()
-        .modifier(
-            Modifier::new()
+    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new()
                 .fill_max_width()
                 .background(paint(p.surface_2))
-                .padding(SP[2]),
-        )
-        // `.vcs-commit{gap:8px}`.
-        .spacing(SP[1])
-        .content(move || {
+                .padding(SP[2]), 
+// `.vcs-commit{gap:8px}`.
+spacing = SP[1], content = move || {
             let s_state = sum_state.clone();
             let s_armed = armed.clone();
             let sum_show = sum_state.clone();
@@ -1899,7 +1849,7 @@ fn CommitBox(
             });
 
             // Amend checkbox
-            cu::Row().modifier(Modifier::new().fill_max_width().height(32.0)).alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+            { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width().height(32.0), alignment = Alignment::CenterStart, spacing = SP[1], {
                 let am = amend_state.clone();
                 let am_armed = armed.clone();
                 StageCheck(if is_amend { Check::On } else { Check::Off }, STAGE_CHECK_SIDE, 32.0, move || {
@@ -1907,7 +1857,7 @@ fn CommitBox(
                     am.set(!am.get());
                 });
                 Label("마지막 커밋 수정 (amend)", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
-            });
+            }) };
             }
             if let Some(text) = warning {
                 Label(text, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), None);
@@ -1951,10 +1901,10 @@ fn CommitBox(
             );
 
             if folded {
-                cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::CenterStart).spacing(SP[1]).content(move || {
-                    cu::Box().modifier(Modifier::new().weight(1.0)).content(move || { if let Some(f) = summary_field { f(); } });
+                { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width(), alignment = Alignment::CenterStart, spacing = SP[1], content = move || {
+                    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().weight(1.0), content = move || { if let Some(f) = summary_field { f(); } }) };
                     button();
-                });
+                }) };
             } else {
                 button();
             }
@@ -1964,17 +1914,17 @@ fn CommitBox(
                 "요약과 스테이징한 파일이 필요합니다".to_string()
             };
             if compact {
-                cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
-                    cu::Box().modifier(Modifier::new().weight(1.0)).content(|| {
+                { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width(), alignment = Alignment::CenterStart, spacing = SP[1], {
+                    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().weight(1.0), {
                         Label(&note_text, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));
-                    });
+                    }) };
                     let toggle = expanded.clone();
                     AppButton(compact_toggle_label(folded), None, ButtonKind::Default, true, true, false, move || toggle.set(!toggle.get()));
-                });
+                }) };
             } else {
                 Label(&note_text, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), None);
             }
-        });
+        }) };
 }
 
 /// The compact commit box's toggle (`CommitBox` with `compact`).
@@ -2091,16 +2041,10 @@ fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<P
 
     match layout {
         PaneLayout::Two => {
-            // The panes scroll on their own inside a bounded row. A row in an unbounded
-            // scroll centres its shorter children vertically (TODO(compose-rust#389, in v0.0.10):
-            // `Row::equal_height(true)` with `fill_max_height` children is in the pin and sizes
-            // the row to its tallest child. It is not used here yet for two reasons. The diff
-            // pane holds wrapped code, and the toolkit sizes an `equal_height` row by intrinsic
-            // heights, which is wrong for wrapped text and counts a scrolling child as 0
-            // (compose-rust#766, open). And one page scroll would take the files card out of
-            // view while a long diff is read, which the mockup's sticky `.vcs-files` avoids. A
-            // capture of this layout with `equal_height` in a page scroll must show the files
-            // card as tall as the diff and still in view before this changes).
+            // The panes scroll independently inside a bounded `intrinsic_size = true` row
+            // (`Row::equal_height`, compose-rust#389), so both panes stretch to the same height
+            // while each keeps its own `ScrollColumn` and the files card stays in view while a
+            // long diff is read (matching the mockup's sticky `.vcs-files`).
             let d_files = diffs.clone();
             let st_files = staging.clone();
             let fold_files = folded.clone();
@@ -2111,31 +2055,27 @@ fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<P
             let body_files = body.clone();
             let am_files = amend.clone();
 
-            cu::Row()
-                .modifier(Modifier::new().fill_max_width().fill_max_height())
-                .alignment(Alignment::TopStart)
-                .spacing(GAP_CARD)
-                .content(move || {
+            { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width().fill_max_height(), alignment = Alignment::TopStart, spacing = GAP_CARD, intrinsic_size = true, content = move || {
                     // One card, as the mockup's `.vcs-files`: the header, the tree (no taller than
                     // its cap, scrolling inside it) and the commit box under a rule on
                     // `surface-2`. The column still scrolls, for a pane shorter than the card.
-                    cu::ScrollColumn().modifier(Modifier::new().width(files_w).fill_max_height()).content(move || {
+                    { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().width(files_w).fill_max_height(), content = move || {
                         VcsCard(move || {
-                            cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
+                            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), content = move || {
                                 FilesHeader(stash_actions.clone(), diffs_len, &all_checks, &st_files, &d_files);
-                                cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+                                { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().height(1.0).background(paint(p.line))) };
                                 FilesTreeCapped(&d_files, &st_files, &fold_files, &sel_files, on_tab_files, tree_cap(VCS_TREE_MAX_H, pane_h));
-                                cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+                                { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().height(1.0).background(paint(p.line))) };
                                 CommitBox(&branch, staged_files, &sum_files, &body_files, &am_files, commit.clone(), false);
-                            });
+                            }) };
                         });
-                    });
+                    }) };
 
                     // Right card: diff
-                    cu::ScrollColumn().modifier(Modifier::new().weight(1.0).fill_max_height()).content(move || {
+                    { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().weight(1.0).fill_max_height(), content = move || {
                         DiffPane(&diffs, sel, &staging, diff_width);
-                    });
-                });
+                    }) };
+                }) };
         }
         PaneLayout::Stacked => {
             let d_files = diffs.clone();
@@ -2148,21 +2088,21 @@ fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<P
             let body_files = body.clone();
             let am_files = amend.clone();
 
-            cu::Column().modifier(Modifier::new().fill_max_width()).spacing(GAP_CARD).content(move || {
+            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), spacing = GAP_CARD, content = move || {
                 VcsCard(move || {
-                    cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
+                    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), content = move || {
                         FilesHeader(stash_actions.clone(), diffs_len, &all_checks, &st_files, &d_files);
-                        cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+                        { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().height(1.0).background(paint(p.line))) };
                         FilesTreeCapped(&d_files, &st_files, &fold_files, &sel_files, on_tab_files, tree_cap(VCS_TREE_MAX_H_STACKED, None));
                         // In the sheet the commit box is the footer under the scroll instead.
                         if !commit_outside {
-                            cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+                            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().height(1.0).background(paint(p.line))) };
                             CommitBox(&branch, staged_files, &sum_files, &body_files, &am_files, commit.clone(), false);
                         }
-                    });
+                    }) };
                 });
                 DiffPane(&diffs, sel, &staging, diff_width);
-            });
+            }) };
         }
         PaneLayout::Tabs => {
             let mut on_tab_pick = on_tab.clone();
@@ -2172,25 +2112,25 @@ fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<P
             let sel_files = selected.clone();
             let on_tab_files = on_tab.clone();
 
-            cu::Column().modifier(Modifier::new().fill_max_width()).spacing(GAP_CARD).content(move || {
+            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), spacing = GAP_CARD, content = move || {
                 PaneTabs(Section::Changes, tab, move |t| on_tab_pick(t));
                 match tab.unwrap_or(PaneTab::Files) {
                     PaneTab::Diff => DiffPane(&diffs, sel, &staging, diff_width),
                     PaneTab::Commit => CommitPane(&snap.branch, staged_files, &summary, &body, &amend, commit.clone(), false),
                     _ => {
                         VcsCard(move || {
-                            cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
+                            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), content = move || {
                                 FilesHeader(stash_actions.clone(), diffs_len, &all_checks, &st_files, &d_files);
-                                cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+                                { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().height(1.0).background(paint(p.line))) };
                                 FilesTree(&d_files, &st_files, &fold_files, &sel_files, on_tab_files);
-                            });
+                            }) };
                         });
                     }
                 }
                 // Every tab ends clear of the floating tab bar, not only 커밋: the last tree row
                 // and the last diff line scroll above it (FR-L19.1, #415).
-                cu::Spacer().modifier(Modifier::new().height(super::routines::compact_bottom_clearance()));
-            });
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(super::routines::compact_bottom_clearance())) };
+            }) };
         }
     }
 }
@@ -2270,6 +2210,23 @@ fn sample_merge() -> MergeLoad {
     MergeLoad::Ready(Some(MergeView { from: "origin/main".into(), into: "feat/session-shim".into(), remaining: SAMPLE_CONFLICT_COUNT, can_commit: false }))
 }
 
+/// Schedules a one-shot timer for [`STASH_ARM_TIMEOUT_MS`] whenever an armed confirmation state
+/// holds a token, clearing it automatically via [`disarm_if_matches`] if the same token is still
+/// armed when the timer fires (FR-L19).
+fn auto_disarm_effect(armed: &MutableState<Option<(usize, i64)>>) {
+    let token = armed.get();
+    let state = armed.clone();
+    launched_effect(token, move || async move {
+        let Some(token) = token else { return };
+        delay(std::time::Duration::from_millis(STASH_ARM_TIMEOUT_MS as u64)).await;
+        let current = state.get_untracked();
+        let next = disarm_if_matches(current, token);
+        if next != current {
+            state.set(next);
+        }
+    });
+}
+
 /// 충돌 with the merge banner (FR-G16, FR-G17, #382): the banner card above the list or editor
 /// while a merge is in progress, with 병합 취소 and 병합 커밋 (each asks twice). A conflict list
 /// without a merge (a stash pop, a cherry-pick) shows no banner. `actions` is `None` for the
@@ -2279,6 +2236,7 @@ fn ConflictsPane(paths: &[String], actions: Option<Actions>, layout: PaneLayout)
     let mlocal = remember(|| mutable_state_of(0_u64));
     let mbusy = remember(|| mutable_state_of(false));
     let armed = remember(|| mutable_state_of(None::<(usize, i64)>));
+    auto_disarm_effect(&armed);
     let generation = remember(|| mutable_state_of(0_u64));
 
     if let Some(a) = actions.clone() {
@@ -2369,7 +2327,7 @@ fn ConflictsPane(paths: &[String], actions: Option<Actions>, layout: PaneLayout)
                 // The state read failed: say so (Korean) and offer a retry instead of nothing.
                 let p = ember_theme().palette;
                 let retry = mlocal.clone();
-                cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content({
+                { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), content = {
                     let text = text.clone();
                     move || {
                         Label("병합 상태를 불러오지 못했습니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
@@ -2377,20 +2335,20 @@ fn ConflictsPane(paths: &[String], actions: Option<Actions>, layout: PaneLayout)
                         let retry = retry.clone();
                         AppButton("다시 시도", None, ButtonKind::Primary, false, true, true, move || retry.set(retry.get() + 1));
                     }
-                });
+                }) };
             }
         }
     };
     if two {
-        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().fill_max_height()).content(move || {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width().fill_max_height(), content = move || {
             banner();
-            cu::Box().modifier(Modifier::new().fill_max_width().weight(1.0)).content(body.clone());
-        });
+            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().weight(1.0), content = body.clone()) };
+        }) };
     } else {
-        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), content = move || {
             banner();
             body();
-        });
+        }) };
     }
 }
 
@@ -2404,21 +2362,21 @@ fn MergeBanner(v: &MergeView, armed: &MutableState<Option<(usize, i64)>>, busy: 
     let (abort_armed, commit_armed) = (shows(MergeAction::Abort), shows(MergeAction::Commit));
     let (title, sub, can_commit) = (banner_title(v), banner_sub(v.remaining), v.can_commit);
     VcsCard(move || {
-        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(move || {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width().padding(SP[2]), content = move || {
             Txt(&title, TypeRole::BodyStrong, Some(paint(p.text)), Some(2), Some(TextOverflow::Ellipsis), None, None);
             Label(&sub, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
-            cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(move || {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width(), content = move || {
                 let on_abort = tap.clone();
                 let kind = if abort_armed { ButtonKind::Destructive } else { ButtonKind::Default };
                 AppButton(banner_button_text(MergeAction::Abort, abort_armed), None, kind, true, !busy, false, move || on_abort(MergeAction::Abort));
                 let on_commit = tap.clone();
                 AppButton(banner_button_text(MergeAction::Commit, commit_armed), None, ButtonKind::Primary, true, can_commit && !busy, false, move || on_commit(MergeAction::Commit));
-            });
+            }) };
             Label(MERGE_ABORT_NOTE, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
             if commit_armed {
                 Label(MERGE_COMMIT_NOTE, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
             }
-        });
+        }) };
     });
 }
 
@@ -2429,24 +2387,32 @@ fn ConflictsBody(paths: &[String], actions: Option<Actions>, layout: PaneLayout)
     let p = ember_theme().palette;
     // `EMBER_CR_VCS_CONFLICT=<path>` opens that file's editor directly, for captures without clicks.
     let open = remember(|| mutable_state_of(std::env::var("EMBER_CR_VCS_CONFLICT").ok().filter(|p| !p.is_empty())));
-    let state = remember(|| mutable_state_of(ConflictLoad::Loading));
+    // #878: demo services do not answer `git conflict`, and sample mode has `actions == None`, so
+    // both open the sample conflict directly instead of staying on "불러오는 중입니다".
+    let use_sample = actions.is_none() || crate::demo::active_from_env();
+    let state = remember(|| {
+        mutable_state_of(if use_sample { ConflictLoad::Ready(sample_conflict()) } else { ConflictLoad::Loading })
+    });
     let local = remember(|| mutable_state_of(0_u64));
     let busy = remember(|| mutable_state_of(false));
     // The armed pick-all button (key, arm time). It lives in the body, which the pane remounts
     // with `key(generation)` after a merge answer, so a reload starts it unarmed.
     let pick_armed = remember(|| mutable_state_of(None::<(usize, i64)>));
+    auto_disarm_effect(&pick_armed);
 
-    if let (Some(a), Some(path)) = (actions.clone(), open.get()) {
-        let st = state.clone();
-        launched_effect((a.project.clone(), path.clone(), local.get()), move || async move {
-            if crate::services::try_services().is_some() {
-                st.set(ConflictLoad::Loading);
-                let name = a.project.clone();
-                crate::services::run_shared(async move { fetch_conflict(&name, &path).await }, move |result| st.set(result));
-            } else {
-                st.set(ConflictLoad::Failed("서버에 연결되어 있지 않아 충돌 파일을 불러올 수 없습니다.".to_string()));
-            }
-        });
+    if !use_sample {
+        if let (Some(a), Some(path)) = (actions.clone(), open.get()) {
+            let st = state.clone();
+            launched_effect((a.project.clone(), path.clone(), local.get()), move || async move {
+                if crate::services::try_services().is_some() {
+                    st.set(ConflictLoad::Loading);
+                    let name = a.project.clone();
+                    crate::services::run_shared(async move { fetch_conflict(&name, &path).await }, move |result| st.set(result));
+                } else {
+                    st.set(ConflictLoad::Failed("서버에 연결되어 있지 않아 충돌 파일을 불러올 수 없습니다.".to_string()));
+                }
+            });
+        }
     }
 
     let Some(path) = open.get() else {
@@ -2460,24 +2426,24 @@ fn ConflictsBody(paths: &[String], actions: Option<Actions>, layout: PaneLayout)
         }
         let paths = paths.to_vec();
         EmberCard(false, true, None, Some(SP[3]), None, move || {
-            cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
-                cu::Column().spacing(SP[0]).modifier(Modifier::new().fill_max_width()).content(|| {
+            { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), content = move || {
+                { use ::compose_rust::ui::Column; Column!(spacing = SP[0], modifier = Modifier::new().fill_max_width(), {
                     Label("충돌", Fs::Lg, Weight::Semibold, None, None);
                     Label("파일을 눌러 충돌을 해결합니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
-                });
+                }) };
                 // Left-aligned rows with a warning mark, like the mockup's file list, and a gap under
                 // the explanation (the old full-width pills centred the path and touched the text).
-                cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(move || {
+                { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), content = move || {
                     for path in paths {
-                        let (open, state, has_server) = (open.clone(), state.clone(), actions.is_some());
+                        let (open, state, has_server) = (open.clone(), state.clone(), !use_sample);
                         let target = path.clone();
                         ConflictFileRow(&path, move || {
                             state.set(if has_server { ConflictLoad::Loading } else { ConflictLoad::Ready(sample_conflict()) });
                             open.set(Some(target.clone()));
                         });
                     }
-                });
-            });
+                }) };
+            }) };
         });
         return;
     };
@@ -2497,7 +2463,7 @@ fn ConflictsBody(paths: &[String], actions: Option<Actions>, layout: PaneLayout)
     let content = {
         let (state, local, busy, step, path, pick_armed) = (state.clone(), local.clone(), busy.clone(), step.clone(), path.clone(), pick_armed.clone());
         move || {
-            cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+            { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), content = move || {
                 Txt(&path, TypeRole::Mono, Some(paint(p.text)), Some(2), Some(TextOverflow::Ellipsis), None, None);
                 match state.get() {
                     ConflictLoad::Loading => {
@@ -2516,7 +2482,7 @@ fn ConflictsBody(paths: &[String], actions: Option<Actions>, layout: PaneLayout)
                             // two when a block already has a choice (it would be replaced).
                             let now = crate::demo::now_ms();
                             let needs_confirm = pick_all_note(&file).is_some();
-                            cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content({
+                            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width(), content = {
                                 let (file, state, pick_armed, busy) = (file.clone(), state.clone(), pick_armed.clone(), busy.clone());
                                 move || {
                                     for (text, pick) in [("모두 현재 것", ConflictChoice::Ours), ("모두 들어오는 것", ConflictChoice::Theirs)] {
@@ -2541,7 +2507,7 @@ fn ConflictsBody(paths: &[String], actions: Option<Actions>, layout: PaneLayout)
                                         });
                                     }
                                 }
-                            });
+                            }) };
                             if let Some(note) = pick_all_note(&file) {
                                 Label(note, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
                             }
@@ -2549,7 +2515,7 @@ fn ConflictsBody(paths: &[String], actions: Option<Actions>, layout: PaneLayout)
                         }
                     }
                 }
-            });
+            }) };
         }
     };
     // The action bar: always visible below the scroll area at the wide layout, after the blocks
@@ -2557,28 +2523,28 @@ fn ConflictsBody(paths: &[String], actions: Option<Actions>, layout: PaneLayout)
     let bar = {
         let (state, busy, open, actions, path, step) = (state.clone(), busy.clone(), open.clone(), actions.clone(), path.clone(), step.clone());
         move || {
-            cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+            { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), content = move || {
                 if let ConflictLoad::Ready(file) = state.get() {
                     ConflictActions(&file, busy.get(), &step, &busy, &open, &actions, &path);
                 }
                 let back = back.clone();
                 AppButton("목록으로", None, ButtonKind::Default, true, !busy.get(), false, back);
                 if !two {
-                    cu::Spacer().modifier(Modifier::new().height(super::routines::compact_bottom_clearance()));
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(super::routines::compact_bottom_clearance())) };
                 }
-            });
+            }) };
         }
     };
     if two {
-        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().fill_max_height()).content(move || {
-            cu::ScrollColumn().modifier(Modifier::new().fill_max_width().weight(1.0)).content(content.clone());
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width().fill_max_height(), content = move || {
+            { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().fill_max_width().weight(1.0), content = content.clone()) };
             bar();
-        });
+        }) };
     } else {
-        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), content = move || {
             content();
             bar();
-        });
+        }) };
     }
 }
 
@@ -2591,9 +2557,9 @@ fn ConflictBlocks(file: &ConflictFile, layout: PaneLayout, is_busy: bool, state:
             ConflictSegment::Common(text) => {
                 if !text.trim().is_empty() {
                     VcsCard(|| {
-                        cu::Box().modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
+                        { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().padding(SP[2]), {
                             Txt(text, TypeRole::Mono, Some(paint(p.text_2)), None, None, None, None);
-                        });
+                        }) };
                     });
                 }
             }
@@ -2602,27 +2568,27 @@ fn ConflictBlocks(file: &ConflictFile, layout: PaneLayout, is_busy: bool, state:
                 index += 1;
                 let (choice, file, state, pick_armed) = (*choice, file.clone(), state.clone(), pick_armed.clone());
                 VcsCard(|| {
-                    cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
+                    { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width().padding(SP[2]), {
                         Label(&format!("충돌 {}", n + 1), Fs::Sm, Weight::Semibold, None, Some(1));
                         let two = layout == PaneLayout::Two;
                         let side = |label: &str, text: &str, ours_side: bool| {
                             let (bg, fg) = if ours_side { (p.green.soft, p.green.strong) } else { (p.blue.soft, p.blue.strong) };
                             let size = if two { Modifier::new().weight(1.0) } else { Modifier::new().fill_max_width() };
-                            cu::Column().spacing(SP[1]).modifier(size.background(paint(bg)).corner_radius(CORNER_LG).padding(SP[2])).content(|| {
+                            { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = size.background(paint(bg)).corner_radius(CORNER_LG).padding(SP[2]), {
                                 Txt(&chip_text(label), TypeRole::Caption, Some(paint(fg)), Some(1), Some(TextOverflow::Ellipsis), None, None);
                                 Txt(text, TypeRole::Mono, Some(paint(p.text)), None, None, None, None);
-                            });
+                            }) };
                         };
                         if two {
-                            cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+                            { use ::compose_rust::ui::Row; Row!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), {
                                 side(ours_label, ours, true);
                                 side(theirs_label, theirs, false);
-                            });
+                            }) };
                         } else {
                             side(ours_label, ours, true);
                             side(theirs_label, theirs, false);
                         }
-                        cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
                             for (text, pick) in [("내 변경", ConflictChoice::Ours), ("상대 변경", ConflictChoice::Theirs), ("둘 다", ConflictChoice::Both)] {
                                 let (file, state, pick_armed) = (file.clone(), state.clone(), pick_armed.clone());
                                 let selected = choice == pick;
@@ -2632,8 +2598,8 @@ fn ConflictBlocks(file: &ConflictFile, layout: PaneLayout, is_busy: bool, state:
                                     state.set(ConflictLoad::Ready(file.with_choice(n, pick)));
                                 });
                             }
-                        });
-                    });
+                        }) };
+                    }) };
                 });
             }
         }
@@ -2648,7 +2614,7 @@ fn ConflictPreview(file: &ConflictFile, step: &MutableState<ConflictStep>) {
         return;
     };
     VcsCard(|| {
-        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width().padding(SP[2]), {
             Label("해결 결과 미리 보기", Fs::Sm, Weight::Semibold, None, Some(1));
             Txt(&text, TypeRole::Mono, Some(paint(p.text)), None, None, None, None);
             if more > 0 {
@@ -2659,7 +2625,7 @@ fn ConflictPreview(file: &ConflictFile, step: &MutableState<ConflictStep>) {
                 let text = if step.get() == ConflictStep::PreviewFull { "접기" } else { "전체 보기" };
                 AppButton(text, None, ButtonKind::Default, true, true, false, move || toggle.set(toggle.get().toggle_full()));
             }
-        });
+        }) };
     });
 }
 
@@ -2684,7 +2650,7 @@ fn ConflictActions(
         });
         return;
     }
-    cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
         let cancel = step.clone();
         AppButton("취소", None, ButtonKind::Default, true, !is_busy, false, move || cancel.set(cancel_preview(cancel.get())));
         let (step, busy, open, actions, path, file) = (step.clone(), busy.clone(), open.clone(), actions.clone(), path.to_string(), file.clone());
@@ -2714,7 +2680,7 @@ fn ConflictActions(
                 }
             });
         });
-    });
+    }) };
 }
 
 /// How many ref chips a history row shows before "+N".
@@ -2756,18 +2722,19 @@ fn HistoryRow(e: &HistoryEntry, layout: PaneLayout, selected: bool, on_select: i
     if selected {
         frame = frame.border(1.0, paint(p.line));
     }
-    cu::Box().modifier(frame).content(move || {
-        cu::Row().alignment(Alignment::TopStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
+    let row_label = format!("커밋 {} {}", e.short, e.subject);
+    NamedClickableOn(&row_label, frame, Some(fill), Alignment::TopStart, on_select, move || {
+        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::TopStart, spacing = SP[2], modifier = Modifier::new().fill_max_width().padding(SP[2]), {
             // TODO(compose-rust#308): lane graph indicator dot. Full SVG/Canvas parent-edge curves wait on compose-rust#308.
             let dot_color = if e.is_merge { p.sky.strong } else { p.blue.strong };
-            cu::Box().modifier(Modifier::new().size(8.0, 8.0).background(paint(dot_color)).shape_role(ShapeRole::Full));
-            cu::Column().spacing(SP[1]).modifier(Modifier::new().weight(1.0)).content(|| {
+            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().size(8.0, 8.0).background(paint(dot_color)).shape_role(ShapeRole::Full)) };
+            { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().weight(1.0), {
                 Txt(&e.subject, TypeRole::BodyStrong, Some(paint(p.text)), Some(2), Some(TextOverflow::Ellipsis), None, None);
-                cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
                     Txt(&history_meta(e), TypeRole::Caption, Some(paint(p.text_2)), Some(1), Some(TextOverflow::Ellipsis), Some(1.0), None);
-                });
+                }) };
                 if e.unpushed || e.remote_only || e.is_merge || !e.refs.is_empty() {
-                    cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
                         if e.unpushed {
                             Pill("푸시 안 됨", PillTone::Orange, true);
                         }
@@ -2783,11 +2750,10 @@ fn HistoryRow(e: &HistoryEntry, layout: PaneLayout, selected: bool, on_select: i
                         if e.refs.len() > limit {
                             Pill(&format!("+{}", e.refs.len() - limit), PillTone::Grey, true);
                         }
-                    });
+                    }) };
                 }
-            });
-        });
-        DataNamedOverlay(&format!("커밋 {} {}", e.short, e.subject), true, None, on_select);
+            }) };
+        }) };
     });
 }
 
@@ -2887,11 +2853,11 @@ fn status_tone(letter: &str) -> (Paint, Paint) {
 fn CommitDetailBody(v: &CommitDetailView, ctl: &CommitCtl) {
     let p = ember_theme().palette;
     VcsCard(|| {
-        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
-            cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width().padding(SP[2]), {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
                 Txt(&v.subject, TypeRole::BodyStrong, Some(paint(p.text)), None, None, Some(1.0), None);
                 Txt(&v.short, TypeRole::Mono, Some(paint(p.text_2)), Some(1), None, None, None);
-            });
+            }) };
             for line in &v.body_lines {
                 Label(line, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
             }
@@ -2906,7 +2872,7 @@ fn CommitDetailBody(v: &CommitDetailView, ctl: &CommitCtl) {
             Label(&format!("{} \u{00b7} {} \u{00b7} {parents}", v.author, v.time_text), Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(2));
             Txt(&v.sha, TypeRole::Mono, Some(paint(p.text_2)), Some(2), None, None, None);
             if v.unpushed || v.remote_only || v.is_merge || !v.refs.is_empty() {
-                cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
                     if v.unpushed {
                         Pill("푸시 안 됨", PillTone::Orange, true);
                     }
@@ -2922,22 +2888,22 @@ fn CommitDetailBody(v: &CommitDetailView, ctl: &CommitCtl) {
                     if v.refs.len() > 6 {
                         Pill(&format!("+{}", v.refs.len() - 6), PillTone::Grey, true);
                     }
-                });
+                }) };
             }
 
             let (shown, more) = commit_files_shown(v);
             InsetPanel(true, || {
-                cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
                     Label(&format!("변경한 파일 {}", v.files_total), Fs::Md, Weight::Semibold, None, Some(1));
                     if shown.is_empty() {
                         Label("변경한 파일이 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
                     }
                     for f in shown {
-                        cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
                             let (bg, fg) = status_tone(f.status_letter);
-                            cu::Box().modifier(Modifier::new().size(20.0, 20.0).background(bg).corner_radius(CORNER_XS)).alignment(Alignment::Center).content(|| {
+                            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().size(20.0, 20.0).background(bg).corner_radius(CORNER_XS), alignment = Alignment::Center, {
                                 Label(f.status_letter, Fs::Xs2, Weight::Semibold, Some(fg.clone()), Some(1));
-                            });
+                            }) };
                             let name = match &f.old_path {
                                 Some(old) => format!("{old} \u{2192} {}", f.path),
                                 None => f.path.clone(),
@@ -2949,31 +2915,31 @@ fn CommitDetailBody(v: &CommitDetailView, ctl: &CommitCtl) {
                                 Label(&format!("+{}", f.additions), Fs::Xs, Weight::Medium, Some(paint(p.green.strong)), Some(1));
                                 Label(&format!("-{}", f.deletions), Fs::Xs, Weight::Medium, Some(paint(p.red.strong)), Some(1));
                             }
-                        });
+                        }) };
                     }
                     if let Some(line) = more {
                         Label(&line, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
                     }
-                });
+                }) };
             });
 
             // Two rows: four buttons side by side do not fit at 390 (Cherry-pick was cut).
-            cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-                cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+            { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
                     let toggle = ctl.on_toggle_form.clone();
                     AppButton("여기서 브랜치", None, ButtonKind::Default, true, !ctl.busy, false, move || toggle());
                     let copy = ctl.on_copy.clone();
                     AppButton("SHA 복사", None, ButtonKind::Default, true, true, false, move || copy());
-                });
-                cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                }) };
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
                     let revert = ctl.on_revert.clone();
                     let label = if ctl.armed == Some(CommitAction::Revert) { CommitAction::Revert.armed_label() } else { CommitAction::Revert.label() };
                     AppButton(label, None, ButtonKind::Destructive, true, !ctl.busy, false, move || revert());
                     let pick = ctl.on_pick.clone();
                     let label = if ctl.armed == Some(CommitAction::CherryPick) { CommitAction::CherryPick.armed_label() } else { CommitAction::CherryPick.label() };
                     AppButton(label, None, ButtonKind::Default, true, !ctl.busy, false, move || pick());
-                });
-            });
+                }) };
+            }) };
 
             if let Some(action) = ctl.armed {
                 Label(&commit_action_branch_line(action, &ctl.branch), Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
@@ -2990,7 +2956,7 @@ fn CommitDetailBody(v: &CommitDetailView, ctl: &CommitCtl) {
 
             if ctl.form_open {
                 Label(&format!("{} 에서 새 브랜치를 만들고 전환합니다", v.short), Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(2));
-                cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
                     let name = ctl.name.clone();
                     key((v.sha.clone(), ctl.name_gen), || {
                         EmberField(FieldOptions {
@@ -3003,9 +2969,9 @@ fn CommitDetailBody(v: &CommitDetailView, ctl: &CommitCtl) {
                     });
                     let create = ctl.on_create.clone();
                     AppButton("만들고 전환", None, ButtonKind::Primary, true, !ctl.busy, false, move || create());
-                });
+                }) };
             }
-        });
+        }) };
     });
 }
 
@@ -3039,6 +3005,7 @@ fn HistoryPane(actions: Option<Actions>, layout: PaneLayout, dirty: bool, branch
     let busy = remember(|| mutable_state_of(false));
     // The armed button as (key from `commit_action_key`, arm time in ms); cleared by a reload or a timeout.
     let armed = remember(|| mutable_state_of(None::<(usize, i64)>));
+    auto_disarm_effect(&armed);
     let form_open = remember(|| mutable_state_of(false));
     let name = remember(|| mutable_state_of(String::new()));
     let name_gen = remember(|| mutable_state_of(0_u64));
@@ -3274,7 +3241,7 @@ fn HistoryPane(actions: Option<Actions>, layout: PaneLayout, dirty: bool, branch
     let list = {
         let (selected, retry, effective, filter) = (selected.clone(), retry.clone(), effective.clone(), filter.clone());
         move || {
-            cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+            { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), content = move || {
                 let cur_filter = filter.get();
                 let filter_row = filter.clone();
                 VcsRadioRow(&HistoryFilter::ALL, HistoryFilter::label, cur_filter, filter_row, || {});
@@ -3302,7 +3269,7 @@ fn HistoryPane(actions: Option<Actions>, layout: PaneLayout, dirty: bool, branch
                         VcsCard(|| {
                             for (i, e) in shown.iter().enumerate() {
                                 if i > 0 {
-                                    cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+                                    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().height(1.0).background(paint(p.line))) };
                                 }
                                 let pick = selected.clone();
                                 let sha = e.sha.clone();
@@ -3315,14 +3282,14 @@ fn HistoryPane(actions: Option<Actions>, layout: PaneLayout, dirty: bool, branch
                         }
                     }
                 }
-            });
+            }) };
         }
     };
 
     let detail_view = {
         let (selected, retry) = (selected.clone(), retry.clone());
         move || {
-            cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+            { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), content = move || {
                 if !two {
                     let back = selected.clone();
                     AppButton("목록으로", None, ButtonKind::Default, true, true, false, move || back.set(None));
@@ -3342,24 +3309,20 @@ fn HistoryPane(actions: Option<Actions>, layout: PaneLayout, dirty: bool, branch
                     }
                     CommitDetailLoad::Ready(v) => CommitDetailBody(&v, &ctl),
                 }
-            });
+            }) };
         }
     };
 
     if two {
-        cu::Row()
-            .modifier(Modifier::new().fill_max_width().fill_max_height())
-            .alignment(Alignment::TopStart)
-            .spacing(GAP_CARD)
-            .content(move || {
-                cu::ScrollColumn().modifier(Modifier::new().weight(1.0).fill_max_height()).content(list);
-                cu::ScrollColumn().modifier(Modifier::new().weight(1.4).fill_max_height()).content(detail_view);
-            });
+        { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width().fill_max_height(), alignment = Alignment::TopStart, spacing = GAP_CARD, content = move || {
+                { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().weight(1.0).fill_max_height(), content = list) };
+                { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().weight(1.4).fill_max_height(), content = detail_view) };
+            }) };
     } else if selected.get().is_some() {
-        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), content = move || {
             detail_view();
-            cu::Spacer().modifier(Modifier::new().height(super::routines::compact_bottom_clearance()));
-        });
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(super::routines::compact_bottom_clearance())) };
+        }) };
     } else {
         list();
     }
@@ -3449,22 +3412,22 @@ fn PullRequestRow(e: &PrEntry, selected: bool, on_select: impl FnMut() + 'static
     if selected {
         frame = frame.border(2.0, paint(p.ink));
     }
-    cu::Box().modifier(frame).content(move || {
-        cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
+    let row_label = format!("풀 리퀘스트 #{} {}", e.number, e.title);
+    NamedClickableOn(&row_label, frame, Some(fill), Alignment::TopStart, on_select, move || {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width().padding(SP[2]), {
             Txt(&format!("#{} {}", e.number, e.title), TypeRole::BodyStrong, Some(paint(p.text)), Some(2), Some(TextOverflow::Ellipsis), None, None);
             Txt(&pr_meta(e), TypeRole::Caption, Some(paint(p.text_2)), Some(2), Some(TextOverflow::Ellipsis), None, None);
-            cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
                 Pill(e.state_text, pr_state_tone(e), true);
                 if e.draft {
                     Pill("초안", PillTone::Grey, true);
                 }
                 Pill(e.review_text, pr_review_tone(e), true);
                 Pill(&e.checks_text, pr_checks_tone(e), true);
-            });
+            }) };
             let gate = if e.can_merge { paint(p.green.strong) } else { paint(p.text_2) };
             Label(&e.gate_text, Fs::Sm, Weight::Regular, Some(gate), None);
-        });
-        DataNamedOverlay(&format!("풀 리퀘스트 #{} {}", e.number, e.title), true, None, on_select);
+        }) };
     });
 }
 
@@ -3571,7 +3534,7 @@ fn StatusDot(class: CheckClass) {
         CheckClass::Failed => p.red.strong,
         CheckClass::Pending => p.orange.strong,
     };
-    cu::Box().modifier(Modifier::new().size(8.0, 8.0).background(paint(color)).shape_role(ShapeRole::Full));
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().size(8.0, 8.0).background(paint(color)).shape_role(ShapeRole::Full)) };
 }
 
 /// What the detail card asks of the pane: the review box text, the busy flag, whether the merge
@@ -3602,7 +3565,7 @@ pub fn pr_grid_columns(window_width_dp: f32) -> usize {
 fn PrDetailBody(v: &PrDetailView) {
     let p = ember_theme().palette;
     VcsCard(|| {
-        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width().padding(SP[2]), {
             Txt(&format!("#{} {}", v.number, v.title), TypeRole::BodyStrong, Some(paint(p.text)), Some(3), Some(TextOverflow::Ellipsis), None, None);
             Txt(&pr_detail_meta(v), TypeRole::Caption, Some(paint(p.text_2)), Some(2), Some(TextOverflow::Ellipsis), None, None);
             for line in &v.body_lines {
@@ -3613,62 +3576,62 @@ fn PrDetailBody(v: &PrDetailView) {
             // the detail was taller than its scroll area at 1440 and 검사 ended at the cut edge.
             let checks_panel = || {
                 InsetPanel(true, || {
-                    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-                        cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width().height(28.0)).content(|| {
+                    { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
+                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width().height(28.0), {
                             Label("검사", Fs::Md, Weight::Semibold, None, Some(1));
-                            cu::Spacer().modifier(Modifier::new().weight(1.0));
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                             Pill(&v.ci_pill, detail_ci_tone(v), true);
-                        });
+                        }) };
                         if v.checks.is_empty() {
-                            cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width().height(24.0)).content(|| {
+                            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width().height(24.0), {
                                 Label("검사가 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
-                            });
+                            }) };
                         }
                         for (name, class, label) in &v.checks {
-                            cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width().height(24.0)).content(|| {
+                            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width().height(24.0), {
                                 StatusDot(*class);
                                 // The name takes the room left and ends in an ellipsis
                                 // (`.ellipsis.spacer`); the result keeps its own width.
-                                cu::Column().modifier(Modifier::new().weight(1.0).width(0.0)).content(|| {
+                                { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0).width(0.0), {
                                     Label(name, Fs::Sm, Weight::Regular, None, Some(1));
-                                });
+                                }) };
                                 Label(label, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
-                            });
+                            }) };
                         }
-                    });
+                    }) };
                 });
             };
             let reviews_panel = || {
                 InsetPanel(true, || {
-                    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-                        cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width().height(28.0)).content(|| {
+                    { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
+                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width().height(28.0), {
                             Label("리뷰", Fs::Md, Weight::Semibold, None, Some(1));
-                            cu::Spacer().modifier(Modifier::new().weight(1.0));
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                             Pill(v.review_pill, detail_review_tone(v.review), true);
-                        });
+                        }) };
                         if v.reviewers.is_empty() {
-                            cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width().height(24.0)).content(|| {
+                            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width().height(24.0), {
                                 Label("리뷰어 없음", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
-                            });
+                            }) };
                         }
                         for (name, state) in &v.reviewers {
-                            cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width().height(24.0)).content(|| {
-                                cu::Column().modifier(Modifier::new().weight(1.0).width(0.0)).content(|| {
+                            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width().height(24.0), {
+                                { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0).width(0.0), {
                                     Label(name, Fs::Sm, Weight::Regular, None, Some(1));
-                                });
+                                }) };
                                 Pill(state.label(), reviewer_tone(*state), true);
-                            });
+                            }) };
                         }
-                    });
+                    }) };
                 });
             };
             if pr_grid_columns(current_window_size().width_dp) == 2 {
-                cu::Row().alignment(Alignment::TopStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::TopStart, spacing = SP[2], modifier = Modifier::new().fill_max_width(), {
                     // Zero-width weighted cells: a weighted child is at least as wide as its
                     // content, and a long check name would push the other column out.
-                    cu::Column().modifier(Modifier::new().weight(1.0).width(0.0)).content(checks_panel);
-                    cu::Column().modifier(Modifier::new().weight(1.0).width(0.0)).content(reviews_panel);
-                });
+                    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0).width(0.0), content = checks_panel) };
+                    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0).width(0.0), content = reviews_panel) };
+                }) };
             } else {
                 checks_panel();
                 reviews_panel();
@@ -3679,13 +3642,13 @@ fn PrDetailBody(v: &PrDetailView) {
                 Label("코멘트가 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
             }
             for (author, text) in &v.comments {
-                cu::Column().spacing(SP[0]).modifier(Modifier::new().fill_max_width()).content(|| {
+                { use ::compose_rust::ui::Column; Column!(spacing = SP[0], modifier = Modifier::new().fill_max_width(), {
                     Label(author, Fs::Sm, Weight::Semibold, None, Some(1));
                     Label(text, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
-                });
+                }) };
             }
 
-        });
+        }) };
     });
 }
 
@@ -3697,7 +3660,7 @@ fn PrDetailActions<R: Fn(GitPrReviewAction) + Clone + 'static, M: Fn() + Clone +
     let method = ctl.merge_method.get();
     let del_branch = ctl.delete_branch.get();
     VcsCard(|| {
-        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width().padding(SP[2]), {
             Label("리뷰 남기기", Fs::Md, Weight::Semibold, None, Some(1));
             let text = ctl.review_text.clone();
             key(ctl.review_gen.get(), || {
@@ -3714,7 +3677,7 @@ fn PrDetailActions<R: Fn(GitPrReviewAction) + Clone + 'static, M: Fn() + Clone +
                     ..Default::default()
                 });
             });
-            cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
                 for (action, kind) in [
                     (GitPrReviewAction::Comment, ButtonKind::Default),
                     (GitPrReviewAction::RequestChanges, ButtonKind::Destructive),
@@ -3726,7 +3689,7 @@ fn PrDetailActions<R: Fn(GitPrReviewAction) + Clone + 'static, M: Fn() + Clone +
                     let action_enabled = !ctl.busy && (!is_approve || ctl.can_approve.is_ok());
                     AppButton(label, None, kind, true, action_enabled, false, move || on_review(action));
                 }
-            });
+            }) };
             if let Err(reason) = ctl.can_approve {
                 Label(reason, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), None);
             }
@@ -3748,7 +3711,7 @@ fn PrDetailActions<R: Fn(GitPrReviewAction) + Clone + 'static, M: Fn() + Clone +
                     }
                 }
             }
-        });
+        }) };
     });
 }
 
@@ -3769,6 +3732,7 @@ fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>
     let busy = remember(|| mutable_state_of(false));
     // The merge button as (pull request number, arm time in ms); cleared by a reload or a timeout.
     let armed = remember(|| mutable_state_of(None::<(usize, i64)>));
+    auto_disarm_effect(&armed);
     let form_open = remember(|| mutable_state_of(false));
     let f_title = remember(|| mutable_state_of(String::new()));
     let f_body = remember(|| mutable_state_of(String::new()));
@@ -3803,6 +3767,7 @@ fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>
     let effective = selected.get().or(first);
     // 승인 and 변경 요청 as (key of the action, arm time in ms); only one is armed, and 병합 clears it.
     let review_armed = remember(|| mutable_state_of(None::<(usize, i64)>));
+    auto_disarm_effect(&review_armed);
     let prev_effective = remember(|| mutable_state_of(effective));
     if prev_effective.get() != effective {
         prev_effective.set(effective);
@@ -4021,7 +3986,7 @@ fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>
         let (form_open, f_title, f_body, f_draft, f_gen, branch) = (form_open.clone(), f_title.clone(), f_body.clone(), f_draft.clone(), f_gen.clone(), branch.clone());
         move || {
             VcsCard(move || {
-                cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(move || {
+                { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width().padding(SP[2]), content = move || {
                     Label("새 풀 리퀘스트", Fs::Md, Weight::Semibold, None, Some(1));
                     let t = f_title.clone();
                     key((f_gen.get(), 0_u8), || {
@@ -4051,17 +4016,17 @@ fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>
                     let head_text = branch.clone().unwrap_or_else(|| "현재 브랜치".to_string());
                     Label(&format!("{head_text} \u{2192} 기본 브랜치"), Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(2));
                     Label("원격에 올라가 있는 브랜치여야 합니다", Fs::Xs, Weight::Regular, Some(paint(p.text_2)), None);
-                    cu::Row().modifier(Modifier::new().fill_max_width().height(32.0)).alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+                    { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width().height(32.0), alignment = Alignment::CenterStart, spacing = SP[1], {
                         let flag = f_draft.clone();
                         StageCheck(if f_draft.get() { Check::On } else { Check::Off }, STAGE_CHECK_SIDE, 32.0, move || flag.set(!flag.get()));
                         Label("초안", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
-                    });
-                    cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                    }) };
+                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
                         AppButton("만들기", None, ButtonKind::Primary, true, !is_busy, false, create.clone());
                         let close = form_open.clone();
                         AppButton("취소", None, ButtonKind::Default, true, true, false, move || close.set(false));
-                    });
-                });
+                    }) };
+                }) };
             });
         }
     };
@@ -4069,16 +4034,16 @@ fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>
     let list = {
         let (selected, retry, form_open) = (selected.clone(), retry.clone(), form_open.clone());
         move || {
-            cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
-                cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+            { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), content = move || {
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
                     Label("풀 리퀘스트", Fs::Lg, Weight::Semibold, None, Some(1));
                     if let Some(n) = open_count {
                         Pill(&format!("열림 {n}"), PillTone::Green, true);
                     }
-                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                     let open = form_open.clone();
                     AppButton("새 PR", None, ButtonKind::Primary, true, true, false, move || open.set(!open.get()));
-                });
+                }) };
                 if form_open.get() {
                     new_form();
                 }
@@ -4102,7 +4067,7 @@ fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>
                         VcsCard(|| {
                             for (i, e) in entries.iter().enumerate() {
                                 if i > 0 {
-                                    cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+                                    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().height(1.0).background(paint(p.line))) };
                                 }
                                 let (pick, disarm, disarm_review) = (selected.clone(), armed.clone(), review_armed.clone());
                                 let number = e.number;
@@ -4115,14 +4080,14 @@ fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>
                         });
                     }
                 }
-            });
+            }) };
         }
     };
 
     let detail_view = {
         let (selected, retry) = (selected.clone(), retry.clone());
         move || {
-            cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+            { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), content = move || {
                 if !two {
                     let back = selected.clone();
                     AppButton("목록으로", None, ButtonKind::Default, true, true, false, move || back.set(None));
@@ -4144,7 +4109,7 @@ fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>
                         PrDetailBody(&v);
                     }
                 }
-            });
+            }) };
         }
     };
 
@@ -4161,28 +4126,24 @@ fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>
         on_merge,
     };
     if two {
-        cu::Row()
-            .modifier(Modifier::new().fill_max_width().fill_max_height())
-            .alignment(Alignment::TopStart)
-            .spacing(GAP_CARD)
-            .content(move || {
-                cu::ScrollColumn().modifier(Modifier::new().weight(1.0).fill_max_height()).content(list);
+        { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width().fill_max_height(), alignment = Alignment::TopStart, spacing = GAP_CARD, content = move || {
+                { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().weight(1.0).fill_max_height(), content = list) };
                 // Bounded column: the detail scrolls, the review box and 병합 stay below it.
-                cu::Column().spacing(SP[2]).modifier(Modifier::new().weight(1.4).fill_max_height()).content(move || {
-                    cu::ScrollColumn().modifier(Modifier::new().fill_max_width().weight(1.0)).content(detail_view);
+                { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().weight(1.4).fill_max_height(), content = move || {
+                    { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().fill_max_width().weight(1.0), content = detail_view) };
                     if let Some(v) = actions_view {
                         PrDetailActions(&v, ctl);
                     }
-                });
-            });
+                }) };
+            }) };
     } else if selected.get().is_some() {
-        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), content = move || {
             detail_view();
             if let Some(v) = actions_view {
                 PrDetailActions(&v, ctl);
             }
-            cu::Spacer().modifier(Modifier::new().height(super::routines::compact_bottom_clearance()));
-        });
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(super::routines::compact_bottom_clearance())) };
+        }) };
     } else {
         list();
     }
@@ -4217,11 +4178,11 @@ const BRANCH_BAR_W: f32 = 56.0;
 /// One thin bar: `fraction` of `BRANCH_BAR_W` painted over a track. A zero fraction paints only the track.
 fn BranchBar(fraction: f32, fill: Paint) {
     let p = ember_theme().palette;
-    cu::Box().modifier(Modifier::new().width(BRANCH_BAR_W).height(4.0).background(paint(p.line)).corner_radius(2.0)).content(move || {
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().width(BRANCH_BAR_W).height(4.0).background(paint(p.line)).corner_radius(2.0), content = move || {
         if fraction > 0.0 {
-            cu::Box().modifier(Modifier::new().width(BRANCH_BAR_W * fraction).height(4.0).background(fill).corner_radius(2.0));
+            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().width(BRANCH_BAR_W * fraction).height(4.0).background(fill).corner_radius(2.0)) };
         }
-    });
+    }) };
 }
 
 /// Side of the icon tile at the start of a branch or stash row (`.vcs-bico`).
@@ -4230,10 +4191,7 @@ pub const ROW_ICON_TILE: f32 = 32.0;
 /// The `.vcs-bico` tile: 32 px, `CORNER_SM`, a 1 px `line` border, the glyph in `text_2`.
 fn RowIconTile(svg: &'static str) {
     let p = ember_theme().palette;
-    cu::Box()
-        .modifier(Modifier::new().size(ROW_ICON_TILE, ROW_ICON_TILE).border(1.0, paint(p.line)).corner_radius(CORNER_SM))
-        .alignment(Alignment::Center)
-        .content(|| NavIcon(svg, p.text_2.to_argb(), 16.0));
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().size(ROW_ICON_TILE, ROW_ICON_TILE).border(1.0, paint(p.line)).corner_radius(CORNER_SM), alignment = Alignment::Center, content = || NavIcon(svg, p.text_2.to_argb(), 16.0)) };
 }
 
 fn BranchIconTile() {
@@ -4249,10 +4207,10 @@ fn BranchRow(e: &BranchEntry, busy: bool, on_switch: impl FnMut() + 'static) {
     // `.vcs-brow` (`vcs.css:140-143`): the current row on `surface_2`, a 32 px icon tile with a
     // `line` border, the mono name, then the 전환 button on the right.
     let row_fill = if e.current { paint(p.surface_2) } else { Paint::Literal(Color::argb(0)) };
-    cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width().background(row_fill).padding(SP[2])).content(move || {
+    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[2], modifier = Modifier::new().fill_max_width().background(row_fill).padding(SP[2]), content = move || {
         BranchIconTile();
-        cu::Column().spacing(SP[0]).modifier(Modifier::new().weight(1.0)).content(|| {
-            cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[0], modifier = Modifier::new().weight(1.0), {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
                 Txt(&e.name, TypeRole::Mono, Some(paint(p.text)), Some(1), Some(TextOverflow::Ellipsis), None, None);
                 if e.current {
                     Pill("현재", PillTone::Green, true);
@@ -4263,23 +4221,23 @@ fn BranchRow(e: &BranchEntry, busy: bool, on_switch: impl FnMut() + 'static) {
                 if let Some(w) = &e.worktree {
                     Pill(&format!("워크트리 {}", worktree_tail(w)), PillTone::Sky, true);
                 }
-            });
-            cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+            }) };
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
                 Txt(&if show_bars { branch_bar_text(e.ahead, e.behind) } else { e.sync_text() }, TypeRole::Caption, Some(paint(p.text_2)), Some(2), Some(TextOverflow::Ellipsis), None, None);
                 if show_bars {
                     BranchBar(a, paint(p.green.strong));
                     BranchBar(b, paint(p.orange.strong));
                 }
-            });
+            }) };
             if e.has_upstream {
                 Txt(&e.upstream_text, TypeRole::Caption, Some(paint(p.text_2)), Some(1), Some(TextOverflow::Ellipsis), None, None);
             }
             if !e.last_line.is_empty() {
                 Txt(&e.last_line, TypeRole::Caption, Some(paint(p.text_2)), Some(2), Some(TextOverflow::Ellipsis), None, None);
             }
-        });
+        }) };
         AppButton("전환", None, ButtonKind::Default, true, !e.current && !busy, false, on_switch);
-    });
+    }) };
 }
 
 /// The 기준 menu's rows: one per branch with the branch glyph, the name and a check on the
@@ -4377,7 +4335,7 @@ fn BranchesPane(actions: Option<Actions>, count: MutableState<Option<usize>>, la
         let (names, base_text) = (names.clone(), base_text.clone());
         move || {
             VcsCard(|| {
-                cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
+                { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width().padding(SP[2]), {
                     Label("새 브랜치", Fs::Md, Weight::Semibold, None, Some(1));
                     let value = name.clone();
                     key(generation.get(), || {
@@ -4405,7 +4363,7 @@ fn BranchesPane(actions: Option<Actions>, count: MutableState<Option<usize>>, la
                             });
                         }
                     });
-                });
+                }) };
             });
         }
     };
@@ -4414,7 +4372,7 @@ fn BranchesPane(actions: Option<Actions>, count: MutableState<Option<usize>>, la
     let retry_state = retry.clone();
     let status = current.clone();
     let list = move || {
-        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), content = move || {
             creator();
             Label(BRANCH_SWITCH_NOTE, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(2));
             let search = query.clone();
@@ -4477,7 +4435,7 @@ fn BranchesPane(actions: Option<Actions>, count: MutableState<Option<usize>>, la
                         VcsCard(|| {
                             for (i, e) in rest.iter().enumerate() {
                                 if i > 0 {
-                                    cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+                                    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().height(1.0).background(paint(p.line))) };
                                 }
                                 row(e);
                             }
@@ -4485,11 +4443,11 @@ fn BranchesPane(actions: Option<Actions>, count: MutableState<Option<usize>>, la
                     }
                 }
             }
-        });
+        }) };
     };
     let content = list;
     if layout == PaneLayout::Two {
-        cu::ScrollColumn().modifier(Modifier::new().fill_max_width().fill_max_height()).content(content);
+        { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().fill_max_width().fill_max_height(), content = content) };
     } else {
         content();
     }
@@ -4582,25 +4540,14 @@ fn TeamRowView(
 ) {
     let p = ember_theme().palette;
     let border = if r.conflict { paint(p.orange.strong) } else { paint(p.line) };
-    cu::Box()
-        .modifier(
-            Modifier::new()
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                 .fill_max_width()
                 .background(paint(p.surface))
                 .border(1.0, border)
-                .corner_radius(CORNER_LG),
-        )
-        .content(|| {
-            cu::Column()
-                .spacing(SP[2])
-                .modifier(Modifier::new().fill_max_width().padding(SP[3]))
-                .content(|| {
+                .corner_radius(CORNER_LG), {
+            { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width().padding(SP[3]), {
                 // Top row: Character, Name + (+N) + Leader, Subtitle (Title · Harness), State Pill
-                cu::Row()
-                    .alignment(Alignment::CenterStart)
-                    .spacing(SP[2])
-                    .modifier(Modifier::new().fill_max_width())
-                    .content(|| {
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[2], modifier = Modifier::new().fill_max_width(), {
                         match &r.member {
                             Some(m) => super::characters::Character(
                                 &m.harness,
@@ -4613,8 +4560,8 @@ fn TeamRowView(
                             ),
                             None => super::channels::Avatar("-", "", 36.0),
                         }
-                        cu::Column().spacing(SP[0]).modifier(Modifier::new().weight(1.0)).content(|| {
-                            cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                        { use ::compose_rust::ui::Column; Column!(spacing = SP[0], modifier = Modifier::new().weight(1.0), {
+                            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
                                 match &r.member {
                                     Some(m) => {
                                         Txt(&m.name, TypeRole::BodyStrong, Some(paint(p.text)), Some(1), Some(TextOverflow::Ellipsis), None, None);
@@ -4627,7 +4574,7 @@ fn TeamRowView(
                                     }
                                     None => Txt("담당 없음", TypeRole::BodyStrong, Some(paint(p.text_2)), Some(1), None, None, None),
                                 }
-                            });
+                            }) };
                             if let Some(m) = &r.member {
                                 let sub = if m.title.trim().is_empty() {
                                     m.harness.clone()
@@ -4636,49 +4583,42 @@ fn TeamRowView(
                                 };
                                 Txt(&sub, TypeRole::Caption, Some(paint(p.text_2)), Some(1), Some(TextOverflow::Ellipsis), None, None);
                             }
-                        });
+                        }) };
                         if let Some(m) = &r.member {
                             Pill(&m.state_text, crate::ui::project::status_pill(m.status).1.into(), true);
                         }
-                    });
+                    }) };
 
                 // Inset box: branch, worktree, computer & dirty
-                cu::Box()
-                    .modifier(Modifier::new().fill_max_width())
-                    .content(|| {
-                        cu::Column()
-                            .spacing(SP[1])
-                            .modifier(
-                                Modifier::new()
+                { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width(), {
+                        { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new()
                                     .fill_max_width()
                                     .background(paint(p.surface_2))
                                     .corner_radius(CORNER_MD)
-                                    .padding(SP[2]),
-                            )
-                            .content(|| {
+                                    .padding(SP[2]), {
                                 // Branch line
-                                cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
                                     Txt("브랜치", TypeRole::Caption, Some(paint(p.text_2)), Some(1), None, None, None);
-                                    cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[1])) };
                                     Txt(&r.branch, TypeRole::Mono, Some(paint(p.text)), Some(1), Some(TextOverflow::Ellipsis), None, None);
                                     if r.current {
                                         Pill("현재", PillTone::Green, true);
                                     }
-                                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                                     Txt(&r.sync_text, TypeRole::Caption, Some(paint(p.text_2)), Some(1), None, None, None);
-                                });
+                                }) };
                                 // Worktree folder line
-                                cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
                                     Txt("워크트리", TypeRole::Caption, Some(paint(p.text_2)), Some(1), None, None, None);
-                                    cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[1])) };
                                     Txt(&r.worktree, TypeRole::Mono, Some(paint(p.text_2)), Some(1), Some(TextOverflow::Ellipsis), None, None);
-                                });
+                                }) };
                                 // Computer and dirty status line
-                                cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
                                     Txt("컴퓨터", TypeRole::Caption, Some(paint(p.text_2)), Some(1), None, None, None);
-                                    cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[1])) };
                                     Txt(r.computer_text(), TypeRole::Caption, Some(paint(p.text_2)), Some(1), Some(TextOverflow::Ellipsis), None, None);
-                                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                                     let dirty_lbl = r.dirty_text();
                                     let dirty_paint = if r.dirty_count.is_some_and(|n| n > 0) {
                                         paint(p.orange.strong)
@@ -4686,27 +4626,19 @@ fn TeamRowView(
                                         paint(p.text_2)
                                     };
                                     Txt(&dirty_lbl, TypeRole::Caption, Some(dirty_paint), Some(1), None, None, None);
-                                });
-                            });
-                    });
+                                }) };
+                            }) };
+                    }) };
 
                 // Last-commit line
                 if !r.last_commit.is_empty() {
-                    cu::Row()
-                        .alignment(Alignment::CenterStart)
-                        .spacing(SP[1])
-                        .modifier(Modifier::new().fill_max_width())
-                        .content(|| {
+                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
                             Txt(&r.last_commit, TypeRole::Caption, Some(paint(p.text_2)), Some(1), Some(TextOverflow::Ellipsis), None, None);
-                        });
+                        }) };
                 }
 
                 // Action buttons: PR chip, conflict button, spacer, branch view button, session button
-                cu::Row()
-                    .alignment(Alignment::CenterStart)
-                    .spacing(SP[1])
-                    .modifier(Modifier::new().fill_max_width())
-                    .content(move || {
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width(), content = move || {
                         match &r.pr_status {
                             TeamPrStatus::Checking => {
                                 Pill("PR 확인 중", PillTone::Grey, true);
@@ -4730,10 +4662,15 @@ fn TeamRowView(
                                 };
                                 let pr_num = *number;
                                 let on_pr_click = on_pr.clone();
-                                cu::Box().modifier(Modifier::new().shape_role(ShapeRole::Full)).content(move || {
-                                    Pill(label, tone, true);
-                                    DataNamedOverlay(label, true, None, move || on_pr_click(pr_num));
-                                });
+                                NamedClickable(
+                                    label,
+                                    Modifier::new().shape_role(ShapeRole::Full),
+                                    Alignment::TopStart,
+                                    move || on_pr_click(pr_num),
+                                    move || {
+                                        Pill(label, tone, true);
+                                    },
+                                );
                             }
                         }
 
@@ -4745,7 +4682,7 @@ fn TeamRowView(
                             StashPill("충돌 해결", "충돌 해결", ButtonKind::Destructive, true, move || on_cf());
                         }
 
-                        cu::Spacer().modifier(Modifier::new().weight(1.0));
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
 
                         let on_br = on_branch.clone();
                         StashPill("브랜치 보기", "브랜치 보기", ButtonKind::Default, true, move || on_br());
@@ -4757,9 +4694,9 @@ fn TeamRowView(
                                 StashPill("세션", "세션", ButtonKind::Default, true, move || on_sess(&sid));
                             }
                         }
-                    });
-            });
-        });
+                    }) };
+            }) };
+        }) };
 }
 
 /// 팀 작업: one card per worktree with its member, branch, ahead/behind and pull request. The
@@ -4861,7 +4798,7 @@ fn TeamPane(
     let has_actions = actions.is_some();
 
     let list = move || {
-        cu::Column().spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(move || match status {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[3], modifier = Modifier::new().fill_max_width(), content = move || match status {
             BranchLoad::Loading => {
                 Label("팀 작업을 불러오는 중입니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
             }
@@ -4918,14 +4855,14 @@ fn TeamPane(
                     );
                 }
                 if compact {
-                    cu::Spacer().modifier(Modifier::new().height(super::routines::compact_bottom_clearance()));
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(super::routines::compact_bottom_clearance())) };
                 }
             }
-        });
+        }) };
     };
 
     if layout == PaneLayout::Two {
-        cu::ScrollColumn().modifier(Modifier::new().fill_max_width().fill_max_height()).content(list);
+        { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().fill_max_width().fill_max_height(), content = list) };
     } else {
         list();
     }
@@ -4970,6 +4907,7 @@ fn StashPane(actions: Option<Actions>, count: MutableState<Option<usize>>, layou
     let busy = remember(|| mutable_state_of(false));
     // The armed button as (key from `stash_tap_key`, arm time in ms); cleared by a timeout, another tap or a reload.
     let armed = remember(|| mutable_state_of(None::<(usize, i64)>));
+    auto_disarm_effect(&armed);
     let message = remember(|| mutable_state_of(String::new()));
     let untracked = remember(|| mutable_state_of(false));
     let generation = remember(|| mutable_state_of(0_u64));
@@ -5041,7 +4979,7 @@ fn StashPane(actions: Option<Actions>, count: MutableState<Option<usize>>, layou
         let (message, untracked, generation) = (message.clone(), untracked.clone(), generation.clone());
         move || {
             VcsCard(|| {
-                cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
+                { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width().padding(SP[2]), {
                     Label("스태시 만들기", Fs::Md, Weight::Semibold, None, Some(1));
                     let value = message.clone();
                     key(generation.get(), || {
@@ -5053,20 +4991,20 @@ fn StashPane(actions: Option<Actions>, count: MutableState<Option<usize>>, layou
                             ..Default::default()
                         });
                     });
-                    cu::Row().modifier(Modifier::new().fill_max_width().height(32.0)).alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+                    { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width().height(32.0), alignment = Alignment::CenterStart, spacing = SP[1], {
                         let flag = untracked.clone();
                         StageCheck(if untracked.get() { Check::On } else { Check::Off }, STAGE_CHECK_SIDE, 32.0, move || flag.set(!flag.get()));
                         Label("추적하지 않는 파일 포함", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
-                    });
+                    }) };
                     AppButton("스태시 만들기", None, ButtonKind::Primary, false, !is_busy, true, make);
-                });
+                }) };
             });
         }
     };
 
     let (retry, status) = (local.clone(), current.clone());
     let list = move || {
-        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), content = move || {
             creator();
             match status {
                 StashLoad::Loading => {
@@ -5086,7 +5024,7 @@ fn StashPane(actions: Option<Actions>, count: MutableState<Option<usize>>, layou
                     VcsCard(|| {
                         for (i, e) in entries.iter().enumerate() {
                             if i > 0 {
-                                cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+                                { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().height(1.0).background(paint(p.line))) };
                             }
                             let (run, armed) = (run.clone(), armed.clone());
                             StashRow(e, layout, is_busy, dirty, armed, run);
@@ -5094,10 +5032,10 @@ fn StashPane(actions: Option<Actions>, count: MutableState<Option<usize>>, layou
                     });
                 }
             }
-        });
+        }) };
     };
     if layout == PaneLayout::Two {
-        cu::ScrollColumn().modifier(Modifier::new().fill_max_width().fill_max_height()).content(list);
+        { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().fill_max_width().fill_max_height(), content = list) };
     } else {
         list();
     }
@@ -5111,10 +5049,10 @@ pub fn stash_actions_inline(layout: PaneLayout) -> bool {
 
 /// One stash: message, meta line and the 적용, 꺼내기, 삭제 buttons. 삭제 needs a second tap on
 /// the same button, which then reads "정말 삭제합니다"; 적용 and 꺼내기 ask the same way when
-/// `dirty`, under a line that says why. The armed label shows only while `armed_label_visible`
-/// holds at composition: nothing re-renders on a timer, so it may stay on screen until the next
-/// recomposition after 4 seconds, and `stash_tap` decides what a tap does. Each button has an
-/// accessible name with the index and message (visible text stays 적용, 꺼내기, 삭제).
+/// `dirty`, under a line that says why. The armed label shows while `armed_label_visible` holds,
+/// and `auto_disarm_effect` in `StashPane` clears the armed state automatically after 4 seconds
+/// without another user tap; `stash_tap` decides what a tap does. Each button has an accessible
+/// name with the index and message (visible text stays 적용, 꺼내기, 삭제).
 fn StashRow(e: &StashEntry, layout: PaneLayout, busy: bool, dirty: bool, armed: MutableState<Option<(usize, i64)>>, run: impl Fn(StashAction, u32) + Clone + 'static) {
     let p = ember_theme().palette;
     let index = e.index;
@@ -5148,7 +5086,7 @@ fn StashRow(e: &StashEntry, layout: PaneLayout, busy: bool, dirty: bool, armed: 
         }
     };
     let actions = || {
-        cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], {
             for (action, verb, kind, ask) in [
                 (StashAction::Apply, "적용", ButtonKind::Default, dirty),
                 (StashAction::Pop, "꺼내기", ButtonKind::Default, dirty),
@@ -5158,48 +5096,48 @@ fn StashRow(e: &StashEntry, layout: PaneLayout, busy: bool, dirty: bool, armed: 
                 let on_tap = tap.clone();
                 StashPill(stash_button_text(action, armed_now), &stash_button_label(index, &e.message, verb), kind, !busy, move || on_tap(action));
             }
-        });
+        }) };
     };
     if stash_actions_inline(layout) {
-        cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
+        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[2], modifier = Modifier::new().fill_max_width().padding(SP[2]), {
             RowIconTile(ICON_STASH_SVG);
-            cu::Column().spacing(SP[0]).modifier(Modifier::new().weight(1.0)).content(text);
+            { use ::compose_rust::ui::Column; Column!(spacing = SP[0], modifier = Modifier::new().weight(1.0), content = text) };
             actions();
-        });
+        }) };
     } else {
-        cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
-            cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width().padding(SP[2]), {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[2], modifier = Modifier::new().fill_max_width(), {
                 RowIconTile(ICON_STASH_SVG);
-                cu::Column().spacing(SP[0]).modifier(Modifier::new().weight(1.0)).content(text);
-            });
-            cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                cu::Spacer().modifier(Modifier::new().weight(1.0));
+                { use ::compose_rust::ui::Column; Column!(spacing = SP[0], modifier = Modifier::new().weight(1.0), content = text) };
+            }) };
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                 actions();
-            });
-        });
+            }) };
+        }) };
     }
 }
 
-// The pill is painted and its accessible name is built from data (the stash's index and message),
-// so the clear button of `components::DataNamedOverlay` carries it (the gap is filed there).
 /// A small pill whose visible text is `text` and whose accessible name is `access`. It is as wide
-/// as its label and [`VCS_PILL_PAD_X`] at each side.
+/// as its label and [`VCS_PILL_PAD_X`] at each side, named directly on the painted box
+/// (`NamedClickableOn` / `NamedDisabled`, compose-rust#831).
 fn StashPill(text: &str, access: &str, kind: ButtonKind, enabled: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let s = super::components::button_style_for(kind, true, enabled, p);
-    cu::Box()
-        .modifier(
-            Modifier::new()
-                .height(s.height)
-                .background(paint(s.fill))
-                .border(1.0, paint(s.border))
-                .shape_role(ShapeRole::Full),
-        )
-        .alignment(Alignment::Center)
-        .content(move || {
+    let m = Modifier::new()
+        .height(s.height)
+        .background(paint(s.fill))
+        .border(1.0, paint(s.border))
+        .shape_role(ShapeRole::Full);
+    if enabled {
+        NamedClickableOn(access, m, Some(s.fill), Alignment::Center, on_click, move || {
             PillLabel(text, s.fs, s.text);
-            DataNamedOverlay(access, enabled, None, on_click);
         });
+    } else {
+        NamedDisabled(access, m, Alignment::Center, move || {
+            PillLabel(text, s.fs, s.text);
+        });
+    }
 }
 
 /// The screen wired as 버전 관리.
@@ -5328,8 +5266,8 @@ fn VcsScreenWithLoad(
         // The sheet's header carries the title and the summary line (FR-L18.1), so the sheet
         // draws neither again.
         if !sheet {
-        cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::CenterStart).content(|| {
-            cu::Column().modifier(Modifier::new().weight(1.0)).spacing(4.0).content(|| {
+        { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width(), alignment = Alignment::CenterStart, {
+            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), spacing = 4.0, {
                 // The sheet header carries the title (#495).
                 if !sheet {
                     Label("버전 관리", Fs::Xl3, PAGE_TITLE_WEIGHT, None, None);
@@ -5338,7 +5276,7 @@ fn VcsScreenWithLoad(
                     let subtitle = screen_subtitle(proj, snap.as_ref(), sample);
                     Label(&subtitle, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
                 }
-            });
+            }) };
             // The page header carries the theme toggle like 에이전트 and 파일; the sheet and the
             // phone (where the shell's menu button sits) do not (#495).
             if !sheet && !compact {
@@ -5347,7 +5285,7 @@ fn VcsScreenWithLoad(
                     super::project::ThemeButton(&s.ui);
                 }
             }
-        });
+        }) };
         }
 
         if let Some(project) = project {
@@ -5386,22 +5324,22 @@ fn VcsScreenWithLoad(
                     }
 
                     if wide {
-                        cu::Row().modifier(Modifier::new().fill_max_width().weight(1.0)).spacing(SP[3]).content(|| {
+                        { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width().weight(1.0), spacing = SP[3], {
                             let sec_state = section.clone();
                             let sec_for_list = sec_state.clone();
                             if sheet {
                                 SectionRail(sec, snap.as_ref(), sample, stash_count.get(), pr_count.get(), branch_count.get(), team_count.get(), move |s| sec_for_list.set(s));
                             } else {
-                                cu::ScrollColumn().modifier(Modifier::new().width(200.0).fill_max_height()).content(|| {
+                                { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().width(200.0).fill_max_height(), {
                                     SectionListWithSample(sec, snap.as_ref(), sample, stash_count.get(), pr_count.get(), branch_count.get(), team_count.get(), move |s| sec_for_list.set(s));
-                                });
+                                }) };
                             }
-                            cu::Column().modifier(Modifier::new().weight(1.0).fill_max_height()).content(|| {
+                            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0).fill_max_height(), {
                                 SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone(), stash_count.clone(), pr_count.clone(), branch_count.clone(), team_count.clone(), pr_list.clone(), selected_pr.clone(), Some(sec_state.clone()), diff_width, files_w, pane_h, Some(draft.clone()), footer);
-                            });
-                        });
+                            }) };
+                        }) };
                     } else {
-                        cu::Column().modifier(Modifier::new().fill_max_width()).spacing(SP[2]).content(|| {
+                        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), spacing = SP[2], {
                             let sec_state = section.clone();
                             let sec_for_pills = sec_state.clone();
                             let (stashes, prs, branches, team) = (stash_count.get(), pr_count.get(), branch_count.get(), team_count.get());
@@ -5427,7 +5365,7 @@ fn VcsScreenWithLoad(
                                 PaneTabs(sec, active_tab, move |t| tab_state.set(t));
                             }
                             SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone(), stash_count.clone(), pr_count.clone(), branch_count.clone(), team_count.clone(), pr_list.clone(), selected_pr.clone(), Some(sec_state.clone()), diff_width, files_w, pane_h, Some(draft.clone()), footer);
-                        });
+                        }) };
                     }
                 } else {
                     Label("저장소를 둘 수 있는 프로젝트가 없습니다", Fs::Md, Weight::Regular, Some(paint(p.text_2)), None);
@@ -5440,7 +5378,7 @@ fn VcsScreenWithLoad(
         let outer = if sheet { Modifier::new().fill_max_width().weight(1.0).background(paint(p.bg)) } else { Modifier::new().fill_max_width().fill_max_height() };
         if wide {
             // Wide: a bounded page, so the section list and the panes can fill its height.
-            cu::Column().modifier(outer.padding(pad)).spacing(SP[3]).content(body);
+            { use ::compose_rust::ui::Column; Column!(modifier = outer.padding(pad), spacing = SP[3], content = body) };
         } else {
             if footer {
                 // One column, in the sheet and on the page: the body scrolls above the commit
@@ -5448,24 +5386,24 @@ fn VcsScreenWithLoad(
                 let fd = draft.clone();
                 let fsnap = snap.clone();
                 let factions = footer_actions.clone();
-                cu::Column().modifier(outer).content(move || {
-                    cu::ScrollColumn().modifier(Modifier::new().fill_max_width().weight(1.0)).content(|| {
-                        cu::Column().modifier(Modifier::new().fill_max_width().padding(pad)).spacing(SP[3]).content(body);
-                    });
-                    cu::Box().modifier(Modifier::new().fill_max_width().padding(pad)).content(move || {
+                { use ::compose_rust::ui::Column; Column!(modifier = outer, content = move || {
+                    { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().fill_max_width().weight(1.0), {
+                        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width().padding(pad), spacing = SP[3], content = body) };
+                    }) };
+                    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().padding(pad), content = move || {
                         if let Some(s) = fsnap.as_ref() {
                             let staged_files = fd.staging.get().staged_files(&s.changes);
                             let commit = factions.clone().map(|a| (a, s.clone(), fd.staging.clone()));
                             CommitPane(&s.branch, staged_files, &fd.summary, &fd.body, &fd.amend, commit, footer_compact);
                         }
-                    });
-                });
+                    }) };
+                }) };
             } else {
-            cu::Box().modifier(outer).content(|| {
-                cu::ScrollColumn().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
-                    cu::Column().modifier(Modifier::new().fill_max_width().padding(pad)).spacing(SP[3]).content(body);
-                });
-            });
+            { use ::compose_rust::ui::Box; Box!(modifier = outer, {
+                { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().fill_max_width().fill_max_height(), {
+                    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width().padding(pad), spacing = SP[3], content = body) };
+                }) };
+            }) };
             }
         }
     };
@@ -5475,16 +5413,16 @@ fn VcsScreenWithLoad(
             let prs = if sample { Some(sample_pr_count()) } else { pr_count.get() };
             let subtitle = vcs_sheet_subtitle(snap.as_ref(), prs);
             let phone = vcs_sheet_full_window(ctl.window_w);
-            cu::Column().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
+            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width().fill_max_height(), {
                 if ctl.top_inset > 0.0 {
                     // `.svcs-box{padding-top:env(safe-area-inset-top)}` on a phone: the header
                     // starts below the window's buttons (review r8: the traffic lights sat on the
                     // tile and the title).
-                    cu::Spacer().modifier(Modifier::new().fill_max_width().height(ctl.top_inset).background(paint(p.bg)));
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().fill_max_width().height(ctl.top_inset).background(paint(p.bg))) };
                 }
                 VcsSheetHeader(&vcs_sheet_title(&project_name), &subtitle, phone, current.clone(), ctl.on_close.clone());
                 page();
-            });
+            }) };
         }
         None => page(),
     }
@@ -5571,23 +5509,17 @@ pub fn vcs_sheet_subtitle(snap: Option<&RepoSnapshot>, open_prs: Option<usize>) 
 fn VcsSheetHeader(title: &str, subtitle: &str, phone: bool, project: Option<String>, on_close: std::rc::Rc<std::cell::RefCell<dyn FnMut()>>) {
     let p = ember_theme().palette;
     let side = if phone { SP[3] } else { SP[4] };
-    cu::Row()
-        .alignment(Alignment::CenterStart)
-        .modifier(Modifier::new().fill_max_width().height(SHEET_HEADER_H).background(paint(p.surface)))
-        .content(|| {
-            cu::Spacer().modifier(Modifier::new().width(side));
-            cu::Box()
-                .alignment(Alignment::Center)
-                .modifier(Modifier::new().size(32.0, 32.0).background(paint(p.ink)).corner_radius(CORNER_SM))
-                .content(|| NavIcon(ICON_GIT_SVG, p.ink_text.to_argb(), 18.0));
-            cu::Spacer().modifier(Modifier::new().width(SP[2]));
-            cu::Column().modifier(Modifier::new().width(0.0).weight(1.0)).content(|| {
+    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width().height(SHEET_HEADER_H).background(paint(p.surface)), {
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(side)) };
+            { use ::compose_rust::ui::Box; Box!(alignment = Alignment::Center, modifier = Modifier::new().size(32.0, 32.0).background(paint(p.ink)).corner_radius(CORNER_SM), content = || NavIcon(ICON_GIT_SVG, p.ink_text.to_argb(), 18.0)) };
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
+            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().width(0.0).weight(1.0), {
                 Label(title, Fs::Xl, Weight::Semibold, None, Some(1));
                 if !subtitle.is_empty() {
                     Label(subtitle, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 }
-            });
-            cu::Spacer().modifier(Modifier::new().width(SP[2]));
+            }) };
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
             if !phone {
                 let close = on_close.clone();
                 let project = project.clone();
@@ -5597,13 +5529,13 @@ fn VcsSheetHeader(title: &str, subtitle: &str, phone: bool, project: Option<Stri
                     }
                     (&mut *close.borrow_mut())();
                 });
-                cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[1])) };
             }
             let close = on_close.clone();
             super::components::CloseButton(move || (&mut *close.borrow_mut())());
-            cu::Spacer().modifier(Modifier::new().width(side));
-        });
-    cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(side)) };
+        }) };
+    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().fill_max_width().height(1.0).background(paint(p.line))) };
 }
 
 /// The section rail of the mounted screen (`.vcs-compact .vcs-navi`): 48 x 44 icon entries in a
@@ -5615,7 +5547,7 @@ fn SectionRail(
 ) {
     let p = ember_theme().palette;
     let (item_w, item_h) = VCS_SHEET_RAIL_ITEM;
-    cu::Column().alignment(Alignment::TopCenter).spacing(2.0).modifier(Modifier::new().width(VCS_SHEET_RAIL_W)).content(|| {
+    { use ::compose_rust::ui::Column; Column!(alignment = Alignment::TopCenter, spacing = 2.0, modifier = Modifier::new().width(VCS_SHEET_RAIL_W), {
         for sec in Section::ALL {
             let on = sec == active;
             let count = shown_section_count(sec, snap, is_sample, stash_count, pr_count, branch_count, team_count);
@@ -5628,24 +5560,21 @@ fn SectionRail(
             }
             let mut pick = on_pick.clone();
             NamedClickable(sec.label(), m, Alignment::TopEnd, move || pick(sec), move || {
-                cu::Box().alignment(Alignment::Center).modifier(Modifier::new().fill_max_size()).content(|| {
+                { use ::compose_rust::ui::Box; Box!(alignment = Alignment::Center, modifier = Modifier::new().fill_max_size(), {
                     NavIcon(section_svg(sec), (if on { p.text } else { p.text_2 }).to_argb(), 18.0);
-                });
+                }) };
                 if let Some(n) = count.filter(|n| *n > 0) {
                     let alert = sec == Section::Conflicts;
                     let (fill, ink) = if alert { (p.orange.strong, Color::argb(0xffff_ffff)) } else { (p.surface_2, p.muted) };
-                    cu::Row()
-                        .alignment(Alignment::CenterStart)
-                        .modifier(Modifier::new().height(16.0).background(paint(fill)).shape_role(ShapeRole::Full))
-                        .content(|| {
-                            cu::Spacer().modifier(Modifier::new().width(5.0));
+                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().height(16.0).background(paint(fill)).shape_role(ShapeRole::Full), {
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(5.0)) };
                             Label(&n.to_string(), Fs::Xs2, Weight::Medium, Some(paint(ink)), Some(1));
-                            cu::Spacer().modifier(Modifier::new().width(5.0));
-                        });
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(5.0)) };
+                        }) };
                 }
             });
         }
-    });
+    }) };
 }
 
 /// A section's count as the list and the rail show it: what the server reported, else the
@@ -5756,9 +5685,9 @@ pub fn VcsSheet(project_id: &str, open: bool, on_close: impl FnMut() + Clone + '
     };
     // No shared title: the mounted screen draws the mockup's header (`.vcs-mhead`, FR-L18.1).
     EmberSheetSized("", true, sheet_w, true, on_close, None, || {
-        cu::Box().modifier(Modifier::new().fill_max_width().height(body_height + VCS_SHEET_CHROME_H)).content(|| {
+        { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().height(body_height + VCS_SHEET_CHROME_H), {
             VcsScreenWithLoad(state, boxes, current, reload, sample, Some(ctl));
-        });
+        }) };
     });
 }
 
@@ -5766,10 +5695,10 @@ pub fn VcsSheet(project_id: &str, open: bool, on_close: impl FnMut() + Clone + '
 #[compose_rust::runtime::Composable]
 pub fn preview_vcs() {
     let p = ember_theme().palette;
-    cu::Box().modifier(Modifier::new().fill_max_size().background(paint(p.bg))).content(|| {
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_size().background(paint(p.bg)), {
         let reload = remember(|| mutable_state_of(0_u64));
         VcsScreenWithLoad(Load::Ready(sample_snapshot()), sample_projects(), Some("ember".into()), reload, true, None);
-    });
+    }) };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -5781,7 +5710,7 @@ mod tests {
     use super::*;
     #[test]
     fn fr_673_stale_vcs_markers_are_gone() {
-        // compose-rust#471, #460/#429 and #500 (v0.0.10): the SHA is copied, the theme button is
+        // compose-rust#471, #460/#429 and #500 (v0.0.11): the SHA is copied, the theme button is
         // named, and a filter chip is a named, selectable container without an overlay button.
         let src = include_str!("vcs.rs");
         let production = &src[..src.find("#[cfg(test)]").expect("tests")];
@@ -6032,10 +5961,10 @@ mod tests {
         assert_eq!(items.len(), 2);
         let sel = format!("{:?}", compose_rust::schema::Modifier::Background(paint(ember_theme().palette.sel)));
         assert_eq!(items.iter().filter(|n| n.1.contains(&sel)).count(), 1, "the chosen row is on sel");
-        // The control is a button named by the shown project that says the menu is open.
+        // The control is a clickable box named by the shown project that says the menu is open.
         let control = nodes
             .iter()
-            .find(|n| n.0 == "Button" && n.2.iter().any(|p| p.contains("core")) && n.1.iter().any(|m| m == "MatchParentSize"))
+            .find(|n| n.0 == "Box" && n.2.iter().any(|p| p == "AccessibleName=String(\"core\")") && n.2.iter().any(|p| p.starts_with("OnClick=")))
             .expect("the control");
         let state: u32 = control
             .1
@@ -6116,11 +6045,12 @@ mod tests {
         assert_eq!(branch_pop_width(1440.0), 380.0);
         assert_eq!(branch_pop_width(390.0), 358.0);
         assert_eq!(branch_pop_width(0.0), 380.0);
-        assert_eq!(branch_pop_list_height(7), None);
-        assert_eq!(branch_pop_list_height(8), Some(300.0));
+        assert_eq!(BRANCH_POP_LIST_MAX_H, 300.0);
         assert_eq!((BRANCH_POP_ROW_H, BRANCH_POP_OFFSET), (40.0, 4.0));
         let src = include_str!("vcs.rs").split("#[cfg(test)]").next().unwrap();
-        assert!(!src.contains("cu::Dialog(branch_menu"), "the centred branch dialog is gone");
+        assert!(!src.contains("Dialog!(branch_menu"), "the centred branch dialog is gone");
+        assert!(!src.contains(&["branch_pop_list", "_height"].concat()));
+        assert!(src.contains(".max_height(BRANCH_POP_LIST_MAX_H)"));
     }
 
     /// The vertical and the horizontal lines between the bar's cells.
@@ -6684,7 +6614,7 @@ mod tests {
 
         // 1. Click "로컬 전용" filter chip -> filters out remote-only commit
         let (node, handler) = tracker.find("로컬 전용");
-        let (bytes, _) = host.dispatch(HostEvent { node_id: node, handler_id: handler, payload: EventPayload::Clicked }).expect("click 로컬 전용");
+        let (bytes, _) = host.dispatch(HostEvent::new(node, handler, EventPayload::Clicked)).expect("click 로컬 전용");
         let local_batch = decode_batch(bytes).expect("decode");
         tracker.scan(&local_batch);
         let local_text: String = local_batch.iter().map(|m| format!("{m:?}")).collect();
@@ -6692,7 +6622,7 @@ mod tests {
 
         // 2. Click "모든 브랜치" filter chip -> brings back all commits including remote-only
         let (node, handler) = tracker.find("모든 브랜치");
-        let (bytes, _) = host.dispatch(HostEvent { node_id: node, handler_id: handler, payload: EventPayload::Clicked }).expect("click 모든 브랜치");
+        let (bytes, _) = host.dispatch(HostEvent::new(node, handler, EventPayload::Clicked)).expect("click 모든 브랜치");
         let all_batch = decode_batch(bytes).expect("decode");
         tracker.scan(&all_batch);
         let all_text: String = all_batch.iter().map(|m| format!("{m:?}")).collect();
@@ -6701,7 +6631,7 @@ mod tests {
 
         // 3. Click "여기서 브랜치" -> toggles form open
         let (node, handler) = tracker.find("여기서 브랜치");
-        let (bytes, _) = host.dispatch(HostEvent { node_id: node, handler_id: handler, payload: EventPayload::Clicked }).expect("click 여기서 브랜치");
+        let (bytes, _) = host.dispatch(HostEvent::new(node, handler, EventPayload::Clicked)).expect("click 여기서 브랜치");
         let form_batch = decode_batch(bytes).expect("decode");
         tracker.scan(&form_batch);
         let form_text: String = form_batch.iter().map(|m| format!("{m:?}")).collect();
@@ -6710,7 +6640,7 @@ mod tests {
 
         // 4. Click "되돌리기" -> two-step arming: label becomes "정말 되돌립니다"
         let (node, handler) = tracker.find("되돌리기");
-        let (bytes, _) = host.dispatch(HostEvent { node_id: node, handler_id: handler, payload: EventPayload::Clicked }).expect("click 되돌리기");
+        let (bytes, _) = host.dispatch(HostEvent::new(node, handler, EventPayload::Clicked)).expect("click 되돌리기");
         let arm_batch = decode_batch(bytes).expect("decode");
         tracker.scan(&arm_batch);
         let arm_text: String = arm_batch.iter().map(|m| format!("{m:?}")).collect();
@@ -6718,7 +6648,7 @@ mod tests {
 
         // 5. Click "Cherry-pick" -> two-step arming: label becomes "정말 가져옵니다"
         let (node, handler) = tracker.find("Cherry-pick");
-        let (bytes, _) = host.dispatch(HostEvent { node_id: node, handler_id: handler, payload: EventPayload::Clicked }).expect("click Cherry-pick");
+        let (bytes, _) = host.dispatch(HostEvent::new(node, handler, EventPayload::Clicked)).expect("click Cherry-pick");
         let cp_batch = decode_batch(bytes).expect("decode");
         tracker.scan(&cp_batch);
         let cp_text: String = cp_batch.iter().map(|m| format!("{m:?}")).collect();
@@ -6727,7 +6657,7 @@ mod tests {
         // 6. Click "SHA 복사" -> copies the SHA and says so; only when the clipboard refuses it
         // (a headless runner) is the selectable SHA field shown instead (compose-rust#471).
         let (node, handler) = tracker.find("SHA 복사");
-        let (bytes, _) = host.dispatch(HostEvent { node_id: node, handler_id: handler, payload: EventPayload::Clicked }).expect("click SHA 복사");
+        let (bytes, _) = host.dispatch(HostEvent::new(node, handler, EventPayload::Clicked)).expect("click SHA 복사");
         let sha_batch = decode_batch(bytes).expect("decode");
         tracker.scan(&sha_batch);
         let sha_text: String = sha_batch.iter().map(|m| format!("{m:?}")).collect();
@@ -6765,7 +6695,11 @@ mod tests {
             fn scan(&mut self, batch: &[Mutation<'_>]) {
                 for m in batch {
                     match m {
-                        Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                        Mutation::SetProp {
+                            node_id,
+                            property: PropertyKind::Text | PropertyKind::AccessibleName,
+                            value: PropertyValue::String(s),
+                        } => {
                             self.texts.insert(*node_id, s.to_string());
                         }
                         Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
@@ -6813,7 +6747,7 @@ mod tests {
 
         // Click on first commit row overlay
         let (node, handler) = tracker.find("커밋 a1b2c3d Feat: attach the session shim before routing");
-        let (bytes, _) = host.dispatch(HostEvent { node_id: node, handler_id: handler, payload: EventPayload::Clicked }).expect("click commit row");
+        let (bytes, _) = host.dispatch(HostEvent::new(node, handler, EventPayload::Clicked)).expect("click commit row");
         let detail_batch = decode_batch(bytes).expect("decode");
         tracker.scan(&detail_batch);
 
@@ -6825,7 +6759,7 @@ mod tests {
 
         // Click "목록으로" to navigate back to list
         let (node, handler) = tracker.find("목록으로");
-        let (bytes, _) = host.dispatch(HostEvent { node_id: node, handler_id: handler, payload: EventPayload::Clicked }).expect("click 목록으로");
+        let (bytes, _) = host.dispatch(HostEvent::new(node, handler, EventPayload::Clicked)).expect("click 목록으로");
         let back_batch = decode_batch(bytes).expect("decode");
         tracker.scan(&back_batch);
         let back_text: String = back_batch.iter().map(|m| format!("{m:?}")).collect();
@@ -7030,11 +6964,7 @@ mod tests {
                 None
             }).unwrap_or_else(|| panic!("button '{label}' not found (known: {:?})", self.texts));
 
-            let bytes = self.host.dispatch(HostEvent {
-                node_id,
-                handler_id,
-                payload: EventPayload::Clicked,
-            }).expect("dispatch").0.to_vec();
+            let bytes = self.host.dispatch(HostEvent::new(node_id, handler_id, EventPayload::Clicked)).expect("dispatch").0.to_vec();
             let batch = decode_batch(&bytes).expect("decode");
             self.absorb(&batch);
             batch.iter().map(|m| format!("{m:?}")).collect()
@@ -7244,7 +7174,7 @@ mod tests {
         let mut handlers = std::collections::HashMap::new();
         for m in &batch {
             match m {
-                Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                Mutation::SetProp { node_id, property: PropertyKind::Text | PropertyKind::AccessibleName, value: PropertyValue::String(s) } => {
                     texts.insert(*node_id, s.to_string());
                 }
                 Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
@@ -7262,7 +7192,7 @@ mod tests {
             .collect();
         assert_eq!(targets.len(), 1, "the row has exactly one tap target named by its path");
         let (node_id, handler_id) = targets[0];
-        let after = host.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("dispatch").0.to_vec();
+        let after = host.dispatch(HostEvent::new(node_id, handler_id, EventPayload::Clicked)).expect("dispatch").0.to_vec();
         let after: String = decode_batch(&after).expect("decode").iter().map(|m| format!("{m:?}")).collect();
         assert!(after.contains("고른 파일 docs/SPEC.md"), "the tap selects the file: {after}");
     }
@@ -7311,7 +7241,7 @@ mod tests {
         // the invisible one inside `StageCheck` that keeps the role and the keyboard.
         let src = include_str!("vcs.rs");
         let code = &src[..src.find("#[cfg(test)]").expect("tests")];
-        assert_eq!(code.matches("cu::Checkbox(").count(), 1);
+        assert_eq!(code.matches("Checkbox!(").count(), 1);
     }
 
     #[compose_rust::runtime::Composable]
@@ -7339,12 +7269,18 @@ mod tests {
         let body = &src[start..end];
         let header = body.find("Txt(&h.header, TypeRole::Mono").expect("mono hunk header");
         let action = body.find("\"이 덩어리 전체\"").expect("hunk action");
-        let row = body[..header].rfind("cu::Row()").expect("header row");
-        let column = body[..header].rfind("cu::Column()").unwrap_or(0);
+        let row = body[..header].rfind("Row!(").expect("header row");
+        let column = body[..header].rfind("Column!(").unwrap_or(0);
         assert!(row > column, "header and action share one row, not a column");
-        assert!(!body[header..action].contains("cu::Column()"), "the action is not on its own row");
+        assert!(!body[header..action].contains("Column!("), "the action is not on its own row");
         assert!(action > header, "the action follows the header text, on the right");
         assert_eq!(VCS_HUNK_HEADER_H, VCS_HUNK_BUTTON_H + 12.0);
+        // compose-rust#424 (v0.0.11): the diff line check column is pinned with Modifier::sticky()
+        // inside a horizontal ScrollRow so long lines scroll sideways under the pinned check cell.
+        assert!(body.contains("ScrollRow!("), "{body}");
+        assert!(body.contains("StageCheckWith(Modifier::new().sticky()"), "{body}");
+        assert!(body.contains("Modifier::new().sticky().width(STAGE_CHECK_HIT_W)"), "{body}");
+        assert!(!include_str!("../vcs.rs").contains(concat!("TODO(compose-rust#", "424")));
     }
 
     /// One node of a composition: widget, parent, modifiers and props as debug text.
@@ -7503,7 +7439,7 @@ mod tests {
         assert_eq!(tree_view_height(10.0), VCS_TREE_PAD + VCS_TREE_ROW_H, "at least one row");
         let production = include_str!("vcs.rs").split("#[cfg(test)]").next().unwrap();
         let capped = production.split("fn FilesTreeCapped(").nth(1).unwrap().split("\nfn ").next().unwrap();
-        assert!(capped.contains(".height(tree_view_height(cap))"), "the scroll box is sent the snapped height");
+        assert!(capped.contains(".max_height(tree_view_height(cap))"), "the scroll box is capped at the snapped height");
     }
 
     #[test]
@@ -7545,17 +7481,15 @@ mod tests {
         // Rows keep the height the cap counts with.
         let rows = build_tree(&sample_snapshot().changes.iter().map(|d| d.path.clone()).collect::<Vec<_>>(), &BTreeSet::new()).len();
         assert!(nodes.iter().filter(|n| n.mods.iter().any(|m| m == "Height(34.0)")).count() >= rows);
-        if tree_height(rows) > 281.0 {
-            assert!(
-                nodes.iter().any(|n| n.widget == "ScrollColumn" && n.mods.iter().any(|m| m == "Height(280.0)")),
-                "the tree scrolls inside its cap"
-            );
-        }
+        assert!(
+            nodes.iter().any(|n| n.widget == "ScrollColumn" && n.mods.iter().any(|m| m.contains("max_height: 280.0"))),
+            "the tree scrolls inside its cap (SizeIn max_height 280.0)"
+        );
         let production = include_str!("vcs.rs").split("#[cfg(test)]").next().unwrap();
         let two = production.split("PaneLayout::Two => {").nth(1).unwrap().split("PaneLayout::Stacked => {").next().unwrap();
         assert_eq!(two.matches("VcsCard(").count(), 1, "one card for the tree and the commit box: {two}");
         assert!(two.contains("FilesTreeCapped(&d_files, &st_files, &fold_files, &sel_files, on_tab_files, tree_cap(VCS_TREE_MAX_H, pane_h));"));
-        assert!(production.contains("TODO(compose-rust#778, after v0.0.10)"));
+        assert!(!production.contains(concat!("TODO(compose-rust#", "778")));
     }
 
     /// The children of `parent`, in the order they were inserted.
@@ -7604,7 +7538,7 @@ mod tests {
         assert_eq!(tree_cap(VCS_TREE_MAX_H, Some(585.0)), 281.0);
         let tree = nodes
             .iter()
-            .find(|n| n.widget == "ScrollColumn" && n.mods.iter().any(|m| m == "Height(280.0)"))
+            .find(|n| n.widget == "ScrollColumn" && n.mods.iter().any(|m| m.contains("max_height: 280.0")))
             .expect("the tree scrolls inside its cap");
         let row = with_text(&nodes, "f13.rs");
         assert!(up(&nodes, row).contains(&tree.id), "the last file row is inside the scrolling tree");
@@ -7838,7 +7772,8 @@ mod tests {
         assert!(production.contains("(section_width - nav).max(0.0),"), "the row's width leaves out the shell's navigation");
         assert!(production.contains("target.scroll_to(to);"));
         assert!(production.contains("seen.set(Some((active, range, to_key)));"), "sent again once the row's range is measured");
-        assert!(production.contains("cu::ScrollRow().scroll_state(&scroll).modifier(Modifier::new().fill_max_width()).content(pills);"));
+        assert!(production.contains("ScrollRow!(scroll_state = &scroll, modifier = Modifier::new().fill_max_width(), content = pills)"));
+
     }
 
     #[test]
@@ -8114,7 +8049,7 @@ mod tests {
             Mutation::SetProp { node_id, property: PropertyKind::OnDismiss, value: PropertyValue::Integer(h) } => Some((*node_id, *h as u64)),
             _ => None,
         }).expect("VCS sheet dismiss handler");
-        host.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("dispatch dismiss");
+        host.dispatch(HostEvent::new(node_id, handler_id, EventPayload::Clicked)).expect("dispatch dismiss");
         assert_eq!(VCS_DISMISSES.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
@@ -8297,10 +8232,7 @@ mod tests {
             .iter()
             .map(|m| format!("{m:?}"))
             .collect();
-        let event = HostEvent {
-            node_id: 0,
-            handler_id: 0,
-            payload: EventPayload::WindowSizeChanged {
+        let event = HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
                 width_dp: 1440.0,
                 height_dp: 900.0,
                 class: WindowSizeClass::Expanded,
@@ -8308,8 +8240,8 @@ mod tests {
                 safe_area_top: 0.0,
                 safe_area_leading: 0.0,
                 safe_area_trailing: 0.0,
-            },
-        };
+                safe_area_bottom: 0.0,
+            });
         let (bytes, _) = host.dispatch(event).expect("dispatch");
         text.extend(decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")));
         assert!(text.contains("feat/session-shim"));
@@ -8328,10 +8260,7 @@ mod tests {
             .iter()
             .map(|m| format!("{m:?}"))
             .collect();
-        let event = HostEvent {
-            node_id: 0,
-            handler_id: 0,
-            payload: EventPayload::WindowSizeChanged {
+        let event = HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
                 width_dp: 1440.0,
                 height_dp: 900.0,
                 class: WindowSizeClass::Expanded,
@@ -8339,8 +8268,8 @@ mod tests {
                 safe_area_top: 0.0,
                 safe_area_leading: 0.0,
                 safe_area_trailing: 0.0,
-            },
-        };
+                safe_area_bottom: 0.0,
+            });
         let (bytes, _) = host.dispatch(event).expect("dispatch");
         text.extend(decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")));
         assert!(text.contains("커밋"), "the commit button is in the wide layout");
@@ -8430,9 +8359,9 @@ mod tests {
         let _guard = crate::services::test_guard();
         assert_eq!(VCS_PILL_PAD_X, 14.0);
         let nodes = nodes_of(|| StashPill("적용", "스태시 1 적용", ButtonKind::Default, true, || {}));
-        let over = nodes.iter().find(|n| n.widget == "Button").expect("the pill's button");
-        assert!(over.props.iter().any(|x| x == "AccessibleName=String(\"스태시 1 적용\")"), "{:?}", over.props);
-        let pill = nodes.iter().find(|n| Some(n.id) == over.parent).expect("the pill");
+        assert!(!nodes.iter().any(|n| n.widget == "Button"), "no clear button overlay on pill");
+        let pill = nodes.iter().find(|n| n.widget == "Box" && n.props.iter().any(|x| x == "AccessibleName=String(\"스태시 1 적용\")")).expect("the pill");
+        assert!(pill.props.iter().any(|x| x.starts_with("OnClick=")), "{:?}", pill.props);
         assert!(pill.mods.iter().any(|m| *m == format!("Height({H_CTL:?})")), "{:?}", pill.mods);
         assert!(!pill.mods.iter().any(|m| m.starts_with("Width(") || m.starts_with("Size(") || m.starts_with("FillMax")), "{:?}", pill.mods);
         let label = with_text(&nodes, "적용");
@@ -8456,10 +8385,7 @@ mod tests {
             .iter()
             .map(|m| format!("{m:?}"))
             .collect();
-        let event = HostEvent {
-            node_id: 0,
-            handler_id: 0,
-            payload: EventPayload::WindowSizeChanged {
+        let event = HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
                 width_dp: 390.0,
                 height_dp: 844.0,
                 class: WindowSizeClass::Compact,
@@ -8467,8 +8393,8 @@ mod tests {
                 safe_area_top: 0.0,
                 safe_area_leading: 0.0,
                 safe_area_trailing: 0.0,
-            },
-        };
+                safe_area_bottom: 0.0,
+            });
         let (bytes, _) = host.dispatch(event).expect("dispatch");
         text.extend(decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")));
         assert!(text.contains("파일"));
@@ -8491,7 +8417,7 @@ mod tests {
         let button_role = |n: &N| n.mods.iter().any(|m| m.starts_with("Semantics") && m.contains("Button"));
 
         // A pane tab: the pill has the fill, the name, the role, the click and the press.
-        let nodes = nodes_of(|| cu::Row().content(|| PaneTabSegment("파일", true, || {})));
+        let nodes = nodes_of(|| { use ::compose_rust::ui::Row; Row!({ PaneTabSegment("파일", true, || {}); }) });
         assert!(!nodes.iter().any(|n| n.widget == "Button"), "no button over the pill");
         let tab = &nodes[named(&nodes, "파일")];
         assert_eq!(tab.widget, "Box");
@@ -8500,30 +8426,27 @@ mod tests {
         let fill = format!("{:?}", compose_rust::schema::Modifier::Background(paint(ember_theme().palette.ink)));
         assert!(tab.mods.contains(&fill) && tab.mods.iter().any(|m| *m == format!("Height({H_CTL:?})")), "{:?}", tab.mods);
 
-        // A round icon button: the 44 dp box is the control and is round, the 32 dp circle is drawn in it.
+        // A round icon button: the 44 dp box is the control and is round, the 32 dp circle is drawn in it,
+        // and MinTouchTarget(44.0) keeps a 44 dp hit area inside a shorter row (compose-rust#472, v0.0.11).
         let nodes = nodes_of(|| CircleIconButton(ICON_FETCH_SVG, "가져오기", || {}));
         assert!(!nodes.iter().any(|n| n.widget == "Button"));
         let hit = &nodes[named(&nodes, "가져오기")];
         assert!(hit.props.iter().any(|x| x.starts_with("OnClick=")) && button_role(hit) && press(hit) == 1, "{:?}", hit.mods);
         assert!(hit.mods.iter().any(|m| m == "Width(44.0)") && hit.mods.iter().any(|m| m.starts_with("ShapeRole(Full")), "{:?}", hit.mods);
+        assert!(hit.mods.iter().any(|m| m == "MinTouchTarget { size: 44.0 }"), "{:?}", hit.mods);
 
-        // A row named by a path: one clear button with the path as text and name, exactly over
-        // its box, which keeps its own size.
+        // A row named by a path: the painted box itself is the control (compose-rust#831), with
+        // no clear `Button` overlay.
         let nodes = nodes_of(|| ConflictFileRow("docs/SPEC.md", || {}));
-        let buttons: Vec<&N> = nodes.iter().filter(|n| n.widget == "Button").collect();
-        assert_eq!(buttons.len(), 1);
-        let over = buttons[0];
-        assert!(over.props.iter().any(|x| x == "Text=String(\"docs/SPEC.md\")"), "{:?}", over.props);
-        assert!(over.props.iter().any(|x| x == "AccessibleName=String(\"docs/SPEC.md\")"), "{:?}", over.props);
-        assert!(over.props.iter().any(|x| x.starts_with("OnClick=")), "{:?}", over.props);
-        assert!(over.mods.iter().any(|m| m == "MatchParentSize"), "{:?}", over.mods);
-        assert!(!over.mods.iter().any(|m| m.starts_with("FillMax")), "it does not widen its box: {:?}", over.mods);
-        let row = nodes.iter().find(|n| Some(n.id) == over.parent).expect("its box");
+        assert!(!nodes.iter().any(|n| n.widget == "Button"), "no clear button overlay on row");
+        let row = &nodes[named(&nodes, "docs/SPEC.md")];
         assert!(row.widget == "Box" && row.mods.iter().any(|m| *m == format!("Height({CONFLICT_ROW_H:?})")), "{:?}", row.mods);
-        assert!(!row.props.iter().any(|x| x.starts_with("OnClick=")), "one tap target, not two");
+        assert!(row.props.iter().any(|x| x.starts_with("OnClick=")), "{:?}", row.props);
+        assert!(button_role(row) && press(row) == 1, "{:?}", row.mods);
 
         let production = include_str!("vcs.rs").split("#[cfg(test)]").next().unwrap();
         assert!(!production.contains(&["Focus", "Overlay("].concat()), "the per-screen overlay is gone");
+        assert!(!production.contains(&["DataNamed", "Overlay"].concat()), "DataNamedOverlay is gone");
         assert!(!production.contains(&["cu::", "Button("].concat()), "no direct toolkit button is left");
         compose_rust::window::reset_window_size();
     }
@@ -8541,6 +8464,12 @@ mod tests {
                     Mutation::Create { node_id, widget: WidgetKind::Button } => {
                         button_nodes.insert(*node_id);
                     }
+                    Mutation::SetModifier { node_id, modifier, .. }
+                        if matches!(modifier, compose_rust::Modifier::Semantics { .. })
+                            && format!("{modifier:?}").contains("role: Button,") =>
+                    {
+                        button_nodes.insert(*node_id);
+                    }
                     Mutation::SetProp { node_id, property: PropertyKind::Text | PropertyKind::AccessibleName, value: PropertyValue::String(s) } => {
                         button_texts.insert(*node_id, s.to_string());
                     }
@@ -8550,10 +8479,7 @@ mod tests {
         };
         scan(&decode_batch(host.rebuild().expect("rebuild")).expect("decode"));
         
-        let event = HostEvent {
-            node_id: 0,
-            handler_id: 0,
-            payload: EventPayload::WindowSizeChanged {
+        let event = HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
                 width_dp: 1440.0,
                 height_dp: 900.0,
                 class: WindowSizeClass::Expanded,
@@ -8561,8 +8487,8 @@ mod tests {
                 safe_area_top: 0.0,
                 safe_area_leading: 0.0,
                 safe_area_trailing: 0.0,
-            },
-        };
+                safe_area_bottom: 0.0,
+            });
         let (bytes, _) = host.dispatch(event).expect("dispatch");
         scan(&decode_batch(bytes).expect("decode"));
 
@@ -8622,6 +8548,12 @@ mod tests {
                     Mutation::Create { node_id, widget: WidgetKind::Button } => {
                         button_nodes.insert(*node_id);
                     }
+                    Mutation::SetModifier { node_id, modifier, .. }
+                        if matches!(modifier, compose_rust::Modifier::Semantics { .. })
+                            && format!("{modifier:?}").contains("role: Button,") =>
+                    {
+                        button_nodes.insert(*node_id);
+                    }
                     Mutation::SetProp { node_id, property: PropertyKind::Text | PropertyKind::AccessibleName, value: PropertyValue::String(s) } => {
                         button_texts.insert(*node_id, s.to_string());
                     }
@@ -8631,10 +8563,7 @@ mod tests {
         };
         scan(&decode_batch(host.rebuild().expect("rebuild")).expect("decode"));
 
-        let event = HostEvent {
-            node_id: 0,
-            handler_id: 0,
-            payload: EventPayload::WindowSizeChanged {
+        let event = HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
                 width_dp: 390.0,
                 height_dp: 844.0,
                 class: WindowSizeClass::Compact,
@@ -8642,8 +8571,8 @@ mod tests {
                 safe_area_top: 0.0,
                 safe_area_leading: 0.0,
                 safe_area_trailing: 0.0,
-            },
-        };
+                safe_area_bottom: 0.0,
+            });
         let (bytes, _) = host.dispatch(event).expect("dispatch");
         scan(&decode_batch(bytes).expect("decode"));
 
@@ -8696,9 +8625,9 @@ mod tests {
             let mut tab_host = Host::new(move || {
                 let s = snap_tab.clone();
                 Box::new(Recomposer::new(move || {
-                    cu::Column().content(|| {
+                    { use ::compose_rust::ui::Column; Column!({
                         ChangesPane(&s, PaneLayout::Tabs, Some(tab), |_| {});
-                    });
+                    }) };
                 }))
             });
             let mut tab_nodes = std::collections::HashSet::new();
@@ -8707,6 +8636,12 @@ mod tests {
                 for m in batch {
                     match m {
                         Mutation::Create { node_id, widget: WidgetKind::Button } => {
+                            tab_nodes.insert(*node_id);
+                        }
+                        Mutation::SetModifier { node_id, modifier, .. }
+                            if matches!(modifier, compose_rust::Modifier::Semantics { .. })
+                                && format!("{modifier:?}").contains("role: Button,") =>
+                        {
                             tab_nodes.insert(*node_id);
                         }
                         // A painted control that takes its own name is a clickable box (compose-rust#429, #673).
@@ -8756,14 +8691,14 @@ mod tests {
         compose_rust::window::reset_window_size();
         let mut host = Host::new(|| {
             Box::new(Recomposer::new(|| {
-                cu::Column().content(|| {
+                { use ::compose_rust::ui::Column; Column!({
                     SectionList(Section::Changes, None, |_| {});
                     let diffs = sample_snapshot().changes;
                     let st = mutable_state_of(Staging::new(&diffs, false));
                     let folded = mutable_state_of(BTreeSet::new());
                     let sel = mutable_state_of(0usize);
                     FilesTree(&diffs, &st, &folded, &sel, |_| {});
-                });
+                }) };
             }))
         });
         let mutations = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
@@ -9010,7 +8945,11 @@ mod tests {
         let mut clickables: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
         for m in &batch_matched {
             match m {
-                Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                Mutation::SetProp {
+                    node_id,
+                    property: PropertyKind::Text | PropertyKind::AccessibleName,
+                    value: PropertyValue::String(s),
+                } => {
                     texts_matched.insert(*node_id, s.to_string());
                 }
                 Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
@@ -9022,7 +8961,7 @@ mod tests {
         assert!(texts_matched.values().any(|t| t == "#100 통과"), "should render '#100 통과' chip");
         let pr_btn = texts_matched.iter().find(|(id, t)| *t == "#100 통과" && clickables.contains_key(id)).map(|(id, _)| *id).expect("clickable PR chip");
         let pr_handler = clickables[&pr_btn];
-        host_matched.dispatch(HostEvent { node_id: pr_btn, handler_id: pr_handler, payload: EventPayload::Clicked }).expect("dispatch PR click");
+        host_matched.dispatch(HostEvent::new(pr_btn, pr_handler, EventPayload::Clicked)).expect("dispatch PR click");
         assert_eq!(clicked_pr.get(), Some(100), "clicking PR chip must pass its PR number");
     }
 
@@ -9102,7 +9041,11 @@ mod tests {
 
         for m in &batch {
             match m {
-                Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                Mutation::SetProp {
+                    node_id,
+                    property: PropertyKind::Text | PropertyKind::AccessibleName,
+                    value: PropertyValue::String(s),
+                } => {
                     button_texts.insert(*node_id, s.to_string());
                 }
                 Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
@@ -9112,13 +9055,13 @@ mod tests {
             }
         }
 
-        // The painted pill carries the text twice (its label and the button over it); the button is the clickable one.
+        // The painted pill is a clickable box named with AccessibleName (`NamedClickable`); find the clickable node.
         let br_button = button_texts.iter().find(|(id, text)| *text == "브랜치 보기" && clickables.contains_key(id)).map(|(id, _)| *id);
         assert!(br_button.is_some(), "expected '브랜치 보기' button");
 
         if let Some(node_id) = br_button {
             if let Some(&handler_id) = clickables.get(&node_id) {
-                host.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("dispatch");
+                host.dispatch(HostEvent::new(node_id, handler_id, EventPayload::Clicked)).expect("dispatch");
                 assert_eq!(sec.get(), Section::Branches, "clicking '브랜치 보기' should navigate to Section::Branches");
             }
         }
@@ -9128,7 +9071,7 @@ mod tests {
         assert!(pr_chip.is_some(), "expected clickable '#409 ...' PR chip in sample team pane");
         if let Some(node_id) = pr_chip {
             if let Some(&handler_id) = clickables.get(&node_id) {
-                host.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("dispatch PR chip");
+                host.dispatch(HostEvent::new(node_id, handler_id, EventPayload::Clicked)).expect("dispatch PR chip");
                 assert_eq!(selected_pr.get(), Some(409), "clicking PR chip should set selected_pr to 409");
                 assert_eq!(sec.get(), Section::PullRequests, "clicking PR chip should navigate to Section::PullRequests");
             }
@@ -9160,5 +9103,82 @@ mod tests {
         });
         assert!(has_clearance, "compact width should include bottom clearance Spacer");
         compose_rust::window::reset_window_size();
+    }
+
+    #[test]
+    fn issue_878_conflict_body_loads_sample_in_demo_mode() {
+        let src = include_str!("vcs.rs");
+        let start = src.find("fn ConflictsBody(").expect("ConflictsBody");
+        let body = &src[start..start + 1800];
+        assert!(body.contains("actions.is_none() || crate::demo::active_from_env()"), "{body}");
+        assert!(body.contains("ConflictLoad::Ready(sample_conflict())"), "{body}");
+    }
+
+    fn row_equal_height_props(equal: bool) -> Vec<String> {
+        fn on() {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::TopStart, spacing = GAP_CARD, intrinsic_size = true, {}) };
+        }
+        fn off() {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::TopStart, spacing = GAP_CARD, intrinsic_size = false, {}) };
+        }
+        let nodes = nodes_of(if equal { on as fn() } else { off as fn() });
+        nodes.iter().find(|n| n.widget == "Row").expect("row").props.clone()
+    }
+
+    #[test]
+    fn fr_l19_changes_two_pane_row_uses_equal_height() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let (on, off) = (row_equal_height_props(true), row_equal_height_props(false));
+        let marks: Vec<&String> = on.iter().filter(|p| !off.contains(p)).collect();
+        assert!(!marks.is_empty(), "intrinsic_size = true emits a Row prop: {on:?} against {off:?}");
+
+        let nodes = nodes_of(changes_two_pane_probe);
+        let row = nodes
+            .iter()
+            .find(|n| {
+                n.widget == "Row" && {
+                    let children = kids(&nodes, n.id);
+                    children.len() == 2 && children.iter().all(|c| c.widget == "ScrollColumn")
+                }
+            })
+            .expect("ChangesPane in PaneLayout::Two renders a Row with two ScrollColumn panes");
+        assert!(
+            marks.iter().all(|p| row.props.contains(p)),
+            "two-pane ChangesPane Row emits equal_height (intrinsic_size = true): {:?}",
+            row.props
+        );
+        let panes = kids(&nodes, row.id);
+        assert!(panes[0].mods.iter().any(|m| m == "FillMaxHeight"), "left pane fills row height: {:?}", panes[0].mods);
+        assert!(panes[1].mods.iter().any(|m| m == "FillMaxHeight"), "right pane fills row height: {:?}", panes[1].mods);
+    }
+
+    #[test]
+    fn fr_l19_armed_delete_wires_auto_disarm_timer() {
+        let production = include_str!("vcs.rs").split("#[cfg(test)]").next().unwrap();
+        let helper = production
+            .split("fn auto_disarm_effect(")
+            .nth(1)
+            .and_then(|s| s.split("\n/// ").next())
+            .expect("auto_disarm_effect exists");
+        assert!(helper.contains("launched_effect("), "{helper}");
+        assert!(helper.contains("delay("), "{helper}");
+        assert!(helper.contains("STASH_ARM_TIMEOUT_MS"), "{helper}");
+        assert!(helper.contains("disarm_if_matches("), "{helper}");
+
+        for fn_name in [
+            "fn StashPane(",
+            "fn ConflictsPane(",
+            "fn ConflictsBody(",
+            "fn HistoryPane(",
+            "fn PullRequestsPane(",
+        ] {
+            let body = production
+                .split(fn_name)
+                .nth(1)
+                .and_then(|s| s.split("\nfn ").next())
+                .unwrap_or_else(|| panic!("missing {fn_name}"));
+            assert!(body.contains("auto_disarm_effect("), "{fn_name} wires auto_disarm_effect");
+        }
     }
 }

@@ -353,8 +353,12 @@ impl NodeClient {
         Ok((raw.status.as_u16(), raw.body.to_vec()))
     }
 
-    async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+    pub(crate) async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         Self::decode(self.send(Method::GET, path, None, true).await?)
+    }
+
+    pub(crate) async fn put<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
+        Self::decode(self.send(Method::PUT, path, Some(Self::json(body)), true).await?)
     }
 
     async fn no_content(&self, method: Method, path: &str, json: Option<Vec<u8>>) -> Result<()> {

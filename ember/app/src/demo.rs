@@ -55,7 +55,7 @@ pub fn ide_launch(session: &str, project: &str, cwd: &str) -> crate::server::Ide
     ide_launch_with(session, project, cwd, demo_ose_from_env())
 }
 
-/// Env var that names a running OSE server (`host:port`, started without a connection token)
+/// Env var that names a running OSE server (`host:port`, at the root, started without a connection token)
 /// for the demo's Ember 에디터 to connect to, since the demo has no node to start one.
 pub const DEMO_OSE_ENV: &str = "EMBER_DEMO_OSE";
 
@@ -66,7 +66,9 @@ fn demo_ose_from_env() -> Option<ember_client::wire::EmberOseConnection> {
         endpoint: format!("http://{raw}"),
         // The demo's OSE is dialed directly: there is no server relay in demo mode.
         relay: None,
-        connection_token: String::new(),
+        path: String::new(),
+        ticket: String::new(),
+        ose_commit: None,
     })
 }
 
@@ -101,12 +103,15 @@ pub fn ide_launch_with(
         computer: IdeComputer {
             name: "이 컴퓨터".to_string(),
             local: true,
+            computer_name: None,
         },
         targets: vec![
             target("ember", true),
             target("vscode", false),
             target("gateway", false),
         ],
+        // The demo has no editor settings record: the chooser opens until a pick (FR-W7b).
+        default_ide: None,
     }
 }
 
@@ -308,15 +313,79 @@ pub fn projects() -> Vec<Project> {
             name: "demo-project".into(),
             created_at: 0,
             computers: vec!["local".into()],
+            leader_session: Some("demo-s1".into()),
             ..Default::default()
         },
         Project {
             name: "second-project".into(),
             created_at: 0,
             computers: vec!["local".into()],
+            leader_session: Some("demo-s3".into()),
             ..Default::default()
         },
     ]
+}
+
+/// Sample routines for demo mode, including a routine linked to `demo-project` so the project
+/// settings `연결` section and full project view show real linked items in captures.
+pub fn demo_routines() -> Vec<crate::ui::routines::Entry> {
+    use crate::ui::home::{default_mode, default_option, Harness, Selection};
+    use crate::ui::routines::{next_run, Entry, Routine, Run, RunStatus, Trigger};
+    let now = crate::ui::cr::routines::now_local();
+    let mut entries = crate::ui::cr::routines::sample_entries();
+    entries.push(Entry {
+        routine: Routine {
+            id: "demo-rt1".into(),
+            name: "데모 CI 상태 점검".into(),
+            trigger: Trigger::Time,
+            cron: "0 9 * * *".into(),
+            time_zone: Some("UTC".into()),
+            prompt: "demo-project의 최근 빌드 상태를 확인하고 실패 원인을 요약합니다.".into(),
+            enabled: true,
+            sel: Selection {
+                project: "demo-project".into(),
+                option: default_option(Harness::ClaudeCode),
+                mode: default_mode(Harness::ClaudeCode),
+                computer: Some("local".into()),
+            },
+            continue_session: None,
+        },
+        runs: vec![Run {
+            at: now - 120,
+            status: RunStatus::Done,
+            session: Some("demo-s1".into()),
+        }],
+        next_at: next_run("0 9 * * *", now),
+    });
+    entries
+}
+
+/// Sample channels for demo mode, including a channel linked to `demo-project` so the project
+/// settings `연결` section and full project view show real linked items in captures.
+pub fn demo_channels() -> Vec<crate::ui::channels::Room> {
+    use crate::ui::channels::{Member as ChannelMember, Message as ChannelMessage, Room};
+    let now = crate::model::now_ms() / 1000;
+    let mut rooms = crate::ui::cr::channels::sample_rooms();
+    rooms.push(Room {
+        id: "demo-r1".into(),
+        name: "데모 개발방".into(),
+        project: "demo-project".into(),
+        members: vec![
+            ChannelMember { id: "me".into(), name: "나".into(), is_agent: false, harness: String::new() },
+            ChannelMember { id: "demo-s1".into(), name: "demo-project-claude-code".into(), is_agent: true, harness: "claude-code".into() },
+        ],
+        messages: vec![ChannelMessage {
+            id: "demo-m1".into(),
+            from: "demo-s1".into(),
+            text: "포트 설정 변경 사항을 정리해 두었습니다.".into(),
+            at: now - 300,
+            unread: 0,
+            author_name: String::new(),
+            author_kind: String::new(),
+        }],
+        unread: 0,
+    });
+    rooms
 }
 
 /// A plausible metrics sample for the demo computer (FR-L21, `GET /api/computers/{id}/metrics`).
@@ -329,7 +398,15 @@ pub fn metrics_sample(now_ms: u64) -> ember_client::api::MetricsSample {
     let cores: Vec<f32> = (0..8).map(|i| wave(7.0 + i as f32, 4.0, 80.0, i as f32)).collect();
     let total = cores.iter().sum::<f32>() / cores.len() as f32;
     const GB: u64 = 1 << 30;
-    let procs = [("ember-server", 14.0, 420u64), ("claude", 9.5, 880), ("rust-analyzer", 6.0, 1500), ("node", 3.2, 310), ("Code Helper", 2.1, 640)];
+    // Name, CPU percent, memory in MB and power in watts (the mockup's `pwr`; `None` reads "-").
+    let procs = [
+        ("ember-server", 14.0, 420u64, Some(2.4)),
+        ("claude", 9.5, 880, Some(1.6)),
+        ("rust-analyzer", 6.0, 1500, Some(1.1)),
+        ("node", 3.2, 310, None),
+        ("Code Helper", 2.1, 640, Some(0.4)),
+    ];
+    let pid = |i: usize| 100 + i as u32 * 37;
     MetricsSample {
         at_ms: now_ms,
         cpu: CpuMetrics { total_percent: Some(total), cores },
@@ -341,19 +418,29 @@ pub fn metrics_sample(now_ms: u64) -> ember_client::api::MetricsSample {
         }),
         disks: vec![DiskMetrics { name: "Macintosh HD".into(), mount: "/".into(), total_bytes: 500 * GB, available_bytes: 210 * GB }],
         network: vec![NetMetrics { interface: "en0".into(), rx_bytes: now_ms / 1000 * 2_400_000, tx_bytes: now_ms / 1000 * 380_000 }],
-        temperatures: vec![TempMetrics { label: "CPU".into(), celsius: wave(20.0, 48.0, 62.0, 1.0) }],
+        temperatures: vec![
+            TempMetrics { label: "CPU".into(), celsius: wave(20.0, 48.0, 62.0, 1.0) },
+            TempMetrics { label: "GPU".into(), celsius: wave(24.0, 42.0, 54.0, 2.0) },
+        ],
         gpu: GpuReport { devices: vec![], reason: Some("이 컴퓨터에서는 GPU 값을 읽지 못했습니다".into()) },
         processes: procs
             .iter()
             .enumerate()
-            .map(|(i, (name, cpu, mb))| ProcessMetrics {
-                pid: 100 + i as u32 * 37,
+            .map(|(i, (name, cpu, mb, watts))| ProcessMetrics {
+                pid: pid(i),
                 name: (*name).into(),
                 cpu_percent: *cpu + wave(5.0, 0.0, 2.0, i as f32),
                 memory_bytes: mb << 20,
+                power_watts: *watts,
             })
             .collect(),
         process_count: 412,
+        chip: Some("Apple M2 Pro".into()),
+        os_name: Some("macOS".into()),
+        os_version: Some("15.2".into()),
+        power_reason: None,
+        // The `claude` process is the first demo member's agent.
+        sessions: vec![SessionProcess { pid: pid(1), session: "demo-s1".into() }],
     }
 }
 
@@ -1128,6 +1215,12 @@ impl DemoSource {
                 .iter()
                 .filter_map(|(k, v)| v.clone().filter(|o| !o.is_empty()).map(|o| (k.clone(), o)))
                 .collect();
+        }
+        if let Some(ls) = &patch.leader_session {
+            project.leader_session = ls.clone();
+        }
+        if let Some(archived) = patch.archived {
+            project.archived = archived;
         }
         client.apply(Input::Push(Push::ProjectUpdated { project: project.clone() }));
         Ok(project)
@@ -2211,7 +2304,9 @@ mod tests {
         let ose = ember_client::wire::EmberOseConnection {
             endpoint: "http://127.0.0.1:18765".into(),
             relay: None,
-            connection_token: String::new(),
+            path: String::new(),
+            ticket: String::new(),
+            ose_commit: None,
         };
         let l = ide_launch_with("s", "p", "/w", Some(ose));
         let c = crate::server::IdeLaunch::editor_connection(Some(&Ok(l)));
@@ -2233,6 +2328,15 @@ mod tests {
         assert!(a.gpu.devices.is_empty() && a.gpu.reason.is_some());
         let (rx, _) = crate::ui::monitor::net_rates(&a, &b).unwrap();
         assert_eq!(rx, 2_400_000);
+    }
+
+    #[test]
+    fn fr_l21_demo_sample_has_chip_os_power_and_a_member_session() {
+        let s = metrics_sample(1_000_000);
+        assert!(s.chip.is_some() && s.os_name.is_some() && s.os_version.is_some());
+        assert!(s.processes.iter().any(|p| p.power_watts.is_some()));
+        let claude = s.processes.iter().find(|p| p.name == "claude").unwrap();
+        assert_eq!(s.sessions, vec![ember_client::api::SessionProcess { pid: claude.pid, session: "demo-s1".into() }]);
     }
 
     #[test]
@@ -3121,5 +3225,19 @@ mod tests {
             assert!(!ev.is_empty(), "{} has a transcript", s.id);
             assert_eq!(ev.len() as i64, s.last_seq, "{}", s.id);
         }
+    }
+
+    #[test]
+    fn demo_project_seeds_leader_and_linked_routines_and_channels() {
+        let list = projects();
+        let primary = list.iter().find(|p| p.name == "demo-project").expect("demo-project");
+        assert_eq!(primary.leader_session.as_deref(), Some("demo-s1"));
+        let links = crate::ui::project::project_links_from(
+            "demo-project",
+            &demo_routines(),
+            &demo_channels(),
+        );
+        assert_eq!(links.routine_button_label(), "루틴 (1)");
+        assert_eq!(links.channel_button_label(), "채널 (1)");
     }
 }

@@ -608,6 +608,132 @@ impl TerminalState {
 pub struct TerminalSession {
     screen: screen::Screen,
     pub state: TerminalState,
+    /// The output as lines, for a task's problem matchers (FR-L31.42); only a task terminal keeps
+    /// them.
+    pub output_lines: Option<OutputLines>,
+}
+
+/// Escape sequence state of [`OutputLines`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum Escape {
+    #[default]
+    None,
+    /// After ESC.
+    Start,
+    /// A control sequence (`ESC [`), up to its final byte.
+    Csi,
+    /// An operating system command (`ESC ]`), up to BEL or `ESC \`.
+    Osc,
+    /// ESC inside an operating system command.
+    OscEsc,
+    /// One byte more (a character set designation such as `ESC ( B`).
+    One,
+}
+
+/// The most finished lines kept before the problem matchers take them.
+const OUTPUT_LINES_KEPT: usize = 10_000;
+
+/// A task's output as the lines the terminal finished, without escape sequences: what Code-OSS's
+/// `terminal.onLineData` gives the problem matchers (FR-L31.42). A carriage return not followed
+/// by a line feed starts the line again, as text written over it would replace it; trailing
+/// spaces are dropped, as `translateToString(true)` drops them.
+#[derive(Debug, Default)]
+pub struct OutputLines {
+    partial: Vec<u8>,
+    ready: std::collections::VecDeque<String>,
+    escape: Escape,
+    carriage_return: bool,
+    /// Bytes have arrived: a later snapshot (after a reconnect) repeats them and is not fed.
+    pub fed: bool,
+}
+
+impl OutputLines {
+    pub fn feed(&mut self, bytes: &[u8]) {
+        self.fed = true;
+        for &b in bytes {
+            match self.escape {
+                Escape::Start => {
+                    self.escape = match b {
+                        b'[' => Escape::Csi,
+                        b']' => Escape::Osc,
+                        b'(' | b')' | b'*' | b'+' => Escape::One,
+                        _ => Escape::None,
+                    };
+                    continue;
+                }
+                Escape::Csi => {
+                    if (0x40..=0x7e).contains(&b) {
+                        self.escape = Escape::None;
+                    }
+                    continue;
+                }
+                Escape::Osc => {
+                    self.escape = match b {
+                        0x07 => Escape::None,
+                        0x1b => Escape::OscEsc,
+                        _ => Escape::Osc,
+                    };
+                    continue;
+                }
+                Escape::OscEsc => {
+                    self.escape = if b == b'\\' { Escape::None } else { Escape::Osc };
+                    continue;
+                }
+                Escape::One => {
+                    self.escape = Escape::None;
+                    continue;
+                }
+                Escape::None => {}
+            }
+            match b {
+                0x1b => self.escape = Escape::Start,
+                b'\n' => {
+                    self.carriage_return = false;
+                    self.end_line();
+                }
+                b'\r' => self.carriage_return = true,
+                0x08 => {
+                    // Back over one character, all of its UTF-8 bytes.
+                    while self.partial.last().is_some_and(|c| c & 0xc0 == 0x80) {
+                        self.partial.pop();
+                    }
+                    self.partial.pop();
+                }
+                b'\t' => self.push(b),
+                c if c < 0x20 || c == 0x7f => {}
+                c => self.push(c),
+            }
+        }
+    }
+
+    fn push(&mut self, b: u8) {
+        if self.carriage_return {
+            self.carriage_return = false;
+            self.partial.clear();
+        }
+        self.partial.push(b);
+    }
+
+    fn end_line(&mut self) {
+        let line = String::from_utf8_lossy(&self.partial).trim_end_matches(' ').to_owned();
+        self.partial.clear();
+        if self.ready.len() == OUTPUT_LINES_KEPT {
+            self.ready.pop_front();
+        }
+        self.ready.push_back(line);
+    }
+
+    /// The process ended: a last line without a line break counts too.
+    pub fn finish(&mut self) {
+        if !self.partial.is_empty() {
+            self.end_line();
+        }
+    }
+
+    /// The finished lines since the last call.
+    pub fn take(&mut self) -> Vec<String> {
+        self.ready.drain(..).collect()
+    }
 }
 
 impl Default for TerminalSession {
@@ -618,7 +744,7 @@ impl Default for TerminalSession {
 
 impl TerminalSession {
     pub fn new() -> Self {
-        Self { screen: screen::Screen::new(80, 24), state: TerminalState::default() }
+        Self { screen: screen::Screen::new(80, 24), state: TerminalState::default(), output_lines: None }
     }
 
     fn refresh(&mut self) {
@@ -683,12 +809,18 @@ impl TerminalSession {
                 }
             }
             TermEvent::Snapshot { size, data } => {
+                if let Some(lines) = self.output_lines.as_mut().filter(|l| !l.fed) {
+                    lines.feed(&data);
+                }
                 self.screen = screen::Screen::new(size.cols, size.rows);
                 self.screen.feed(&data);
                 self.state.status = TerminalStatus::Connected;
                 self.refresh();
             }
             TermEvent::Output { data } => {
+                if let Some(lines) = self.output_lines.as_mut() {
+                    lines.feed(&data);
+                }
                 self.screen.feed(&data);
                 self.state.refusal = None;
                 self.refresh();
@@ -710,6 +842,9 @@ impl TerminalSession {
             TermEvent::Clients { clients } => self.state.clients = clients,
             TermEvent::Title { title } => self.state.title = title,
             TermEvent::Exit { code, signal } => {
+                if let Some(lines) = self.output_lines.as_mut() {
+                    lines.finish();
+                }
                 self.state.exit = Some((code, signal));
                 self.state.status = TerminalStatus::Disconnected;
             }
@@ -809,6 +944,18 @@ impl TerminalHandle {
         self.shared.pick.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
+    /// Whether `other` is a clone of this handle (the same attachment).
+    pub fn same(&self, other: &TerminalHandle) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared)
+    }
+
+    /// The lines of a task terminal's output since the last call (FR-L31.42); always empty for
+    /// another terminal.
+    pub fn take_output_lines(&self) -> Vec<String> {
+        let mut session = self.shared.session.lock().unwrap_or_else(|e| e.into_inner());
+        session.output_lines.as_mut().map(OutputLines::take).unwrap_or_default()
+    }
+
     /// Bumped on every change; the UI polls it to know when to re-read [`snapshot`](Self::snapshot).
     pub fn revision(&self) -> u64 {
         self.shared.revision.load(Ordering::Acquire)
@@ -858,7 +1005,19 @@ pub fn start(
     project: &str,
     on_change: Option<ChangeCallback>,
 ) -> TerminalHandle {
-    start_with(base_url, computer_id, folder, project, None, on_change)
+    start_with(TermReach::Http(base_url.to_owned()), computer_id, folder, project, None, on_change)
+}
+
+/// [`start`] on `reach` (FR-N9, #1050): over the transport the create goes through the `Api`
+/// and the attach through its own transport stream, with the same reconnect policy.
+pub fn start_on(
+    reach: TermReach,
+    computer_id: &str,
+    folder: &str,
+    project: &str,
+    on_change: Option<ChangeCallback>,
+) -> TerminalHandle {
+    start_with(reach, computer_id, folder, project, None, on_change)
 }
 
 /// Start a new terminal on `computer_id` that runs `launch` (a task of the 실행 window,
@@ -870,12 +1029,23 @@ pub fn start_task(
     launch: TermLaunch,
     on_change: Option<ChangeCallback>,
 ) -> TerminalHandle {
+    start_task_on(TermReach::Http(base_url.to_owned()), computer_id, project, launch, on_change)
+}
+
+/// [`start_task`] on `reach` (FR-N9, #1050): the editor window's 실행 tasks over the transport.
+pub fn start_task_on(
+    reach: TermReach,
+    computer_id: &str,
+    project: &str,
+    launch: TermLaunch,
+    on_change: Option<ChangeCallback>,
+) -> TerminalHandle {
     let folder = launch.cwd.clone();
-    start_with(base_url, computer_id, &folder, project, Some(launch), on_change)
+    start_with(reach, computer_id, &folder, project, Some(launch), on_change)
 }
 
 fn start_with(
-    base_url: &str,
+    reach: TermReach,
     computer_id: &str,
     folder: &str,
     project: &str,
@@ -883,8 +1053,12 @@ fn start_with(
     on_change: Option<ChangeCallback>,
 ) -> TerminalHandle {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut session = TerminalSession::new();
+    if launch.is_some() {
+        session.output_lines = Some(OutputLines::default());
+    }
     let shared = Arc::new(Shared {
-        session: Mutex::new(TerminalSession::new()),
+        session: Mutex::new(session),
         revision: AtomicU64::new(0),
         // The size until the panel measures itself (FR-L31.20, `ui::term_fit`).
         size: Mutex::new((80, 24)),
@@ -894,15 +1068,23 @@ fn start_with(
     });
     shared.update(|s| s.connecting());
     let task_shared = Arc::downgrade(&shared);
-    let (base, computer, folder, project) =
-        (base_url.to_owned(), computer_id.to_owned(), folder.to_owned(), project.to_owned());
-    crate::services::services().rt.spawn(async move {
-        use crate::terminal_reconnect::{Next, Reconnect, StreamEnd};
+    let (computer, folder, project) = (computer_id.to_owned(), folder.to_owned(), project.to_owned());
+    spawn_task(async move {
+        use crate::terminal_reconnect::{Reconnect, StreamEnd};
         let mut rx = rx;
         let mut policy = Reconnect::default();
         loop {
-            let end = match run(&task_shared, &base, &computer, &folder, &project, launch.clone(), &mut rx, &mut policy).await {
+            let end = match run(&task_shared, &reach, &computer, &folder, &project, launch.clone(), &mut rx, &mut policy).await {
                 Ok(end) => end,
+                // Over the transport a refusal (the device's scope, a revoked device, a server
+                // out of reach) is final: the panel shows its sentence and does not retry.
+                Err(ClientError::Refused(sentence)) if reach.is_peer() => {
+                    tracing::warn!("editor terminal over the transport refused: {sentence}");
+                    let Some(shared) = task_shared.upgrade() else { return };
+                    shared.update(|s| s.fail(sentence));
+                    shared.update(|s| s.disconnected());
+                    return;
+                }
                 Err(e) => {
                     // The raw text goes to the log; the panel shows a fixed sentence.
                     tracing::warn!("editor terminal stream failed: {e}");
@@ -918,34 +1100,51 @@ fn start_with(
                 shared.update(|s| s.disconnected());
                 return;
             }
-            match policy.on_end(end) {
-                Next::Stop => {
-                    shared.update(|s| s.disconnected());
-                    return;
-                }
-                Next::GiveUp => {
-                    shared.update(|s| s.gave_up());
-                    return;
-                }
-                Next::Retry { attempt, delay } => {
-                    shared.update(|s| s.waiting(attempt, delay));
-                    drop(shared);
-                    tokio::time::sleep(delay).await;
-                    // Keys typed while the stream was down are not replayed into the shell.
-                    loop {
-                        match rx.try_recv() {
-                            Ok(_) => continue,
-                            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return,
-                        }
-                    }
-                    let Some(shared) = task_shared.upgrade() else { return };
-                    shared.update(|s| s.reconnecting());
-                }
+            drop(shared);
+            if !retry_after(&task_shared, &mut policy, &mut rx, end).await {
+                return;
             }
         }
     });
     TerminalHandle { shared }
+}
+
+/// What follows the end of a stream under the reconnect policy (FR-L31.22): `true` to attach
+/// again, after the backoff wait, with the keys typed meanwhile dropped (they are not replayed
+/// into the shell); `false` when the attachment is over, its state already set.
+async fn retry_after(
+    shared: &std::sync::Weak<Shared>,
+    policy: &mut crate::terminal_reconnect::Reconnect,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    end: crate::terminal_reconnect::StreamEnd,
+) -> bool {
+    use crate::terminal_reconnect::Next;
+    let Some(strong) = shared.upgrade() else { return false };
+    match policy.on_end(end) {
+        Next::Stop => {
+            strong.update(|s| s.disconnected());
+            false
+        }
+        Next::GiveUp => {
+            strong.update(|s| s.gave_up());
+            false
+        }
+        Next::Retry { attempt, delay } => {
+            strong.update(|s| s.waiting(attempt, delay));
+            drop(strong);
+            tokio::time::sleep(delay).await;
+            loop {
+                match rx.try_recv() {
+                    Ok(_) => continue,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return false,
+                }
+            }
+            let Some(strong) = shared.upgrade() else { return false };
+            strong.update(|s| s.reconnecting());
+            true
+        }
+    }
 }
 
 /// Attach the editor to the existing terminal `term_id` (FR-P6: a terminal that survived the window,
@@ -963,7 +1162,8 @@ pub fn attach_existing(base_url: &str, computer_id: &str, term_id: &str, on_chan
     shared.update(|s| s.connecting());
     let task_shared = Arc::downgrade(&shared);
     let (base, computer, term) = (base_url.to_owned(), computer_id.to_owned(), term_id.to_owned());
-    crate::services::services().rt.spawn(async move {
+    spawn_task(async move {
+        use crate::terminal_reconnect::{Reconnect, StreamEnd};
         let hello = TermHello {
             device: device_name(),
             kind: Some("ember-editor".into()),
@@ -975,14 +1175,22 @@ pub fn attach_existing(base_url: &str, computer_id: &str, term_id: &str, on_chan
         };
         let token = server_token(&base);
         let mut rx = rx;
-        // No reconnect policy: a reattached tab ends when its stream ends, as in #768.
-        if let Err(e) = stream(&task_shared, &base, &computer, &term, hello, token, &mut rx, None).await {
-            if let Some(shared) = task_shared.upgrade() {
-                shared.update(|s| s.fail(e.to_string()));
+        // FR-L31.22: a reattached tab follows the same policy as the panel's first shell. Its id
+        // names a terminal the node keeps, so attaching again never starts a second one.
+        let mut policy = Reconnect::default();
+        loop {
+            let end = match stream(&task_shared, &base, &computer, &term, hello.clone(), token.clone(), &mut rx, Some(&mut policy)).await {
+                Ok(end) => end,
+                Err(e) => {
+                    tracing::warn!("editor terminal reattach failed: {e}");
+                    let Some(shared) = task_shared.upgrade() else { return };
+                    shared.update(|s| s.fail(e.to_string()));
+                    StreamEnd::Dropped
+                }
+            };
+            if !retry_after(&task_shared, &mut policy, &mut rx, end).await {
+                return;
             }
-        }
-        if let Some(shared) = task_shared.upgrade() {
-            shared.update(|s| s.disconnected());
         }
     });
     TerminalHandle { shared }
@@ -1030,6 +1238,16 @@ impl TermReach {
     pub fn is_peer(&self) -> bool {
         matches!(self, TermReach::Peer(_))
     }
+
+    /// The reach for a window that was given `server_url` (the separate editor window, FR-N9,
+    /// #1050): the app's `Api` over the transport when the app has a peer, else `server_url` over
+    /// HTTP. Without the app's services (tests) it is `server_url` over HTTP.
+    pub fn for_base(server_url: &str) -> TermReach {
+        match crate::services::try_services() {
+            Some(s) => Self::select(server_url, s.client.api()),
+            None => TermReach::Http(server_url.to_owned()),
+        }
+    }
 }
 
 /// Where a terminal call goes: a URL over HTTP, or a path below `/api` for the `Api`.
@@ -1040,7 +1258,7 @@ pub enum TermTarget {
 }
 
 /// True for the `peer:<id>` base the app keeps while a peer is set.
-fn is_peer_base(base: &str) -> bool {
+pub(crate) fn is_peer_base(base: &str) -> bool {
     base.starts_with("peer:")
 }
 
@@ -1054,7 +1272,7 @@ pub(crate) fn refuse_peer_base(base: &str) -> Result<(), ClientError> {
 }
 
 /// `{path}` without its `/api` prefix, as the `Api` takes it.
-fn below_api(path: String) -> String {
+pub(crate) fn below_api(path: String) -> String {
     path.strip_prefix("/api").map(str::to_owned).unwrap_or(path)
 }
 
@@ -1205,9 +1423,24 @@ pub fn attach_existing_with(
             snapshot: true,
         };
         let mut rx = rx;
-        let r = stream_peer(&task_shared, &api, &computer, &term, hello, &mut rx).await;
-        let r = after_peer_end(&api, r).await.map(|_| ());
-        finish(&task_shared, r);
+        // FR-L31.22 over the transport too; a refusal (scope, revoked device) is final.
+        let mut policy = crate::terminal_reconnect::Reconnect::default();
+        loop {
+            let r = stream_peer(&task_shared, &api, &computer, &term, hello.clone(), &mut rx, Some(&mut policy)).await;
+            let end = match after_peer_end(&api, r).await {
+                Ok(end) => end,
+                Err(e @ ClientError::Refused(_)) => return finish(&task_shared, Err(e)),
+                Err(e) => {
+                    tracing::warn!("terminal reattach over the transport failed: {e}");
+                    let Some(shared) = task_shared.upgrade() else { return };
+                    shared.update(|s| s.fail(e.to_string()));
+                    crate::terminal_reconnect::StreamEnd::Dropped
+                }
+            };
+            if !retry_after(&task_shared, &mut policy, &mut rx, end).await {
+                return;
+            }
+        }
     });
     TerminalHandle { shared }
 }
@@ -1248,12 +1481,13 @@ async fn view_peer(
         }
         return Ok(());
     };
-    let r = stream_peer(shared, api, computer, term_id, TermHello::viewer(), &mut rx).await;
+    let r = stream_peer(shared, api, computer, term_id, TermHello::viewer(), &mut rx, None).await;
     after_peer_end(api, r).await.map(|_| ())
 }
 
-/// Attaches to `term_id` over the transport and runs until the stream ends. No reconnect
-/// policy: the pane's viewer and a reattached tab end with their stream, as over HTTP.
+/// Attaches to `term_id` over the transport and runs until the stream ends. `policy` is the
+/// editor's reconnect policy (the panel's shell and a reattached tab, FR-L31.22); the pane's
+/// viewer has none and ends with its stream, as over HTTP.
 async fn stream_peer(
     shared: &std::sync::Weak<Shared>,
     api: &ember_client::api::Api,
@@ -1261,12 +1495,13 @@ async fn stream_peer(
     term_id: &str,
     hello: TermHello,
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    policy: Option<&mut crate::terminal_reconnect::Reconnect>,
 ) -> Result<crate::terminal_reconnect::StreamEnd, ClientError> {
     let TermTarget::Api(path) = attach_target(&TermReach::Peer(api.clone()), computer, term_id)? else {
         return Err(ClientError::Protocol("the attach has no path over the transport".into()));
     };
     let mut ws = api.open_peer_socket(&path).await.map_err(api_failure)?;
-    pump(shared, &mut ws, hello, rx, None).await
+    pump(shared, &mut ws, hello, rx, policy).await
 }
 
 /// After a stream over the transport ended (dropped, failed, or the process exited), asks the
@@ -1288,7 +1523,95 @@ async fn after_peer_end(
     }
 }
 
+/// One create-and-attach of the editor's shell or task on `reach`.
+#[allow(clippy::too_many_arguments)]
 async fn run(
+    shared: &std::sync::Weak<Shared>,
+    reach: &TermReach,
+    computer: &str,
+    folder: &str,
+    project: &str,
+    launch: Option<TermLaunch>,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    policy: &mut crate::terminal_reconnect::Reconnect,
+) -> Result<crate::terminal_reconnect::StreamEnd, ClientError> {
+    match reach {
+        TermReach::Http(base) => {
+            refuse_peer_base(base)?;
+            run_http(shared, base, computer, folder, project, launch, rx, policy).await
+        }
+        TermReach::Peer(api) => run_peer(shared, api, computer, folder, project, launch, rx, policy).await,
+    }
+}
+
+/// [`run`] over the transport (FR-N9, #1050): the create through `Api::raw_request`, the attach
+/// on its own transport stream; no token (the device key is the credential).
+#[allow(clippy::too_many_arguments)]
+async fn run_peer(
+    shared: &std::sync::Weak<Shared>,
+    api: &ember_client::api::Api,
+    computer: &str,
+    folder: &str,
+    project: &str,
+    launch: Option<TermLaunch>,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    policy: &mut crate::terminal_reconnect::Reconnect,
+) -> Result<crate::terminal_reconnect::StreamEnd, ClientError> {
+    let (cols, rows) = {
+        let strong = shared.upgrade().ok_or_else(|| ClientError::Protocol("terminal closed".into()))?;
+        let size = *strong.size.lock().unwrap_or_else(|e| e.into_inner());
+        size
+    };
+    let size = PtySize { rows, cols };
+    let request = serde_json::to_value(task_request(folder, project, size, launch))
+        .map_err(|e| ClientError::Protocol(e.to_string()))?;
+    let created: TermCreateResponse =
+        peer_json(api, reqwest::Method::POST, &below_api(terms_url("", computer)), Some(request)).await?;
+    let hello = TermHello {
+        device: device_name(),
+        kind: Some("ember-editor".into()),
+        pid: Some(std::process::id()),
+        size: Some(size),
+        active: true,
+        read_only: false,
+        snapshot: true,
+    };
+    let r = stream_peer(shared, api, computer, &created.term.id, hello, rx, Some(policy)).await;
+    after_peer_end(api, r).await
+}
+
+/// One JSON call below `/api` over the transport (FR-N9): the decoded answer, or the refusal
+/// sentence (the device's scope, a refused or unreachable device), or the status as a protocol
+/// error whose text goes to the log.
+pub(crate) async fn peer_json<T: serde::de::DeserializeOwned>(
+    api: &ember_client::api::Api,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> Result<T, ClientError> {
+    let body = peer_call(api, method, path, body).await?;
+    serde_json::from_slice(&body).map_err(|e| ClientError::Protocol(e.to_string()))
+}
+
+/// [`peer_json`] without decoding the answer.
+pub(crate) async fn peer_call(
+    api: &ember_client::api::Api,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> Result<Vec<u8>, ClientError> {
+    let (status, body) = api.raw_request(method, path, body).await.map_err(api_failure)?;
+    if (200..300).contains(&status) {
+        return Ok(body);
+    }
+    Err(match status_refusal(status, &body) {
+        Some(t) => ClientError::Refused(t),
+        None => ClientError::Protocol(format!("{path} answered {status}: {}", String::from_utf8_lossy(&body))),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_http(
     shared: &std::sync::Weak<Shared>,
     base: &str,
     computer: &str,

@@ -8,7 +8,7 @@
 //! window. The temperature meter shows the hottest sensor on a fixed 0 to 100 degree Celsius
 //! scale (memory and disk meters use their percent).
 
-use ember_client::api::{MemoryMetrics, MetricsSample};
+use ember_client::api::{MemoryMetrics, MetricsSample, SessionProcess};
 use ember_client::state::Reachability;
 
 use crate::ui::project::{Member, ProjectBox};
@@ -100,6 +100,10 @@ pub struct ProcessRow {
     pub session: Option<String>,
     pub agent: String,
     pub leader: bool,
+    /// Watts drawn by the process, when reported (#389).
+    pub power: Option<f32>,
+    /// The OS process name of a member row matched by its pid; `name` is then the member's.
+    pub process: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +111,7 @@ pub enum SortKey {
     Name,
     Pid,
     Cpu,
+    Power,
     Memory,
 }
 
@@ -126,8 +131,8 @@ impl Default for SortState {
     }
 }
 
-/// A click on a header: the same key flips the direction; a new key starts descending for CPU
-/// and memory and ascending for name and PID.
+/// A click on a header: the same key flips the direction; a new key starts descending for CPU,
+/// power and memory and ascending for name and PID.
 pub fn toggle_sort(state: SortState, key: SortKey) -> SortState {
     if state.key == key {
         SortState {
@@ -137,7 +142,7 @@ pub fn toggle_sort(state: SortState, key: SortKey) -> SortState {
     } else {
         SortState {
             key,
-            descending: matches!(key, SortKey::Cpu | SortKey::Memory),
+            descending: matches!(key, SortKey::Cpu | SortKey::Power | SortKey::Memory),
         }
     }
 }
@@ -175,6 +180,7 @@ pub fn sort_rows(rows: &mut [ProcessRow], state: SortState) {
             }
             SortKey::Pid => known(&a.pid, &b.pid, desc),
             SortKey::Cpu => known(&a.cpu, &b.cpu, desc),
+            SortKey::Power => known(&a.power, &b.power, desc),
             SortKey::Memory => known(&a.mem, &b.mem, desc),
         };
         primary
@@ -183,8 +189,8 @@ pub fn sort_rows(rows: &mut [ProcessRow], state: SortState) {
     });
 }
 
-/// Members of the projects assigned to a computer, once each. TODO(FR-X7): the client does not
-/// know which computer a session runs on, so this is every member of the assigned projects.
+/// Members of the projects assigned to a computer, once each: every member of the assigned
+/// projects. Which of them has a process here comes from the sample's `sessions` ([`member_rows`]).
 pub fn computer_members(projects: &[String], boxes: &[ProjectBox]) -> Vec<Member> {
     let mut out: Vec<Member> = Vec::new();
     for b in boxes.iter().filter(|b| projects.contains(&b.id)) {
@@ -209,8 +215,48 @@ pub fn agent_rows(members: &[Member]) -> Vec<ProcessRow> {
             session: Some(m.session_id.clone()),
             agent: m.agent.clone(),
             leader: m.leader,
+            power: None,
+            process: None,
         })
         .collect()
+}
+
+/// Mark the rows of members' agent processes (FR-L21, FR-X7): a row whose pid is a member's
+/// session in `sessions` (the server's report) takes the member's name, character and session,
+/// and keeps its process name in `process`. A member whose reported pid is not among the rows
+/// (not in the listed top) is added after them with its pid and unknown values. A session that
+/// is not a member of this computer's projects marks nothing.
+pub fn member_rows(mut rows: Vec<ProcessRow>, sessions: &[SessionProcess], members: &[Member]) -> Vec<ProcessRow> {
+    for m in members {
+        let Some(sp) = sessions.iter().find(|s| s.session == m.session_id) else { continue };
+        if let Some(r) = rows.iter_mut().find(|r| r.pid == Some(sp.pid) && r.session.is_none()) {
+            r.process = Some(std::mem::replace(&mut r.name, m.name.clone()));
+            r.session = Some(m.session_id.clone());
+            r.agent = m.agent.clone();
+            r.leader = m.leader;
+        } else if !rows.iter().any(|r| r.session.as_deref() == Some(m.session_id.as_str())) {
+            rows.push(ProcessRow {
+                pid: Some(sp.pid),
+                name: m.name.clone(),
+                cpu: None,
+                mem: None,
+                session: Some(m.session_id.clone()),
+                agent: m.agent.clone(),
+                leader: m.leader,
+                power: None,
+                process: None,
+            });
+        }
+    }
+    rows
+}
+
+/// The note under the table when a row opens a member's session (mockup `.mon-note`).
+pub const MEMBER_NOTE: &str = "팀원 행을 누르면 그 팀원의 세션으로 이동합니다.";
+
+/// [`MEMBER_NOTE`] when one of the rows is a member's.
+pub fn member_note(rows: &[ProcessRow]) -> Option<&'static str> {
+    rows.iter().any(|r| r.session.is_some()).then_some(MEMBER_NOTE)
 }
 
 /// The line under the title: the online state, and for a computer that is not online the notice
@@ -343,9 +389,11 @@ pub struct MonitorFeed {
     prev: Option<MetricsSample>,
     error: Option<String>,
     cpu: Vec<f32>,
+    gpu: Vec<f32>,
     memory: Vec<f32>,
     temperature: Vec<f32>,
     net_rx: Vec<f32>,
+    net_tx: Vec<f32>,
 }
 
 impl MonitorFeed {
@@ -357,17 +405,36 @@ impl MonitorFeed {
         }
         let rates = self.latest.as_ref().and_then(|l| net_rates(l, &sample));
         let cpu = sample.cpu.total_percent.into_iter().collect::<Vec<_>>();
+        let gpu = sample
+            .gpu
+            .devices
+            .first()
+            .and_then(|d| d.utilization_percent)
+            .into_iter()
+            .collect::<Vec<_>>();
         let mem = sample.memory.iter().map(|m| ratio_percent(m.used_bytes, m.total_bytes)).collect::<Vec<_>>();
         let temp = hottest(&sample).map(|t| t.celsius).into_iter().collect::<Vec<_>>();
         self.cpu = fold_samples(&self.cpu, &cpu, FEED_CAP);
+        self.gpu = fold_samples(&self.gpu, &gpu, FEED_CAP);
         self.memory = fold_samples(&self.memory, &mem, FEED_CAP);
         self.temperature = fold_samples(&self.temperature, &temp, FEED_CAP);
-        if let Some((rx, _)) = rates {
+        if let Some((rx, tx)) = rates {
             self.net_rx = fold_samples(&self.net_rx, &[rx as f32], FEED_CAP);
+            self.net_tx = fold_samples(&self.net_tx, &[tx as f32], FEED_CAP);
         }
         self.prev = self.latest.take();
         self.latest = Some(sample);
         self.error = None;
+    }
+
+    /// Rolling download rate samples in bytes per second, oldest first.
+    pub fn net_rx_series(&self) -> &[f32] {
+        &self.net_rx
+    }
+
+    /// Rolling upload rate samples in bytes per second, oldest first.
+    pub fn net_tx_series(&self) -> &[f32] {
+        &self.net_tx
     }
 
     /// A request failed. The last values stay so the sheet can show them dimmed.
@@ -403,6 +470,7 @@ impl ComputerMetrics for MonitorFeed {
     fn series(&self, metric: Metric) -> Option<Vec<f32>> {
         let v = match metric {
             Metric::Cpu => &self.cpu,
+            Metric::Gpu => &self.gpu,
             Metric::Memory => &self.memory,
             Metric::Temperature => &self.temperature,
             Metric::Network => &self.net_rx,
@@ -423,8 +491,8 @@ fn hottest(s: &MetricsSample) -> Option<&ember_client::api::TempMetrics> {
         .max_by(|a, b| a.celsius.partial_cmp(&b.celsius).unwrap_or(std::cmp::Ordering::Equal))
 }
 
-/// The sample's processes as table rows. The client cannot tell an agent process from another
-/// yet (FR-X7), so none is linked to a session.
+/// The sample's processes as table rows, none linked to a session yet ([`member_rows`] marks
+/// the members'). A power value that is not finite is unknown.
 pub fn process_rows(s: &MetricsSample) -> Vec<ProcessRow> {
     s.processes
         .iter()
@@ -436,6 +504,8 @@ pub fn process_rows(s: &MetricsSample) -> Vec<ProcessRow> {
             session: None,
             agent: String::new(),
             leader: false,
+            power: p.power_watts.filter(|w| w.is_finite()),
+            process: None,
         })
         .collect()
 }
@@ -481,7 +551,7 @@ pub fn card_view(metric: Metric, feed: &MonitorFeed) -> Option<CardView> {
             Some(m) => CardView {
                 headline: percent_text(Some(ratio_percent(m.used_bytes, m.total_bytes))),
                 lines: memory_lines(m),
-                bars: vec![],
+                bars: feed.series(Metric::Memory).filter(|b| b.len() >= 2).unwrap_or_default(),
             },
             None => CardView {
                 headline: "-".into(),
@@ -490,24 +560,24 @@ pub fn card_view(metric: Metric, feed: &MonitorFeed) -> Option<CardView> {
             },
         },
         Metric::Disk => {
-            let worst = s
-                .disks
-                .iter()
-                .map(|d| disk_used_percent(d.total_bytes, d.available_bytes))
-                .fold(None, |a: Option<f32>, v| Some(a.map_or(v, |a| a.max(v))));
+            let headline = match main_disk(s) {
+                Some(main) => format!("{} 여유", bytes_text(main.available_bytes)),
+                None => "-".into(),
+            };
             let mut lines: Vec<String> = s
                 .disks
                 .iter()
                 .take(3)
                 .map(|d| {
                     let used = d.total_bytes.saturating_sub(d.available_bytes);
+                    let pct = disk_used_percent(d.total_bytes, d.available_bytes);
                     if s.disks.len() == 1 {
-                        format!("{} / {} 사용 중입니다", bytes_text(used), bytes_text(d.total_bytes))
+                        format!("{} 사용 \u{00B7} {:.0}%", bytes_text(used), pct)
                     } else {
                         format!(
                             "{} {} ({} / {})",
                             d.mount,
-                            percent_text(Some(disk_used_percent(d.total_bytes, d.available_bytes))),
+                            percent_text(Some(pct)),
                             bytes_text(used),
                             bytes_text(d.total_bytes)
                         )
@@ -520,7 +590,7 @@ pub fn card_view(metric: Metric, feed: &MonitorFeed) -> Option<CardView> {
             if s.disks.is_empty() {
                 lines.push("디스크를 찾지 못했습니다".into());
             }
-            CardView { headline: percent_text(worst), lines, bars: vec![] }
+            CardView { headline, lines, bars: vec![] }
         }
         Metric::Network => match feed.rates() {
             Some((rx, tx)) => CardView {
@@ -569,7 +639,11 @@ pub fn card_view(metric: Metric, feed: &MonitorFeed) -> Option<CardView> {
                 if let (Some(u), Some(t)) = (d.memory_used_bytes, d.memory_total_bytes) {
                     lines.push(format!("{} / {}", bytes_text(u), bytes_text(t)));
                 }
-                CardView { headline: percent_text(d.utilization_percent), lines, bars: vec![] }
+                CardView {
+                    headline: percent_text(d.utilization_percent),
+                    lines,
+                    bars: feed.series(Metric::Gpu).filter(|b| b.len() >= 2).unwrap_or_default(),
+                }
             }
         }
         Metric::Fans => return None,
@@ -667,6 +741,89 @@ pub fn hero_parts(headline: &str) -> (String, String) {
     (number, unit)
 }
 
+/// Split a card headline into `(number, unit, sub)` so a trailing qualifier like `"여유"` or
+/// `"받기"` renders in the smaller muted style beside the unit. Whole-number free storage drops
+/// a redundant `.0` (e.g. `"210.0 GB 여유"` becomes `("210", "GB", "여유")`).
+pub fn hero_triple(headline: &str) -> (String, String, String) {
+    let (mut number, unit_and_sub) = hero_parts(headline);
+    let (unit, sub) = if let Some(u) = unit_and_sub.strip_suffix(" 여유") {
+        (u.to_string(), "여유".to_string())
+    } else if let Some(u) = unit_and_sub.strip_suffix(" 받기") {
+        (u.to_string(), "받기".to_string())
+    } else {
+        (unit_and_sub, String::new())
+    };
+    if sub == "여유"
+        && let Some(whole) = number.strip_suffix(".0")
+    {
+        number = whole.to_string();
+    }
+    (number, unit, sub)
+}
+
+/// Replace ASCII spaces before byte and temperature units with a non-breaking space so multi-line
+/// labels never orphan `"GB"` or `"TB"` on a line by itself.
+pub fn no_unit_wrap(text: &str) -> String {
+    text.replace(" TB", "\u{00A0}TB")
+        .replace(" GB", "\u{00A0}GB")
+        .replace(" MB", "\u{00A0}MB")
+        .replace(" KB", "\u{00A0}KB")
+        .replace(" B", "\u{00A0}B")
+        .replace(" \u{00B0}C", "\u{00A0}\u{00B0}C")
+}
+
+/// Number of historical samples seeded into the monitor feed in demo mode so the SVG graphs
+/// render full curves on the first frame.
+pub const DEMO_SEED_SAMPLES: usize = 20;
+
+/// Enrich a demo metrics sample with varied memory, GPU, and monotonically increasing network
+/// wave counters so the monitor's SVG graphs render visible curves instead of flat lines.
+pub fn demo_varied_sample(mut base: MetricsSample) -> MetricsSample {
+    let t = (base.at_ms / 1000) as f64;
+    if let Some(m) = base.memory.as_mut()
+        && m.total_bytes > 0
+    {
+        let frac = (0.58 + 0.11 * (t / 7.0).sin() + 0.05 * (t / 3.1 + 1.3).cos()).clamp(0.25, 0.88);
+        m.used_bytes = ((m.total_bytes as f64) * frac) as u64;
+    }
+    if base.gpu.devices.is_empty() {
+        let util = (34.0 + 18.0 * (t / 6.0 + 0.7).sin() + 8.0 * (t / 2.7).cos()).clamp(4.0, 92.0) as f32;
+        base.gpu = ember_client::api::GpuReport {
+            devices: vec![ember_client::api::GpuMetrics {
+                name: base.chip.clone().unwrap_or_else(|| "내장 GPU".to_string()),
+                utilization_percent: Some(util),
+                memory_total_bytes: None,
+                memory_used_bytes: None,
+            }],
+            reason: None,
+        };
+    }
+    for (idx, net) in base.network.iter_mut().enumerate() {
+        let phase = idx as f64 * 0.9;
+        // Derivatives stay strictly positive:
+        // d(rx)/dt >= 2_400_000 - 1_125_000 - 521_739 > 750_000 B/s
+        // d(tx)/dt >= 520_000 - 200_000 - 120_000 = 200_000 B/s
+        let rx = t * 2_400_000.0
+            + 4_500_000.0 * (1.0 + (t / 4.0 + phase).sin())
+            + 1_200_000.0 * (1.0 + (t / 2.3 + 0.8 + phase).cos());
+        let tx = t * 520_000.0
+            + 900_000.0 * (1.0 + (t / 4.5 + 1.2 + phase).sin())
+            + 300_000.0 * (1.0 + (t / 2.5 + 2.1 + phase).cos());
+        net.rx_bytes = rx.max(0.0) as u64;
+        net.tx_bytes = tx.max(0.0) as u64;
+    }
+    base
+}
+
+/// Seed `DEMO_SEED_SAMPLES` varied history samples ending one poll interval before `now_ms`.
+pub fn seed_demo_feed(feed: &mut MonitorFeed, now_ms: u64, sample_at: impl Fn(u64) -> MetricsSample) {
+    let step_ms = POLL_SECS * 1000;
+    for step in (1..=DEMO_SEED_SAMPLES as u64).rev() {
+        let at = now_ms.saturating_sub(step * step_ms);
+        feed.push(demo_varied_sample(sample_at(at)));
+    }
+}
+
 /// The CPU card's core bars (`.mon-cores`): 44 high, 3 apart, green with 2 dp top corners at
 /// 85 percent (review M2; they were blue square bars 32 high).
 pub const CORE_BARS_H: f32 = 44.0;
@@ -746,9 +903,128 @@ pub fn storage_line(s: &MetricsSample) -> Option<String> {
     Some(format!("{word} \u{00B7} 여유 {}", bytes_text(d.available_bytes)))
 }
 
-/// The RAM size badge of the status card, from the memory total.
+/// The badge shown in the top-right corner of a metric card header (`.mon-badge`, FR-L21, #389):
+/// - CPU / GPU: the sensor's rounded degree Celsius when a matching temperature is reported;
+/// - Memory: memory usage pressure percentage (`압력 N%`) with green/orange/red tone;
+/// - Temperature: `정상입니다` (< 70 °C), `따뜻합니다` (< 85 °C), or `높습니다` (>= 85 °C);
+/// - Disk: total capacity of the largest disk (`2 TB`, etc.);
+/// - Network: the primary interface name (`en0`, `eth0`, etc.).
+pub fn metric_badge(metric: Metric, s: &MetricsSample) -> Option<(String, crate::ui::components::PillTone)> {
+    use crate::ui::components::PillTone;
+    match metric {
+        Metric::Cpu => {
+            let t = s
+                .temperatures
+                .iter()
+                .find(|t| t.celsius.is_finite() && t.label.to_ascii_lowercase().contains("cpu"))
+                .or_else(|| hottest(s))?;
+            let tone = if t.celsius >= 85.0 {
+                PillTone::Red
+            } else if t.celsius >= 70.0 {
+                PillTone::Orange
+            } else {
+                PillTone::Green
+            };
+            Some((format!("{:.0}\u{00B0}C", t.celsius), tone))
+        }
+        Metric::Gpu => {
+            let t = s
+                .temperatures
+                .iter()
+                .find(|t| t.celsius.is_finite() && t.label.to_ascii_lowercase().contains("gpu"))?;
+            let tone = if t.celsius >= 85.0 {
+                PillTone::Red
+            } else if t.celsius >= 70.0 {
+                PillTone::Orange
+            } else {
+                PillTone::Green
+            };
+            Some((format!("{:.0}\u{00B0}C", t.celsius), tone))
+        }
+        Metric::Memory => {
+            let m = s.memory.as_ref().filter(|m| m.total_bytes > 0)?;
+            let pct = ratio_percent(m.used_bytes, m.total_bytes);
+            let tone = if pct >= 85.0 {
+                PillTone::Red
+            } else if pct >= 70.0 {
+                PillTone::Orange
+            } else {
+                PillTone::Green
+            };
+            Some((format!("압력 {:.0}%", pct), tone))
+        }
+        Metric::Temperature => {
+            let t = hottest(s)?;
+            let (word, tone) = if t.celsius >= 85.0 {
+                ("높습니다", PillTone::Red)
+            } else if t.celsius >= 70.0 {
+                ("따뜻합니다", PillTone::Orange)
+            } else {
+                ("정상입니다", PillTone::Green)
+            };
+            Some((word.to_string(), tone))
+        }
+        Metric::Disk => {
+            let total = s.disks.iter().map(|d| d.total_bytes).max().filter(|&b| b > 0)?;
+            Some((bytes_text(total), PillTone::Blue))
+        }
+        Metric::Network => {
+            let iface = s.network.iter().find(|n| !n.interface.is_empty())?;
+            Some((iface.interface.clone(), PillTone::Blue))
+        }
+        Metric::Fans => {
+            let cpu = s.cpu.total_percent.filter(|v| v.is_finite())?;
+            let tone = if cpu > 60.0 { PillTone::Orange } else { PillTone::Grey };
+            Some((format!("부하 {:.0}%", cpu), tone))
+        }
+    }
+}
+
+/// The badge shown in the status card header: total RAM (e.g. `64.0 GB`), when reported.
 pub fn ram_badge(s: &MetricsSample) -> Option<String> {
     s.memory.as_ref().filter(|m| m.total_bytes > 0).map(|m| bytes_text(m.total_bytes))
+}
+
+fn non_empty(v: &Option<String>) -> Option<&str> {
+    v.as_deref().map(str::trim).filter(|v| !v.is_empty())
+}
+
+/// The chip badge: the processor name the node reports (#389).
+pub fn chip_badge(s: &MetricsSample) -> Option<String> {
+    non_empty(&s.chip).map(str::to_string)
+}
+
+/// The OS as the node reports it, name and version (`macOS 15.2`); either alone when the other
+/// is missing (#389).
+pub fn os_text(s: &MetricsSample) -> Option<String> {
+    match (non_empty(&s.os_name), non_empty(&s.os_version)) {
+        (Some(n), Some(v)) => Some(format!("{n} {v}")),
+        (Some(one), None) | (None, Some(one)) => Some(one.to_string()),
+        (None, None) => None,
+    }
+}
+
+/// The status card's header badges in the mockup's order (chip, RAM, OS), each only when
+/// reported.
+pub fn status_badges(s: &MetricsSample) -> Vec<String> {
+    [chip_badge(s), ram_badge(s), os_text(s)].into_iter().flatten().collect()
+}
+
+/// The OS text beside the sheet title (`.mon-os`), not shown at 560 and below
+/// (`.mon-os{display:none}`).
+pub fn title_os(feed: &MonitorFeed, width_dp: f32) -> Option<String> {
+    if width_dp <= 560.0 {
+        return None;
+    }
+    feed.latest().and_then(os_text)
+}
+
+/// A process's power: watts with one decimal (mockup `f1`), a dash when not reported.
+pub fn power_text(v: Option<f32>) -> String {
+    match v.filter(|w| w.is_finite()) {
+        Some(w) => format!("{w:.1}"),
+        None => "-".to_string(),
+    }
 }
 
 /// The fan modes of the mockup's fan card, in order.
@@ -778,10 +1054,263 @@ pub const FAN_MODE_AVAILABLE: bool = false;
 /// Why the fan mode control is disabled.
 pub const FAN_MODE_REASON: &str = "이 컴퓨터의 팬 속도와 모드는 아직 읽거나 바꿀 수 없습니다";
 
+/// Height of the card sparkline and area graphs in dp.
+pub const GRAPH_HEIGHT: f32 = 44.0;
+
+/// One sensor reading shown in the temperature card, with its severity tone.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TempReading {
+    pub label: String,
+    pub celsius: f32,
+    pub tone: crate::ui::components::PillTone,
+}
+
+fn temp_tone(celsius: f32) -> crate::ui::components::PillTone {
+    use crate::ui::components::PillTone;
+    if celsius >= 85.0 {
+        PillTone::Red
+    } else if celsius >= 70.0 {
+        PillTone::Orange
+    } else {
+        PillTone::Green
+    }
+}
+
+/// Up to two sensor readings for the temperature card: CPU and GPU side by side when reported,
+/// otherwise the hottest reported sensors. Never invents a sensor that was not reported.
+pub fn temperature_readings(s: &MetricsSample) -> Vec<TempReading> {
+    let finite: Vec<(usize, &ember_client::api::TempMetrics)> = s
+        .temperatures
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.celsius.is_finite())
+        .collect();
+    if finite.is_empty() {
+        return Vec::new();
+    }
+    let hottest_matching = |needle: &str| {
+        finite
+            .iter()
+            .filter(|(_, t)| t.label.to_ascii_lowercase().contains(needle))
+            .max_by(|a, b| a.1.celsius.partial_cmp(&b.1.celsius).unwrap_or(std::cmp::Ordering::Equal))
+            .copied()
+    };
+    let mut picked: Vec<(usize, String, f32)> = Vec::new();
+    if let Some((idx, t)) = hottest_matching("cpu") {
+        picked.push((idx, "CPU".to_string(), t.celsius));
+    }
+    if let Some((idx, t)) = hottest_matching("gpu")
+        && !picked.iter().any(|(i, _, _)| *i == idx)
+    {
+        picked.push((idx, "GPU".to_string(), t.celsius));
+    }
+    if picked.len() < 2 {
+        let mut rest: Vec<(usize, &ember_client::api::TempMetrics)> = finite
+            .into_iter()
+            .filter(|(idx, _)| !picked.iter().any(|(i, _, _)| i == idx))
+            .collect();
+        rest.sort_by(|a, b| b.1.celsius.partial_cmp(&a.1.celsius).unwrap_or(std::cmp::Ordering::Equal));
+        for (idx, t) in rest.into_iter().take(2 - picked.len()) {
+            let label = t.label.trim();
+            let name = if label.is_empty() { "센서".to_string() } else { label.to_string() };
+            picked.push((idx, name, t.celsius));
+        }
+    }
+    picked
+        .into_iter()
+        .map(|(_, label, celsius)| TempReading { label, celsius, tone: temp_tone(celsius) })
+        .collect()
+}
+
+fn rgb_hex(argb: u32) -> String {
+    format!("#{:06x}", argb & 0x00ff_ffff)
+}
+
+/// An SVG sparkline (line only, or line with a 16 percent area fill) over a 200 x 44 viewBox.
+/// Returns an empty string when `values` is empty.
+pub fn sparkline_svg(values: &[f32], max: f32, stroke_argb: u32, area: bool) -> String {
+    if values.is_empty() {
+        return String::new();
+    }
+    let w = 200.0_f32;
+    let h = GRAPH_HEIGHT;
+    let scale = if max.is_finite() && max > 0.0 { max } else { 100.0 };
+    let y_of = |v: f32| {
+        let frac = bar_fraction(v, scale);
+        h - 3.0 - frac * (h - 6.0)
+    };
+    let pts = if values.len() == 1 {
+        let y = y_of(values[0]);
+        format!("0.0,{y:.1} {w:.1},{y:.1}")
+    } else {
+        let n = (values.len() - 1) as f32;
+        values
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| format!("{:.1},{:.1}", i as f32 * w / n, y_of(v)))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let color = rgb_hex(stroke_argb);
+    let mut svg = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100%\" height=\"100%\" viewBox=\"0 0 200 {h:.0}\" preserveAspectRatio=\"none\">"
+    );
+    if area {
+        svg.push_str(&format!(
+            "<polygon fill=\"{color}\" fill-opacity=\"0.16\" points=\"0,{h:.0} {pts} {w:.0},{h:.0}\"/>"
+        ));
+    }
+    svg.push_str(&format!(
+        "<polyline fill=\"none\" stroke=\"{color}\" stroke-width=\"1.5\" stroke-linejoin=\"round\" points=\"{pts}\"/>"
+    ));
+    svg.push_str("</svg>");
+    svg
+}
+
+/// A dual-area SVG graph for the network card: upload rises above the center line (`y=22`) in
+/// `up_argb` and download drops below it in `down_argb`, over a 200 x 44 viewBox.
+pub fn net_graph_svg(up: &[f32], down: &[f32], up_argb: u32, down_argb: u32, mid_argb: u32) -> String {
+    let len = up.len().min(down.len());
+    if len == 0 {
+        return String::new();
+    }
+    let w = 200.0_f32;
+    let mid = GRAPH_HEIGHT / 2.0;
+    let span = mid - 3.0;
+    let max_up = up[..len].iter().copied().filter(|v| v.is_finite()).fold(1.0_f32, f32::max);
+    let max_down = down[..len].iter().copied().filter(|v| v.is_finite()).fold(1.0_f32, f32::max);
+    let series_pts = |arr: &[f32], max_v: f32, dir: f32| -> String {
+        if arr.len() == 1 {
+            let y = mid + dir * bar_fraction(arr[0], max_v) * span;
+            format!("0.0,{y:.1} {w:.1},{y:.1}")
+        } else {
+            let n = (arr.len() - 1) as f32;
+            arr.iter()
+                .enumerate()
+                .map(|(i, &v)| {
+                    let y = mid + dir * bar_fraction(v, max_v) * span;
+                    format!("{:.1},{:.1}", i as f32 * w / n, y)
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+    };
+    let u = series_pts(&up[..len], max_up, -1.0);
+    let d = series_pts(&down[..len], max_down, 1.0);
+    let up_c = rgb_hex(up_argb);
+    let down_c = rgb_hex(down_argb);
+    let mid_c = rgb_hex(mid_argb);
+    format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100%\" height=\"100%\" viewBox=\"0 0 200 {h:.0}\" preserveAspectRatio=\"none\">\
+<line x1=\"0\" y1=\"{mid:.0}\" x2=\"200\" y2=\"{mid:.0}\" stroke=\"{mid_c}\" stroke-width=\"1\"/>\
+<polygon fill=\"{up_c}\" fill-opacity=\"0.16\" points=\"0,{mid:.0} {u} 200,{mid:.0}\"/>\
+<polyline fill=\"none\" stroke=\"{up_c}\" stroke-width=\"1.5\" stroke-linejoin=\"round\" points=\"{u}\"/>\
+<polygon fill=\"{down_c}\" fill-opacity=\"0.16\" points=\"0,{mid:.0} {d} 200,{mid:.0}\"/>\
+<polyline fill=\"none\" stroke=\"{down_c}\" stroke-width=\"1.5\" stroke-linejoin=\"round\" points=\"{d}\"/>\
+</svg>",
+        h = GRAPH_HEIGHT
+    )
+}
+
+/// Column widths and in-cell CPU bar geometry for the process table at a given window width.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TableLayout {
+    pub pid_w: f32,
+    pub cpu_w: f32,
+    pub pwr_w: f32,
+    pub mem_w: f32,
+    pub cpu_bar_w: Option<f32>,
+    pub cpu_bar_h: f32,
+}
+
+/// Responsive column widths for the process table: desktop/tablet keeps the 64 x 6 in-cell CPU
+/// bar; phones at 560 dp and below use compact widths without the bar so the name column stays
+/// readable on a 390 dp screen.
+pub fn table_layout(width_dp: f32) -> TableLayout {
+    if width_dp <= 560.0 {
+        TableLayout {
+            pid_w: 44.0,
+            cpu_w: 52.0,
+            pwr_w: 40.0,
+            mem_w: 60.0,
+            cpu_bar_w: None,
+            cpu_bar_h: 6.0,
+        }
+    } else {
+        TableLayout {
+            pid_w: 72.0,
+            cpu_w: 124.0,
+            pwr_w: 72.0,
+            mem_w: 96.0,
+            cpu_bar_w: Some(64.0),
+            cpu_bar_h: 6.0,
+        }
+    }
+}
+
+/// Scale ceiling for in-cell CPU bars: the highest reported process CPU, at least 1.0.
+pub fn max_process_cpu(rows: &[ProcessRow]) -> f32 {
+    rows.iter()
+        .filter_map(|r| r.cpu)
+        .filter(|v| v.is_finite())
+        .fold(1.0_f32, f32::max)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ember_client::LauncherStatus;
+
+    #[test]
+    fn fr_l21_metric_badges_and_gpu_series_follow_the_sample() {
+        use crate::ui::components::PillTone;
+        use ember_client::api::{DiskMetrics, GpuMetrics, GpuReport, NetMetrics, TempMetrics};
+        let mut s1 = MetricsSample {
+            at_ms: 1000,
+            memory: Some(MemoryMetrics {
+                total_bytes: 64 * (1u64 << 30),
+                used_bytes: 32 * (1u64 << 30),
+                swap_total_bytes: 0,
+                swap_used_bytes: 0,
+            }),
+            disks: vec![DiskMetrics {
+                name: "disk0".into(),
+                mount: "/".into(),
+                total_bytes: 2 * (1u64 << 40),
+                available_bytes: 1u64 << 40,
+            }],
+            network: vec![NetMetrics { interface: "en0".into(), rx_bytes: 0, tx_bytes: 0 }],
+            temperatures: vec![
+                TempMetrics { label: "CPU die".into(), celsius: 56.0 },
+                TempMetrics { label: "GPU die".into(), celsius: 74.0 },
+            ],
+            gpu: GpuReport {
+                devices: vec![GpuMetrics {
+                    name: "Apple M4".into(),
+                    utilization_percent: Some(12.0),
+                    memory_total_bytes: None,
+                    memory_used_bytes: None,
+                }],
+                reason: None,
+            },
+            ..MetricsSample::default()
+        };
+        assert_eq!(metric_badge(Metric::Cpu, &s1), Some(("56\u{00B0}C".into(), PillTone::Green)));
+        assert_eq!(metric_badge(Metric::Gpu, &s1), Some(("74\u{00B0}C".into(), PillTone::Orange)));
+        assert_eq!(metric_badge(Metric::Memory, &s1), Some(("압력 50%".into(), PillTone::Green)));
+        assert_eq!(metric_badge(Metric::Temperature, &s1), Some(("따뜻합니다".into(), PillTone::Orange)));
+        assert_eq!(metric_badge(Metric::Disk, &s1), Some(("2.0 TB".into(), PillTone::Blue)));
+        assert_eq!(metric_badge(Metric::Network, &s1), Some(("en0".into(), PillTone::Blue)));
+        assert_eq!(metric_badge(Metric::Fans, &s1), None);
+
+        let mut feed = MonitorFeed::default();
+        feed.push(s1.clone());
+        assert!(card_view(Metric::Gpu, &feed).unwrap().bars.is_empty());
+        s1.at_ms = 4000;
+        s1.gpu.devices[0].utilization_percent = Some(28.0);
+        feed.push(s1);
+        assert_eq!(card_view(Metric::Gpu, &feed).unwrap().bars, vec![12.0, 28.0]);
+    }
 
     #[test]
     fn fr_l21_hero_number_and_unit_are_split_like_the_mockup() {
@@ -804,6 +1333,8 @@ mod tests {
             session: None,
             agent: "claude-code".into(),
             leader: false,
+            power: None,
+            process: None,
         }
     }
 
@@ -1004,8 +1535,9 @@ mod tests {
             network: vec![NetMetrics { interface: "en0".into(), rx_bytes: rx, tx_bytes: tx }],
             temperatures: vec![TempMetrics { label: "cpu".into(), celsius: 51.5 }],
             gpu: GpuReport { devices: vec![], reason: Some("GPU를 읽을 수 없습니다".into()) },
-            processes: vec![ProcessMetrics { pid: 7, name: "node".into(), cpu_percent: 3.0, memory_bytes: 1 << 20 }],
+            processes: vec![ProcessMetrics { pid: 7, name: "node".into(), cpu_percent: 3.0, memory_bytes: 1 << 20, ..Default::default() }],
             process_count: 321,
+            ..Default::default()
         }
     }
 
@@ -1099,9 +1631,8 @@ mod tests {
         assert_eq!(mem.headline, "50.0%");
         assert_eq!(mem.lines, vec!["8.0 GB / 16.0 GB".to_string(), "스왑 1.0 GB / 4.0 GB".to_string()]);
         let disk = card_view(Metric::Disk, &f).unwrap();
-        assert_eq!(disk.headline, "60.0%");
-        assert_eq!(disk.lines, vec!["60 B / 100 B 사용 중입니다".to_string()]);
-        assert!(!disk.lines[0].contains('%'));
+        assert_eq!(disk.headline, "40 B 여유");
+        assert_eq!(disk.lines, vec!["60 B 사용 \u{00B7} 60%".to_string()]);
         let net = card_view(Metric::Network, &f).unwrap();
         assert_eq!(net.headline, "\u{2193} 2.0 KB/s");
         assert_eq!(net.lines, vec!["\u{2191} 1.0 KB/s".to_string()]);
@@ -1145,9 +1676,9 @@ mod tests {
     fn fr_l21_live_processes_sort_by_cpu_or_memory() {
         let mut s = sample(1, 0, 0);
         s.processes = vec![
-            ProcessMetrics { pid: 1, name: "a".into(), cpu_percent: 1.0, memory_bytes: 900 },
-            ProcessMetrics { pid: 2, name: "b".into(), cpu_percent: 9.0, memory_bytes: 100 },
-            ProcessMetrics { pid: 3, name: "c".into(), cpu_percent: 5.0, memory_bytes: 500 },
+            ProcessMetrics { pid: 1, name: "a".into(), cpu_percent: 1.0, memory_bytes: 900, ..Default::default() },
+            ProcessMetrics { pid: 2, name: "b".into(), cpu_percent: 9.0, memory_bytes: 100, ..Default::default() },
+            ProcessMetrics { pid: 3, name: "c".into(), cpu_percent: 5.0, memory_bytes: 500, ..Default::default() },
         ];
         let mut rows = process_rows(&s);
         sort_rows(&mut rows, SortState { key: SortKey::Cpu, descending: true });
@@ -1257,5 +1788,257 @@ mod tests {
         assert_eq!(labels, ["자동", "냉각", "최대"]);
         assert!(!FAN_MODE_AVAILABLE);
         assert!(FAN_MODE_REASON.ends_with("없습니다"));
+    }
+
+    // ---- #389: chip, OS, power and member rows (FR-L21, FR-X7) ----
+
+    fn sp(pid: u32, session: &str) -> ember_client::api::SessionProcess {
+        ember_client::api::SessionProcess { pid, session: session.into() }
+    }
+
+    #[test]
+    fn fr_l21_os_text_joins_name_and_version() {
+        let mut s = sample(1, 0, 0);
+        assert_eq!(os_text(&s), None);
+        s.os_name = Some("macOS".into());
+        assert_eq!(os_text(&s).as_deref(), Some("macOS"));
+        s.os_version = Some(" 15.2 ".into());
+        assert_eq!(os_text(&s).as_deref(), Some("macOS 15.2"));
+        s.os_name = Some("  ".into());
+        assert_eq!(os_text(&s).as_deref(), Some("15.2"));
+    }
+
+    #[test]
+    fn fr_l21_status_badges_are_chip_ram_and_os_in_order() {
+        let mut s = sample(1, 0, 0);
+        // Only what the node reports: the RAM alone.
+        assert_eq!(status_badges(&s), ["16.0 GB"]);
+        s.chip = Some("Apple M2 Pro".into());
+        s.os_name = Some("macOS".into());
+        s.os_version = Some("15.2".into());
+        assert_eq!(status_badges(&s), ["Apple M2 Pro", "16.0 GB", "macOS 15.2"]);
+        s.chip = Some(" ".into());
+        s.memory = None;
+        assert_eq!(status_badges(&s), ["macOS 15.2"]);
+    }
+
+    #[test]
+    fn fr_l21_power_text_has_one_decimal_or_a_dash() {
+        assert_eq!(power_text(Some(2.345)), "2.3");
+        assert_eq!(power_text(Some(0.0)), "0.0");
+        assert_eq!(power_text(None), "-");
+        assert_eq!(power_text(Some(f32::NAN)), "-");
+    }
+
+    #[test]
+    fn fr_x7_process_rows_carry_power() {
+        let mut s = sample(1, 0, 0);
+        s.processes = vec![
+            ProcessMetrics { pid: 1, name: "a".into(), power_watts: Some(1.5), ..Default::default() },
+            ProcessMetrics { pid: 2, name: "b".into(), power_watts: Some(f32::INFINITY), ..Default::default() },
+            ProcessMetrics { pid: 3, name: "c".into(), ..Default::default() },
+        ];
+        let rows = process_rows(&s);
+        assert_eq!(rows.iter().map(|r| r.power).collect::<Vec<_>>(), [Some(1.5), None, None]);
+    }
+
+    #[test]
+    fn fr_l21_sort_by_power_puts_unknown_last() {
+        let mut rows = vec![row("a", Some(1), None, None), row("b", Some(2), None, None), row("c", Some(3), None, None)];
+        rows[0].power = Some(1.0);
+        rows[2].power = Some(4.0);
+        let s = toggle_sort(SortState::default(), SortKey::Power);
+        assert_eq!((s.key, s.descending), (SortKey::Power, true));
+        sort_rows(&mut rows, s);
+        assert_eq!(names(&rows), ["c", "a", "b"]);
+        sort_rows(&mut rows, toggle_sort(s, SortKey::Power));
+        assert_eq!(names(&rows), ["a", "c", "b"]);
+    }
+
+    #[test]
+    fn fr_l21_member_rows_match_session_pids_and_list_the_rest() {
+        let mut s = sample(1, 0, 0);
+        s.processes = vec![
+            ProcessMetrics { pid: 10, name: "claude".into(), cpu_percent: 20.0, ..Default::default() },
+            ProcessMetrics { pid: 11, name: "node".into(), cpu_percent: 5.0, ..Default::default() },
+        ];
+        // s1 runs as pid 10 (listed), s2 as pid 99 (not in the top list), s9 is not a member
+        // of this computer's projects, s3 reported no pid.
+        let sessions = [sp(10, "s1"), sp(99, "s2"), sp(11, "s9")];
+        let members = [member("s1", true), member("s2", false), member("s3", false)];
+        let rows = member_rows(process_rows(&s), &sessions, &members);
+        assert_eq!(rows.len(), 3);
+        let r = &rows[0];
+        assert_eq!((r.pid, r.session.as_deref(), r.name.as_str()), (Some(10), Some("s1"), "m-s1"));
+        assert_eq!((r.process.as_deref(), r.cpu, r.leader, r.agent.as_str()), (Some("claude"), Some(20.0), true, "claude-code"));
+        // Another session's pid is not marked.
+        assert_eq!((rows[1].pid, rows[1].session.as_deref(), rows[1].name.as_str()), (Some(11), None, "node"));
+        let r = &rows[2];
+        assert_eq!((r.pid, r.session.as_deref(), r.cpu, r.mem, r.power), (Some(99), Some("s2"), None, None, None));
+        // Nothing reported: the rows are unchanged.
+        assert_eq!(member_rows(process_rows(&s), &[], &members), process_rows(&s));
+    }
+
+    #[test]
+    fn fr_l21_member_note_only_with_a_member_row() {
+        let plain = vec![row("a", Some(1), None, None)];
+        assert_eq!(member_note(&plain), None);
+        let mut mine = plain.clone();
+        mine[0].session = Some("s1".into());
+        assert_eq!(member_note(&mine), Some("팀원 행을 누르면 그 팀원의 세션으로 이동합니다."));
+    }
+
+    #[test]
+    fn fr_l21_title_os_is_hidden_on_a_phone() {
+        let mut s = sample(1, 0, 0);
+        s.os_name = Some("Ubuntu".into());
+        s.os_version = Some("24.04".into());
+        let mut f = MonitorFeed::default();
+        assert_eq!(title_os(&f, 1440.0), None, "nothing before a sample");
+        f.push(s);
+        assert_eq!(title_os(&f, 1440.0).as_deref(), Some("Ubuntu 24.04"));
+        assert_eq!(title_os(&f, 561.0).as_deref(), Some("Ubuntu 24.04"));
+        assert_eq!(title_os(&f, 560.0), None, "`.mon-os{{display:none}}` at 560 and below");
+    }
+
+    #[test]
+    fn fr_l21_sparkline_and_area_graph_svg_encode_series_and_fill() {
+        assert!(sparkline_svg(&[], 100.0, 0xFFFF_8800, false).is_empty());
+        let line = sparkline_svg(&[10.0, 50.0, 90.0], 100.0, 0xFFFF_8800, false);
+        assert!(line.contains("viewBox=\"0 0 200 44\""), "{line}");
+        assert!(line.contains("<polyline") && line.contains("stroke=\"#ff8800\""), "{line}");
+        assert!(!line.contains("<polygon"), "GPU sparkline has no area fill: {line}");
+
+        let area = sparkline_svg(&[40.0, 52.0, 55.0], 100.0, 0xFF00_66FF, true);
+        assert!(area.contains("<polygon") && area.contains("fill=\"#0066ff\"") && area.contains("fill-opacity=\"0.16\""), "{area}");
+        assert!(area.contains("<polyline") && area.contains("stroke=\"#0066ff\""), "{area}");
+    }
+
+    #[test]
+    fn fr_l21_net_graph_svg_splits_upload_above_and_download_below_center() {
+        let mut f = MonitorFeed::default();
+        f.push(sample(1000, 0, 0));
+        f.push(sample(2000, 2000, 500));
+        f.push(sample(3000, 6000, 1500));
+        assert_eq!(f.net_rx_series(), &[2000.0, 4000.0]);
+        assert_eq!(f.net_tx_series(), &[500.0, 1000.0]);
+        let svg = net_graph_svg(f.net_tx_series(), f.net_rx_series(), 0xFF00_AA44, 0xFF00_66FF, 0xFFCC_CCCC);
+        assert!(svg.contains("<line x1=\"0\" y1=\"22\" x2=\"200\" y2=\"22\""), "{svg}");
+        assert!(svg.contains("stroke=\"#00aa44\"") && svg.contains("stroke=\"#0066ff\""), "{svg}");
+        assert!(svg.contains("points=\"0,22 ") && svg.contains(" 200,22\""), "{svg}");
+    }
+
+    #[test]
+    fn fr_l21_memory_card_reports_series_after_two_samples() {
+        let mut f = MonitorFeed::default();
+        f.push(sample(1000, 0, 0));
+        assert!(card_view(Metric::Memory, &f).unwrap().bars.is_empty());
+        f.push(sample(4000, 0, 0));
+        assert_eq!(card_view(Metric::Memory, &f).unwrap().bars.len(), 2);
+    }
+
+    #[test]
+    fn fr_l21_temperature_readings_pair_cpu_and_gpu_with_tones() {
+        use crate::ui::components::PillTone;
+        let mut s = sample(1000, 0, 0);
+        s.temperatures = vec![
+            TempMetrics { label: "CPU die".into(), celsius: 74.0 },
+            TempMetrics { label: "GPU die".into(), celsius: 48.0 },
+            TempMetrics { label: "SSD".into(), celsius: 39.0 },
+        ];
+        let items = temperature_readings(&s);
+        assert_eq!(items.len(), 2);
+        assert_eq!((items[0].label.as_str(), items[0].celsius, items[0].tone), ("CPU", 74.0, PillTone::Orange));
+        assert_eq!((items[1].label.as_str(), items[1].celsius, items[1].tone), ("GPU", 48.0, PillTone::Green));
+
+        s.temperatures = vec![TempMetrics { label: "NVMe".into(), celsius: 88.0 }];
+        let fallback = temperature_readings(&s);
+        assert_eq!(fallback.len(), 1);
+        assert_eq!((fallback[0].label.as_str(), fallback[0].tone), ("NVMe", PillTone::Red));
+    }
+
+    #[test]
+    fn fr_l21_table_layout_fits_phone_and_keeps_desktop_cpu_bar() {
+        let desk = table_layout(1440.0);
+        assert_eq!(desk.cpu_bar_w, Some(64.0));
+        assert_eq!(desk.cpu_bar_h, 6.0);
+        let phone = table_layout(390.0);
+        assert_eq!(phone.cpu_bar_w, None);
+        let fixed_sum = phone.pid_w + phone.cpu_w + phone.pwr_w + phone.mem_w;
+        // 390 dp less 32 dp outer scroll padding and 32 dp card row padding leaves 326 dp.
+        assert!(326.0 - fixed_sum >= 120.0, "name column needs room on 390 dp: fixed={fixed_sum}");
+        assert_eq!(max_process_cpu(&[row("a", Some(1), Some(35.0), None), row("b", Some(2), Some(5.0), None)]), 35.0);
+        assert_eq!(max_process_cpu(&[]), 1.0);
+    }
+
+    #[test]
+    fn fr_l21_demo_seed_produces_non_flat_memory_gpu_and_network_series() {
+        let mut feed = MonitorFeed::default();
+        let now = 1_700_000_000_000u64;
+        seed_demo_feed(&mut feed, now, crate::demo::metrics_sample);
+        feed.push(demo_varied_sample(crate::demo::metrics_sample(now)));
+
+        let span = |vals: &[f32]| -> f32 {
+            let min = vals.iter().copied().fold(f32::INFINITY, f32::min);
+            let max = vals.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            max - min
+        };
+        let mem = card_view(Metric::Memory, &feed).unwrap().bars;
+        let gpu = card_view(Metric::Gpu, &feed).unwrap().bars;
+        let net_rx = feed.net_rx_series();
+        let net_tx = feed.net_tx_series();
+
+        assert_eq!(mem.len(), DEMO_SEED_SAMPLES + 1);
+        assert_eq!(gpu.len(), DEMO_SEED_SAMPLES + 1);
+        assert_eq!(net_rx.len(), DEMO_SEED_SAMPLES);
+        assert_eq!(net_tx.len(), DEMO_SEED_SAMPLES);
+        assert!(span(&mem) > 5.0, "memory demo curve must vary, got {mem:?}");
+        assert!(span(&gpu) > 10.0, "gpu demo curve must vary, got {gpu:?}");
+        assert!(span(net_rx) > 500_000.0, "network rx demo curve must vary, got {net_rx:?}");
+        assert!(span(net_tx) > 100_000.0, "network tx demo curve must vary, got {net_tx:?}");
+        assert!(net_rx.iter().all(|&v| v > 0.0), "network rx must stay positive");
+        assert!(net_tx.iter().all(|&v| v > 0.0), "network tx must stay positive");
+    }
+
+    #[test]
+    fn fr_l21_no_unit_wrap_binds_numbers_to_storage_units() {
+        assert_eq!(
+            no_unit_wrap("저장 공간이 넉넉합니다 \u{00B7} 여유 210.0 GB"),
+            "저장 공간이 넉넉합니다 \u{00B7} 여유 210.0\u{00A0}GB"
+        );
+        assert_eq!(no_unit_wrap("2.0 TB / 512 MB / 4.0 KB"), "2.0\u{00A0}TB / 512\u{00A0}MB / 4.0\u{00A0}KB");
+    }
+
+    #[test]
+    fn fr_l21_disk_hero_and_triple_split_free_space_and_sub_label() {
+        assert_eq!(hero_triple("210.0 GB 여유"), ("210".into(), "GB".into(), "여유".into()));
+        assert_eq!(hero_triple("1.5 TB 여유"), ("1.5".into(), "TB".into(), "여유".into()));
+        assert_eq!(hero_triple("\u{2193} 2.3 MB/s"), ("2.3".into(), "MB/s".into(), "받기".into()));
+        assert_eq!(hero_triple("23.1%"), ("23".into(), "%".into(), String::new()));
+
+        let mut f = MonitorFeed::default();
+        let mut s = sample(1000, 0, 0);
+        s.disks = vec![DiskMetrics {
+            name: "Macintosh HD".into(),
+            mount: "/".into(),
+            total_bytes: 500 << 30,
+            available_bytes: 210 << 30,
+        }];
+        f.push(s);
+        let disk = card_view(Metric::Disk, &f).unwrap();
+        assert_eq!(disk.headline, "210.0 GB 여유");
+        assert_eq!(disk.lines, vec!["290.0 GB 사용 \u{00B7} 58%".to_string()]);
+    }
+
+    #[test]
+    fn fr_l21_fan_badge_shows_cpu_load_with_tone() {
+        use crate::ui::components::PillTone;
+        let mut s = sample(1000, 0, 0);
+        s.cpu.total_percent = Some(34.2);
+        assert_eq!(metric_badge(Metric::Fans, &s), Some(("부하 34%".into(), PillTone::Grey)));
+        s.cpu.total_percent = Some(72.6);
+        assert_eq!(metric_badge(Metric::Fans, &s), Some(("부하 73%".into(), PillTone::Orange)));
+        s.cpu.total_percent = None;
+        assert_eq!(metric_badge(Metric::Fans, &s), None);
     }
 }

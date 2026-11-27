@@ -21,12 +21,14 @@ pub mod demo;
 pub mod device_link;
 pub mod export;
 pub mod fs_watch;
+pub mod hub_pairing;
 pub mod editor_backup;
 pub mod editor_host;
 pub mod editor_reach;
 pub mod ide;
 pub mod model;
 pub mod owner_claim;
+pub mod owner_handoff;
 pub mod prefs;
 pub mod self_update;
 pub mod server;
@@ -50,6 +52,24 @@ use crate::services::{Services, install, services};
 
 /// Build the services, start the client, open the window. Returns when the window closes.
 pub fn launch() {
+    // The VS Code window's helper (INTENT D55, FR-W5b): the gateway and the `ember-ide-webview`
+    // window it waits for, with no window of its own. It exits with that window.
+    if let Some(args) = ide::parse_vscode_window_args(std::env::args()) {
+        let args = args.unwrap_or_else(|e| {
+            eprintln!("ember-app: {e}");
+            std::process::exit(2);
+        });
+        prepare();
+        let code = match ide::run_vscode_window(&args) {
+            Ok(()) => 0,
+            Err(e) => {
+                tracing::warn!("the VS Code window ended: {e}");
+                eprintln!("ember-app: {e}");
+                1
+            }
+        };
+        std::process::exit(code);
+    }
     prepare();
     open_window();
     shutdown();
@@ -68,6 +88,12 @@ pub(crate) fn prepare() {
         .try_init();
 
     let config = AppConfig::from_env();
+    // The app's own data folder is the last place the server token is looked for (FR-S11, #982):
+    // on Windows a program started from the Start menu has no HOME, and a server in WSL writes
+    // its token where the Windows app cannot see it.
+    if let Some(dir) = config.data_dir.as_deref() {
+        ember_client::token::set_app_data_dir(dir);
+    }
     // Prefs first: the server address saved in 설정 decides the reach (FR-N9).
     let initial_prefs = config
         .prefs_path()
@@ -147,7 +173,10 @@ pub(crate) fn prepare() {
         tracing::info!("demo mode: serving demo data, no server contacted");
         source
     });
-    if demo.is_none() {
+    // The VS Code window's helper only dials the relay with the client's `Api`: no push
+    // connection, no sync and no cache writer beside the shell's (INTENT D55).
+    let vscode_helper = ide::parse_vscode_window_args(std::env::args()).is_some();
+    if demo.is_none() && !vscode_helper {
         // Push connection, resync worker and cache writer (they need the runtime's context).
         let _guard = rt.enter();
         client.start();
@@ -165,7 +194,7 @@ pub(crate) fn prepare() {
             std::process::exit(2);
         }
     };
-    let check = link.as_ref().filter(|_| demo.is_none()).map(|l| l.api());
+    let check = link.as_ref().filter(|_| demo.is_none() && !vscode_helper).map(|l| l.api());
     install(Services {
         config,
         rt,
@@ -175,7 +204,6 @@ pub(crate) fn prepare() {
         outbox: Arc::new(Mutex::new(Outbox::default())),
         initial_prefs,
         ui: shared_ui,
-        live: OnceLock::new(),
     });
     // A device the server refuses, or a server out of reach, reads as one Korean sentence at
     // start (FR-N9); 설정 shows it again.
@@ -205,8 +233,7 @@ fn server_choice_from_env(prefs: &prefs::Prefs) -> Result<Option<device_link::Pe
 fn open_window() {
     if let Some(target) = ide::parse_editor_args(std::env::args()) {
         // Separate IDE window (FR-L31): `--editor <project> <folder>` opens the editor as its own
-        // HTML-mode window in its own process. The `Window` element (dioxus-compose#152) is in the
-        // pin; an HTML page under the shell's Compose root waits for dioxus-compose#161.
+        // window in its own process: a Compose root with the HTML page in an `HtmlView`.
         // `EMBER_CR_SIZE=1100x400` opens a check window of that size beside the owner's.
         let (w, h): (u16, u16) = std::env::var("EMBER_CR_SIZE")
             .ok()
@@ -215,32 +242,64 @@ fn open_window() {
                 Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
             })
             .unwrap_or((1280, 820));
+        // The opened size stands in for a size the renderer has not reported yet (FR-L10.3, FR-L31.41).
+        ui::window_size::record_opened(f32::from(w), f32::from(h));
         let title: &'static str = Box::leak(format!("{} - Ember", target.project).into_boxed_str());
         services().ui.standalone_editor.set(true);
         services().ui.editor.set(Some(target));
-        // TODO(dioxus-compose#161): HtmlView inside a Compose root aborts the real renderer, so the editor runs in HTML mode.
+        // The editor window sends owner routes too (FR-S12, #1042): it claims like the shell,
+        // naming the token its shell handed it, so the shell approves it without a sheet.
+        if claims_owner(Launch::Editor) {
+            start_owner_claim(owner_handoff::claim_name(owner_handoff::own_token()));
+        }
+        // A Compose root holding the editor page in an `HtmlView` (#301): the window's chrome and
+        // size come from the Compose side, and the code editor and diff editor (WidgetViews inside
+        // the page) get their events through the root since dioxus-compose a64f3b92 (#161).
         launch_builder()
-            .with_html(ui::editor_workbench::page::config)
             .with_window(ui::cr::shell::window_chrome(Window::new().with_title(title).with_size(w, h)))
-            .launch(ui::editor_workbench::page::app);
+            .launch(ui::editor_workbench::view::EditorRoot);
     } else if let Some(pref) = ui::cr::gallery::requested() {
         // Phase 1 review window (#220): the compose-rust components, no app.
+        if claims_owner(Launch::Gallery) {
+            start_owner_claim(owner_claim::CLAIMANT_NAME.to_string());
+        }
         ui::cr::gallery::launch(pref);
     } else {
         // Default launch (#220 phase 8): start the background bridge and open the compose-rust
         // shell. `EMBER_CR_SHELL` still overrides the initial theme preference when set.
         bridge::start_shared();
-        start_owner_claim();
+        if claims_owner(Launch::Shell) {
+            start_owner_claim(owner_claim::CLAIMANT_NAME.to_string());
+        }
         start_self_update();
         let pref = ui::cr::shell::requested().unwrap_or_else(|| services().initial_prefs.theme);
         ui::cr::shell::launch(pref);
     }
 }
 
+/// Which desktop window a process opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Launch {
+    /// The compose-rust shell.
+    Shell,
+    /// The separate editor window (`--editor`).
+    Editor,
+    /// The component gallery (review captures, no app).
+    Gallery,
+}
+
+/// Whether a process that opens `launch` claims the owner key (FR-S12, #1042): the shell and the
+/// separate editor window do, because both send owner routes; the gallery reaches no server.
+fn claims_owner(launch: Launch) -> bool {
+    matches!(launch, Launch::Shell | Launch::Editor)
+}
+
 /// Claims the owner key for a real server on this computer (FR-S12, #842) and keeps the claim
 /// for the life of the app. Nothing in demo mode, over the transport, or for a server
-/// elsewhere. The separate editor window (`--editor`) does not claim.
-fn start_owner_claim() {
+/// elsewhere. The separate editor window (`--editor`) claims too (#1042) under `name`, which
+/// carries the token its shell handed it ([`owner_handoff`]); the shell approves that claim
+/// without a sheet. Without a token, or a shell that holds no key, it waits.
+fn start_owner_claim(name: String) {
     let s = services();
     let api = s.client.api();
     let endpoint = ember_client::owner::OwnerEndpoint::from_env();
@@ -250,7 +309,7 @@ fn start_owner_claim() {
     #[cfg(any(unix, windows))]
     if let Some(endpoint) = endpoint {
         let hooks = Arc::new(AppClaimHooks { api: api.clone(), server: s.server.clone() });
-        owner_claim::install(owner_claim::spawn(s.rt.handle(), endpoint, hooks, owner_claim::Backoff::default()));
+        owner_claim::install(owner_claim::spawn(s.rt.handle(), endpoint, name, hooks, owner_claim::Backoff::default()));
     }
 }
 
@@ -286,6 +345,11 @@ impl owner_claim::ClaimHooks for AppClaimHooks {
     fn notice(&self, text: String) {
         ui::cr::notice::post(text);
     }
+
+    fn handoff(&self, pid: u64, name: &str) -> bool {
+        let mut reg = owner_handoff::registry().lock().unwrap_or_else(|e| e.into_inner());
+        reg.take(pid, name, std::time::Instant::now())
+    }
 }
 
 /// Flush the current state before the process exits or the window loop returns.
@@ -293,6 +357,10 @@ pub(crate) fn shutdown() -> i32 {
     // The unsaved buffers of an editor window first (hot exit, FR-L31.6a): nothing else here needs them.
     editor_backup::flush_on_exit();
     let s = services();
+    // A save still on the wire finishes (bounded) before the process ends and cuts it off.
+    if !s.rt.block_on(ember_editor::writes::wait_settled(ember_editor::session::SHUTDOWN_WRITE_WAIT)) {
+        tracing::warn!("a file save was still unfinished at exit");
+    }
     let _guard = services::prefs_write_lock();
     let prefs = s.ui.prefs.get_untracked();
     let path = s.config.prefs_path();
@@ -336,6 +404,58 @@ fn launch_builder() -> LaunchBuilder {
 
 #[cfg(test)]
 mod shutdown_tests {
+    /// Set in the child process of [`fr_l31_1_closing_the_editor_runs_shutdown_and_exits`]: the
+    /// data folder its services use.
+    const CHILD_DIR: &str = "EMBER_TEST_CLOSE_EDITOR_DIR";
+
+    /// The child half: services on their own data folder, a standalone editor window, a pref
+    /// changed in memory only, then 에디터 닫기. `close_editor` exits the process.
+    #[test]
+    #[ignore = "run by fr_l31_1_closing_the_editor_runs_shutdown_and_exits in a child process"]
+    fn fr_l31_1_child_closes_the_editor() {
+        let Ok(dir) = std::env::var(CHILD_DIR) else { return };
+        let data = std::path::PathBuf::from(dir);
+        let config = crate::config::AppConfig::from_values(Some("http://127.0.0.1:9".to_string()), Some(data), None);
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+        let client = rt.block_on(ember_client::Client::new(config.client_config())).unwrap();
+        let server = crate::server::ServerApi::new(&config.server_url).unwrap();
+        let initial_prefs = crate::prefs::Prefs::default();
+        let s = crate::services::install(crate::services::Services {
+            config,
+            rt,
+            client,
+            server,
+            demo: None,
+            outbox: std::sync::Arc::new(std::sync::Mutex::new(crate::model::Outbox::default())),
+            ui: crate::ui::coexist::SharedUi::new(initial_prefs.clone()),
+            initial_prefs,
+        });
+        s.ui.standalone_editor.set(true);
+        // In memory only (`update_prefs` would save at once): only the exit path writes it.
+        let mut prefs = s.ui.prefs.get_untracked();
+        prefs.keymap = crate::ui::keymap::Keymap::JetBrains;
+        s.ui.prefs.set(prefs);
+        s.ui.close_editor();
+        unreachable!("closing a standalone editor exits the process");
+    }
+
+    #[test]
+    fn fr_l31_1_closing_the_editor_runs_shutdown_and_exits() {
+        let scratch = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let dir = tempfile::tempdir_in(scratch).unwrap();
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "shutdown_tests::fr_l31_1_child_closes_the_editor", "--include-ignored", "--nocapture"])
+            .env(CHILD_DIR, dir.path())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "the child did not exit cleanly: {:?}\n{stderr}", out.status);
+        assert!(!stderr.contains("unreachable"), "{stderr}");
+        let saved = crate::prefs::load(&dir.path().join("prefs.json"));
+        assert_eq!(saved.keymap, crate::ui::keymap::Keymap::JetBrains, "prefs were not flushed on close");
+    }
+
     #[test]
     fn fr_l31_1_editor_close_flushes_prefs_and_cache_before_exit() {
         let scratch = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.scratch");
@@ -344,7 +464,7 @@ mod shutdown_tests {
         let path = dir.path().join("prefs.json");
         let mut prefs = crate::prefs::Prefs::default();
         prefs.keymap = crate::ui::keymap::Keymap::JetBrains;
-        prefs.ide_target = Some("vscode".into());
+        prefs.set_ide_target("ember", crate::ide::IdeKind::VsCode);
         let mut cache_flushed = false;
         let code = super::flush_before_exit(Some(&path), &prefs, || {
             assert_eq!(crate::prefs::load(&path), prefs);
@@ -353,5 +473,18 @@ mod shutdown_tests {
         assert_eq!(code, 0);
         assert!(cache_flushed);
         assert_eq!(crate::prefs::load(&path), prefs);
+    }
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use super::*;
+
+    /// The separate editor window claims the owner key like the shell (FR-S12, #1042).
+    #[test]
+    fn fr_s12_the_editor_window_claims_too() {
+        assert!(claims_owner(Launch::Shell));
+        assert!(claims_owner(Launch::Editor));
+        assert!(!claims_owner(Launch::Gallery));
     }
 }

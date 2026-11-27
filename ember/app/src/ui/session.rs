@@ -82,6 +82,80 @@ pub fn timeline_summary(demo: bool) -> &'static str {
     }
 }
 
+/// Playback state for the agent communication timeline (FR-L18).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TimelinePlayback {
+    pub playing: bool,
+    pub cursor: usize,
+}
+
+impl TimelinePlayback {
+    pub fn new() -> Self {
+        Self { playing: false, cursor: 0 }
+    }
+
+    /// The highlighted event/lane index clamped to `total`, or `None` when empty.
+    pub fn active_index(&self, total: usize) -> Option<usize> {
+        if total == 0 {
+            None
+        } else {
+            Some(self.cursor.min(total - 1))
+        }
+    }
+
+    /// The Korean label for the play/pause control.
+    pub fn action_label(&self) -> &'static str {
+        if self.playing {
+            "일시 정지"
+        } else {
+            "재생"
+        }
+    }
+
+    /// Toggles playing state. Starting from the last event rewinds to index 0 first.
+    pub fn toggle_play(&mut self, total: usize) {
+        if total == 0 {
+            self.playing = false;
+            self.cursor = 0;
+            return;
+        }
+        if self.playing {
+            self.playing = false;
+        } else {
+            if self.cursor + 1 >= total {
+                self.cursor = 0;
+            }
+            self.playing = true;
+        }
+    }
+
+    /// Advances the cursor by one event, stopping automatically at the last event (`total - 1`).
+    /// Returns `true` while playback remains active after the step.
+    pub fn step_next(&mut self, total: usize) -> bool {
+        if total == 0 {
+            self.playing = false;
+            self.cursor = 0;
+            return false;
+        }
+        if self.cursor + 1 < total {
+            self.cursor += 1;
+            if self.cursor + 1 >= total {
+                self.playing = false;
+            }
+        } else {
+            self.cursor = total - 1;
+            self.playing = false;
+        }
+        self.playing
+    }
+
+    /// Resets the cursor to 0 and pauses playback.
+    pub fn restart(&mut self) {
+        self.playing = false;
+        self.cursor = 0;
+    }
+}
+
 pub const UI_STRINGS: &[&str] = &[
     crate::ui::question::WITHDRAWN_LINE,
     crate::ui::question::CARD_TITLE,
@@ -507,6 +581,37 @@ pub fn web_tap(load: &WebPagesLoad, idx: usize) -> WebTap {
     }
 }
 
+/// Caption under the direct-port input in the 웹 페이지 menu (FR-L18, #1076). The mockup's line
+/// (`같은 네트워크가 아니면 Ember 터널로 엽니다`) promises a tunnel the app does not have yet: a
+/// typed port opens at the computer's address directly, so the caption says only that.
+pub const WEB_MENU_TUNNEL_HINT: &str = "같은 네트워크에 있을 때 열립니다. Ember 터널로 여는 기능은 아직 없습니다.";
+
+/// Why a typed port cannot be opened: the computer's address is not known here.
+pub const DIRECT_PORT_NO_HOST: &str = "이 컴퓨터의 주소를 알 수 없어 포트를 열 수 없습니다";
+
+/// Parses a direct port input (`1..=65535`, trimmed) for the 웹 페이지 menu (FR-L18, #1076).
+pub fn parse_direct_port(input: &str) -> Result<u16, &'static str> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("포트 번호를 입력해 주세요");
+    }
+    match trimmed.parse::<u16>() {
+        Ok(port) if port > 0 => Ok(port),
+        _ => Err("1부터 65535 사이의 포트 번호를 입력해 주세요"),
+    }
+}
+
+/// The browser address for a typed port on the session's computer (FR-L18, #1076): its `host`
+/// when known, loopback when the computer is this machine, otherwise [`DIRECT_PORT_NO_HOST`]
+/// (never this machine's loopback for another computer's port).
+pub fn direct_port_url(computer: &ComputerHost, port: u16) -> Result<String, &'static str> {
+    match (&computer.host, computer.local) {
+        (Some(h), _) => Ok(format!("http://{}:{port}", web_host_text(h))),
+        (None, true) => Ok(format!("http://127.0.0.1:{port}")),
+        (None, false) => Err(DIRECT_PORT_NO_HOST),
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Views
 // ---------------------------------------------------------------------------------------------
@@ -901,6 +1006,18 @@ pub fn ide_menu_folder(cwd: &str) -> String {
 /// the session's computer and its folder. Without a computer name (not read yet) the folder
 /// alone; without a folder nothing. Review r8 found the raw folder
 /// (`/Volumes/macMini/darkpyonix/darkpyonix-ember/.scrat...`) there.
+/// The computer the IDE chooser's head names: the computer the server routes this session's IDE
+/// to (the IDE answer's `computer_name`, e.g. a node), once that answer has arrived; before that,
+/// the session's own computer. A session with no computer of its own runs on the server, but its
+/// IDE may go to the default computer, so the session's name ("this server") would be wrong.
+pub fn ide_menu_computer(launch: Option<&Result<crate::server::IdeLaunch, String>>, session_computer: Option<&str>) -> Option<String> {
+    let routed = launch.and_then(|r| r.as_ref().ok()).and_then(|l| {
+        let c = &l.computer;
+        c.computer_name.as_deref().map(str::trim).filter(|n| !n.is_empty()).map(str::to_string)
+    });
+    routed.or_else(|| session_computer.map(str::to_string))
+}
+
 pub fn ide_menu_subtitle(computer: Option<&str>, cwd: &str) -> Option<String> {
     let folder = ide_menu_folder(cwd);
     if folder.is_empty() {
@@ -912,16 +1029,41 @@ pub fn ide_menu_subtitle(computer: Option<&str>, cwd: &str) -> Option<String> {
     })
 }
 
-/// The line under an IDE's name in the menu: what this client does with it (FR-L7, FR-L10.4).
-/// The mockup's wording is kept where the client does the same: the Ember editor opens its own
-/// window, VS Code opens the server's web IDE address in the browser, and Gateway gets a
-/// `jetbrains-gateway://` link through the OS (`crate::ide::plan`).
+/// The line under an IDE's name in the menu: what this client does with it.
+/// The Ember editor opens its own window, VS Code opens the server's web IDE address in the
+/// standalone IDE window, and Gateway gets a `jetbrains-gateway://` link through the OS
+/// (`crate::ide::plan`).
 pub fn ide_description(kind: IdeKind) -> &'static str {
     match kind {
         IdeKind::Ember => "Ember 자체 에디터 창으로 엽니다",
-        IdeKind::VsCode => "그 컴퓨터의 웹 IDE를 브라우저로 엽니다",
+        IdeKind::VsCode => "그 컴퓨터의 VS Code 웹 IDE를 전용 창으로 엽니다",
         IdeKind::Gateway => "JetBrains Gateway에 열기 링크를 보냅니다",
     }
+}
+
+/// What the chooser says under the Ember entry before it is picked, when the editor server the
+/// session's computer runs is not one Ember's editor supports: the editor window would only show
+/// its fallback and offer VS Code. `None` when the launch is not loaded, failed, has no Ember
+/// target, or reports no commit (an older server leaves it out; unknown is not unsupported, and the
+/// window handles that case itself).
+pub fn ember_ide_notice(launch: Option<&Result<crate::server::IdeLaunch, String>>) -> Option<String> {
+    let commit = launch?
+        .as_ref()
+        .ok()?
+        .target(IdeKind::Ember.key())?
+        .launch
+        .as_ref()?
+        .ose
+        .as_ref()?
+        .ose_commit
+        .as_deref()?;
+    if ember_editor_conn::is_supported_commit(commit) {
+        return None;
+    }
+    let short: String = commit.trim().chars().take(12).collect();
+    Some(format!(
+        "이 컴퓨터의 편집기 서버(Code-OSS {short})는 지원하지 않는 버전이라 VS Code에서 열기를 안내합니다."
+    ))
 }
 
 /// The IDE the menu marks as current: the remembered one, else Ember's own editor, which the
@@ -2065,6 +2207,39 @@ mod tests {
         }
     }
 
+    fn launch_with_commit(commit: Option<&str>) -> crate::server::IdeLaunch {
+        crate::demo::ide_launch_with(
+            "s",
+            "p",
+            "/w",
+            Some(ember_client::wire::EmberOseConnection {
+                endpoint: "http://127.0.0.1:9000".into(),
+                relay: None,
+                path: String::new(),
+                ticket: String::new(),
+                ose_commit: commit.map(String::from),
+            }),
+        )
+    }
+
+    #[test]
+    fn fr_e10_chooser_notes_an_unsupported_ose_commit_in_advance() {
+        let other = "0036dcb6c18a603d2168c00fa578be600987ac7b";
+        let unsupported = Ok(launch_with_commit(Some(other)));
+        let n = ember_ide_notice(Some(&unsupported)).expect("an unsupported commit is noted");
+        assert!(n.contains(&other[..12]) && !n.contains(&other[..13]) && n.contains("VS Code"));
+        let pinned = Ok(launch_with_commit(Some(ember_editor_conn::PINNED_COMMIT)));
+        assert_eq!(ember_ide_notice(Some(&pinned)), None);
+        let unknown = Ok(launch_with_commit(None));
+        assert_eq!(ember_ide_notice(Some(&unknown)), None);
+        let failed: Result<crate::server::IdeLaunch, String> = Err("down".into());
+        assert_eq!(ember_ide_notice(Some(&failed)), None);
+        assert_eq!(ember_ide_notice(None), None);
+        let mut no_ember = launch_with_commit(Some(other));
+        no_ember.targets.retain(|t| t.kind != "ember");
+        assert_eq!(ember_ide_notice(Some(&Ok(no_ember))), None);
+    }
+
     #[test]
     fn fr_l7_remembered_ide_is_listed_first_and_nothing_is_added() {
         let c = ide_choices(Some(IdeKind::Gateway));
@@ -2093,11 +2268,28 @@ mod tests {
         assert_eq!(ide_menu_subtitle(None, "/Users/brew/ember").as_deref(), Some("~/ember"));
         assert_eq!(ide_menu_subtitle(Some(" "), "/Users/brew/ember").as_deref(), Some("~/ember"));
         assert_eq!(ide_menu_subtitle(Some("mac-mini"), ""), None);
+        // #1064: the head names the computer the IDE is routed to (a node), not the session's
+        // "this server", once the IDE answer is in; before it, the session's computer.
+        let launch = |computer_name: Option<&str>| {
+            Ok(crate::server::IdeLaunch {
+                session: "s".into(),
+                project: "p".into(),
+                folder: "/w/demo".into(),
+                computer: crate::server::IdeComputer { name: "3759f352".into(), local: false, computer_name: computer_name.map(str::to_string) },
+                targets: vec![],
+                default_ide: None,
+            })
+        };
+        assert_eq!(ide_menu_computer(Some(&launch(Some("mac-node"))), Some("this server")).as_deref(), Some("mac-node"));
+        assert_eq!(ide_menu_computer(Some(&launch(None)), Some("this server")).as_deref(), Some("this server"));
+        assert_eq!(ide_menu_computer(None, Some("this server")).as_deref(), Some("this server"));
+        assert_eq!(ide_menu_computer(Some(&Err("down".into())), None), None);
         for (file, src) in [("cr/session.rs", include_str!("cr/session.rs")), ("cr/project.rs", include_str!("cr/project.rs"))] {
             let production = src.split("#[cfg(test)]").next().unwrap();
             assert!(production.contains("sub: ide_sub.as_deref(),"), "{file}");
             assert!(!production.contains("sub: (!cwd.is_empty()).then_some(cwd.as_str()),"), "{file}: the raw folder");
             assert!(production.contains("load_session_computer("), "{file}");
+            assert!(production.contains("ide_menu_computer(ide.get().as_ref(), computer.get().as_deref())"), "{file}");
         }
     }
 
@@ -2108,7 +2300,7 @@ mod tests {
             assert!(!ide_description(k).is_empty(), "{k:?}");
         }
         // What each one does in this client, not the mockup's wording where the client differs.
-        assert_eq!(ide_description(IdeKind::VsCode), "그 컴퓨터의 웹 IDE를 브라우저로 엽니다");
+        assert_eq!(ide_description(IdeKind::VsCode), "그 컴퓨터의 VS Code 웹 IDE를 전용 창으로 엽니다");
         assert_eq!(ide_description(IdeKind::Gateway), "JetBrains Gateway에 열기 링크를 보냅니다");
     }
 
@@ -2550,6 +2742,29 @@ mod tests {
         );
         assert_eq!(web_menu_items(&WebPagesLoad::Loading).len(), web_menu_lines(&WebPagesLoad::Loading).len());
         assert!(web_menu_items(&WebPagesLoad::Loading)[0].loading, "the loading row carries the spinner");
+    }
+
+    #[test]
+    fn fr_l18_parse_direct_port_accepts_valid_ports_and_rejects_invalid_ones() {
+        assert_eq!(parse_direct_port("80"), Ok(80));
+        assert_eq!(parse_direct_port(" 3000 "), Ok(3000));
+        assert_eq!(parse_direct_port("65535"), Ok(65535));
+        for bad in ["", "   ", "0", "65536", "abc", "-1"] {
+            let err = parse_direct_port(bad).expect_err(&format!("expected error for {bad:?}"));
+            assert!(!err.is_empty(), "error message must not be empty for {bad:?}");
+            assert!(!err.contains('\u{2014}'), "no em-dash in error message");
+        }
+    }
+
+    #[test]
+    fn fr_l18_direct_port_url_uses_the_computer_host_or_loopback_only_when_local() {
+        assert_eq!(direct_port_url(&remote("192.168.0.10"), 8080), Ok("http://192.168.0.10:8080".to_string()));
+        assert_eq!(direct_port_url(&remote("fd00::2"), 5173), Ok("http://[fd00::2]:5173".to_string()));
+        assert_eq!(direct_port_url(&local_host(), 4000), Ok("http://127.0.0.1:4000".to_string()));
+        // Another computer with no known address: never this machine's loopback.
+        assert_eq!(direct_port_url(&no_host(NoHost::PeerComputer), 3000), Err(DIRECT_PORT_NO_HOST));
+        assert_eq!(direct_port_url(&ComputerHost::default(), 3000), Err(DIRECT_PORT_NO_HOST));
+        assert!(!WEB_MENU_TUNNEL_HINT.contains('\u{2014}'));
     }
 
     #[test]
@@ -3012,5 +3227,60 @@ mod tests {
         assert_eq!(NodeStatus::Done.label(), "완료");
         assert_eq!(NodeStatus::Fail.label(), "실패");
         assert_eq!(NodeStatus::Unknown.label(), "");
+    }
+
+    #[test]
+    fn fr_l18_timeline_playback_steps_through_events_and_restarts() {
+        let mut pb = TimelinePlayback::new();
+        assert!(!pb.playing);
+        assert_eq!(pb.cursor, 0);
+        assert_eq!(pb.active_index(5), Some(0));
+        assert_eq!(pb.active_index(0), None);
+        assert_eq!(pb.action_label(), "재생");
+
+        // Starting playback switches to playing ("일시 정지").
+        pb.toggle_play(5);
+        assert!(pb.playing);
+        assert_eq!(pb.action_label(), "일시 정지");
+        assert_eq!(pb.active_index(5), Some(0));
+
+        // Stepping advances cursor through events and stops at the last event (index 4).
+        assert!(pb.step_next(5));
+        assert_eq!(pb.active_index(5), Some(1));
+        assert!(pb.step_next(5));
+        assert_eq!(pb.active_index(5), Some(2));
+        assert!(pb.step_next(5));
+        assert_eq!(pb.active_index(5), Some(3));
+        assert!(!pb.step_next(5));
+        assert_eq!(pb.active_index(5), Some(4));
+        assert!(!pb.playing);
+        assert_eq!(pb.action_label(), "재생");
+
+        // Toggling play at the end rewinds to 0 and resumes playing.
+        pb.toggle_play(5);
+        assert!(pb.playing);
+        assert_eq!(pb.active_index(5), Some(0));
+
+        // Stepping once then toggling play pauses at current cursor.
+        assert!(pb.step_next(5));
+        assert_eq!(pb.active_index(5), Some(1));
+        pb.toggle_play(5);
+        assert!(!pb.playing);
+        assert_eq!(pb.active_index(5), Some(1));
+
+        // Restart resets cursor to 0 and stops playback.
+        pb.toggle_play(5);
+        assert!(pb.step_next(5));
+        assert_eq!(pb.active_index(5), Some(2));
+        pb.restart();
+        assert!(!pb.playing);
+        assert_eq!(pb.cursor, 0);
+        assert_eq!(pb.active_index(5), Some(0));
+
+        // Empty timeline stays paused with no active index.
+        pb.toggle_play(0);
+        assert!(!pb.playing);
+        assert_eq!(pb.active_index(0), None);
+        assert!(!pb.step_next(0));
     }
 }

@@ -12,8 +12,9 @@ use crate::terminal_stream::{TerminalState, TerminalStatus};
 
 /// Scrollback kept for one pane (FR-P2 asks for at least 10,000 lines).
 pub const SCROLLBACK_LINES: usize = 10_000;
-/// Lines drawn at once; the older ones stay in the buffer. TODO(#673): the toolkit's `LazyColumn`
-/// (in the v0.0.10 pin) would draw all of them; it needs a display check.
+/// Lines drawn at once; the older ones stay in the buffer. `PaneTerminal` stays on `ScrollColumn`
+/// because it uses `ScrollState` (`FollowNewest`) to track the newest line, and the toolkit's
+/// `LazyColumn` does not take a `ScrollState` in the current pin.
 pub const RENDER_LINES: usize = 500;
 
 pub const CONNECTING: &str = "터미널에 연결하는 중입니다";

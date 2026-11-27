@@ -147,7 +147,10 @@ impl Updater {
     pub fn finish_check(&self) {
         let Some(backend) = self.backend.clone() else { return };
         let next = match backend.check() {
-            Err(reason) => UpdateState::Failed { stage: Stage::Check, reason },
+            Err(reason) => {
+                tracing::warn!(stage = "check", "self-update check failed: {reason}");
+                UpdateState::Failed { stage: Stage::Check, reason }
+            }
             Ok(Found::UpToDate(v)) => UpdateState::UpToDate(v),
             Ok(Found::Pending(v)) => UpdateState::Ready(v),
             Ok(Found::Available(v)) => {
@@ -155,7 +158,10 @@ impl Updater {
                 self.set(UpdateState::Downloading(v.clone()));
                 match backend.download() {
                     Ok(()) => UpdateState::Ready(v),
-                    Err(reason) => UpdateState::Failed { stage: Stage::Download, reason },
+                    Err(reason) => {
+                        tracing::warn!(stage = "download", "self-update download failed: {reason}");
+                        UpdateState::Failed { stage: Stage::Download, reason }
+                    }
                 }
             }
         };
@@ -186,6 +192,7 @@ impl Updater {
         }
         before();
         if let Err(reason) = backend.apply_and_restart() {
+            tracing::warn!(stage = "apply", "self-update apply failed: {reason}");
             self.set(UpdateState::Failed { stage: Stage::Apply, reason });
         }
         self.busy.store(false, Ordering::Release);
@@ -214,10 +221,14 @@ pub fn state_text(state: &UpdateState) -> String {
         UpdateState::Available(v) => format!("새 버전 {v}을(를) 찾았습니다."),
         UpdateState::Downloading(v) => format!("새 버전 {v}을(를) 내려받는 중입니다."),
         UpdateState::Ready(v) => format!("새 버전 {v}을(를) 내려받았습니다. 다시 시작하면 적용됩니다."),
-        UpdateState::Failed { stage: Stage::Check, reason } => format!("업데이트를 확인하지 못했습니다: {reason}"),
-        UpdateState::Failed { stage: Stage::Download, reason } => format!("새 버전을 내려받지 못했습니다: {reason}"),
-        UpdateState::Failed { stage: Stage::Apply, reason } => {
-            format!("업데이트를 적용하지 못했습니다: {reason}. 앱을 닫았다가 다시 여십시오.")
+        UpdateState::Failed { stage: Stage::Check, .. } => {
+            "업데이트를 확인하지 못했습니다. 잠시 후 다시 시도해 주세요.".to_string()
+        }
+        UpdateState::Failed { stage: Stage::Download, .. } => {
+            "새 버전을 내려받지 못했습니다. 네트워크 상태를 확인한 뒤 다시 시도해 주세요.".to_string()
+        }
+        UpdateState::Failed { stage: Stage::Apply, .. } => {
+            "업데이트를 적용하지 못했습니다. 앱을 닫았다가 다시 열어 주세요.".to_string()
         }
     }
 }
@@ -573,11 +584,21 @@ mod tests {
             (UpdateState::Available(v()), "새 버전 0.2.0을(를) 찾았습니다.", false, false),
             (UpdateState::Downloading(v()), "새 버전 0.2.0을(를) 내려받는 중입니다.", false, false),
             (UpdateState::Ready(v()), "새 버전 0.2.0을(를) 내려받았습니다. 다시 시작하면 적용됩니다.", false, true),
-            (UpdateState::Failed { stage: Stage::Check, reason: "x".into() }, "업데이트를 확인하지 못했습니다: x", true, false),
-            (UpdateState::Failed { stage: Stage::Download, reason: "x".into() }, "새 버전을 내려받지 못했습니다: x", true, false),
+            (
+                UpdateState::Failed { stage: Stage::Check, reason: "x".into() },
+                "업데이트를 확인하지 못했습니다. 잠시 후 다시 시도해 주세요.",
+                true,
+                false,
+            ),
+            (
+                UpdateState::Failed { stage: Stage::Download, reason: "x".into() },
+                "새 버전을 내려받지 못했습니다. 네트워크 상태를 확인한 뒤 다시 시도해 주세요.",
+                true,
+                false,
+            ),
             (
                 UpdateState::Failed { stage: Stage::Apply, reason: "x".into() },
-                "업데이트를 적용하지 못했습니다: x. 앱을 닫았다가 다시 여십시오.",
+                "업데이트를 적용하지 못했습니다. 앱을 닫았다가 다시 열어 주세요.",
                 true,
                 false,
             ),
@@ -588,5 +609,43 @@ mod tests {
             assert_eq!(can_restart(&state), restart, "{state:?}");
         }
         assert_eq!(RUNNING_VERSION, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn nfr_l4_self_update_messages_hide_raw_errors_and_use_hamnidache() {
+        let raw_errors = [
+            (Stage::Check, "ureq: connection refused (os error 61)"),
+            (Stage::Download, "Checksum did not match for package"),
+            (Stage::Apply, "Velopack Error: Access is denied"),
+        ];
+        for (stage, reason) in raw_errors {
+            let text = state_text(&UpdateState::Failed { stage, reason: reason.into() });
+            assert!(!text.contains(reason), "raw error leaked into UI: {text}");
+            assert!(!text.contains("ureq") && !text.contains("Velopack") && !text.contains("Checksum"), "{text}");
+            assert!(!text.contains("십시오"), "must use 합니다체, not 하십시오체: {text}");
+            assert!(text.ends_with("주세요."), "must end in 합니다체: {text}");
+        }
+
+        let all_states = [
+            UpdateState::NotInstalled,
+            UpdateState::Idle,
+            UpdateState::Checking,
+            UpdateState::UpToDate("0.1.0".into()),
+            UpdateState::Available("0.2.0".into()),
+            UpdateState::Downloading("0.2.0".into()),
+            UpdateState::Ready("0.2.0".into()),
+            UpdateState::Failed { stage: Stage::Check, reason: "raw".into() },
+            UpdateState::Failed { stage: Stage::Download, reason: "raw".into() },
+            UpdateState::Failed { stage: Stage::Apply, reason: "raw".into() },
+        ];
+        for state in all_states {
+            let text = state_text(&state);
+            assert!(!text.contains("십시오"), "no 하십시오체: {text}");
+            let polite = text.ends_with("습니다.")
+                || text.ends_with("니다.")
+                || text.ends_with("주세요.")
+                || (text.contains("습니다 (") && text.ends_with(")."));
+            assert!(polite, "every self-update message must use 합니다체: {text}");
+        }
     }
 }

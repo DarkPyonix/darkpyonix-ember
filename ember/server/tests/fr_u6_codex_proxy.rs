@@ -21,8 +21,11 @@ fn codex_bin() -> std::ffi::OsString {
     std::env::var_os("EMBER_CODEX_BIN").unwrap_or_else(|| "codex".into())
 }
 
+/// The `(request line, header)` pairs a fake upstream recorded.
+type Seen = Arc<Mutex<Vec<(String, String)>>>;
+
 /// A fake upstream recording `(request line, authorization header)` of each request.
-fn fake_upstream() -> (u16, Arc<Mutex<Vec<(String, String)>>>) {
+fn fake_upstream() -> (u16, Seen) {
     let l = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = l.local_addr().unwrap().port();
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -100,7 +103,7 @@ fn fr_u6_codex_turn_goes_to_the_member_proxy_endpoint() {
 
 /// A fake Responses API upstream that streams a minimal completed turn, so `CodexAdapter`
 /// (`codex app-server`) completes a full turn end-to-end through the member proxy endpoint.
-fn fake_streaming_upstream() -> (u16, Arc<Mutex<Vec<(String, String)>>>) {
+fn fake_streaming_upstream() -> (u16, Seen) {
     let l = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = l.local_addr().unwrap().port();
     let seen = Arc::new(Mutex::new(Vec::new()));

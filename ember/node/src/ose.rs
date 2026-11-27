@@ -1,60 +1,47 @@
-//! Manages local OSE server processes for editor launches.
+//! The OSE command line of the server's own machine: extension installs and uninstalls into the
+//! per-computer OSE data dir (SPEC FR-W4, FR-L31.14), and the helpers they share.
 //!
-//! The manager lives in this crate because two programs run it (SPEC FR-W4a, #896): `ember-node`
-//! for the projects of its computer ([`OseManager::for_node`], routes in [`crate::ose_api`]), and
-//! `ember-server` for the projects of the server's own machine (it re-exports this module as
-//! `ember_server::ose`). `ember-server` depends on this crate, not the reverse.
+//! **No OSE is started here** (`INTENT.md` D55, #1064). The editor server of every computer is the
+//! DarkPyonix manager's ([`crate::editor_manager`]): the manager installs it and runs it on a 0700
+//! Unix socket, and Ember only asks it for a launch ticket and relays bytes to it. What stays here
+//! is the server's local extension install and uninstall (`ember_server::ose` re-exports this
+//! module), which still runs the OSE binary found by `EMBER_OSE_SERVER` or under
+//! `~/.local/share/dpx-ose-*`, until those routes go to the manager too.
 //!
 //! Each computer has its own OSE data dir, `<data root>/<computer id>`, passed as
-//! `--server-data-dir` to every OSE started for it and to every extension install, so an
-//! extension is installed once per computer and shared by that computer's folders (SPEC
-//! FR-W4, #459). On the server the data root is `EMBER_OSE_DATA_DIR`, else `<runtime dir>/ose-data`,
-//! where the runtime dir is the data dir's sibling ([`runtime_dir`], FR-A11):
-//! `~/.ember-runtime/ose-data` by default. On a node it is `<EMBER_OSE_DATA_DIR>/node`, else
-//! `<state dir>/ose-data`, and the computer id is always [`LOCAL_COMPUTER`]. The `node` segment
-//! keeps a node and a server that share one `EMBER_OSE_DATA_DIR` apart ([`node_data_root_from`]).
-//! **Unknown:** how several OSE processes behave on one shared data dir (no lock or race
-//! documentation was found), so nothing here claims it is safe.
+//! `--server-data-dir` to every extension command for it (SPEC FR-W4, #459). On the server the
+//! data root is `EMBER_OSE_DATA_DIR`, else `<runtime dir>/ose-data`, where the runtime dir is the
+//! data dir's sibling ([`runtime_dir`], FR-A11).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io::Read;
-use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// How an editor reaches one OSE: the loopback endpoint, the relay path of the server route that
-/// carries it, and the placeholder token (never the real one).
-#[derive(Clone, serde::Serialize, PartialEq)]
-pub struct EmberOseConnection {
-    pub endpoint: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub relay: Option<String>,
-    pub connection_token: String,
-}
+mod process;
+use process::ManagedChild;
 
-impl std::fmt::Debug for EmberOseConnection {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EmberOseConnection")
-            .field("endpoint", &self.endpoint)
-            .field("relay", &self.relay)
-            .field("connection_token", &"[REDACTED]")
-            .finish()
-    }
-}
+/// The message of an extension command refused because there is no OSE binary on the server's
+/// machine. It names the install step (SPEC FR-W4 acceptance step 6, #83).
+pub const NOT_INSTALLED: &str = "OSE server binary is not installed: run install-ose.sh from the \
+    ember-server or ember-node folder (it fetches the matching DarkPyonix OSE release into \
+    ~/.local/share), or set EMBER_OSE_SERVER to a dpx-ose-server launcher";
 
-/// One started or reused OSE: its opaque id and how to reach it.
-#[derive(Debug, Clone, PartialEq)]
-pub struct OseLaunch {
-    /// 32 hex characters, the `{launch_id}` of the relay routes.
-    pub launch_id: String,
-    pub connection: EmberOseConnection,
+/// The Code-OSS commit of the OSE build that `binary` launches (SPEC FR-E10, #32): `commit` in the
+/// build's `product.json`, which sits beside `bin/` (`<root>/bin/dpx-ose-server` and
+/// `<root>/product.json`, the layout of the release archives and of `install-ose.sh`). `None` for
+/// a missing or unreadable file, or a value that is not a hex commit of at most 64 characters.
+pub fn ose_commit(binary: &Path) -> Option<String> {
+    let root = binary.parent()?.parent()?;
+    let text = std::fs::read_to_string(root.join("product.json")).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let commit = value.get("commit")?.as_str()?.trim();
+    (!commit.is_empty() && commit.len() <= 64 && commit.bytes().all(|b| b.is_ascii_hexdigit()))
+        .then(|| commit.to_ascii_lowercase())
 }
-
-/// The message of a start refused because there is no OSE binary.
-pub const NOT_INSTALLED: &str = "OSE server binary is not installed";
 
 /// The runtime dir for the server's `data_dir`: its sibling `<name>-runtime` (SPEC FR-A11). The
 /// server's `runtime_dir` module re-exports it and holds the migration.
@@ -64,118 +51,14 @@ pub fn runtime_dir(data_dir: &Path) -> PathBuf {
     parent.join(format!("{name}-runtime"))
 }
 
-struct Process {
-    child: Option<Child>,
-    launch_id: String,
-    address: SocketAddr,
-    real_token: String,
-    placeholder: String,
-    connection: EmberOseConnection,
-    active_relays: Arc<AtomicUsize>,
-    /// Removed when the entry goes away (child exited, manager dropped, start failed).
-    _token_file: Option<TokenFile>,
-}
-
-/// Target and credentials resolved for one active OSE relay stream (`FR-W4`, `#458`, `#461`).
-pub struct RelayTarget {
-    pub address: SocketAddr,
-    pub real_token: String,
-    pub placeholder: String,
-    pub idle_timeout: Duration,
-    _permit: RelayPermit,
-}
-
-/// RAII guard for one active OSE relay stream: decrements the per-launch and per-server counters on drop.
-struct RelayPermit {
-    launch: Arc<AtomicUsize>,
-    server: Arc<AtomicUsize>,
-}
-
-impl Drop for RelayPermit {
-    fn drop(&mut self) {
-        self.launch.fetch_sub(1, Ordering::SeqCst);
-        self.server.fetch_sub(1, Ordering::SeqCst);
-    }
-}
-
-/// Why a relay stream could not be opened before the WebSocket upgrade.
-#[derive(Debug, PartialEq, Eq)]
-pub enum RelayLookupError {
-    /// 404: no live launch with this `(computer_id, launch_id)`.
-    NotFound,
-    /// 429: per-launch or per-server relay concurrency limit reached.
-    TooManyRelays,
-}
-
-/// The connection token file of one OSE process. The file is deleted on drop.
-struct TokenFile(PathBuf);
-
-impl Drop for TokenFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-/// Writes `token` to `<tokens dir>/<first 16 hex of SHA-256 of the folder>.token`, mode 0600
-/// from creation (`create_new`), without a trailing newline. A stale file at the path is removed
-/// first; a directory there is refused. The token never exists with wider permissions.
-fn write_token_file(tokens_dir: &Path, folder: &Path, token: &str) -> std::io::Result<TokenFile> {
-    use sha2::{Digest, Sha256};
-    use std::io::{Error, ErrorKind, Write};
-    // The tokens dir and its parent (the computer dir) hold or lead to a secret: they are
-    // hardened, not just created (#521).
-    if let Some(parent) = tokens_dir.parent() {
-        secure_token_dir(parent)?;
-    }
-    secure_token_dir(tokens_dir)?;
-    let digest = Sha256::digest(folder.as_os_str().as_encoded_bytes());
-    let name: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
-    let path = tokens_dir.join(format!("{name}.token"));
-    match std::fs::symlink_metadata(&path) {
-        Ok(md) if md.is_dir() => {
-            return Err(Error::new(ErrorKind::InvalidInput, format!("{} is a directory", path.display())));
-        }
-        Ok(_) => std::fs::remove_file(&path)?,
-        Err(e) if e.kind() == ErrorKind::NotFound => {}
-        Err(e) => return Err(e),
-    }
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(&path)?;
-    let guard = TokenFile(path);
-    file.write_all(token.as_bytes())?;
-    Ok(guard)
-}
-
-impl Drop for Process {
-    fn drop(&mut self) {
-        if let Some(child) = &mut self.child {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
-}
-
 /// The id of the computer this server runs on.
 pub const LOCAL_COMPUTER: &str = "local";
 /// Longest wait for one `--install-extension` run.
 pub const INSTALL_TIMEOUT: Duration = Duration::from_secs(120);
 /// The most captured output returned for one install (stdout then stderr).
 pub const OUTPUT_CAP: usize = 16 * 1024;
-/// Default idle timeout for one relayed OSE connection (`FR-W4`, `#458`).
-pub const RELAY_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
-/// Maximum concurrent relays per OSE launch (`FR-W4`, `#458`).
-pub const MAX_RELAYS_PER_LAUNCH: usize = 16;
-/// Maximum concurrent relays across the server (`FR-W4`, `#458`).
-pub const MAX_RELAYS_PER_SERVER: usize = 64;
-
 /// The server CLI flags this module passes. `--server-data-dir`, `--install-extension` and
-/// `--extensions-dir` are documented in `ember/ose/README.md` and used by `ember/ose/smoke.sh`.
+/// `--extensions-dir` are documented in `.github/scripts/ose/README.md` and used by `.github/scripts/ose/smoke.sh`.
 /// `--accept-server-license-terms` is used by every start and by smoke.sh's install step.
 const FLAG_DATA_DIR: &str = "--server-data-dir";
 const FLAG_EXTENSIONS_DIR: &str = "--extensions-dir";
@@ -208,22 +91,14 @@ pub fn watcher_args(kind: crate::fs_kind::FsKind) -> Vec<String> {
 #[allow(dead_code)]
 const FLAG_LIST_UNVERIFIED: &str = "--list-extensions";
 
-/// Owns one server per (computer, local project folder).
+/// Runs the OSE binary's extension commands against the per-computer data dirs.
 pub struct OseManager {
     binary: Option<PathBuf>,
     /// `Err` when no root can be resolved (no override and no HOME): every use answers the message.
     data_root: Result<PathBuf, String>,
     install_timeout: Duration,
-    relay_idle_timeout: Duration,
-    max_relays_per_launch: usize,
-    max_relays_per_server: usize,
-    active_relays: Arc<AtomicUsize>,
     installing: Arc<Mutex<HashSet<String>>>,
-    processes: Arc<Mutex<HashMap<(String, PathBuf), Process>>>,
-    terminal_env: TerminalEnv,
-    /// The thread that drops the entries of exited children. `None` for a manager that can start
-    /// nothing ([`OseManager::disabled`]). It ends by itself once the manager is dropped.
-    _reaper: Option<std::thread::JoinHandle<()>>,
+    stopping: AtomicBool,
 }
 
 /// What the terminals of an OSE window need to reach persistent sessions (SPEC FR-P5, #26).
@@ -322,7 +197,7 @@ pub fn extension_spec(id: &str, version: Option<&str>) -> Result<String, String>
     let nums: Vec<&str> = core.split('.').collect();
     let nums_ok = nums.len() == 3
         && nums.iter().all(|n| !n.is_empty() && n.len() <= 9 && n.bytes().all(|b| b.is_ascii_digit()));
-    let rest_ok = rest.map_or(true, |r| {
+    let rest_ok = rest.is_none_or(|r| {
         !r.is_empty() && r.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
     });
     if v.len() > 64 || !nums_ok || !rest_ok {
@@ -438,79 +313,8 @@ fn make_private_dir(path: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Makes `path` a directory only this user can use, for a directory that holds or leads to a
-/// connection token file (the tokens dir and the computer dir above it).
-///
-/// Created with 0700 when missing. A symlink, a non-directory or a directory owned by another
-/// user is refused. An existing directory that group or others can WRITE (`mode & 0o022`) is
-/// refused with `token directory <path> is writable by others; fix the permissions`: another user
-/// could delete and replace the 0600 token file before the OSE reads it. An existing directory
-/// with only group/other read or search bits (`0o055`) is tightened to 0700, because we own it and
-/// a token file lives there; this is logged at warn. The shared data root above is not touched
-/// here (see [`make_private_dir`]).
-fn secure_token_dir(path: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::io::{Error, ErrorKind};
-        use std::os::fd::FromRawFd;
-        use std::os::unix::ffi::OsStrExt;
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        // Open the directory itself, never through a symlink at its place, and check and chmod
-        // the opened handle (fstat, fchmod), so a symlink swapped in after the check cannot
-        // redirect the chmod (#534). ACLs are not inspected.
-        let c = std::ffi::CString::new(path.as_os_str().as_bytes())
-            .map_err(|_| Error::new(ErrorKind::InvalidInput, "path contains NUL"))?;
-        // SAFETY: `c` is a valid NUL-terminated path; the flags take no extra argument.
-        let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
-        if fd < 0 {
-            let e = Error::last_os_error();
-            return match e.raw_os_error() {
-                Some(libc::ENOENT) => make_private_dir(path),
-                Some(libc::ELOOP) => Err(Error::new(ErrorKind::PermissionDenied, format!("{} is a symlink", path.display()))),
-                Some(libc::ENOTDIR) => match std::fs::symlink_metadata(path) {
-                    Ok(md) if md.file_type().is_symlink() => {
-                        Err(Error::new(ErrorKind::PermissionDenied, format!("{} is a symlink", path.display())))
-                    }
-                    _ => Err(Error::new(ErrorKind::InvalidInput, format!("{} is not a directory", path.display()))),
-                },
-                _ => Err(e),
-            };
-        }
-        // SAFETY: `fd` is a fresh descriptor owned here.
-        let dir = unsafe { std::fs::File::from_raw_fd(fd) };
-        let md = dir.metadata()?;
-        // SAFETY: geteuid takes no arguments and cannot fail.
-        if md.uid() != unsafe { libc::geteuid() } {
-            return Err(Error::new(
-                ErrorKind::PermissionDenied,
-                format!("{} is not owned by the current user", path.display()),
-            ));
-        }
-        let mode = md.permissions().mode() & 0o777;
-        if mode & 0o022 != 0 {
-            return Err(Error::new(
-                ErrorKind::PermissionDenied,
-                format!("token directory {} is writable by others; fix the permissions", path.display()),
-            ));
-        }
-        if mode & 0o077 != 0 {
-            tracing::warn!(
-                path = %path.display(),
-                mode = format!("{mode:o}"),
-                "token directory is readable by group or others; tightening it to 0700"
-            );
-            dir.set_permissions(std::fs::Permissions::from_mode(0o700))?;
-        }
-        Ok(())
-    }
-    #[cfg(not(unix))]
-    {
-        make_private_dir(path)
-    }
-}
-
 /// The variables an OSE child gets from the server's environment. Everything else (server tokens,
-/// other secrets) is dropped. `ember/ose/smoke.sh` and `regress.sh` set no variable of their own
+/// other secrets) is dropped. `.github/scripts/ose/smoke.sh` and `regress.sh` set no variable of their own
 /// and call the launcher with the caller's environment, so nothing beyond this list is known to
 /// be needed. More names come only from [`PASSTHROUGH_VAR`] (#471).
 const ENV_ALLOWLIST: [&str; 6] = ["HOME", "PATH", "LANG", "LC_ALL", "TMPDIR", "USER"];
@@ -636,20 +440,6 @@ fn ose_command_with(
     cmd
 }
 
-/// Kills a child and everything in its process group (the child leads its own group, see
-/// `process_group(0)` at the spawn), then reaps it. On Windows only the child itself is killed
-/// (`node.exe`, see [`launch_program`]); its own children, such as the extension host, are not
-/// (no job object yet, #83).
-fn kill_tree(child: &mut Child) {
-    #[cfg(unix)]
-    {
-        // SAFETY: killpg takes plain integers; a stale group id at worst fails with ESRCH.
-        unsafe { libc::killpg(child.id() as libc::pid_t, libc::SIGKILL) };
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
 /// Removes the computer from the busy set when dropped.
 struct BusyGuard {
     set: Arc<Mutex<HashSet<String>>>,
@@ -662,8 +452,11 @@ impl Drop for BusyGuard {
     }
 }
 
+/// A captured stream: the bytes read so far, and whether the reader reached the end.
+type Captured = (Arc<Mutex<Vec<u8>>>, Arc<AtomicBool>);
+
 /// Reads a pipe to its end on a thread, keeping at most `OUTPUT_CAP` bytes.
-fn capture<R: Read + Send + 'static>(mut r: R) -> (Arc<Mutex<Vec<u8>>>, Arc<AtomicBool>) {
+fn capture<R: Read + Send + 'static>(mut r: R) -> Captured {
     let buf = Arc::new(Mutex::new(Vec::new()));
     let done = Arc::new(AtomicBool::new(false));
     let (b, d) = (buf.clone(), done.clone());
@@ -682,7 +475,7 @@ fn capture<R: Read + Send + 'static>(mut r: R) -> (Arc<Mutex<Vec<u8>>>, Arc<Atom
     (buf, done)
 }
 
-fn collect(parts: &[(Arc<Mutex<Vec<u8>>>, Arc<AtomicBool>)], wait: bool) -> String {
+fn collect(parts: &[Captured], wait: bool) -> String {
     if wait {
         let until = Instant::now() + Duration::from_secs(2);
         while Instant::now() < until && !parts.iter().all(|(_, d)| d.load(Ordering::SeqCst)) {
@@ -719,199 +512,37 @@ impl OseManager {
         Self::with_root(binary, Ok(data_root))
     }
 
-    /// The manager of an `ember-node` daemon (SPEC FR-W4a): the binary is found as on the server
-    /// (`EMBER_OSE_SERVER`, else the newest `~/.local/share/dpx-ose-*`), the data root is
-    /// `<EMBER_OSE_DATA_DIR>/node`, else `<state dir>/ose-data` ([`node_data_root_from`]). Without
-    /// either, every start answers why.
-    pub fn for_node(state_dir: Option<&Path>) -> Self {
-        let root = node_data_root_from(std::env::var_os("EMBER_OSE_DATA_DIR").map(PathBuf::from), state_dir);
-        Self::with_root(server_binary(), root)
-    }
-
-    /// A manager that starts nothing: no binary and no data root. A node built without an OSE
-    /// manager (the server's in-process local node, tests) uses it, so its `/ide` routes answer
-    /// 503 instead of starting a second OSE beside the server's own. It never has a child to
-    /// reap, so it starts no reaper thread (every `Node::new` builds one of these).
-    pub fn disabled() -> Self {
-        Self::build(None, Err("the OSE is not enabled on this node".to_string()), false)
-    }
-
     fn with_root(binary: Option<PathBuf>, data_root: Result<PathBuf, String>) -> Self {
-        Self::build(binary, data_root, true)
-    }
-
-    /// `reap`: start the thread that drops the entry of a child that exited, once a second, until
-    /// the manager is dropped.
-    fn build(binary: Option<PathBuf>, data_root: Result<PathBuf, String>, reap: bool) -> Self {
-        let processes: Arc<Mutex<HashMap<(String, PathBuf), Process>>> = Arc::new(Mutex::new(HashMap::new()));
-        let reaper = reap.then(|| {
-            let weak = Arc::downgrade(&processes);
-            std::thread::spawn(move || loop {
-                std::thread::sleep(Duration::from_secs(1));
-                let Some(processes) = weak.upgrade() else { break };
-                let mut processes = processes.lock().unwrap_or_else(|e| e.into_inner());
-                processes.retain(|_, process| match &mut process.child {
-                    Some(child) => matches!(child.try_wait(), Ok(None)),
-                    None => true,
-                });
-            })
-        });
         Self {
-            _reaper: reaper,
             binary,
             data_root,
             install_timeout: INSTALL_TIMEOUT,
-            relay_idle_timeout: RELAY_IDLE_TIMEOUT,
-            max_relays_per_launch: MAX_RELAYS_PER_LAUNCH,
-            max_relays_per_server: MAX_RELAYS_PER_SERVER,
-            active_relays: Arc::new(AtomicUsize::new(0)),
             installing: Arc::new(Mutex::new(HashSet::new())),
-            processes,
-            terminal_env: TerminalEnv::default(),
+            stopping: AtomicBool::new(false),
         }
     }
 
-    /// Sets what OSE windows' terminals need for persistent sessions ([`TerminalEnv`], #26).
-    pub fn with_terminal_env(mut self, env: TerminalEnv) -> Self {
-        self.terminal_env = env;
-        self
+    /// Stops allowing new extension commands and cancels active ones. Call before waiting for
+    /// HTTP requests to finish shutting down.
+    pub fn shutdown(&self) {
+        let _spawn = self.installing.lock().unwrap_or_else(|e| e.into_inner());
+        self.stopping.store(true, Ordering::SeqCst);
+    }
+
+    fn spawn(&self, command: &mut Command) -> std::io::Result<ManagedChild> {
+        // Serialize the stop flag and the spawn. An initial check before command construction
+        // would let a new child start after shutdown had already begun.
+        let _spawn = self.installing.lock().unwrap_or_else(|e| e.into_inner());
+        if self.stopping.load(Ordering::SeqCst) {
+            return Err(std::io::Error::other("OSE is shutting down"));
+        }
+        ManagedChild::spawn(command)
     }
 
     /// Overrides the install timeout (tests).
     pub fn with_install_timeout(mut self, timeout: Duration) -> Self {
         self.install_timeout = timeout;
         self
-    }
-
-    /// Overrides the relay idle timeout (tests).
-    pub fn with_relay_idle_timeout(mut self, timeout: Duration) -> Self {
-        self.relay_idle_timeout = timeout;
-        self
-    }
-
-    /// Overrides the per-launch and per-server relay concurrency limits (tests).
-    pub fn with_relay_limits(mut self, per_launch: usize, per_server: usize) -> Self {
-        self.max_relays_per_launch = per_launch;
-        self.max_relays_per_server = per_server;
-        self
-    }
-
-    /// Registers an existing OSE TCP listener for `(computer_id, folder)` without spawning a
-    /// child process (used by relay integration tests).
-    pub fn register_launch_for_test(
-        &self,
-        computer_id: &str,
-        folder: &Path,
-        address: SocketAddr,
-        real_token: &str,
-    ) -> EmberOseConnection {
-        let launch_id = uuid::Uuid::new_v4().simple().to_string();
-        let mut placeholder = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
-        while placeholder == real_token {
-            placeholder = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
-        }
-        let relay = format!("/api/computers/{computer_id}/ide/relay/{launch_id}");
-        let connection = EmberOseConnection {
-            endpoint: format!("http://{address}"),
-            relay: Some(relay),
-            connection_token: placeholder.clone(),
-        };
-        let folder = folder.canonicalize().unwrap_or_else(|_| folder.to_path_buf());
-        let key = (computer_id.to_string(), folder);
-        let mut processes = self.processes.lock().unwrap_or_else(|e| e.into_inner());
-        processes.insert(
-            key,
-            Process {
-                child: None,
-                launch_id,
-                address,
-                real_token: real_token.to_string(),
-                placeholder,
-                connection: connection.clone(),
-                active_relays: Arc::new(AtomicUsize::new(0)),
-                _token_file: None,
-            },
-        );
-        connection
-    }
-
-    /// Resolves `(computer_id, launch_id)` and acquires a concurrency permit for one relay stream.
-    pub fn open_relay(&self, computer_id: &str, launch_id: &str) -> Result<RelayTarget, RelayLookupError> {
-        let mut processes = self.processes.lock().unwrap_or_else(|e| e.into_inner());
-        let mut found = None;
-        for ((comp, _), p) in processes.iter_mut() {
-            if comp == computer_id
-                && p.launch_id == launch_id
-                && match &mut p.child {
-                    Some(c) => matches!(c.try_wait(), Ok(None)),
-                    None => true,
-                }
-            {
-                found = Some(p);
-                break;
-            }
-        }
-        let Some(process) = found else {
-            return Err(RelayLookupError::NotFound);
-        };
-        let launch_active = process.active_relays.load(Ordering::SeqCst);
-        let server_active = self.active_relays.load(Ordering::SeqCst);
-        if launch_active >= self.max_relays_per_launch || server_active >= self.max_relays_per_server {
-            return Err(RelayLookupError::TooManyRelays);
-        }
-        process.active_relays.fetch_add(1, Ordering::SeqCst);
-        self.active_relays.fetch_add(1, Ordering::SeqCst);
-        let permit = RelayPermit {
-            launch: process.active_relays.clone(),
-            server: self.active_relays.clone(),
-        };
-        Ok(RelayTarget {
-            address: process.address,
-            real_token: process.real_token.clone(),
-            placeholder: process.placeholder.clone(),
-            idle_timeout: self.relay_idle_timeout,
-            _permit: permit,
-        })
-    }
-
-    /// Removes the `*.token` files a killed server left behind (#521): every regular file named
-    /// `<hex>.token` in `<data root>/<computer id>/tokens/`. Call it once at startup, before any OSE
-    /// start: a SIGKILL skips the [`TokenFile`] drop, so the dead token stays on disk until the
-    /// same folder starts again. Symlinks and directories are left alone, a missing root is not an
-    /// error, and an OSE of ANOTHER server sharing the same data root loses its file too (it read
-    /// the file at its start, see FR-W4). Returns how many files were removed.
-    pub fn sweep_stale_tokens(&self) -> usize {
-        let Ok(root) = self.data_root() else { return 0 };
-        let Ok(computers) = std::fs::read_dir(root) else { return 0 };
-        let mut removed = 0;
-        for computer in computers.flatten() {
-            let name = computer.file_name();
-            if !valid_computer_id(&name.to_string_lossy()) {
-                continue;
-            }
-            let tokens = computer.path().join("tokens");
-            match std::fs::symlink_metadata(&tokens) {
-                Ok(md) if md.is_dir() => {}
-                _ => continue,
-            }
-            let Ok(files) = std::fs::read_dir(&tokens) else { continue };
-            for file in files.flatten() {
-                let path = file.path();
-                let is_token = path.extension().is_some_and(|e| e == "token")
-                    && path.file_stem().is_some_and(|s| {
-                        let s = s.to_string_lossy();
-                        !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit())
-                    });
-                let regular = std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_file());
-                if is_token && regular && std::fs::remove_file(&path).is_ok() {
-                    removed += 1;
-                }
-            }
-        }
-        if removed > 0 {
-            tracing::info!(removed, "removed stale OSE token files left by an earlier server");
-        }
-        removed
     }
 
     pub fn data_root(&self) -> Result<&Path, String> {
@@ -942,8 +573,8 @@ impl OseManager {
 
     /// Runs `<binary> --install-extension <id>[@version]` against the computer's data dir. No
     /// shell; the arguments are separate argv entries; one install at a time per computer; the
-    /// child runs with a cleared environment (allowlist only) in its own process group, which is
-    /// killed on timeout. A server shutdown or panic does not kill a running install (TODO follow-up). Blocking: call from `spawn_blocking`.
+    /// child runs with a cleared environment (allowlist only). Timeout and graceful shutdown
+    /// kill the process tree. Blocking: call from `spawn_blocking`.
     pub fn install_extension(
         &self,
         computer_id: &str,
@@ -994,15 +625,16 @@ impl OseManager {
             .args(Self::dir_args(&dir))
             .arg("--accept-server-license-terms")
             .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        // Own process group, so a timeout kills a launcher's children too.
-        #[cfg(unix)]
-        std::os::unix::process::CommandExt::process_group(&mut command, 0);
-        let mut child = command.spawn().map_err(|e| InstallError::Io(format!("cannot start OSE server: {e}")))?;
-        let parts = [capture(child.stdout.take().expect("piped")), capture(child.stderr.take().expect("piped"))];
+        let mut child = self.spawn(&mut command).map_err(|e| InstallError::Io(format!("cannot start OSE server: {e}")))?;
+        let parts = [
+            capture(child.child.stdout.take().expect("piped")),
+            capture(child.child.stderr.take().expect("piped")),
+        ];
         let deadline = Instant::now() + self.install_timeout;
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
+                    drop(child);
                     let output = collect(&parts, true);
                     return if status.success() {
                         Ok(output)
@@ -1010,128 +642,24 @@ impl OseManager {
                         Err(InstallError::Failed { message: format!("{what} failed: {status}"), output })
                     };
                 }
-                Ok(None) if Instant::now() >= deadline => {
-                    kill_tree(&mut child);
-                    let output = collect(&parts, false);
-                    return Err(InstallError::Failed {
-                        message: format!("{what} timed out after {}s", self.install_timeout.as_secs_f32()),
-                        output,
-                    });
+                Ok(None) => {
+                    let message = if self.stopping.load(Ordering::SeqCst) {
+                        Some(format!("{what} stopped because OSE is shutting down"))
+                    } else if Instant::now() >= deadline {
+                        Some(format!("{what} timed out after {}s", self.install_timeout.as_secs_f32()))
+                    } else {
+                        None
+                    };
+                    if let Some(message) = message {
+                        drop(child);
+                        return Err(InstallError::Failed { message, output: collect(&parts, false) });
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
                 }
-                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-                Err(e) => {
-                    kill_tree(&mut child);
-                    return Err(InstallError::Io(format!("cannot wait for the OSE server: {e}")));
-                }
+                Err(e) => return Err(InstallError::Io(format!("cannot wait for the OSE server: {e}"))),
             }
         }
     }
-
-    /// The local computer's server for `folder`.
-    pub fn connection(&self, folder: &Path) -> Result<EmberOseConnection, String> {
-        self.connection_for(LOCAL_COMPUTER, folder)
-    }
-
-    /// The server of `computer_id` for `folder`, started with that computer's data dir.
-    pub fn connection_for(&self, computer_id: &str, folder: &Path) -> Result<EmberOseConnection, String> {
-        self.launch_for(computer_id, folder).map(|launch| launch.connection)
-    }
-
-    /// Like [`OseManager::connection_for`], with the launch id beside the connection (the node's
-    /// `POST /ide/ose` answers it, SPEC FR-W4b). A missing binary is the error [`NOT_INSTALLED`].
-    /// Blocking for up to 10 s while a new OSE starts: call from `spawn_blocking`.
-    pub fn launch_for(&self, computer_id: &str, folder: &Path) -> Result<OseLaunch, String> {
-        let folder = folder.canonicalize().map_err(|e| format!("cannot open project folder: {e}"))?;
-        let key = (computer_id.to_string(), folder.clone());
-        let mut processes = self.processes.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(process) = processes.get_mut(&key) {
-            let alive = match &mut process.child {
-                Some(child) => matches!(child.try_wait(), Ok(None)),
-                None => true,
-            };
-            if alive {
-                return Ok(OseLaunch { launch_id: process.launch_id.clone(), connection: process.connection.clone() });
-            }
-        }
-        processes.remove(&key);
-        let binary = self.binary.as_ref().filter(|p| p.is_file()).ok_or_else(|| NOT_INSTALLED.to_string())?;
-        let data_dir = self.computer_data_dir(computer_id)?;
-        let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("cannot allocate OSE port: {e}"))?;
-        let address = listener.local_addr().map_err(|e| format!("cannot read OSE port: {e}"))?;
-        drop(listener);
-        let token = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
-        let mut placeholder = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
-        while placeholder == token {
-            placeholder = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
-        }
-        let launch_id = uuid::Uuid::new_v4().simple().to_string();
-        let token_file = write_token_file(&data_dir.join("tokens"), &folder, &token)
-            .map_err(|e| format!("cannot write the OSE token file: {e}"))?;
-        let mut command = ose_command(binary);
-        let base_path = command.get_envs().find(|(k, _)| k.to_str() == Some("PATH")).and_then(|(_, v)| v.map(|v| v.to_os_string()));
-        for (key, value) in self.terminal_env.vars(computer_id, base_path.as_deref()) {
-            command.env(key, value);
-        }
-        let child = command
-            .args(["--host", "127.0.0.1", "--port", &address.port().to_string(), "--connection-token-file"])
-            .arg(&token_file.0)
-            .args(["--accept-server-license-terms", "--telemetry-level", "off"])
-            .args(Self::dir_args(&data_dir))
-            .args(watcher_args(crate::fs_kind::fs_kind(&folder)))
-            .current_dir(long_path(&folder))
-            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
-            .spawn().map_err(|e| format!("cannot start OSE server: {e}"))?;
-        let connection = EmberOseConnection {
-            endpoint: format!("http://{address}"),
-            relay: Some(format!("/api/computers/{computer_id}/ide/relay/{launch_id}")),
-            connection_token: placeholder.clone(),
-        };
-        let launch = OseLaunch { launch_id: launch_id.clone(), connection: connection.clone() };
-        let mut process = Process {
-            child: Some(child),
-            launch_id,
-            address,
-            real_token: token,
-            placeholder,
-            connection: connection.clone(),
-            active_relays: Arc::new(AtomicUsize::new(0)),
-            _token_file: Some(token_file),
-        };
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            if let Some(child) = &mut process.child {
-                if let Ok(Some(status)) = child.try_wait() {
-                    return Err(format!("OSE server exited during startup: {status}"));
-                }
-            }
-            if TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_ok() { break; }
-            if Instant::now() >= deadline { return Err("OSE server did not start in time".into()); }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        processes.insert(key, process);
-        Ok(launch)
-    }
-}
-
-/// The segment a node adds under an `EMBER_OSE_DATA_DIR` override.
-pub const NODE_DATA_SEGMENT: &str = "node";
-
-/// The OSE data root of a node from its inputs (kept pure so tests need no env): the override
-/// (`EMBER_OSE_DATA_DIR`) with [`NODE_DATA_SEGMENT`] under it, else `<state dir>/ose-data`. With
-/// neither it is an error: a relative path under the working directory is never used.
-///
-/// The segment is there because a server on the same machine reads the same variable and uses
-/// the root itself ([`data_root_from`]): without it both would keep their token files in
-/// `<root>/local/tokens`, and each start-up [`OseManager::sweep_stale_tokens`] would delete the
-/// live files of the other. The server's sweep looks only at `<root>/<computer id>/tokens`, so it
-/// never reaches `<root>/node/local/tokens`; registry computer ids are UUIDs, never `node`.
-pub fn node_data_root_from(ose_dir: Option<PathBuf>, state_dir: Option<&Path>) -> Result<PathBuf, String> {
-    if let Some(p) = ose_dir.filter(|p| !p.as_os_str().is_empty()) {
-        return Ok(p.join(NODE_DATA_SEGMENT));
-    }
-    state_dir
-        .map(|d| d.join("ose-data"))
-        .ok_or_else(|| "cannot resolve the OSE data dir: set EMBER_OSE_DATA_DIR or EMBER_NODE_STATE_DIR".to_string())
 }
 
 fn server_binary() -> Option<PathBuf> {
@@ -1152,7 +680,46 @@ fn server_binary() -> Option<PathBuf> {
 }
 
 #[cfg(test)]
+mod ose_commit_tests {
+    use super::ose_commit;
+
+    /// SPEC FR-E10 (#32): the commit comes from the build's `product.json`, beside `bin/`.
+    #[test]
+    fn fr_e10_ose_commit_is_read_from_the_build_product_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("dpx-ose-1.139.1-linux-x64").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let launcher = bin.join("dpx-ose-server");
+        std::fs::write(&launcher, "").unwrap();
+        assert_eq!(ose_commit(&launcher), None, "no product.json");
+        let product = bin.parent().unwrap().join("product.json");
+        std::fs::write(&product, r#"{"commit":"  0123456789ABCDEF0123456789abcdef01234567 ","nameShort":"x"}"#).unwrap();
+        assert_eq!(ose_commit(&launcher).as_deref(), Some("0123456789abcdef0123456789abcdef01234567"));
+        for bad in [r#"{"nameShort":"x"}"#, r#"{"commit":""}"#, r#"{"commit":"not-hex"}"#, r#"{"commit":7}"#, "not json"] {
+            std::fs::write(&product, bad).unwrap();
+            assert_eq!(ose_commit(&launcher), None, "{bad}");
+        }
+        std::fs::write(&product, format!(r#"{{"commit":"{}"}}"#, "a".repeat(65))).unwrap();
+        assert_eq!(ose_commit(&launcher), None, "longer than 64");
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    /// SPEC FR-W4 acceptance step 6 (#83): a missing OSE says what to do, in the words the
+    /// release archive uses (`install-ose.sh`, the folder it is in) and where the binary is looked up.
+    #[test]
+    fn fr_w4_not_installed_names_the_install_step() {
+        let m = super::NOT_INSTALLED;
+        assert!(m.starts_with("OSE server binary is not installed"), "{m}");
+        for word in ["install-ose.sh", "ember-server", "~/.local/share", "EMBER_OSE_SERVER"] {
+            assert!(m.contains(word), "{word} missing from {m}");
+        }
+        assert!(!m.contains("  "), "line continuation left a double space: {m}");
+        let script = include_str!("../../server/scripts/install-ose.sh");
+        assert!(script.contains("/.local/share"), "install-ose.sh no longer unpacks into ~/.local/share");
+    }
+
     #[test]
     fn fr_w4_windows_strip_verbatim_prefix() {
         use super::strip_verbatim_prefix as s;
@@ -1197,63 +764,6 @@ mod tests {
     }
 
     use super::*;
-
-    /// FR-W4a (#896): a node keeps its OSE data under its state dir unless the owner names another.
-    #[test]
-    fn fr_w4a_node_data_root_is_the_override_or_under_the_state_dir() {
-        let state = Path::new("/home/u/.ember/node");
-        assert_eq!(node_data_root_from(None, Some(state)), Ok(PathBuf::from("/home/u/.ember/node/ose-data")));
-        assert_eq!(node_data_root_from(Some("/srv/ose".into()), Some(state)), Ok(PathBuf::from("/srv/ose/node")));
-        assert_eq!(node_data_root_from(Some("/srv/ose".into()), None), Ok(PathBuf::from("/srv/ose/node")));
-        assert_eq!(node_data_root_from(Some(PathBuf::new()), Some(state)), Ok(PathBuf::from("/home/u/.ember/node/ose-data")));
-        assert!(node_data_root_from(None, None).is_err());
-    }
-
-    /// FR-W4a (#896): a manager that is not enabled starts nothing and says the binary is missing.
-    #[test]
-    fn fr_w4a_disabled_manager_has_no_binary() {
-        let dir = tempfile::tempdir().unwrap();
-        let m = OseManager::disabled();
-        assert_eq!(m.launch_for(LOCAL_COMPUTER, dir.path()), Err(NOT_INSTALLED.to_string()));
-        assert_eq!(m.install_extension(LOCAL_COMPUTER, "a.b", None), Err(InstallError::NotInstalled));
-        assert!(m.data_root().is_err());
-        // No child can exist, so there is nothing to reap: no thread per `Node::new`.
-        assert!(m._reaper.is_none(), "a disabled manager started a reaper thread");
-        assert!(OseManager::with_data_root(None, dir.path().join("d"))._reaper.is_some());
-    }
-
-    /// FR-W4a (#896): a server and a node that share one `EMBER_OSE_DATA_DIR` keep their token
-    /// files in different directories, and the start-up sweep of one leaves the other's alone.
-    #[test]
-    fn fr_w4a_node_and_server_token_dirs_differ_under_one_override() {
-        let dir = tempfile::tempdir().unwrap();
-        let shared = dir.path().join("shared");
-        let server_root = data_root_from(Some(shared.clone()), None, None).unwrap();
-        let node_root = node_data_root_from(Some(shared.clone()), Some(Path::new("/state"))).unwrap();
-        assert_eq!(server_root, shared);
-        assert_eq!(node_root, shared.join("node"));
-        let server_tokens = server_root.join(LOCAL_COMPUTER).join("tokens");
-        let node_tokens = node_root.join(LOCAL_COMPUTER).join("tokens");
-        assert_ne!(server_tokens, node_tokens);
-
-        let server = OseManager::with_root(None, Ok(server_root));
-        let node = OseManager::with_root(None, Ok(node_root));
-        let folder = Path::new("/work/project");
-        let server_file = write_token_file(&server_tokens, folder, "server-token").unwrap();
-        let node_file = write_token_file(&node_tokens, folder, "node-token").unwrap();
-        assert_ne!(server_file.0, node_file.0, "the same folder must not share a token file");
-
-        // The server's sweep removes its own stale file and does not reach the node's.
-        assert_eq!(server.sweep_stale_tokens(), 1);
-        assert!(!server_file.0.exists());
-        assert_eq!(std::fs::read_to_string(&node_file.0).unwrap(), "node-token");
-
-        // The node's sweep removes only the node's.
-        let server_file = write_token_file(&server_tokens, folder, "server-token").unwrap();
-        assert_eq!(node.sweep_stale_tokens(), 1);
-        assert!(!node_file.0.exists());
-        assert_eq!(std::fs::read_to_string(&server_file.0).unwrap(), "server-token");
-    }
 
     #[test]
     fn fr_l31_24_only_a_network_share_makes_the_ose_poll() {

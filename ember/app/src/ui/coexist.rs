@@ -1,22 +1,13 @@
-//! Shared UI and live state for the `compose-rust` UI migration (#220, INTENT D9).
+//! Shared UI and live state for the `compose-rust` UI (#220, INTENT D9).
 //!
-//! Base screens move from `dioxus-compose` to `compose-rust` one PR at a time. The two toolkits
-//! run in separate windows (option C, decided after compose-rust FR-53), so they never share a
-//! runtime. What they share is state: [`SharedUi`] and [`SharedLive`] hold the route, prefs,
-//! theme and live revisions in `compose-rust` `MutableState`s outside either runtime.
-//!
-//! TRANSITIONAL: the Dioxus `SyncSignal` mirroring ([`DioxusMirrors`], [`use_shared_mirrors`])
-//! only keeps the still-Dioxus screens in step with the shared store. Delete it once every
-//! screen has moved (tracked in #226).
-
-use std::sync::{Arc, OnceLock};
+//! [`SharedUi`] and [`SharedLive`] hold the route, prefs, theme and live revisions in
+//! `compose-rust` `MutableState`s written from tokio worker threads and read by `compose-rust`
+//! composables.
 
 use compose_rust::runtime::{mutable_state_of, MutableState};
-use dioxus_compose::prelude::*;
 use ember_client::api::UsageSummary;
 use ember_client::wire::{DailyUsage, DetectedAgent};
 
-use crate::bridge::Live;
 use crate::model::{self, RowContext};
 use crate::prefs::Prefs;
 use crate::server::{Account, ChatGptAccount};
@@ -27,7 +18,7 @@ use crate::ui::theme::ThemePref;
 use crate::ui::{initial_menu, Route};
 
 // ---------------------------------------------------------------------------------------------
-// Shared live and UI state (`compose-rust` MutableState + Dioxus SyncSignal bridge)
+// Shared live and UI state (`compose-rust` MutableState)
 // ---------------------------------------------------------------------------------------------
 
 /// Live client and server state observed by `compose-rust` composables (#220).
@@ -45,6 +36,12 @@ pub struct SharedLive {
     pub outbox: MutableState<u64>,
     /// Any team (members, tasks: FR-T7).
     pub teams: MutableState<u64>,
+    /// A channel got a message, or push reconnected (PR-1, FR-L12, #1049): the channels screen
+    /// reads the open room after its last seq and the list's unread counts again.
+    pub channels: MutableState<u64>,
+    /// A schedule or a run changed, or push reconnected (PR-1, FR-L25, #1049): the routines
+    /// screen reads the schedules again.
+    pub schedules: MutableState<u64>,
     pub accounts: MutableState<Vec<Account>>,
     /// ChatGPT plan accounts (FR-U4); empty when sign-in is off.
     pub chatgpt: MutableState<Vec<ChatGptAccount>>,
@@ -80,6 +77,8 @@ impl SharedLive {
             transcripts: mutable_state_of(0),
             outbox: mutable_state_of(0),
             teams: mutable_state_of(0),
+            channels: mutable_state_of(0),
+            schedules: mutable_state_of(0),
             accounts: mutable_state_of(Vec::new()),
             chatgpt: mutable_state_of(Vec::new()),
             agents: mutable_state_of(Vec::new()),
@@ -103,26 +102,12 @@ impl SharedLive {
         Self::bump(&self.transcripts);
         Self::bump(&self.outbox);
         Self::bump(&self.teams);
+        Self::bump(&self.channels);
+        Self::bump(&self.schedules);
     }
 }
 
-/// TRANSITIONAL (delete with #226). Dioxus `SyncSignal` mirrors registered when a Dioxus `VirtualDom` mounts [`crate::ui::app`],
-/// so mutations made through [`SharedUi`] from a `compose-rust` composable immediately wake
-/// any mounted Dioxus screen as well.
-#[derive(Clone, Copy)]
-pub struct DioxusMirrors {
-    pub route: SyncSignal<Route>,
-    pub prefs: SyncSignal<Prefs>,
-    pub selected_project: SyncSignal<Option<String>>,
-    pub new_session: SyncSignal<Option<String>>,
-    pub show_archived: SyncSignal<bool>,
-    pub menu: SyncSignal<NavMenu>,
-    pub editor: SyncSignal<Option<EditorTarget>>,
-    pub theme_pref: SyncSignal<ThemePref>,
-}
-
-/// UI-wide navigation, preference and dialog state observed by `compose-rust` composables
-/// and synchronized with Dioxus [`crate::ui::Ui`] (#220).
+/// UI-wide navigation, preference and dialog state observed by `compose-rust` composables (#220).
 #[derive(Clone)]
 pub struct SharedUi {
     pub live: SharedLive,
@@ -158,7 +143,12 @@ pub struct SharedUi {
     pub owner_claim_dismissed: MutableState<Option<String>>,
     /// The update check (NFR-R2, #880), written by `self_update` from a worker.
     pub self_update: MutableState<crate::self_update::UpdateState>,
-    mirrors: Arc<OnceLock<DioxusMirrors>>,
+    /// `true` while the 루틴 screen's create or edit form is open and holds unsaved changes
+    /// (FR-L25, #596), so a shell navigation away from 루틴 asks the discard question first.
+    pub routine_form_dirty: MutableState<bool>,
+    /// A shell navigation (another menu or global search) intercepted while [`routine_form_dirty`]
+    /// is true; the 루틴 screen shows the discard confirmation sheet for it (FR-L25, #596).
+    pub routine_pending_leave: MutableState<Option<crate::ui::routines::Leave>>,
 }
 
 impl SharedUi {
@@ -182,21 +172,13 @@ impl SharedUi {
             owner_claim: mutable_state_of(Default::default()),
             owner_claim_dismissed: mutable_state_of(None),
             self_update: mutable_state_of(crate::self_update::UpdateState::NotInstalled),
-            mirrors: Arc::new(OnceLock::new()),
+            routine_form_dirty: mutable_state_of(false),
+            routine_pending_leave: mutable_state_of(None),
         }
     }
 
-    /// Register the Dioxus `SyncSignal` mirrors from the root Dioxus component.
-    pub fn register_mirrors(&self, mirrors: DioxusMirrors) {
-        let _ = self.mirrors.set(mirrors);
-    }
-
-    pub fn mirrors(&self) -> Option<DioxusMirrors> {
-        self.mirrors.get().copied()
-    }
-
     /// Navigate, opening/closing the conversation in the client as the route enters/leaves it
-    /// (FR-S6, FR-L2), and keeping both `MutableState`s and Dioxus signals in step.
+    /// (FR-S6, FR-L2).
     pub fn go(&self, to: Route) {
         let from = self.route.get_untracked();
         if from == to {
@@ -221,10 +203,7 @@ impl SharedUi {
             Route::Conversation(_) => NavMenu::Sessions,
         };
         self.set_menu(next_menu);
-        self.route.set(to.clone());
-        if let Some(mut m) = self.mirrors() {
-            m.route.set(to);
-        }
+        self.route.set(to);
     }
 
     pub fn open_conversation(&self, id: &str) {
@@ -234,33 +213,21 @@ impl SharedUi {
     pub fn set_menu(&self, menu: NavMenu) {
         let prev = self.menu.get_untracked();
         self.menu.set(menu);
-        if let Some(mut m) = self.mirrors() {
-            m.menu.set(menu);
-        }
         if menu == NavMenu::Home && prev != NavMenu::Home && try_services().is_some() {
             crate::bridge::request_github_summary();
         }
     }
 
     pub fn set_selected_project(&self, project: Option<String>) {
-        self.selected_project.set(project.clone());
-        if let Some(mut m) = self.mirrors() {
-            m.selected_project.set(project);
-        }
+        self.selected_project.set(project);
     }
 
     pub fn set_show_archived(&self, show: bool) {
         self.show_archived.set(show);
-        if let Some(mut m) = self.mirrors() {
-            m.show_archived.set(show);
-        }
     }
 
     pub fn set_theme_pref(&self, pref: ThemePref) {
         self.theme_pref.set(pref);
-        if let Some(mut m) = self.mirrors() {
-            m.theme_pref.set(pref);
-        }
         self.update_prefs(|p| p.theme = pref);
     }
 
@@ -269,9 +236,6 @@ impl SharedUi {
         let mut snapshot = self.prefs.get_untracked();
         f(&mut snapshot);
         self.prefs.set(snapshot.clone());
-        if let Some(mut m) = self.mirrors() {
-            m.prefs.set(snapshot.clone());
-        }
         if try_services().is_some() {
             save_prefs(snapshot);
         }
@@ -280,39 +244,44 @@ impl SharedUi {
     /// Open the Ember 에디터 for a project in its own window (FR-L7, FR-L31).
     /// TODO(dioxus-compose#161): open the editor window in the same process instead of spawning
     /// `--editor <project> <folder>`. The `Window` element (dioxus-compose#152) is in the pin; the
-    /// shell is a Compose root and the editor an HTML page, and an HTML view inside a Compose root
-    /// aborts the real renderer (#161).
+    /// shell is a Compose root and the editor an HTML page, and a Compose root does not yet deliver
+    /// events to the editor's `WidgetView`s inside an `HtmlView` (#161; see `open_window` in lib.rs).
     pub fn open_editor(&self, project: String, folder: String) {
-        self.open_editor_connection(project, folder, None, None, None, None, None);
+        self.open_editor_connection(crate::server::EditorConnection { project, folder, ..Default::default() });
     }
 
-    /// Open an editor with the remote connection when one is available.
-    #[allow(clippy::too_many_arguments)]
-    pub fn open_editor_connection(
-        &self,
-        project: String,
-        folder: String,
-        endpoint: Option<String>,
-        token: Option<String>,
-        server_url: Option<String>,
-        computer: Option<String>,
-        relay: Option<String>,
-    ) {
-        let target = EditorTarget {
-            project: project.clone(),
-            folder: folder.clone(),
-            endpoint: endpoint.unwrap_or_default(),
-            token: token.unwrap_or_default(),
-            server_url: server_url.unwrap_or_default(),
-            computer: computer.unwrap_or_default(),
-            relay: relay.unwrap_or_default(),
+    /// Open an editor with the remote connection when one is available: the relay route, the
+    /// DarkPyonix manager's path and ticket (FR-W4c (1), INTENT D55), or the demo's endpoint.
+    pub fn open_editor_connection(&self, c: crate::server::EditorConnection) {
+        // The VS Code target travels as its relay launch (route, manager's path and ticket, and
+        // folder; the server is the editor's own), an old server's URL, or the session whose
+        // launch the button asks for (SPEC FR-E10, FR-W4c (1c)).
+        let mut target = EditorTarget {
+            project: c.project.clone(),
+            folder: c.folder.clone(),
+            endpoint: c.endpoint.unwrap_or_default(),
+            ose_path: c.ose_path.unwrap_or_default(),
+            ticket: c.ticket.unwrap_or_default(),
+            server_url: c.server_url.unwrap_or_default(),
+            computer: c.computer.unwrap_or_default(),
+            relay: c.relay.unwrap_or_default(),
+            ..Default::default()
         };
+        match c.vscode {
+            Some(crate::ide::VsCodeFallback::Relay(r)) => {
+                target.vscode_relay = r.relay;
+                target.vscode_path = r.path;
+                target.vscode_ticket = r.ticket;
+                target.vscode_folder = r.folder;
+            }
+            Some(crate::ide::VsCodeFallback::Url(u)) => target.vscode_url = u,
+            Some(crate::ide::VsCodeFallback::Start { session }) => target.vscode_session = session,
+            None => {}
+        }
+        let (project, folder) = (c.project, c.folder);
         #[cfg(not(test))]
         let spawn_target = target.clone();
-        self.editor.set(Some(target.clone()));
-        if let Some(mut mirrors) = self.mirrors() {
-            mirrors.editor.set(Some(target));
-        }
+        self.editor.set(Some(target));
         if crate::services::try_services().is_some() {
             #[cfg(not(test))]
             let notice = crate::ide::spawn_editor_notice(&project, &folder, move |_, _| {
@@ -339,10 +308,7 @@ impl SharedUi {
             folder: folder.clone(),
             ..Default::default()
         });
-        self.editor.set(target.clone());
-        if let Some(mut m) = self.mirrors() {
-            m.editor.set(target);
-        }
+        self.editor.set(target);
         if crate::services::try_services().is_some() {
             let notice = crate::ide::spawn_editor_notice(&project, &folder, spawner);
             crate::ui::cr::notice::post(notice.clone());
@@ -363,9 +329,6 @@ impl SharedUi {
     pub fn close_editor_with(&self, on_exit_standalone: impl FnOnce()) {
         let standalone = self.standalone_editor.get_untracked();
         self.editor.set(None);
-        if let Some(mut m) = self.mirrors() {
-            m.editor.set(None);
-        }
         if standalone {
             on_exit_standalone();
         }
@@ -380,18 +343,11 @@ impl SharedUi {
     }
 
     pub fn open_new_session(&self, project: Option<String>) {
-        let val = Some(project.unwrap_or_default());
-        self.new_session.set(val.clone());
-        if let Some(mut m) = self.mirrors() {
-            m.new_session.set(val);
-        }
+        self.new_session.set(Some(project.unwrap_or_default()));
     }
 
     pub fn close_new_session(&self) {
         self.new_session.set(None);
-        if let Some(mut m) = self.mirrors() {
-            m.new_session.set(None);
-        }
     }
 
     /// Read the live data a session row needs (subscribing the calling composable to it,
@@ -421,34 +377,6 @@ pub fn shared_ui() -> &'static SharedUi {
     &services().ui
 }
 
-/// Synchronize Dioxus signals into [`SharedUi`] and wire [`Live`] when [`crate::ui::app`] runs.
-pub fn use_shared_mirrors(
-    live: Live,
-    route: SyncSignal<Route>,
-    prefs: SyncSignal<Prefs>,
-    selected_project: SyncSignal<Option<String>>,
-    new_session: SyncSignal<Option<String>>,
-    show_archived: SyncSignal<bool>,
-    menu: SyncSignal<NavMenu>,
-    editor: SyncSignal<Option<EditorTarget>>,
-    theme_pref: SyncSignal<ThemePref>,
-) {
-    use_hook(move || {
-        let Some(s) = try_services() else { return };
-        s.ui.register_mirrors(DioxusMirrors {
-            route,
-            prefs,
-            selected_project,
-            new_session,
-            show_archived,
-            menu,
-            editor,
-            theme_pref,
-        });
-        let _ = live;
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -460,20 +388,32 @@ mod tests {
     #[test]
     fn editor_connection_is_retained_in_target() {
         let ui = SharedUi::new(Prefs::default());
-        ui.open_editor_connection(
-            "project".into(),
-            "/work".into(),
-            Some("localhost:8000".into()),
-            Some("secret".into()),
-            Some("http://srv:1".into()),
-            Some("node-a".into()),
-            Some("/api/computers/node-a/ide/relay/l1".into()),
-        );
+        ui.open_editor_connection(crate::server::EditorConnection {
+            project: "project".into(),
+            folder: "/work".into(),
+            endpoint: None,
+            ose_path: Some("/ide/ose/".into()),
+            ticket: Some("secret".into()),
+            server_url: Some("http://srv:1".into()),
+            computer: Some("node-a".into()),
+            relay: Some("/api/computers/node-a/ide/relay/l1".into()),
+            vscode: Some(crate::ide::VsCodeFallback::Relay(crate::ide::IdeRelay {
+                relay: "/api/computers/node-a/ide/relay/v1".into(),
+                path: "/ide/ose/".into(),
+                ticket: "tk-v1".into(),
+                folder: "/work".into(),
+                server_url: "http://srv:1".into(),
+            })),
+        });
         let target = ui.editor.get_untracked().unwrap();
+        assert_eq!(target.vscode_relay, "/api/computers/node-a/ide/relay/v1");
+        assert_eq!(target.vscode_folder, "/work");
+        assert_eq!(target.vscode_url, "");
         assert_eq!(target.relay, "/api/computers/node-a/ide/relay/l1");
         assert_eq!((target.server_url.as_str(), target.computer.as_str()), ("http://srv:1", "node-a"));
-        assert_eq!(target.endpoint, "localhost:8000");
-        assert_eq!(target.token, "secret");
+        assert_eq!((target.vscode_path.as_str(), target.vscode_ticket.as_str()), ("/ide/ose/", "tk-v1"));
+        assert_eq!(target.endpoint, "");
+        assert_eq!((target.ose_path.as_str(), target.ticket.as_str()), ("/ide/ose/", "secret"));
     }
 
     #[test]
@@ -571,7 +511,7 @@ mod tests {
             let launcher = launcher.clone();
             Box::new(Recomposer::new(move || {
                 let rev = launcher.get();
-                cu::Text(format!("rev:{rev}"));
+                { use ::compose_rust::ui::Text; Text!(format!("rev:{rev}")) };
             }))
         });
 

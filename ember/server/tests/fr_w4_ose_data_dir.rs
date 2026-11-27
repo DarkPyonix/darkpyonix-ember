@@ -165,7 +165,6 @@ fn fr_w4_ose_data_dir_a_computer_id_cannot_escape_the_root() {
     let m = OseManager::with_data_root(None, dir.path().join("root"));
     for bad in ["..", "../x", "a/../b", "", "/etc", "x/y"] {
         assert!(m.computer_data_dir(bad).is_err(), "{bad:?}");
-        assert!(m.connection_for(bad, dir.path()).is_err());
     }
     assert!(!dir.path().join("x").exists());
     let ok = m.computer_data_dir("local").unwrap();
@@ -189,7 +188,7 @@ fn fr_w4_ose_data_dir_root_resolution() {
 }
 
 #[test]
-fn fr_w4_ose_data_dir_an_unresolved_root_fails_install_and_start() {
+fn fr_w4_ose_data_dir_an_unresolved_root_fails_install() {
     // The explicit-root API: the manager built from an unresolvable environment is modelled by
     // data_root_from's error; computer_data_dir on a manager whose root is a file also fails.
     let dir = tempfile::tempdir().unwrap();
@@ -269,39 +268,104 @@ fn fr_w4_ose_data_dir_a_timeout_kills_the_whole_process_group() {
     assert!(!alive, "grandchild {pid} survived the timeout");
 }
 
+/// The red run leaves subprocesses behind. Clean them even if an assertion panics.
+struct RunningFixture(PathBuf);
+
+impl RunningFixture {
+    fn pids(&self) -> Vec<libc::pid_t> {
+        std::fs::read_to_string(&self.0)
+            .unwrap_or_default()
+            .split_whitespace()
+            .filter_map(|pid| pid.parse().ok().filter(|pid| *pid > 0))
+            .collect()
+    }
+}
+
+impl Drop for RunningFixture {
+    fn drop(&mut self) {
+        for pid in self.pids() {
+            // SAFETY: these are positive process ids recorded by the fixture.
+            unsafe { libc::kill(pid, libc::SIGKILL); }
+        }
+    }
+}
+
 #[tokio::test]
-async fn fr_w4_ose_data_dir_start_passes_server_data_dir() {
+async fn fr_w4_ose_shutdown_cancels_an_active_install_and_its_descendant() {
     let dir = tempfile::tempdir().unwrap();
-    let bin = dir.path().join("fake-ose");
-    common::write_exec_ready(
-        &bin,
-        r##"#!/bin/sh
-printf '%s\n' "$@" > "$(dirname "$0")/start-argv.txt"
-env > "$(dirname "$0")/start-env.txt"
-exec python3 -c 'import socket,sys; p=int(sys.argv[sys.argv.index("--port")+1]); s=socket.socket(); s.bind(("127.0.0.1",p)); s.listen();
-while True: s.accept()[0].close()' "$@"
-"##,
-    );
-    let root = dir.path().join("ose-data");
-    let folder = dir.path().join("proj");
-    std::fs::create_dir(&folder).unwrap();
-    let m = OseManager::with_data_root(Some(bin), root.clone());
-    let m = tokio::task::spawn_blocking(move || {
-        m.connection(&folder).unwrap();
-        m
-    })
-    .await
-    .unwrap();
-    let v: Vec<String> =
-        std::fs::read_to_string(dir.path().join("start-argv.txt")).unwrap().lines().map(String::from).collect();
-    assert_eq!(arg_after(&v, "--server-data-dir"), root.join("local").to_str().unwrap());
-    assert!(v.contains(&"--connection-token-file".to_string()));
-    assert!(!v.contains(&"--connection-token".to_string()));
-    let env = std::fs::read_to_string(dir.path().join("start-env.txt")).unwrap();
-    assert!(!env.contains("CARGO_MANIFEST_DIR"), "the server environment leaked into the OSE start:\n{env}");
-    assert!(env.lines().any(|l| l.starts_with("PATH=")), "{env}");
-    assert_eq!(mode(&root.join("local")), 0o700);
-    drop(m);
+    let install = RunningFixture(dir.path().join("install-pids"));
+    let binary = fake(dir.path(), r#"sleep 60 & printf '%s %s\n' "$$" "$!" > "$(dirname "$0")/install-pids"; wait"#);
+    let data = dir.path().join("server-data");
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+    let base = format!("http://{port}");
+    let mut server = tokio::process::Command::new(env!("CARGO_BIN_EXE_ember-server"))
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap())
+        .env("HOME", dir.path())
+        .env("EMBER_DATA_DIR", &data)
+        .env("EMBER_LISTEN", port.to_string())
+        .env("EMBER_TRANSPORT", "0")
+        .env("EMBER_OWNER_PRESENCE", "warn")
+        .env("EMBER_OSE_SERVER", &binary)
+        .env("EMBER_OSE_DATA_DIR", dir.path().join("ose-data"))
+        .kill_on_drop(true)
+        .spawn().unwrap();
+    let http = reqwest::Client::builder().no_proxy().build().unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if http.get(format!("{base}/api/health")).send().await.is_ok_and(|r| r.status().is_success()) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await.expect("server did not become ready");
+    let token = std::fs::read_to_string(data.join("server-token")).unwrap();
+    let request = tokio::spawn(async move {
+        http.post(format!("{base}/api/computers/local/ide/extensions"))
+            .bearer_auth(token.trim())
+            .header("content-type", "application/json")
+            .body(r#"{"id":"a.b"}"#)
+            .send().await
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while install.pids().len() < 2 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await.expect("install fixture did not start");
+
+    // SAFETY: this is the live, positive process id of the test server.
+    assert_eq!(unsafe { libc::kill(server.id().unwrap() as libc::pid_t, libc::SIGINT) }, 0);
+    let status = tokio::time::timeout(Duration::from_secs(5), server.wait())
+        .await.expect("server waited for the full install timeout").unwrap();
+    assert!(status.success(), "server status {status}");
+    let response = request.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert!(response.text().await.unwrap().contains("shutting down"));
+    wait_for_fixture_exit(&install);
+}
+
+fn wait_for_fixture_exit(fixture: &RunningFixture) {
+    for pid in fixture.pids() {
+        let end = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            // SAFETY: signal zero only checks whether the positive fixture pid is present.
+            if unsafe { libc::kill(pid, 0) } != 0
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            {
+                break;
+            }
+            #[cfg(target_os = "linux")]
+            if std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .ok().and_then(|stat| stat.rsplit_once(") ").map(|(_, rest)| rest.starts_with("Z ")))
+                .unwrap_or(false)
+            {
+                // The signal already stopped the process. PID 1 may not have reaped it yet.
+                break;
+            }
+            assert!(std::time::Instant::now() < end, "process {pid} survived OSE cleanup");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
 }
 
 #[tokio::test]
@@ -396,87 +460,3 @@ async fn fr_w4_ose_data_dir_a_second_concurrent_install_is_409() {
     assert_ne!(st, StatusCode::CONFLICT);
 }
 
-/// FR-W4 (#461): the connection token is passed as a 0600 file, never on the command line.
-#[tokio::test]
-async fn fr_w4_ose_token_file_keeps_the_token_out_of_argv() {
-    let dir = tempfile::tempdir().unwrap();
-    let bin = dir.path().join("fake-ose");
-    common::write_exec_ready(
-        &bin,
-        r##"#!/bin/sh
-D="$(dirname "$0")"
-printf '%s\n' "$@" > "$D/start-argv.txt"
-exec python3 -c 'import socket,sys,os
-d=sys.argv[1]; a=sys.argv[2:]
-f=a[a.index("--connection-token-file")+1]
-open(d+"/start-token.txt","w").write(open(f).read())
-open(d+"/start-mode.txt","w").write("%o %o" % (os.stat(f).st_mode & 0o777, os.stat(os.path.dirname(f)).st_mode & 0o777))
-p=int(a[a.index("--port")+1]); s=socket.socket(); s.bind(("127.0.0.1",p)); s.listen()
-while True: s.accept()[0].close()' "$D" "$@"
-"##,
-    );
-    let root = dir.path().join("ose-data");
-    let folder = dir.path().join("proj");
-    std::fs::create_dir(&folder).unwrap();
-    let m = OseManager::with_data_root(Some(bin), root.clone());
-    let (m, first, second) = tokio::task::spawn_blocking(move || {
-        let first = m.connection(&folder).unwrap();
-        let second = m.connection(&folder).unwrap();
-        (m, first, second)
-    })
-    .await
-    .unwrap();
-    let v: Vec<String> =
-        std::fs::read_to_string(dir.path().join("start-argv.txt")).unwrap().lines().map(String::from).collect();
-    let file = PathBuf::from(arg_after(&v, "--connection-token-file"));
-    assert!(file.starts_with(root.join("local").join("tokens")), "{file:?}");
-    assert!(!v.iter().any(|a| a == "--connection-token"), "{v:?}");
-    let real_token = std::fs::read_to_string(dir.path().join("start-token.txt")).unwrap();
-    assert_eq!(real_token.len(), 64);
-    assert!(!v.iter().any(|a| a.contains(&real_token)), "real token in argv: {v:?}");
-    assert!(!v.iter().any(|a| a.contains(&first.connection_token)), "placeholder token in argv: {v:?}");
-    assert_eq!(first.connection_token.len(), 64);
-    assert_ne!(
-        first.connection_token, real_token,
-        "C2 (#458, #461): the returned connection_token is a placeholder, never the real token"
-    );
-    assert!(
-        first.relay.as_deref().unwrap_or("").starts_with("/api/computers/local/ide/relay/"),
-        "relay missing: {:?}",
-        first.relay
-    );
-    assert_eq!(std::fs::read_to_string(dir.path().join("start-mode.txt")).unwrap(), "600 700");
-    assert_eq!(mode(&file), 0o600);
-    assert_eq!(mode(&root.join("local").join("tokens")), 0o700);
-    assert_eq!(second.connection_token, first.connection_token, "the running process is reused");
-    assert_eq!(second.relay, first.relay);
-    assert_eq!(second.endpoint, first.endpoint);
-    drop(m);
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while file.exists() && std::time::Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    assert!(!file.exists(), "the token file must be removed when the manager is dropped");
-}
-
-/// A stale file at the token path is replaced, and nothing is left when the start fails.
-#[tokio::test]
-async fn fr_w4_ose_token_file_replaces_a_stale_file_and_is_removed_when_the_start_fails() {
-    use sha2::{Digest, Sha256};
-    let dir = tempfile::tempdir().unwrap();
-    let bin = dir.path().join("fake-ose");
-    common::write_exec_ready(&bin, "#!/bin/sh\nexit 3\n");
-    let root = dir.path().join("ose-data");
-    let folder = dir.path().join("proj");
-    std::fs::create_dir(&folder).unwrap();
-    let canonical = folder.canonicalize().unwrap();
-    let hex: String = Sha256::digest(canonical.as_os_str().as_encoded_bytes()).iter().take(8).map(|b| format!("{b:02x}")).collect();
-    let tokens = root.join("local").join("tokens");
-    std::fs::create_dir_all(&tokens).unwrap();
-    let stale = tokens.join(format!("{hex}.token"));
-    std::fs::write(&stale, "old").unwrap();
-    let m = OseManager::with_data_root(Some(bin), root.clone());
-    let err = tokio::task::spawn_blocking(move || m.connection(&folder).unwrap_err()).await.unwrap();
-    assert!(err.contains("exited") || err.contains("start"), "{err}");
-    assert!(!stale.exists(), "the file of a failed start is removed");
-}

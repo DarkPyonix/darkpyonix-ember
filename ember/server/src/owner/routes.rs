@@ -115,6 +115,8 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("GET", "/api/computers/{computer}/ide/relay/{launch_id}", Token),
     ("DELETE", "/api/computers/{id}", Owner),
     ("GET", "/api/computers/{id}", Token),
+    ("GET", "/api/computers/{id}/editor/settings", Token),
+    ("PUT", "/api/computers/{id}/editor/settings", Owner),
     ("POST", "/api/computers/{id}/fs/{op}", Token),
     ("POST", "/api/computers/{id}/fs/mkdir", Token),
     ("POST", "/api/computers/{id}/fs/pwrite", Token),
@@ -150,6 +152,8 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("POST", "/api/devices", Owner),
     ("DELETE", "/api/devices/{peer}", Owner),
     ("PATCH", "/api/devices/{peer}", Owner),
+    ("GET", "/api/editor/settings", Token),
+    ("PUT", "/api/editor/settings", Owner),
     ("GET", "/api/guest-door", Token),
     ("POST", "/api/guest/accept", OtherDoor),
     ("GET", "/api/guest/channels/{id}", OtherDoor),
@@ -213,6 +217,7 @@ pub const ROUTES: &[(&str, &str, RouteClass)] = &[
     ("GET", "/api/sessions/{id}/export", Token),
     ("POST", "/api/sessions/{id}/fork", Token),
     ("GET", "/api/sessions/{id}/ide", Token),
+    ("POST", "/api/sessions/{id}/ide/vscode", Token),
     ("POST", "/api/sessions/{id}/interrupt", Token),
     ("POST", "/api/sessions/{id}/lease", Token),
     ("GET", "/api/sessions/{id}/mentions", Token),
@@ -308,6 +313,15 @@ mod tests {
         assert!(owner_route(&Method::DELETE, "/api/computers/c1"));
         assert!(owner_route(&Method::POST, "/api/computers/enrol-codes"));
         assert!(owner_route(&Method::PUT, "/api/agents/codex/settings"));
+    }
+
+    /// FR-W7, FR-W7a (D56): changing the editor settings is an owner route, reading them is not.
+    #[test]
+    fn fr_w7_editor_settings_put_is_an_owner_route() {
+        assert!(owner_route(&Method::PUT, "/api/editor/settings"));
+        assert!(owner_route(&Method::PUT, "/api/computers/c1/editor/settings"));
+        assert!(!owner_route(&Method::GET, "/api/editor/settings"));
+        assert!(!owner_route(&Method::GET, "/api/computers/c1/editor/settings"));
     }
 
     #[test]

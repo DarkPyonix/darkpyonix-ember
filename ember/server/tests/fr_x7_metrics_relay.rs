@@ -54,10 +54,52 @@ async fn fr_x7_metrics_relay_returns_the_node_sample_and_errors_map() {
         let s: MetricsSample = r.json().await.unwrap();
         assert!(!s.cpu.cores.is_empty());
         assert!(s.processes.len() <= 4);
-        assert!(s.gpu.devices.is_empty() && s.gpu.reason.is_some());
+        assert_eq!(s.gpu.devices.is_empty(), s.gpu.reason.is_some());
 
         let r = c.get(format!("{base}/api/computers/nope/metrics")).send().await.unwrap();
         assert_eq!(r.status(), 404);
+    })
+    .await;
+}
+
+/// #981: the local computer (`local`) answers from the server's in-process node, not 400, and
+/// carries the pids of the agents this server started (#389).
+#[tokio::test]
+async fn fr_x7_metrics_relay_answers_for_the_local_computer_from_the_in_process_node() {
+    within(async {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let computers = Computers::new(Registry::new(store), computers::default_connector());
+        let app = computers::metrics::router(computers);
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+
+        // This test process stands in for an agent of session `fr-x7-local`.
+        ember_server::agents::proc::note_agent_pid("fr-x7-local", std::process::id());
+
+        let r = reqwest::get(format!("{base}/api/computers/{}/metrics?top=3", computers::LOCAL)).await.unwrap();
+        assert_eq!(r.status(), 200);
+        let s: MetricsSample = r.json().await.unwrap();
+        assert!(!s.cpu.cores.is_empty());
+        assert!(s.processes.len() <= 3);
+        assert!(
+            s.sessions.iter().any(|p| p.session == "fr-x7-local" && p.pid == std::process::id()),
+            "{:?}",
+            s.sessions
+        );
+        // Power is never invented. Off macOS there is no per-process energy API: empty with the
+        // reason. On macOS (`proc_pid_rusage`, 2ac55109) a value is reported from the second sample
+        // on, and each one is finite and not negative; no reason is given only when power is
+        // reported (or the top list left out the processes that have it), as the node test
+        // `fr_x7_sample_reports_chip_and_os_and_never_invents_power` checks.
+        if cfg!(target_os = "macos") {
+            assert!(s.processes.iter().all(|p| p.power_watts.is_none_or(|w| w.is_finite() && w >= 0.0)), "{:?}", s.processes);
+            let any = s.processes.iter().any(|p| p.power_watts.is_some());
+            assert!(s.power_reason.is_some() || any || s.process_count > 3, "no reason only when power is reported");
+        } else {
+            assert!(s.processes.iter().all(|p| p.power_watts.is_none()));
+            assert!(s.power_reason.is_some());
+        }
     })
     .await;
 }

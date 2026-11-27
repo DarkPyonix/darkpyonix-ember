@@ -109,6 +109,19 @@ fn language_updates(effects: &[Effect]) -> Vec<&LanguageUpdate> {
         .collect()
 }
 
+/// The `InsertSnippet` commands for the widget, in the order sent: (base version, range, snippet).
+fn widget_snippets(effects: &[Effect]) -> Vec<(u32, WidgetRange, String)> {
+    effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Ui(SessionUpdate::Command { command: WidgetCommand::InsertSnippet { base_version, range, snippet }, .. }) => {
+                Some((*base_version, *range, snippet.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// The `EditCode` commands for the widget, in the order sent: (base version, range, text).
 fn widget_edits(effects: &[Effect]) -> Vec<(u32, WidgetRange, String)> {
     effects
@@ -182,9 +195,10 @@ fn fr_l31_13_completion_asks_lists_resolves_inserts_and_releases() {
 
     let resolved = json!({"a": "beta", "h": "changed", "l": [{"range": irange(1, 1, 1, 1), "text": "import beta\n"}], "o": "ext.afterInsert", "p": [1]});
     let fx = reply(&mut core, now, token, resolved);
-    // The snippet as plain text over the typed word (the insert text first given, not the resolved
-    // one), then the additional edit; both against the version the list was made for.
-    assert_eq!(widget_edits(&fx), vec![(0, range(0, 0, 0, 2), "beta()".to_string()), (0, range(0, 0, 0, 0), "import beta\n".to_string())]);
+    // The snippet is handed raw to the widget's snippet session (the insert text first given, not
+    // the resolved one), and the additional edit goes as EditCode; both against the list's version.
+    assert_eq!(widget_snippets(&fx), vec![(0, range(0, 0, 0, 2), "beta($1)".to_string())]);
+    assert_eq!(widget_edits(&fx), vec![(0, range(0, 0, 0, 0), "import beta\n".to_string())]);
     let (_, c) = calls(&fx, "$releaseCompletionItems")[0];
     assert_eq!((arg(c, 0), arg(c, 1)), (json!(5), json!(11)));
     assert!(language_updates(&fx).iter().any(|u| matches!(u, LanguageUpdate::CompletionApplied { .. })));
@@ -404,7 +418,7 @@ fn fr_l31_13_rename_edits_the_open_document_and_writes_the_files_that_are_not_op
     let (bytes, write) = fx
         .iter()
         .find_map(|e| match e {
-            Effect::WriteFile { uri: u, bytes, token } if u.path == other => Some((bytes.clone(), *token)),
+            Effect::WriteFile { uri: u, bytes, token, .. } if u.path == other => Some((bytes.clone(), *token)),
             _ => None,
         })
         .expect("a write of the other file");

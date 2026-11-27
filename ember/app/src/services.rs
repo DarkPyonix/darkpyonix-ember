@@ -38,8 +38,6 @@ pub struct Services {
     pub initial_prefs: crate::prefs::Prefs,
     /// Shared UI and live state for `compose-rust` composables (#220).
     pub ui: crate::ui::coexist::SharedUi,
-    /// The UI's sync signals, set when the root component mounts (see [`crate::bridge`]).
-    pub live: OnceLock<crate::bridge::Live>,
 }
 
 static SERVICES: OnceLock<Services> = OnceLock::new();
@@ -261,51 +259,25 @@ impl Services {
         };
         d.reset(&self.client, crate::demo::now_ms());
         crate::ui::cr::routines::clear_local_store();
+        self.ui.routine_form_dirty.set(false);
+        self.ui.routine_pending_leave.set(None);
         *self.outbox.lock().unwrap() = Outbox::default();
         self.ui.update_prefs(|p| {
             p.panes.clear();
         });
         self.ui.live.bump_all();
-        if let Some(live) = self.live.get() {
-            let mut l = live.launcher;
-            *l.write() += 1;
-            let mut t = live.transcripts;
-            *t.write() += 1;
-            let mut o = live.outbox;
-            *o.write() += 1;
-        }
         true
     }
 
     /// Tell the UI the outbox changed (queued-message indicator).
     pub fn bump_outbox(&self) {
         crate::ui::coexist::SharedLive::bump(&self.ui.live.outbox);
-        if let Some(live) = self.live.get() {
-            let mut sig = live.outbox;
-            *sig.write() += 1;
-        }
     }
 }
 
-/// Run `work` on the runtime, then `then` with its result on the UI thread. Call from a
-/// component or an event handler (it uses the current Dioxus scope to own the UI task).
-pub fn run<T, F>(work: F, then: impl FnOnce(T) + 'static)
-where
-    T: Send + 'static,
-    F: Future<Output = T> + Send + 'static,
-{
-    let handle = services().rt.spawn(work);
-    dioxus_core::spawn(async move {
-        match handle.await {
-            Ok(v) => then(v),
-            Err(e) => show_message(format!("Background task failed: {e}")),
-        }
-    });
-}
-
-/// Like [`run`], for `compose-rust` composables and handlers that do not sit inside a Dioxus
-/// scope (#220). `then` runs on the tokio worker and may write [`compose_rust::MutableState`]s
-/// or [`crate::ui::coexist::SharedUi`] fields, which automatically request a frame.
+/// Run `work` on the runtime, then `then` with its result on the tokio worker (#220).
+/// `then` may write [`compose_rust::MutableState`]s or [`crate::ui::coexist::SharedUi`] fields,
+/// which automatically request a frame.
 pub fn run_shared<T, F>(work: F, then: impl FnOnce(T) + Send + 'static)
 where
     T: Send + 'static,
@@ -369,7 +341,6 @@ pub fn test_services() -> &'static Services {
             outbox: Arc::new(Mutex::new(crate::model::Outbox::default())),
             ui: crate::ui::coexist::SharedUi::new(initial_prefs.clone()),
             initial_prefs,
-            live: OnceLock::new(),
         });
     });
     services()

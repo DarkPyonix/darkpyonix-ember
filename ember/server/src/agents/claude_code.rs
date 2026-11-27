@@ -280,9 +280,13 @@ fn mcp_timeout_env(req: &StartRequest) -> Option<(String, String)> {
     Some(("MCP_TIMEOUT".into(), (u64::from(secs) * 1000).to_string()))
 }
 
-/// The `--mcp-config` JSON for `servers` (`{"mcpServers": {name: {type, command, args, env?}}}`),
-/// or `None` when there are none. With `env` it may hold secrets: write it to a
-/// [`PrivateConfigFile`], never onto the command line.
+/// The `--mcp-config` JSON for `servers` (`{"mcpServers": {name: {type, command, args, env?,
+/// alwaysLoad?}}}`), or `None` when there are none. With `env` it may hold secrets: write it to a
+/// [`PrivateConfigFile`], never onto the command line. `alwaysLoad: true` (FR-T2, #1045) keeps the
+/// server's tools in the prompt instead of behind tool search; the field is in the stdio entry's
+/// schema of the claude 2.1.332 binary ("When true, all tools from this server are always included
+/// in the prompt and never deferred behind tool search"). It is written only when set, so every
+/// other server's entry is unchanged.
 pub fn mcp_config(servers: &[super::McpServer]) -> Option<String> {
     if servers.is_empty() {
         return None;
@@ -296,6 +300,9 @@ pub fn mcp_config(servers: &[super::McpServer]) -> Option<String> {
                 let env: serde_json::Map<String, Value> =
                     s.env.iter().map(|(k, v)| (k.clone(), Value::String(v.clone()))).collect();
                 server["env"] = Value::Object(env);
+            }
+            if s.always_load {
+                server["alwaysLoad"] = Value::Bool(true);
             }
             (s.name.clone(), server)
         })
@@ -1490,6 +1497,7 @@ mod tests {
                 command: "/usr/local/bin/npx".into(),
                 args: vec!["-y".into(), "chrome-devtools-mcp@latest".into(), "--wsEndpoint=ws://x/cdp".into()],
                 startup_timeout_secs: Some(60),
+                always_load: false,
                 env: Vec::new(),
             }],
             ..Default::default()
@@ -1514,6 +1522,7 @@ mod tests {
                 command: "/usr/local/bin/gh-mcp".into(),
                 args: vec!["--stdio".into()],
                 startup_timeout_secs: None,
+                always_load: false,
                 env: vec![("GITHUB_TOKEN".into(), "ghp_SECRET123".into())],
             }],
             ..Default::default()
@@ -1568,6 +1577,7 @@ mod tests {
             command: "/bin/ember-a2a".into(),
             args: vec!["mcp".into()],
             startup_timeout_secs: Some(10),
+            always_load: false,
             env: Vec::new(),
         }];
         let args = ClaudeCodeAdapter::args(&req);

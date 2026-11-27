@@ -2,8 +2,8 @@
 //! their pickers. Pure parts only, no renderer.
 
 use ember_app::ui::editor_status::{
-    encoding_text, initial_selection, list_window, more_above_text, overflow_rows, resolve_selection, FOLLOW_CURRENT,
-    PICKER_VISIBLE_ROWS, is_picker, picker_items, reopen_failure_text, reopen_needs_confirmation, status_texts,
+    encoding_text, initial_selection, resolve_selection, FOLLOW_CURRENT,
+    is_picker, picker_items, reopen_failure_text, reopen_needs_confirmation, status_texts,
     StatusTexts, AUTO_DETECT, CANCEL, DISCARD_AND_REOPEN, REOPEN_WITH_ENCODING, SAVE_WITH_ENCODING, UNKNOWN,
 };
 use ember_app::ui::palette::{lists_files, placeholder, rank, search_label, Mode, Payload};
@@ -126,10 +126,9 @@ fn fr_l31_7_reopen_failure_says_why_in_korean() {
     assert!(t.starts_with("a.txt을(를) 다시 열지 못했습니다: 파일이 없습니다"), "{t}");
 }
 
-// The picker opens on the current language even far down a long list: it is selected, tagged 현재 and
-// readable inside the rows that fit (the "위에 N개" row counts, one row of context stays below).
+// The picker selects and tags the current language even far down a long list.
 #[test]
-fn fr_l31_7_language_picker_opens_on_the_current_language_in_view() {
+fn fr_l31_7_language_picker_opens_on_the_current_language() {
     // Names that sort before JSON put it below the first page.
     let mut languages: Vec<LanguageInfo> =
         (0..80).map(|i| LanguageInfo { id: format!("lang{i:02}"), name: format!("Aa {i:02}") }).collect();
@@ -141,41 +140,7 @@ fn fr_l31_7_language_picker_opens_on_the_current_language_in_view() {
     assert_eq!(items[sel].title, "JSON");
     assert_eq!(items[sel].hint, "(json) - 현재");
     assert_eq!(items.iter().filter(|i| i.hint.ends_with("현재")).count(), 1);
-    assert!(sel >= PICKER_VISIBLE_ROWS, "the case needs a row below the first page");
-    assert_in_view(sel, items.len());
-    assert_eq!(more_above_text(5), "위에 5개 더 있습니다");
-}
-
-/// `selected` is drawn among the rows that fit the budget, after the "위에" row if there is one, and is
-/// not the last row that fits unless it is the list's last row.
-fn assert_in_view(selected: usize, len: usize) {
-    let (start, end) = list_window(selected, len, PICKER_VISIBLE_ROWS);
-    let budget = PICKER_VISIBLE_ROWS - overflow_rows(start);
-    assert!(end - start <= budget, "{start}..{end} over the budget {budget}");
-    assert!(start <= selected, "{selected} hidden above {start}");
-    assert!(selected < start + budget, "{selected} past the rows that fit ({start} + {budget})");
-    if selected + 1 < len {
-        assert!(selected + 1 < start + budget, "{selected} on the last visible row of {start}..{}", start + budget);
-    }
-}
-
-#[test]
-fn fr_l31_7_picker_window_counts_the_overflow_row_and_keeps_context_below() {
-    let v = PICKER_VISIBLE_ROWS;
-    for len in [1, 4, v - 1, v, v + 1, 30, 120] {
-        for selected in 0..len {
-            assert_in_view(selected, len);
-        }
-    }
-    // The first page while the row and the one below it fit; then the "위에" row appears.
-    assert_eq!(list_window(0, 120, v), (0, v));
-    assert_eq!(list_window(v - 2, 120, v), (0, v));
-    let (start, end) = list_window(v - 1, 120, v);
-    assert_eq!((overflow_rows(start), end - start), (1, v - 1));
-    // The last row ends the list: no blank rows below it.
-    assert_eq!(list_window(119, 120, v), (120 - (v - 1), 120));
-    assert_eq!(list_window(3, 4, v), (0, 4));
-    assert_eq!(overflow_rows(0), 0);
+    assert_eq!(sel, 81);
 }
 
 // The language list can arrive after the sheet opened: until the person moves, the highlight follows
@@ -192,7 +157,6 @@ fn fr_l31_7_picker_highlight_follows_the_current_entry_until_moved() {
     let items = picker_items(Mode::Language, Some(&f), &later);
     let row = resolve_selection(FOLLOW_CURRENT, Mode::Language, Some(&f), &later, items.len());
     assert_eq!(items[row].title, "JSON");
-    assert_in_view(row, items.len());
     // A row the person chose is kept, clamped to the list.
     assert_eq!(resolve_selection(3, Mode::Language, Some(&f), &later, items.len()), 3);
     assert_eq!(resolve_selection(500, Mode::Language, Some(&f), &later, items.len()), items.len() - 1);
@@ -210,7 +174,64 @@ fn fr_l31_7_encoding_picker_opens_on_the_current_encoding() {
             assert_eq!(sel, row);
             assert!(items[sel].hint.ends_with("- 현재"), "{:?}", items[sel].hint);
             assert_eq!(items.iter().filter(|i| i.hint.ends_with("현재")).count(), 1);
-            assert_in_view(sel, items.len());
         }
     }
+}
+
+// #302: the indentation pick (Code-OSS `showIndentationPicker`, `ChangeIndentationSizeAction`).
+
+#[test]
+fn fr_l31_indentation_pick_rows_follow_code_oss_in_korean() {
+    use ember_app::ui::editor_status::{indentation_initial_selection, indentation_items, indentation_text, is_indentation_pick};
+    use ember_app::ui::palette::IndentationSizeFor;
+    use ember_editor::{Indentation, IndentationAction};
+
+    let current = Indentation::new(4, true);
+    let items = indentation_items(Mode::Indentation, current, 4);
+    let titles: Vec<&str> = items.iter().map(|i| i.title.as_str()).collect();
+    assert_eq!(
+        titles,
+        [
+            "공백을 사용한 들여쓰기",
+            "탭을 사용한 들여쓰기",
+            "탭 표시 크기 변경",
+            "콘텐츠에서 들여쓰기 감지",
+            "들여쓰기를 공백으로 변환",
+            "들여쓰기를 탭으로 변환",
+            "후행 공백 자르기",
+        ]
+    );
+    assert_eq!(items[0].payload, Payload::IndentationSize(IndentationSizeFor::Spaces));
+    assert_eq!(items[3].payload, Payload::SetIndentation(IndentationAction::Detect));
+    assert_eq!(items[5].payload, Payload::SetIndentation(IndentationAction::Convert { to_spaces: false }));
+
+    // The size list: 1 to 8, the settings' size and the current one marked as Code-OSS marks them.
+    let current = Indentation { tab_size: 6, indent_size: 6, insert_spaces: true };
+    let sizes = indentation_items(Mode::IndentationSize(IndentationSizeFor::Tabs), current, 2);
+    assert_eq!(sizes.iter().map(|i| i.title.as_str()).collect::<Vec<_>>(), ["1", "2", "3", "4", "5", "6", "7", "8"]);
+    assert_eq!(sizes[1].hint, "기본 탭 크기");
+    assert_eq!(sizes[5].hint, "현재 탭 크기");
+    assert_eq!(sizes[0].hint, "");
+    let same = indentation_items(Mode::IndentationSize(IndentationSizeFor::Spaces), Indentation::new(2, true), 2);
+    assert_eq!(same[1].hint, "구성된 탭 크기");
+    assert_eq!(same[1].payload, Payload::SetIndentation(IndentationAction::IndentUsing { insert_spaces: true, size: 2 }));
+    let display = indentation_items(Mode::IndentationSize(IndentationSizeFor::Display), current, 4);
+    assert_eq!(display[7].payload, Payload::SetIndentation(IndentationAction::DisplaySize(8)));
+
+    // The size list opens on the current tab size; the action list on its first row.
+    assert_eq!(indentation_initial_selection(Mode::IndentationSize(IndentationSizeFor::Spaces), current), 5);
+    assert_eq!(indentation_initial_selection(Mode::IndentationSize(IndentationSizeFor::Spaces), Indentation::new(16, true)), 7);
+    assert_eq!(indentation_initial_selection(Mode::Indentation, current), 0);
+
+    for mode in [Mode::Indentation, Mode::IndentationSize(IndentationSizeFor::Display)] {
+        assert!(is_picker(mode) && is_indentation_pick(mode) && !lists_files(mode));
+        assert!(!placeholder(mode, Keymap::VsCode).is_empty() && !search_label(mode).is_empty());
+    }
+    assert_eq!(placeholder(Mode::Indentation, Keymap::VsCode), "작업 선택");
+    assert_eq!(placeholder(Mode::IndentationSize(IndentationSizeFor::Spaces), Keymap::VsCode), "현재 파일의 탭 크기 선택");
+
+    // The status text: spaces, tabs, and spaces with a tab of another width.
+    assert_eq!(indentation_text(Indentation::new(4, true)), "4칸");
+    assert_eq!(indentation_text(Indentation::new(2, false)), "탭 크기: 2");
+    assert_eq!(indentation_text(Indentation { tab_size: 8, indent_size: 2, insert_spaces: true }), "2칸 (탭 크기: 8)");
 }

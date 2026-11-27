@@ -1,0 +1,35 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ember Mockup</title><link rel="icon" href="logo/phoenix-fold/favicon.svg"><link rel="stylesheet" href="style.css"><script src="icons.js"></script>
+<style>
+.wrapx{max-width:1200px;margin:0 auto;padding:var(--sp8) var(--sp4)}
+.links{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:var(--sp3);margin:var(--sp5) 0 var(--sp8)}
+@media(max-width:900px){.links{grid-template-columns:1fr 1fr}}
+.stage{background:var(--surface-2);border:1px solid var(--line);border-radius:var(--r-lg);padding:var(--sp4);overflow:hidden}
+.frame{transform-origin:0 0;border:1px solid var(--line);border-radius:var(--r);background:var(--bg);box-shadow:var(--shadow-lg);display:block}
+</style></head><body>
+<div class="wrapx">
+<div class="flex"><span class="logo logo-mark sq-off" style="width:28px;height:28px" role="img" aria-label="DarkPyonix"><svg viewBox="27.9 24.9 346.8 346.8" aria-hidden="true"><path fill="currentColor" d="M210 371C276 371 333 324 338 262C341 232 326 214 305 194C289 179 287 172 296 166C306 160 320 160 334 164C322 150 312 145 304 136C292 121 272 116 244 121C230 124 219 123 207 118C209 128 214 134 222 141C210 148 202 160 186 165C192 170 199 172 205 174C200 198 205 214 220 232C233 246 233 256 226 264C214 277 192 274 178 264C145 240 138 203 158 166C186 120 196 94 178 56C174 46 174 36 175 25C150 38 142 60 134 88C129 106 125 113 114 121C117 110 117 102 115 95C84 132 62 175 64 222C67 305 136 371 210 371Z"/></svg></span><h1 style="font-size:24px;font-weight:500;margin:0">Ember 클라이언트 목업 v8</h1><div class="spacer"></div><button class="icon-btn" id="th" title="테마"></button></div>
+<p class="muted">#151 · 모든 OS에서 같은 디자인 · 각 화면은 실제 앱처럼 동작합니다 (데모 데이터, 브라우저 저장)</p>
+<div class="links" id="links"></div>
+<div class="flex wrap" style="margin-bottom:var(--sp3)"><b>폭 미리보기</b><div class="seg" id="widths"></div><div class="seg" id="plats" title="플랫폼 미리보기"></div><div class="spacer"></div><div class="seg" id="screens"></div></div>
+<div class="stage" id="stage"><iframe class="frame" id="frame" title="preview"></iframe></div>
+<p class="small muted">1440 데스크톱 사이드바 · 1024 아이콘 레일 · 768 레일과 한 열 카드 · 390 떠 있는 하단 탭(iOS는 Liquid Glass), 목록과 상세 전환</p>
+</div>
+<script>
+(function(){var r=document.documentElement, MQ=matchMedia("(prefers-color-scheme: dark)"), U={system:["pc","시스템"],light:["sun","라이트"],dark:["moon","다크"]};
+function pref(){try{var v=localStorage.getItem("ember-mock-theme");return v==="light"||v==="dark"?v:"system"}catch(e){return "system"}}
+function ap(){var p=pref();r.dataset.themePref=p;r.dataset.theme=p==="system"?(MQ.matches?"dark":"light"):p;var b=document.getElementById("th");if(b){b.innerHTML='<svg class="i" viewBox="0 0 24 24">'+EMBER_ICONS[U[p][0]]+'</svg>';b.title="테마: "+U[p][1];b.setAttribute("aria-label","테마: "+U[p][1]+", 눌러서 다음으로")}}
+MQ.addEventListener&&MQ.addEventListener("change",ap);
+function I(n){return '<svg class="i" viewBox="0 0 24 24">'+EMBER_ICONS[n]+'</svg>'}
+ap();
+document.getElementById("th").onclick=function(){var o=["system","light","dark"],n=o[(o.indexOf(pref())+1)%3];try{localStorage.setItem("ember-mock-theme",n)}catch(e){};ap();f.src=f.src};
+var S=[["logo.html","sun","로고 후보","Ember 로고 후보 네 가지를 크기, 테마, 작업 표시줄, 홈 화면에서 비교합니다"],["home.html","home","홈","빠른 대화, 위로 당기거나 로고를 누르면 대시보드"],["project.html","folder","프로젝트","프로젝트별 요약, 고정 세션, IDE 열기"],["conversation.html#p:ember","grid","세션 (프로젝트 안)","프로젝트를 누르면 들어갑니다. 멀티, 싱글, 상태 뷰와 터미널 토글"],["conversation.html#s1","chat","세션 싱글 뷰","팀원 하나를 크게, 승인과 접히는 명령"],["channels.html","hash","채널","단톡방 구조, 안 읽은 수"],["routines.html","repeat","루틴","프로젝트별 예약, 이벤트 작업과 실행 기록"],["vcs.html","git","버전 관리","GitHub Desktop급: 변경, 히스토리, 브랜치, PR, 스태시, 충돌, 팀 작업"],["agents.html","cpu","에이전트","하네스, 모델, 계정과 에이전트 설정"],["tools.html","wrench","도구","연동, MCP 서버, 서버 CLI와 프로젝트별, 팀원별 접근 권한"],["files.html","arrows-right-left","파일","장비 간 전송, 받기 요청, 공유 시트"],["characters.html","smile","팀 캐릭터","스타일 여섯 가지, 팀 미리보기, 편집기"],["icons.html","spark","아이콘 후보","참고 이미지와 비슷한 6개 팩, Heroicons 선택"],["editor.html","code","에디터","Ember 에디터와 터미널, 아일랜드 패널과 JetBrains식 도구 창 띠"],["jetbrains.html","code","에디터 결정","오너 결정과 단축키 체계(VS Code, JetBrains)"]];
+document.getElementById("links").innerHTML=S.map(function(s){return '<a class="card" href="'+s[0]+'"><div class="card-b"><div class="flex"><div class="tile">'+I(s[1])+'</div><b style="font-size:16px">'+s[2]+'</b></div><p class="small muted" style="margin:10px 0 0">'+s[3]+'</p></div></a>'}).join("");
+var W=[1440,1024,768,390],w=1440,src="home.html",f=document.getElementById("frame"),st=document.getElementById("stage");
+function seg(id,items,cur,cb){var el=document.getElementById(id);el.innerHTML=items.map(function(x){return '<button data-v="'+x[0]+'" class="'+(x[0]==cur?"on":"")+'">'+x[1]+'</button>'}).join("");el.onclick=function(e){var b=e.target.closest("button");if(!b)return;el.querySelectorAll("button").forEach(function(x){x.classList.toggle("on",x===b)});cb(b.dataset.v)}}
+seg("widths",W.map(function(x){return [x,x+"px"]}),w,function(v){w=+v;fit()});
+var pl=(function(){try{return localStorage.getItem("ember-mock-platform")}catch(e){return null}})()||((/iPhone|iPad|iPod/.test(navigator.userAgent))?"ios":"other");
+seg("plats",[["ios","iOS"],["other","기타"]],pl,function(v){try{localStorage.setItem("ember-mock-platform",v)}catch(e){} f.src=f.src});
+seg("screens",S.map(function(s){return [s[0],s[2]]}),src,function(v){src=v;f.src=v});
+function fit(){var h=w<=390?844:w<=768?1024:860,avail=st.clientWidth-32,k=Math.min(1,avail/w);f.style.width=w+"px";f.style.height=h+"px";f.style.transform="scale("+k+")";st.style.height=(h*k+34)+"px";f.style.marginLeft=Math.max(0,(avail-w*k)/2)+"px"}
+f.src=src;fit();addEventListener("resize",fit)})();
+</script></body></html>

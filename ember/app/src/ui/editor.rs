@@ -10,8 +10,14 @@ pub struct EditorTarget {
     pub project: String,
     /// The project's folder on its computer, when the server said (`IdeLaunch.folder`).
     pub folder: String,
+    /// The demo's direct `host:port` for the OSE, dialed only without [`Self::relay`].
     pub endpoint: String,
-    pub token: String,
+    /// The editor server's base path at the DarkPyonix manager (`ose.path`, `/ide/ose/`, FR-W4c
+    /// (1), INTENT D55). Empty means the root (the demo's direct OSE).
+    pub ose_path: String,
+    /// The manager's ticket (`ose.ticket`), sent as `Cookie: dpx-editor=<ticket>`. A credential:
+    /// it travels in the editor process's environment and never reaches a log.
+    pub ticket: String,
     /// The ember server's base URL, for the node terminal relay. Empty when unknown.
     pub server_url: String,
     /// The id of the computer the project lives on. Empty when unknown.
@@ -19,22 +25,365 @@ pub struct EditorTarget {
     /// The server's relay route to the OSE (`/api/computers/{id}/ide/relay/{launch}`, FR-W4),
     /// dialed instead of `endpoint` when set (FR-N9.1). Empty when unknown.
     pub relay: String,
+    /// An old server's VS Code target URL (a target with `url` and no relay launch), which the
+    /// window offers when the server is a Code-OSS commit the editor does not support (SPEC
+    /// FR-E10, #32). Empty when the target has a relay launch or the server offered none.
+    pub vscode_url: String,
+    /// The VS Code target's relay path (`launch.ose.relay`, FR-W4c, INTENT D55), which the
+    /// fallback opens in the `--vscode-window` helper on [`Self::server_url`]
+    /// (`crate::ide::VsCodeFallback`). Empty when the server sent no relay launch.
+    pub vscode_relay: String,
+    /// The manager's path of the VS Code target's relay launch (`launch.ose.path`).
+    pub vscode_path: String,
+    /// The manager's ticket of the VS Code target's relay launch (`launch.ose.ticket`). A credential.
+    pub vscode_ticket: String,
+    /// The folder the VS Code target's relay launch opens (`launch.folder`).
+    pub vscode_folder: String,
+    /// The session whose VS Code launch the fallback asks for (`POST /api/sessions/{id}/ide/vscode`,
+    /// FR-W4c (1c)) when VS Code was offered with no launch. Empty otherwise.
+    pub vscode_session: String,
 }
 
 impl std::fmt::Debug for EditorTarget {
-    // The token authorizes the editor connection, so it never reaches logs.
+    // The tickets authorize the editor connection and the VS Code window, so they never reach logs.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EditorTarget")
             .field("project", &self.project)
             .field("folder", &self.folder)
             .field("endpoint", &self.endpoint)
-            .field("token", &"[REDACTED]")
+            .field("ose_path", &self.ose_path)
+            .field("ticket", &"[REDACTED]")
             .field("server_url", &self.server_url)
             .field("computer", &self.computer)
             .field("relay", &self.relay)
+            .field("vscode_url", &self.vscode_url)
+            .field("vscode_relay", &self.vscode_relay)
+            .field("vscode_path", &self.vscode_path)
+            .field("vscode_ticket", &"[REDACTED]")
+            .field("vscode_folder", &self.vscode_folder)
+            .field("vscode_session", &self.vscode_session)
             .finish()
     }
 }
+
+/// The one sentence the window shows instead of the editor when the server is not a supported
+/// Code-OSS commit (SPEC FR-E10, Q-E2: a sentence and a button, never an automatic switch).
+/// `has_vscode` says whether a VS Code target exists for the button.
+pub fn fallback_sentence(fallback: &ember_editor::Fallback, has_vscode: bool) -> String {
+    let ember_editor::Fallback::OpenInVsCode { server_commit } = fallback;
+    let what = match server_commit {
+        Some(c) => format!(
+            "이 컴퓨터의 편집기 서버(Code-OSS {})는 Ember 에디터가 지원하지 않는 버전입니다.",
+            c.chars().take(12).collect::<String>()
+        ),
+        None => "이 컴퓨터의 편집기 서버 버전을 알 수 없어 Ember 에디터로 열 수 없습니다.".to_string(),
+    };
+    if has_vscode {
+        format!("{what} VS Code에서 열 수 있습니다.")
+    } else {
+        format!("{what} 이 프로젝트에는 열 수 있는 VS Code 대상도 없습니다.")
+    }
+}
+
+/// What the hover card shows (SPEC FR-E3, #32 phase A step 7): the diagnostics at the position
+/// first, as Code-OSS's hover does, then each provider's Markdown, drawn from [`markdown_blocks`].
+/// `None` when there is nothing to show.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HoverCard {
+    pub diagnostics: Vec<String>,
+    pub contents: Vec<String>,
+}
+
+/// The card for `hover`, or `None` when it has no diagnostic and no non-empty content. Each
+/// content block is the provider's Markdown source; [`markdown_blocks`] turns it into what is drawn.
+pub fn hover_card(hover: &ember_editor::hover::HoverPopup) -> Option<HoverCard> {
+    let diagnostics: Vec<String> = hover.diagnostics.iter().map(|d| d.message.clone()).filter(|m| !m.trim().is_empty()).collect();
+    let contents: Vec<String> = hover.contents.iter().map(|m| m.value.trim().to_string()).filter(|v| !v.is_empty()).collect();
+    (!diagnostics.is_empty() || !contents.is_empty()).then_some(HoverCard { diagnostics, contents })
+}
+
+/// Which position the card is anchored to: the start of the hovered range when a provider gave
+/// one (the word), else where the pointer rests; with the document generation.
+pub fn hover_key(generation: u64, hover: &ember_editor::hover::HoverPopup) -> (u64, u32, u32) {
+    let at = hover.range.map(|r| r.start).unwrap_or(hover.pos);
+    (generation, at.line, at.col)
+}
+
+/// The tallest the hover card grows, in dp; a longer card scrolls.
+pub const HOVER_CARD_MAX_HEIGHT: f32 = 320.0;
+
+/// Where the card goes: under the hovered line when the card fits below it in the window, else on
+/// the side with more room, as Code-OSS's hover does. `rect` is the position's rectangle in the
+/// window's dp and `window_height` the window's height in dp. A height of 0 (the renderer has not
+/// reported a size yet) places the card below.
+pub fn hover_card_style(rect: compose_rust::code::CodeRect, window_height: f32) -> String {
+    let frame = format!(
+        "position:fixed; z-index:41; left:{:.0}px; max-width:480px; max-height:{HOVER_CARD_MAX_HEIGHT:.0}px; overflow:auto; padding:var(--sp1);",
+        rect.x.max(0.0)
+    );
+    let below_top = rect.y + rect.height + 2.0;
+    let above_bottom = rect.y - 2.0;
+    let space_below = window_height - below_top;
+    let above = window_height > 0.0 && space_below < HOVER_CARD_MAX_HEIGHT && above_bottom > space_below;
+    if above {
+        format!("{frame} top:auto; bottom:calc(100vh - {above_bottom:.0}px);")
+    } else {
+        format!("{frame} top:{below_top:.0}px;")
+    }
+}
+
+/// One run of inline Markdown in a hover card.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MdSpan {
+    Text(String),
+    Strong(String),
+    Emphasis(String),
+    Code(String),
+    /// A link's text and target. The card shows the text; the target is its tooltip.
+    Link { text: String, href: String },
+}
+
+/// One block of Markdown in a hover card.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MdBlock {
+    Heading { level: u8, spans: Vec<MdSpan> },
+    Paragraph(Vec<MdSpan>),
+    List { ordered: bool, items: Vec<Vec<MdSpan>> },
+    /// A fenced or indented code block: its info string (the language, may be empty) and text.
+    Code { lang: String, text: String },
+    Rule,
+}
+
+/// The blocks of `source`, the CommonMark subset language servers send in hovers: ATX headings,
+/// paragraphs, bullet and numbered lists, fenced code, thematic breaks, and inline code, strong,
+/// emphasis and links. Raw HTML is shown as text, never interpreted.
+pub fn markdown_blocks(source: &str) -> Vec<MdBlock> {
+    let mut blocks = Vec::new();
+    let mut para: Vec<String> = Vec::new();
+    let mut list: Option<(bool, Vec<String>)> = None;
+    let mut lines = source.lines();
+
+    fn flush(blocks: &mut Vec<MdBlock>, para: &mut Vec<String>, list: &mut Option<(bool, Vec<String>)>) {
+        if !para.is_empty() {
+            blocks.push(MdBlock::Paragraph(markdown_spans(&para.join(" "))));
+            para.clear();
+        }
+        if let Some((ordered, items)) = list.take() {
+            blocks.push(MdBlock::List { ordered, items: items.iter().map(|i| markdown_spans(i)).collect() });
+        }
+    }
+
+    while let Some(line) = lines.next() {
+        let trimmed = line.trim_start();
+        let indent = line.len() - trimmed.len();
+        if let Some(fence) = fence_marker(trimmed) {
+            flush(&mut blocks, &mut para, &mut list);
+            let lang = trimmed[fence.len()..].trim().to_string();
+            let mut body: Vec<&str> = Vec::new();
+            for next in lines.by_ref() {
+                let t = next.trim_start();
+                if t.starts_with(fence) && t[fence.len()..].trim().is_empty() {
+                    break;
+                }
+                body.push(next);
+            }
+            blocks.push(MdBlock::Code { lang, text: body.join("\n") });
+            continue;
+        }
+        if trimmed.is_empty() {
+            flush(&mut blocks, &mut para, &mut list);
+            continue;
+        }
+        if indent < 4 {
+            if let Some((level, text)) = heading(trimmed) {
+                flush(&mut blocks, &mut para, &mut list);
+                blocks.push(MdBlock::Heading { level, spans: markdown_spans(text) });
+                continue;
+            }
+            if is_rule(trimmed) {
+                flush(&mut blocks, &mut para, &mut list);
+                blocks.push(MdBlock::Rule);
+                continue;
+            }
+            if let Some((ordered, text)) = list_item(trimmed) {
+                if !para.is_empty() || list.as_ref().is_some_and(|(o, _)| *o != ordered) {
+                    flush(&mut blocks, &mut para, &mut list);
+                }
+                list.get_or_insert_with(|| (ordered, Vec::new())).1.push(text.to_string());
+                continue;
+            }
+        }
+        if let Some((_, items)) = list.as_mut() {
+            // A lazy continuation line belongs to the last item.
+            if let Some(last) = items.last_mut() {
+                last.push(' ');
+                last.push_str(trimmed);
+                continue;
+            }
+        }
+        if indent >= 4 && para.is_empty() {
+            let mut body = vec![&line[4..]];
+            // Indented code runs until a line that is not indented (blank lines inside are kept).
+            let mut rest: Vec<&str> = Vec::new();
+            for next in lines.by_ref() {
+                if next.trim().is_empty() {
+                    rest.push("");
+                    continue;
+                }
+                if next.len() - next.trim_start().len() >= 4 {
+                    body.append(&mut rest);
+                    body.push(&next[4..]);
+                } else {
+                    blocks.push(MdBlock::Code { lang: String::new(), text: body.join("\n") });
+                    body.clear();
+                    para.push(next.trim().to_string());
+                    break;
+                }
+            }
+            if !body.is_empty() {
+                blocks.push(MdBlock::Code { lang: String::new(), text: body.join("\n") });
+            }
+            continue;
+        }
+        para.push(trimmed.trim_end().to_string());
+    }
+    flush(&mut blocks, &mut para, &mut list);
+    blocks
+}
+
+/// The fence a line opens with (three or more backticks or tildes), if any.
+fn fence_marker(line: &str) -> Option<&str> {
+    for c in ['`', '~'] {
+        let n = line.chars().take_while(|&x| x == c).count();
+        if n >= 3 {
+            return Some(&line[..n]);
+        }
+    }
+    None
+}
+
+fn heading(line: &str) -> Option<(u8, &str)> {
+    let n = line.chars().take_while(|&c| c == '#').count();
+    if !(1..=6).contains(&n) {
+        return None;
+    }
+    let rest = &line[n..];
+    if !rest.is_empty() && !rest.starts_with(' ') && !rest.starts_with('\t') {
+        return None;
+    }
+    let text = rest.trim().trim_end_matches('#').trim_end();
+    Some((n as u8, text))
+}
+
+fn is_rule(line: &str) -> bool {
+    let compact: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+    compact.len() >= 3 && ['-', '*', '_'].iter().any(|&m| compact.chars().all(|c| c == m))
+}
+
+fn list_item(line: &str) -> Option<(bool, &str)> {
+    for marker in ["- ", "* ", "+ "] {
+        if let Some(rest) = line.strip_prefix(marker) {
+            return Some((false, rest.trim()));
+        }
+    }
+    let digits = line.chars().take_while(|c| c.is_ascii_digit()).count();
+    if (1..=9).contains(&digits) {
+        let rest = &line[digits..];
+        if let Some(text) = rest.strip_prefix(". ").or_else(|| rest.strip_prefix(") ")) {
+            return Some((true, text.trim()));
+        }
+    }
+    None
+}
+
+/// The inline runs of `text`: code spans, `**strong**` / `__strong__`, `*emphasis*` / `_emphasis_`,
+/// `[text](href)` links and backslash escapes. Markers that do not close are kept as text.
+pub fn markdown_spans(text: &str) -> Vec<MdSpan> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut spans: Vec<MdSpan> = Vec::new();
+    let mut plain = String::new();
+    let mut i = 0;
+    let push_plain = |spans: &mut Vec<MdSpan>, plain: &mut String| {
+        if !plain.is_empty() {
+            spans.push(MdSpan::Text(std::mem::take(plain)));
+        }
+    };
+    let find = |from: usize, pat: &[char]| -> Option<usize> {
+        (from..=chars.len().saturating_sub(pat.len())).find(|&j| chars[j..j + pat.len()] == *pat)
+    };
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\\' && i + 1 < chars.len() && chars[i + 1].is_ascii_punctuation() {
+            plain.push(chars[i + 1]);
+            i += 2;
+            continue;
+        }
+        if c == '`' {
+            let run = chars[i..].iter().take_while(|&&x| x == '`').count();
+            let fence: Vec<char> = vec!['`'; run];
+            if let Some(end) = find(i + run, &fence) {
+                push_plain(&mut spans, &mut plain);
+                let code: String = chars[i + run..end].iter().collect();
+                let code = if code.len() > 1 && code.starts_with(' ') && code.ends_with(' ') { code[1..code.len() - 1].to_string() } else { code };
+                spans.push(MdSpan::Code(code));
+                i = end + run;
+                continue;
+            }
+        }
+        if (c == '*' || c == '_') && i + 1 < chars.len() && chars[i + 1] == c {
+            if let Some(end) = find(i + 2, &[c, c]).filter(|&e| e > i + 2) {
+                push_plain(&mut spans, &mut plain);
+                spans.push(MdSpan::Strong(spans_text(&markdown_spans(&chars[i + 2..end].iter().collect::<String>()))));
+                i = end + 2;
+                continue;
+            }
+        }
+        // `_` only opens emphasis at a word boundary, so snake_case names stay as they are.
+        let boundary = c == '*' || i == 0 || !chars[i - 1].is_alphanumeric();
+        if (c == '*' || c == '_') && boundary && i + 1 < chars.len() && !chars[i + 1].is_whitespace() {
+            let close = (i + 2..chars.len()).find(|&j| {
+                chars[j] == c && !chars[j - 1].is_whitespace() && (c == '*' || j + 1 == chars.len() || !chars[j + 1].is_alphanumeric())
+            });
+            if let Some(end) = close {
+                push_plain(&mut spans, &mut plain);
+                spans.push(MdSpan::Emphasis(spans_text(&markdown_spans(&chars[i + 1..end].iter().collect::<String>()))));
+                i = end + 1;
+                continue;
+            }
+        }
+        if c == '[' {
+            if let Some(mid) = find(i + 1, &[']', '(']) {
+                if let Some(close) = (mid + 2..chars.len()).find(|&j| chars[j] == ')') {
+                    push_plain(&mut spans, &mut plain);
+                    let label: String = chars[i + 1..mid].iter().collect();
+                    let href: String = chars[mid + 2..close].iter().collect();
+                    let href = href.split_whitespace().next().unwrap_or("").to_string();
+                    spans.push(MdSpan::Link { text: spans_text(&markdown_spans(&label)), href });
+                    i = close + 1;
+                    continue;
+                }
+            }
+        }
+        plain.push(c);
+        i += 1;
+    }
+    push_plain(&mut spans, &mut plain);
+    spans
+}
+
+/// The text of `spans` without their markup.
+pub fn spans_text(spans: &[MdSpan]) -> String {
+    spans
+        .iter()
+        .map(|s| match s {
+            MdSpan::Text(t) | MdSpan::Strong(t) | MdSpan::Emphasis(t) | MdSpan::Code(t) => t.as_str(),
+            MdSpan::Link { text, .. } => text.as_str(),
+        })
+        .collect()
+}
+
+/// The label of the fallback button (SPEC FR-E10).
+pub const FALLBACK_BUTTON: &str = "VS Code에서 열기";
 
 /// The status bar's cursor position, "N행 M열".
 pub fn position_text(line: usize, column: usize) -> String {
@@ -50,7 +399,9 @@ pub fn base_name(path: &str) -> &str {
 /// control characters, and is not for the person: the caller logs it and shows this.
 pub fn file_failure_reason(error: &str) -> &'static str {
     let e = error.to_lowercase();
-    if e.contains("entrynotfound") || e.contains("enoent") || e.contains("not found") || e.contains("no such file") {
+    if e.contains("changed on disk") {
+        "파일이 디스크에서 바뀌어 저장하지 않았습니다. 비교한 뒤 다시 저장하면 덮어씁니다"
+    } else if e.contains("entrynotfound") || e.contains("enoent") || e.contains("not found") || e.contains("no such file") {
         "파일이 없습니다. 지워졌거나 이름이 바뀌었을 수 있습니다"
     } else if e.contains("nopermissions") || e.contains("eacces") || e.contains("eperm") || e.contains("permission") {
         "파일을 읽거나 쓸 권한이 없습니다"
@@ -62,6 +413,27 @@ pub fn file_failure_reason(error: &str) -> &'static str {
         "파일이 너무 커서 열 수 없습니다"
     } else {
         "알 수 없는 오류입니다. 자세한 내용은 로그에 있습니다"
+    }
+}
+
+/// What the window says about a [`ember_editor::FileNoticeKind`] the session reported, in Korean and
+/// naming the file when the notice has one. The server's own words are logged, never shown.
+pub fn file_notice_text(kind: ember_editor::FileNoticeKind, name: Option<&str>) -> String {
+    use ember_editor::FileNoticeKind::{EditRejected, ReloadFailed, WatchRefused, WatcherError};
+    let file = name.map(display_name);
+    match (kind, file) {
+        (ReloadFailed, file) => format!(
+            "{}이(가) 디스크에서 바뀐 것을 다시 읽지 못했습니다. 화면의 내용이 파일과 다를 수 있습니다",
+            file.as_deref().unwrap_or("파일")
+        ),
+        (WatchRefused, Some(file)) => format!("서버가 {file}의 변경을 감시하지 않습니다. 다른 곳에서 바뀌어도 알려 드리지 못합니다"),
+        (WatchRefused, None) => "서버가 파일의 변경을 감시하지 않습니다. 다른 곳에서 바뀌어도 알려 드리지 못합니다".to_string(),
+        (WatcherError, Some(file)) => format!("서버의 파일 감시에 오류가 있습니다 ({file}). 파일이 바뀌어도 알려 드리지 못할 수 있습니다"),
+        (WatcherError, None) => "서버의 파일 감시에 오류가 있습니다. 파일이 바뀌어도 알려 드리지 못할 수 있습니다".to_string(),
+        (EditRejected, file) => format!(
+            "{}에 적용하려던 변경이 입력한 내용과 겹쳐 적용하지 못했습니다",
+            file.as_deref().unwrap_or("파일")
+        ),
     }
 }
 
@@ -127,17 +499,35 @@ pub fn colour_role(role: ember_editor::textmate::SyntaxRole) -> compose_rust::Co
 
 /// The `syntax_spans` prop for the coloured runs the session reported.
 pub fn syntax_spans(syntax: &ember_editor::SyntaxRuns) -> compose_rust::code::SyntaxSpans {
+    syntax_spans_at(syntax, syntax.version)
+}
+
+/// [`syntax_spans`] with the runs written against `version`, the widget's numbering of the session's
+/// `syntax.version` (`DocumentWidgetState::widget_version_of`).
+pub fn syntax_spans_at(syntax: &ember_editor::SyntaxRuns, version: u32) -> compose_rust::code::SyntaxSpans {
     use compose_rust::code::{CodeRange, SyntaxSpan, SyntaxSpans};
     SyntaxSpans::new(
-        syntax.runs.iter().map(|r| SyntaxSpan::role(syntax.version, CodeRange::of(r.line, r.start, r.line, r.end), colour_role(r.role))),
+        // Comments italic and types at weight 500, as the editor mockup draws them (#477): the
+        // toolkit's default style for each colour role.
+        syntax.runs.iter().map(|r| {
+            let role = colour_role(r.role);
+            SyntaxSpan::role(version, CodeRange::of(r.line, r.start, r.line, r.end), role)
+                .with_style(compose_rust::highlight::style_for_role(role))
+        }),
     )
 }
 
 /// The `folds` prop for the foldable regions the session reported (FR-E6, #441).
 pub fn folds(regions: &[ember_editor::FoldRegion]) -> compose_rust::code::Folds {
+    folds_from(regions, 0)
+}
+
+/// [`folds`] with each version in the widget's numbering: the session's version minus the document's
+/// `widget_base`.
+pub fn folds_from(regions: &[ember_editor::FoldRegion], widget_base: u32) -> compose_rust::code::Folds {
     use compose_rust::code::{Fold, Folds};
     Folds::new(regions.iter().map(|f| Fold {
-        version: f.version,
+        version: f.version.saturating_sub(widget_base),
         start_line: f.start_line,
         end_line: f.end_line,
         collapsed: f.collapsed,
@@ -519,6 +909,34 @@ impl EditorTabs {
         self.current.map(|i| self.tabs[i].path.as_str())
     }
 
+    /// Activate the next tab in the strip, wrapping around. Returns the new current path.
+    pub fn next_tab(&mut self) -> Option<String> {
+        let len = self.tabs.len();
+        if len <= 1 {
+            return None;
+        }
+        let next = match self.current {
+            Some(i) => (i + 1) % len,
+            None => 0,
+        };
+        self.current = Some(next);
+        Some(self.tabs[next].path.clone())
+    }
+
+    /// Activate the previous tab in the strip, wrapping around. Returns the new current path.
+    pub fn prev_tab(&mut self) -> Option<String> {
+        let len = self.tabs.len();
+        if len <= 1 {
+            return None;
+        }
+        let prev = match self.current {
+            Some(i) => (i + len - 1) % len,
+            None => len - 1,
+        };
+        self.current = Some(prev);
+        Some(self.tabs[prev].path.clone())
+    }
+
     /// Close every tab except the currently active one and the pinned ones, without asking, returning the
     /// paths of the tabs that closed. The window asks first through [`EditorTabs::close_others_request`].
     pub fn close_others(&mut self) -> Vec<String> {
@@ -882,6 +1300,29 @@ pub enum PromptSubmitOutcome {
     DeleteMany { items: Vec<(String, bool)> },
     BlockedDirty { path: String, dirty_files: Vec<String> },
     EmptyName,
+    Unchanged,
+}
+
+/// Drops sources that are already in `dest_dir`, are `dest_dir` itself, or would move a folder into
+/// one of its own descendants.
+pub fn filter_move_sources(sources: Vec<String>, dest_dir: &str) -> Vec<String> {
+    let dest = dest_dir.trim_end_matches('/');
+    let dest = if dest.is_empty() { "/" } else { dest };
+    sources
+        .into_iter()
+        .filter(|src| {
+            let trimmed = src.trim_end_matches('/');
+            if trimmed == dest || is_at_or_below(dest, trimmed) {
+                return false;
+            }
+            let parent = match trimmed.rfind('/') {
+                Some(0) => "/",
+                Some(i) => &trimmed[..i],
+                None => "",
+            };
+            parent != dest
+        })
+        .collect()
 }
 
 /// Evaluates submitting a tree prompt: checks empty names and unsaved dirty buffers on rename.
@@ -904,6 +1345,9 @@ pub fn evaluate_prompt_submit(
             name: name.to_string(),
         },
         TreePrompt::Rename { path } => {
+            if name == base_name(path) {
+                return PromptSubmitOutcome::Unchanged;
+            }
             let blocked: Vec<String> = unsaved_paths
                 .iter()
                 .filter(|u| is_at_or_below(u, path))
@@ -1410,6 +1854,25 @@ pub fn tree_key_action(
     }
 }
 
+/// The tree row that takes keyboard focus after `outcome`: the row an arrow key, `Home` or `End`
+/// selected. Focus follows the selection, as in Code-OSS, so the next `Enter` or `Space` reaches
+/// the selected row instead of the row that had focus before the arrow key.
+pub fn tree_key_focus(outcome: &TreeKeyOutcome) -> Option<&str> {
+    match outcome {
+        TreeKeyOutcome::Select(path, _) => Some(path),
+        _ => None,
+    }
+}
+
+/// The index of the tab that takes keyboard focus after `outcome`: the tab an arrow key, `Home` or
+/// `End` activated, so focus follows the selection in the strip as it does in the tree.
+pub fn tab_key_focus(paths: &[String], outcome: &TabKeyOutcome) -> Option<usize> {
+    match outcome {
+        TabKeyOutcome::Activate(path) => paths.iter().position(|p| p == path),
+        _ => None,
+    }
+}
+
 /// What path to focus in the editor when returning focus from a tool window or tree, if any.
 pub fn editor_focus_target(current: Option<&str>) -> Option<String> {
     current.map(str::to_string)
@@ -1525,10 +1988,14 @@ pub enum ToolWindow {
     Run,
     Problems,
     Output,
+    /// Run and Debug: variables, watch, call stack and breakpoints (FR-L31.42).
+    Debug,
+    /// The debug console: adapter output and evaluation (FR-L31.42).
+    DebugConsole,
 }
 
 impl ToolWindow {
-    pub const ALL: [ToolWindow; 11] = [
+    pub const ALL: [ToolWindow; 13] = [
         ToolWindow::Project,
         ToolWindow::Search,
         ToolWindow::Commit,
@@ -1540,14 +2007,25 @@ impl ToolWindow {
         ToolWindow::Run,
         ToolWindow::Problems,
         ToolWindow::Output,
+        ToolWindow::Debug,
+        ToolWindow::DebugConsole,
     ];
-    pub const LEFT: [ToolWindow; 6] =
-        [ToolWindow::Project, ToolWindow::Search, ToolWindow::Commit, ToolWindow::Git, ToolWindow::Extensions, ToolWindow::Agent];
+    pub const LEFT: [ToolWindow; 7] = [
+        ToolWindow::Project,
+        ToolWindow::Search,
+        ToolWindow::Commit,
+        ToolWindow::Git,
+        ToolWindow::Extensions,
+        ToolWindow::Agent,
+        ToolWindow::Debug,
+    ];
     pub const RIGHT: [ToolWindow; 1] = [ToolWindow::Notifications];
     /// The buttons of the right stripe: 에이전트 (its window opens in the left slot, #766) and 알림.
     pub const RIGHT_STRIPE: [ToolWindow; 2] = [ToolWindow::Agent, ToolWindow::Notifications];
-    pub const BOTTOM: [ToolWindow; 4] =
-        [ToolWindow::Terminal, ToolWindow::Run, ToolWindow::Problems, ToolWindow::Output];
+    /// The tabs of the bottom tool window. 디버그 콘솔 is a tab like 출력, as Code-OSS puts the
+    /// debug console in the panel (FR-L31.42).
+    pub const BOTTOM: [ToolWindow; 5] =
+        [ToolWindow::Terminal, ToolWindow::Run, ToolWindow::Problems, ToolWindow::Output, ToolWindow::DebugConsole];
 
     /// The buttons of the left stripe, exactly the mockup's (`editor.js:51`): 프로젝트, 커밋, Git.
     /// 검색 opens from the top find pill and ⇧⌘F, 확장 from its shortcut and the palette; their
@@ -1570,6 +2048,8 @@ impl ToolWindow {
             ToolWindow::Run => "실행",
             ToolWindow::Problems => "문제",
             ToolWindow::Output => "출력",
+            ToolWindow::Debug => "실행 및 디버그",
+            ToolWindow::DebugConsole => "디버그 콘솔",
         }
     }
 
@@ -1580,9 +2060,14 @@ impl ToolWindow {
             | ToolWindow::Commit
             | ToolWindow::Git
             | ToolWindow::Extensions
-            | ToolWindow::Agent => Side::Left,
+            | ToolWindow::Agent
+            | ToolWindow::Debug => Side::Left,
             ToolWindow::Notifications => Side::Right,
-            ToolWindow::Terminal | ToolWindow::Run | ToolWindow::Problems | ToolWindow::Output => Side::Bottom,
+            ToolWindow::Terminal
+            | ToolWindow::Run
+            | ToolWindow::Problems
+            | ToolWindow::Output
+            | ToolWindow::DebugConsole => Side::Bottom,
         }
     }
 
@@ -1600,6 +2085,8 @@ impl ToolWindow {
             ToolWindow::Run => Some(Action::Run),
             ToolWindow::Problems => Some(Action::Problems),
             ToolWindow::Output => None,
+            ToolWindow::Debug => Some(Action::DebugView),
+            ToolWindow::DebugConsole => Some(Action::DebugConsole),
         }
     }
 
@@ -1624,6 +2111,8 @@ impl ToolWindow {
             ToolWindow::Run => IconRole::Forward,
             ToolWindow::Problems => IconRole::Close,
             ToolWindow::Output => IconRole::Menu,
+            ToolWindow::Debug => IconRole::Forward,
+            ToolWindow::DebugConsole => IconRole::Menu,
         }
     }
 }
@@ -1646,7 +2135,22 @@ impl Default for Stripes {
     }
 }
 
+/// Width in px at and below which the mockup lays the left tool window over the editor island
+/// and opens with it closed (`editor.css` `@media (max-width:900px)`, `editor.js` `onHash`).
+pub const NARROW_WINDOW_PX: f32 = 900.0;
+
 impl Stripes {
+    /// The stripes a window opened `width` px wide starts with (FR-L31.41): the default, less the
+    /// left tool window when the window is narrow, because there it would cover the code. A width
+    /// not known yet (0, nothing reported and no opened size) keeps the default.
+    pub fn opening(width: f32) -> Stripes {
+        let mut s = Stripes::default();
+        if width > 0.0 && width <= NARROW_WINDOW_PX {
+            s.left = None;
+        }
+        s
+    }
+
     pub fn selected(&self, side: Side) -> Option<ToolWindow> {
         match side {
             Side::Left => self.left,
@@ -1712,6 +2216,11 @@ pub fn is_implemented(action: Action) -> bool {
                 | Action::KeybindingsJson
                 | Action::Format
                 | Action::NewTerminal
+                | Action::NextTab
+                | Action::PrevTab
+                | Action::Debug
+                | Action::Stop
+                | Action::RunConfig
         )
 }
 
@@ -1728,6 +2237,14 @@ pub fn apply_action(action: Action, tabs: &mut EditorTabs, stripes: &mut Stripes
     match action {
         Action::NewTerminal => {
             stripes.show(ToolWindow::Terminal);
+            true
+        }
+        Action::NextTab => {
+            tabs.next_tab();
+            true
+        }
+        Action::PrevTab => {
+            tabs.prev_tab();
             true
         }
         Action::Close => match tabs.current_path().map(str::to_string) {
@@ -2012,6 +2529,108 @@ pub fn first_diff_line(old_text: &str, new_text: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
+
+    fn hover(range: Option<ember_editor::WidgetRange>, diag: &[&str], contents: &[&str]) -> ember_editor::hover::HoverPopup {
+        ember_editor::hover::HoverPopup {
+            doc: "d".into(),
+            generation: 3,
+            pos: ember_editor::WidgetPos::new(1, 9),
+            range,
+            diagnostics: diag
+                .iter()
+                .map(|m| ember_editor::diagnostics::HoverDiagnostic { owner: "o".into(), severity: ember_editor::Severity::Error, message: (*m).into(), source: None, code: None })
+                .collect(),
+            contents: contents.iter().map(|v| ember_editor::hover::MarkdownString { value: (*v).into(), is_trusted: false, support_theme_icons: false, support_html: false, raw: serde_json::Value::Null }).collect(),
+            complete: true,
+        }
+    }
+
+    /// SPEC FR-E3 (#32 phase A step 7): the card lists diagnostics first, then the providers' text;
+    /// it anchors at the hovered word's start when a range came back, else at the pointer; it goes
+    /// under the line near the top of the window and above it lower down.
+    #[test]
+    fn fr_e3_hover_card_text_anchor_and_placement() {
+        assert_eq!(hover_card(&hover(None, &[], &["  ", ""])), None, "nothing to show");
+        let h = hover(Some(ember_editor::WidgetRange::new(ember_editor::WidgetPos::new(1, 6), ember_editor::WidgetPos::new(1, 11))), &["expected ','"], &["**probe**", ""]);
+        assert_eq!(hover_card(&h), Some(HoverCard { diagnostics: vec!["expected ','".into()], contents: vec!["**probe**".into()] }));
+        assert_eq!(hover_key(3, &h), (3, 1, 6));
+        assert_eq!(hover_key(3, &hover(None, &[], &["x"])), (3, 1, 9));
+        let high = hover_card_style(compose_rust::code::CodeRect::new(100.0, 80.0, 2.0, 18.0), 800.0);
+        assert!(high.contains("left:100px;") && high.contains("top:100px;"), "{high}");
+        let low = hover_card_style(compose_rust::code::CodeRect::new(-5.0, 600.0, 2.0, 18.0), 800.0);
+        assert!(low.contains("left:0px;") && low.contains("bottom:calc(100vh - 598px);"), "{low}");
+    }
+
+    /// SPEC FR-E3: the card flips above the line only when it does not fit below in the window
+    /// and there is more room above; the decision reads the window's height, not a fixed line.
+    #[test]
+    fn fr_e3_hover_card_flips_by_window_height() {
+        let at = |y: f32, h: f32| hover_card_style(compose_rust::code::CodeRect::new(10.0, y, 2.0, 18.0), h);
+        // 400 dp tall: 80 dp below, 298 above: above.
+        assert!(at(300.0, 400.0).contains("bottom:calc(100vh - 298px);"));
+        // The same line in a 1200 dp window: 800 dp below: below, where the old fixed 360 rule flipped it.
+        assert!(at(380.0, 1200.0).contains("top:400px;"));
+        assert!(at(500.0, 1200.0).contains("top:520px;"));
+        // Too little room either way: the side with more room.
+        assert!(at(100.0, 300.0).contains("top:120px;"));
+        assert!(at(180.0, 300.0).contains("bottom:calc(100vh - 178px);"));
+        // Size not reported yet: below.
+        assert!(at(700.0, 0.0).contains("top:720px;"));
+    }
+
+    /// SPEC FR-E3: provider Markdown is drawn as headings, paragraphs, lists, code and inline
+    /// styles, not as its source.
+    #[test]
+    fn fr_e3_hover_markdown_blocks_and_spans() {
+        use MdBlock as B;
+        use MdSpan as S;
+        let md = "## Heading ##\n\nUse **bold**, *italic*, `a_b()` and [docs](https://example.com \"t\").\nsnake_case_name stays.\n\n- one\n  more\n- two\n\n1. first\n2) second\n\n---\n```rust\nlet x = 1;\n\nlet y = 2;\n```\n\n    indented()\n\\*not em\\*";
+        let blocks = markdown_blocks(md);
+        assert_eq!(blocks[0], B::Heading { level: 2, spans: vec![S::Text("Heading".into())] });
+        assert_eq!(
+            blocks[1],
+            B::Paragraph(vec![
+                S::Text("Use ".into()),
+                S::Strong("bold".into()),
+                S::Text(", ".into()),
+                S::Emphasis("italic".into()),
+                S::Text(", ".into()),
+                S::Code("a_b()".into()),
+                S::Text(" and ".into()),
+                S::Link { text: "docs".into(), href: "https://example.com".into() },
+                S::Text(". snake_case_name stays.".into()),
+            ])
+        );
+        assert_eq!(blocks[2], B::List { ordered: false, items: vec![vec![S::Text("one more".into())], vec![S::Text("two".into())]] });
+        assert_eq!(blocks[3], B::List { ordered: true, items: vec![vec![S::Text("first".into())], vec![S::Text("second".into())]] });
+        assert_eq!(blocks[4], B::Rule);
+        assert_eq!(blocks[5], B::Code { lang: "rust".into(), text: "let x = 1;\n\nlet y = 2;".into() });
+        assert_eq!(blocks[6], B::Code { lang: String::new(), text: "indented()".into() });
+        assert_eq!(blocks[7], B::Paragraph(vec![S::Text("*not em*".into())]));
+        assert_eq!(blocks.len(), 8);
+        // Unclosed markers and HTML stay as text.
+        assert_eq!(markdown_spans("a ** b `c <b>x</b>"), vec![S::Text("a ** b `c <b>x</b>".into())]);
+        assert_eq!(markdown_blocks("#nospace"), vec![B::Paragraph(vec![S::Text("#nospace".into())])]);
+    }
+
+    /// SPEC FR-E10, Q-E2 (#32 phase A step 6): one sentence for the fallback, in 합니다체, naming a
+    /// short commit or saying it is unknown, and offering VS Code only when a target exists.
+    #[test]
+    fn fr_e10_fallback_sentence_names_the_commit_and_the_way_out() {
+        use ember_editor::Fallback;
+        let known = Fallback::OpenInVsCode { server_commit: Some("0123456789abcdef0123".into()) };
+        assert_eq!(
+            fallback_sentence(&known, true),
+            "이 컴퓨터의 편집기 서버(Code-OSS 0123456789ab)는 Ember 에디터가 지원하지 않는 버전입니다. VS Code에서 열 수 있습니다."
+        );
+        let unknown = Fallback::OpenInVsCode { server_commit: None };
+        assert_eq!(
+            fallback_sentence(&unknown, false),
+            "이 컴퓨터의 편집기 서버 버전을 알 수 없어 Ember 에디터로 열 수 없습니다. 이 프로젝트에는 열 수 있는 VS Code 대상도 없습니다."
+        );
+        assert_eq!(FALLBACK_BUTTON, "VS Code에서 열기");
+    }
+
     use super::*;
 
     #[test]
@@ -2039,6 +2658,33 @@ mod tests {
         assert_eq!(spans.len(), 2);
         assert!(spans.iter().all(|s| s.version == 7));
         assert!(syntax_spans(&ember_editor::SyntaxRuns::default()).is_empty());
+    }
+
+    #[test]
+    fn fr_l31_editor_comments_are_italic_and_types_weight_500() {
+        // #477: the mockup's `.tok-c` is italic and `.tok-t` is 500; other runs keep the body style.
+        use compose_rust::code::SyntaxFontStyle;
+        use ember_editor::textmate::{DocRun, SyntaxRole};
+        let run = |role| DocRun { line: 0, start: 0, end: 3, role };
+        let syntax = ember_editor::SyntaxRuns {
+            version: 1,
+            runs: vec![run(SyntaxRole::Comment), run(SyntaxRole::Type), run(SyntaxRole::Keyword)],
+        };
+        let spans = syntax_spans(&syntax).spans();
+        assert_eq!(spans[0].style, SyntaxFontStyle::NORMAL.italic());
+        assert_eq!(spans[1].style, SyntaxFontStyle::NORMAL.weight(500));
+        assert_eq!(spans[2].style, SyntaxFontStyle::NORMAL);
+    }
+
+    #[test]
+    fn fr_l31_6_a3_window_syntax_runs_and_folds_are_written_in_the_widget_numbering() {
+        use ember_editor::textmate::{DocRun, SyntaxRole};
+        let syntax = ember_editor::SyntaxRuns { version: 12, runs: vec![DocRun { line: 0, start: 0, end: 2, role: SyntaxRole::Keyword }] };
+        // The session is at 12 and the widget was mounted again at 10: it knows this text as version 2.
+        assert!(syntax_spans_at(&syntax, 2).spans().iter().all(|s| s.version == 2));
+        let regions = [ember_editor::FoldRegion { version: 12, start_line: 1, end_line: 4, collapsed: false }];
+        assert_eq!(folds_from(&regions, 10).folds()[0].version, 2);
+        assert_eq!(folds_from(&regions, 0).folds()[0].version, 12, "a widget that never restarted keeps the session's numbers");
     }
 
     #[test]
@@ -2099,9 +2745,13 @@ mod tests {
             // Save, maximize and reopen act on the window's session, panel size and close history (FR-L31.15).
             // The settings view and the two settings files open a tab through the window (FR-L31.17).
             // Format document goes to the language features (FR-L31.13), not to a tab or a tool window.
+            // F5, Shift+F5 and Ctrl+F5 go to the debug session or the task runner (FR-L31.42).
             if matches!(
                 action,
-                Action::Palette
+                Action::Debug
+                    | Action::Stop
+                    | Action::RunConfig
+                    | Action::Palette
                     | Action::Find
                     | Action::FindInFile
                     | Action::ReplaceInFiles
@@ -2125,6 +2775,29 @@ mod tests {
             let mut stripes = Stripes::default();
             assert_eq!(apply_action(action, &mut tabs, &mut stripes), is_implemented(action), "{action:?}");
         }
+    }
+
+    #[test]
+    fn fr_l31_41_a_narrow_window_opens_with_the_left_tool_window_closed() {
+        for w in [390.0, 768.0, 900.0] {
+            let s = Stripes::opening(w);
+            assert_eq!(s.selected(Side::Left), None, "{w}");
+            assert_eq!(s.selected(Side::Bottom), Some(ToolWindow::Terminal), "{w}");
+            assert_eq!(s.selected(Side::Right), None, "{w}");
+        }
+        for w in [0.0, 901.0, 1024.0, 1440.0] {
+            assert_eq!(Stripes::opening(w), Stripes::default(), "{w}");
+        }
+        assert_eq!(Stripes::default().selected(Side::Left), Some(ToolWindow::Project));
+    }
+
+    #[test]
+    fn fr_l31_41_the_window_opens_its_stripes_for_its_width() {
+        let page = include_str!("editor_workbench.rs");
+        assert!(page.contains("Stripes::opening(crate::ui::window_size::window_size_untracked().width_dp)"));
+        let lib = include_str!("../lib.rs");
+        let editor = &lib[lib.find("Separate IDE window (FR-L31)").unwrap()..lib.find("ui::cr::gallery::requested()").unwrap()];
+        assert!(editor.contains("ui::window_size::record_opened(f32::from(w), f32::from(h));"));
     }
 
     #[test]
@@ -2201,19 +2874,26 @@ mod tests {
     }
 
     #[test]
-    fn fr_l31_editor_target_debug_redacts_the_token() {
+    fn fr_l31_editor_target_debug_redacts_the_tickets() {
         let target = EditorTarget {
             project: "p".into(),
             folder: "/f".into(),
             endpoint: "127.0.0.1:9000".into(),
-            token: "s3cret-token".into(),
+            ose_path: "/ide/ose/".into(),
+            ticket: "s3cret-token".into(),
             server_url: "http://srv:1".into(),
             computer: "node-a".into(),
             relay: "/api/computers/node-a/ide/relay/l1".into(),
+            vscode_url: String::new(),
+            vscode_relay: String::new(),
+            vscode_path: String::new(),
+            vscode_ticket: "vs-s3cret".into(),
+            vscode_folder: String::new(),
+            vscode_session: String::new(),
         };
         let text = format!("{target:?}");
         assert!(text.contains("/api/computers/node-a/ide/relay/l1"), "{text}");
-        assert!(!text.contains("s3cret-token"), "{text}");
+        assert!(!text.contains("s3cret-token") && !text.contains("vs-s3cret"), "{text}");
         assert!(text.contains("[REDACTED]"));
         assert!(text.contains("127.0.0.1:9000"));
         assert!(text.contains("http://srv:1") && text.contains("node-a"));
@@ -2322,5 +3002,77 @@ mod tests {
         assert_eq!(merged.len(), 4, "the document's own decorations stay first");
         assert_eq!(merged[0].range.start.line, 9);
         assert_eq!(with_diff_line_tints(own.clone(), 3, &[]), own, "no change sends the same list");
+    }
+
+    #[test]
+    fn tabs_next_and_prev_cycle_and_wrap() {
+        let mut tabs = EditorTabs::default();
+        assert_eq!(tabs.next_tab(), None);
+        assert_eq!(tabs.prev_tab(), None);
+
+        tabs.open("/w/a.rs");
+        assert_eq!(tabs.next_tab(), None);
+        assert_eq!(tabs.prev_tab(), None);
+
+        tabs.open("/w/b.rs");
+        tabs.open("/w/c.rs");
+        assert_eq!(tabs.current_path(), Some("/w/c.rs"));
+
+        assert_eq!(tabs.next_tab().as_deref(), Some("/w/a.rs"));
+        assert_eq!(tabs.next_tab().as_deref(), Some("/w/b.rs"));
+        assert_eq!(tabs.prev_tab().as_deref(), Some("/w/a.rs"));
+        assert_eq!(tabs.prev_tab().as_deref(), Some("/w/c.rs"));
+
+        let mut stripes = Stripes::default();
+        assert!(is_implemented(Action::NextTab));
+        assert!(is_implemented(Action::PrevTab));
+        assert!(apply_action(Action::NextTab, &mut tabs, &mut stripes));
+        assert_eq!(tabs.current_path(), Some("/w/a.rs"));
+        assert!(apply_action(Action::PrevTab, &mut tabs, &mut stripes));
+        assert_eq!(tabs.current_path(), Some("/w/c.rs"));
+    }
+
+    #[test]
+    fn filter_move_sources_drops_same_parent_self_and_descendant() {
+        assert_eq!(
+            filter_move_sources(vec!["/w/src/a.rs".into()], "/w/src"),
+            Vec::<String>::new(),
+            "dropping a file into its own parent is a no-op"
+        );
+        assert_eq!(
+            filter_move_sources(vec!["/w/src".into()], "/w/src"),
+            Vec::<String>::new(),
+            "dropping a folder onto itself is a no-op"
+        );
+        assert_eq!(
+            filter_move_sources(vec!["/w/src".into()], "/w/src/sub"),
+            Vec::<String>::new(),
+            "dropping a folder into its own descendant is rejected"
+        );
+        assert_eq!(
+            filter_move_sources(vec!["/w/src/a.rs".into(), "/w/docs/b.md".into()], "/w/src"),
+            vec!["/w/docs/b.md".to_string()],
+            "only items from another directory remain"
+        );
+    }
+
+    #[test]
+    fn rename_prompt_submit_unchanged_name_is_noop() {
+        let prompt = TreePrompt::Rename { path: "/w/src/a.rs".into() };
+        assert_eq!(
+            evaluate_prompt_submit(&prompt, "a.rs", &[]),
+            PromptSubmitOutcome::Unchanged
+        );
+        assert_eq!(
+            evaluate_prompt_submit(&prompt, "  a.rs  ", &[]),
+            PromptSubmitOutcome::Unchanged
+        );
+        assert_eq!(
+            evaluate_prompt_submit(&prompt, "b.rs", &[]),
+            PromptSubmitOutcome::Rename {
+                path: "/w/src/a.rs".into(),
+                new_name: "b.rs".into(),
+            }
+        );
     }
 }

@@ -1,0 +1,5 @@
+error: missing required argument `on_dismiss` for Dialog!
+ --> tests/compile-fail/fr_l32_dialog_without_on_dismiss.rs:7:64
+  |
+7 |     { use ::compose_rust::ui::Dialog; Dialog!(open, modifier = modifier) };
+  |                                                                ^^^^^^^^

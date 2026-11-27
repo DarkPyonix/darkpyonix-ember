@@ -5,6 +5,12 @@ Status: **marker pass done on 2026-11-15, not compiled.** The table is read from
 checked on a display. Branch `feat/673-drop-in-pin` then removes the base screens' workarounds
 whose fix is in the pin; those rows are in their own table and name functions, not lines.
 Branch `feat/673-editor-in-pin` does the same for the editor window, in a table of its own.
+The closed-issue pass of 2026-11-22 (#673, not compiled) goes through every marker that cites a
+compose-rust issue closed in the current pin; it has a table of its own, and the rows it moved
+name functions, not lines. Branch `feat/673-app-todos-and-workarounds` (2026-11-22, #673, not
+compiled) then clears the remaining `TODO(#673)` items on the current pin (compose-rust
+`a85f02de`, dioxus-compose `3758928b`), removing `DataNamedOverlay` and wiring the remaining
+in-pin features in its own table; zero `TODO(#673)` markers remain in `ember/app/src/`.
 
 Korean follows the English section with the same content.
 
@@ -14,16 +20,17 @@ Korean follows the English section with the same content.
 
 Every Ember workaround for a toolkit bug or gap cites a toolkit issue, and goes once the fix is
 in the pinned toolkit, because a workaround without an issue is never removed. The pins are
-compose-rust tag `v0.0.10` (commit `3df7c17`, published 2026-11-14T09:44Z) and dioxus-compose
-rev `f0e5b9f5` (committed 2026-11-14T10:00Z, built on compose-rust v0.0.10).
+compose-rust rev `a85f02de` (after tag `v0.0.12`, widgets as call macros) and dioxus-compose
+rev `3758928b`. The marker pass and the two branches below read compose-rust `v0.0.11`
+(commit `732f69a5`) and dioxus-compose `94ade333`.
 
 A marker has one of five forms, so that one grep finds each group at the next pin:
 
 | Form | Meaning | At the next pin |
 |---|---|---|
 | `TODO(compose-rust#N)`, `TODO(dioxus-compose#N)` | The toolkit issue is open. | Read the issue state; when it is closed, check the API in the new pin and move the marker. |
-| `TODO(compose-rust#N, after v0.0.10)`, `TODO(dioxus-compose#N, after f0e5b9f5)` | The issue was closed after the pin and the API is not in the pinned source. | Confirm the API in the new pin, remove the workaround with a test, or move it to the display list. |
-| `TODO(compose-rust#N, in v0.0.10)`, `TODO(dioxus-compose#N, in f0e5b9f5)` | The API is in the pinned source. Removing the workaround changes what is drawn or how input behaves, so it waits for a builder with a display. | Nothing waits for a pin. A builder removes it and checks it on a display. |
+| `TODO(compose-rust#N, after v0.0.11)`, `TODO(dioxus-compose#N, after 94ade333)` | The issue was closed after the pin and the API is not in the pinned source. | Confirm the API in the new pin, remove the workaround with a test, or move it to the display list. |
+| `TODO(compose-rust#N, in v0.0.11)`, `TODO(dioxus-compose#N, in 94ade333)` | The API is in the pinned source. Removing the workaround changes what is drawn or how input behaves, so it waits for a builder with a display. | Nothing waits for a pin. A builder removes it and checks it on a display. |
 | `v0.0.7: #N fixed; workaround kept until checked on a display` | The older wording of the form above (`#N` is a compose-rust issue). | The same as the form above. |
 | `TODO(compose-rust, unfiled: <gap>)` | A real gap with no toolkit issue. | File the issue, then replace the marker with its number. |
 
@@ -46,8 +53,9 @@ dioxus-compose#256 was closed after the pinned commit while its API is in the pi
 | Unfiled toolkit gaps | 4 lines, 3 gaps |
 | Ember tasks with no toolkit issue (`TODO(#673)`) | 2 |
 
-The counts above are the marker pass's; `feat/673-drop-in-pin` and `feat/673-editor-in-pin` have
-not recounted them.
+The counts above are the marker pass's; `feat/673-drop-in-pin`, `feat/673-editor-in-pin`, the
+closed-issue pass, and `feat/673-app-todos-and-workarounds` have not recounted them. Zero
+`TODO(#673)` markers remain in `ember/app/src/`.
 
 The first grep of this pass found 186 lines that name a toolkit issue. The rest of them are
 references to a fix that is already in use (for example `compose-rust#372` beside a container
@@ -59,6 +67,13 @@ references to a fix that is already in use (for example `compose-rust#372` besid
 |---|---|---|---|---|
 | `src/ui/cr/session.rs` `PaneTerminal` | The terminal pane opened at its top and did not follow new output. | compose-rust#385 | Closed, in the pin since v0.0.5 (`ScrollState::scroll_to`) | The pane's `ScrollColumn` takes `remember_scroll_state()` and `FollowNewest` moves it, as the transcript does. Test `pane_terminal_follows_its_newest_line_with_the_toolkit_scroll_state`. |
 | `src/ui/cr/compat.rs` `SplitPane` | A fixed two-column row stood in for a split pane. It had no caller. | compose-rust#27 | Closed, in the pin (`compose_rust::ui::SplitPane`) | The function is gone. Test `no_stand_in_split_pane_is_left`. |
+| `src/ui/cr/channel_owner.rs`, `add_computer.rs`, `files.rs`, `project.rs` | A sheet body took a fixed or estimated height, because a node's height could not be capped. | compose-rust#778 | Closed, in v0.0.11 (`Modifier::max_height`) | Each sheet body is a `ScrollColumn` capped with `Modifier::max_height`; `new_project_body_estimate`, `add_body_estimate` and `share_body_estimate` are gone. Tests `fr_l32_1_*` and `fr_l26_1_new_project_body_is_capped_at_the_room`. |
+| `src/ui/cr/vcs.rs` (`BranchMenu`, `FilesTreeCapped`) | The branch list took a fixed 300 and the changes tree a fixed height from a row count. | compose-rust#778 | Closed, in v0.0.11 (`Modifier::max_height`) | Both take `Modifier::max_height` (`BRANCH_POP_LIST_MAX_H`, `tree_view_height(cap)`); `branch_pop_list_height` is gone. Tests `fr_l10_4_branch_menu_sizes`, `fr_l19_a_scrolling_tree_shows_whole_rows_at_rest`, `fr_l19_the_commit_box_is_in_the_changes_card_and_the_tree_leaves_it_room`. |
+| `src/ui/cr/agents.rs` (`HeadedCard`) | A zero-width spacer stood in as a minimum-height strut in the card header row. | compose-rust#778, #826 | Closed in v0.0.11 (`Modifier::min_height`) | The header row takes `.min_height(CARD_HEAD_CONTENT_MIN_H)` and the strut spacer is gone. Test `fr_l20_a_card_has_a_header_row_with_an_icon_tile_and_a_rule_across_the_card`. |
+| `src/ui/cr/vcs.rs` (`CircleIconButton`), `session.rs` (`IdeChevronSized`) | A press area was as large as its row at most; the IDE chevron was 26 by 32. | compose-rust#472 | Closed, in v0.0.11 (`Modifier::min_touch_target`) | Both carry `.min_touch_target(ICON_TOUCH_TARGET)` (44 dp) without growing the node. Tests `fr_l7_ide_chevron_beside_the_default_opens_the_chooser_when_clicked`, `a_fixed_name_sits_on_the_painted_box_and_a_data_name_on_a_matched_button`. |
+| `src/ui/vcs.rs`, `src/ui/cr/vcs.rs` (`DiffViewAtWidth`) | The diff line check scrolled with its row. | compose-rust#424 | Closed, in v0.0.11 (`Modifier::sticky`) | The diff line check cell takes `Modifier::sticky()`. Test `fr_l19_hunk_action_sits_in_the_header_row`. |
+| `src/ui/cr/components.rs` `OneLineHintField`, `new_session.rs` | Ember drew a long hint as its own one-line label under the field. | compose-rust#786 | Closed, in v0.0.11 (single-line `TextField` keeps its placeholder on one line with an ellipsis) | `OneLineHintField` and `FieldOptions::one_line_hint` are gone; the hint is passed as the field's `placeholder`. Tests `fr_l10_1_one_line_hint_is_the_toolkit_placeholder`, `fr_l10_1_new_session_long_hints_are_the_field_placeholder`. |
+| `assets/editor/page.css`, `src/ui/editor_workbench.rs` | `.ed-none` stood in for closed tool windows and conditional children so placeholder comment nodes would not become grid or flex items. | dioxus-compose#266 | Closed, in `94ade333` (comment nodes make no layout box) | `.ed-none` and its four `div { class: "ed-none" }` branches are gone. Test `fr_l31_26_the_status_bar_is_32_high_and_flush_with_the_page_bottom`. |
 
 ### Removed on `feat/673-drop-in-pin`, to be confirmed by capture
 
@@ -96,17 +111,39 @@ compiled or seen on a display yet, for the same reason as the table above.
 | `src/ui/editor.rs` (`DoubleClick`, `DOUBLE_CLICK_MS`), `src/ui/editor_workbench.rs` (`DOUBLE_CLICK`, the tree row's and the tab's `onclick`) | Two clicks on one tab or tree row within 500 ms stood in for a double-click. | compose-rust#417; dioxus-compose `f0e5b9f5` sends `dblclick` on an `Up` with `click_count == 2` (`dom/pointer.rs`) | The rows' and tabs' own `ondoubleclick` keeps the preview; `onclick` only opens or activates. The struct, the constant, the thread-local and test `fr_l31_tabs_two_clicks_on_one_target_within_500_ms_are_a_double_click` (`tests/editor.rs`) are gone. Test `fr_l31_5_double_click_and_right_click_are_the_real_events` (`editor_workbench_glue_tests.rs`). | By hand with a pointer in the editor window: a single click on a file opens an italic preview tab, a double-click on the row or the tab makes it permanent, two slow clicks do not; a double-click on a terminal tab starts its rename. |
 | `src/ui/editor_tree_menu.rs` (`PLUS_MENU_HOLDS_SELECTION`, `SELECTION_HEADING`, `TreeMenuEntry::Heading`), `src/ui/editor_workbench.rs` (the heading arm) | The header "+" menu carried a "선택한 항목" section with the context menu's items. | compose-rust#417; dioxus-compose `f0e5b9f5` sends `contextmenu` | The "+" menu is 새 파일 and 새 폴더 only; the row's `oncontextmenu` opens the context menu at the pointer. Shift+F10 and the context-menu key stay: they are Code-OSS's keyboard route, not a stand-in. Test `design_rule1_plus_menu_is_new_file_and_folder_only` (replaces `design_rule1_plus_menu_is_new_file_and_folder_then_the_stand_in_section`). Left: the ⋯ menu's current-tab group, where Shift+F10 on the tab strip leads (`TODO(#673)`: open the tab's own menu at the tab from the keyboard). | The project window's "+" menu at 1440, light and dark: two items. By hand with a pointer: right-click a tree row and a tab, each menu opens at the pointer with its items; right-click on the scrim closes it. By hand with the keyboard: Shift+F10 on a tree row opens the context menu. |
 
-### Closed after the pin
+### Closed-issue pass (2026-11-22), to be confirmed by capture
 
-| Place | Workaround | Toolkit issue | State | Action at the next pin |
+The issue states were checked on 2026-11-22 and each feature was read in compose-rust
+`a85f02de`. One workaround goes. The card and inset panel padding was replaced too and put
+back: with `padding_xy` the first hatched bar of the home 비용과 토큰 추이 card at 1440 lost its
+left edge (a 1 px column at the card's content edge, grey before and white after), so it is in
+the display-check table. The other closed issues are reworded where they are listed below
+(waits for a display check, unfiled gaps). compose-rust#817 (dashed border) was already in use
+(`project.rs`, `add_computer_chip_frame`), so its open row is gone. Test
+`no_todo_cites_a_toolkit_issue_that_is_closed_in_the_pin` (`components.rs`) keeps
+`TODO(compose-rust#N)` for compose-rust #389, #521, #546, #771, #778, #826 and #831 out of the
+files that carried them.
+
+| Place | Workaround | Toolkit issue | What replaced it | Capture or hand check that proves it |
 |---|---|---|---|---|
-| `src/ui/cr/channel_owner.rs:381`, `add_computer.rs:423`, `files.rs:1584`, `project.rs:1157`, `project.rs:1384` | A sheet body takes a fixed or estimated height, because a node's height cannot be capped. | compose-rust#778 | Closed 2026-11-14T16:50Z. No maximum height on `Modifier` in the pin (`compose-rust/src/ui/mod.rs`). | Cap the body and delete the estimates (`sheet_body_max_height` callers, `new_project_body_estimate`, `add_body_estimate`). |
-| `src/ui/cr/vcs.rs:801`, `vcs.rs:1534` | The branch list takes a fixed 300 and the changes tree a fixed cap. | compose-rust#778 | As above | Cap both and delete `branch_pop_list_height` and the fixed height in `tree_cap`. |
-| `src/ui/cr/components.rs:1202` | A name and a pill in a row are measured through `observe_size_every_dp`, because no weight leaves a child its own size. | compose-rust#778 | As above (the title also names weight without fill) | Use the weight without fill and delete the measuring. |
-| `src/ui/cr/vcs.rs:508`, `session.rs:558` | A press area is as large as its row at most; the IDE chevron is 26 by 32. | compose-rust#472 | Closed 2026-11-14T22:03Z. No hit area API in the pin. | Give both a 44 by 44 hit area that does not grow the node. |
-| `src/ui/vcs.rs:17` | The diff line check scrolls with its row. | compose-rust#424 | Closed 2026-11-14T17:07Z. No sticky column in the pin. | Pin the check column. |
-| `src/ui/cr/components.rs:1049` `OneLineHintField` | Ember draws the hint as its own one-line label under the field. | compose-rust#786 | Closed 2026-11-14T22:03Z. `TextField` has no placeholder line limit in the pin. | Delete `OneLineHintField` and pass the hint as the placeholder. |
-| `assets/editor/page.css:36` | `.ed-layers` and `.ed-none` keep placeholder comment nodes out of the grid rows. | dioxus-compose#266 | Closed 2026-11-14T22:03Z, after the pinned commit. | Drop both rules and check the status bar's place. |
+| `src/ui/cr/channel_owner.rs` (`InviteSection`), `components.rs` (`FieldOptions`, `FieldNode`) | The invite link sat in an ordinary field: typing changed what was drawn, never the link. | compose-rust#826 | `FieldOptions::read_only` sends `TextField`'s `read_only`, and the link field sets it. Tests `fr_t14_a_read_only_field_is_the_toolkits_read_only_text_field` (`components.rs`), `fr_t14_the_invite_link_field_is_read_only` (`channel_owner.rs`). | By hand in a channel's 멤버/게스트 sheet with a server, after 초대 만들기: the link looks as before, can be selected and copied with Cmd+C, and typing changes nothing. VoiceOver reads it as not editable. |
+
+### Removed on `feat/673-app-todos-and-workarounds`, to be confirmed by capture
+
+Branch `feat/673-app-todos-and-workarounds` (2026-11-22, against compose-rust `a85f02de` and
+dioxus-compose `3758928b`) removes the workarounds and completes the `#673` items below. None of
+it is compiled or seen on a display yet. Zero `TODO(#673)` markers remain in `ember/app/src/`:
+items kept intentionally (`PaneTerminal`, `EmberField` / `BareField`, `model_popover`,
+`CHIP_WRAP_WIDTH`, `PaneLayout::Two`) carry factual comments explaining their layout invariants.
+
+| Place | Workaround | Toolkit issue | What replaced it | Capture or hand check that proves it |
+|---|---|---|---|---|
+| `src/ui/cr/components.rs` (`DataNamedOverlay`, `NamedClickable`, `NamedClickableOn`, `NamedDisabled`), `agents.rs`, `routines.rs`, `vcs.rs` | A clear `Button` (`DataNamedOverlay`) sat over painted boxes whose accessible name was built from data. | compose-rust#831 (`Modifier::label(&str)`) | Widened `NamedClickable`, `NamedClickableOn` and `NamedDisabled` to `label: &str`, migrated all 14 callers in `agents.rs`, `routines.rs` and `vcs.rs`, and deleted `DataNamedOverlay`. Updated `a_data_named_overlay_takes_its_box_and_a_disabled_named_box_has_no_click` (`components.rs`) and screen tests in `vcs.rs`, `agents.rs` and `routines.rs` to assert no `DataNamedOverlay` remains. | `EMBER_CR_ROUTE=vcs`, `agents` and `routines` at 1440 and 390, light and dark: every row, chip, radio and pill keeps its size and press shape. By hand with a pointer, keyboard and VoiceOver: the painted box itself takes clicks, focus ring and the data-built name. |
+| `src/ui/cr/compat.rs` (`CodeText`) | Long monospace lines wrapped instead of scrolling horizontally. | Ember #673 (toolkit `ScrollRow`) | Wrapped the monospace `Text!` in toolkit `ScrollRow`. Test `code_text_scrolls_horizontally_in_a_scroll_row`. | By hand on a screen using `CodeText` with a line wider than the viewport: the line stays unwrapped and scrolls horizontally inside the container. |
+| `src/ui/cr/files.rs` (`ShareSheet`) | `SHARE_SHEET_PICKS_FILES = false` disabled the share sheet's file card picker. | compose-rust#483, Ember #673 | Deleted `SHARE_SHEET_PICKS_FILES` and wired the share sheet's file card to open `FileDialog::open_files()` on macOS when `FILE_PICKER_AVAILABLE` is true. Test `fr_l27_7_share_sheet_file_card_opens_file_dialog_when_available`. | On macOS outside demo mode, open the share sheet and click the file card: the system file panel opens and chosen files fill the draft. |
+| `src/ui/editor_workbench.rs` (tab strip `Shift+F10` / `ContextMenu`, `⋯` menu) | `Shift+F10` on the tab strip routed through a redundant current-tab group in the `⋯` menu. | Ember #673 | `Shift+F10` and the `ContextMenu` key open the tab's own context menu directly for the current tab, and the redundant current-tab group is removed from the `⋯` menu. Test `fr_l31_5_tab_strip_keyboard_menu_opens_tab_context_menu_and_main_menu_omits_tab_group`. | By hand with the keyboard in the editor window: focus a tab, press `Shift+F10` (or the context menu key), and the tab's own menu opens; open the `⋯` menu and confirm the current-tab group is gone. |
+| `src/ui/editor_workbench.rs` (`terminal_body`), `src/terminal_input.rs` | A paste chord in the editor terminal showed `PASTE_UNAVAILABLE` instead of reading the clipboard. | compose-rust#546 (`compose_rust::clipboard::read_text`) | Wired the paste chord to `compose_rust::clipboard::read_text` with `plan_paste` and an inline `role: "alertdialog"` multi-line confirmation bar (`붙여넣기`, `한 줄로 붙여넣기`, `취소`), removing `PASTE_UNAVAILABLE`; the chord follows `terminal.integrated.enableMultiLinePasteWarning` (old booleans included). Tests `fr_l31_21_the_setting_reads_strings_and_old_booleans`, `fr_l31_21_single_line_pastes_immediately_and_multiline_confirms`, `fr_l31_21_pending_paste_state_transitions`, `fr_l31_21_editor_terminal_paste_chord_reads_clipboard_and_confirms_multiline`. | By hand in the editor terminal: paste a single line (sent immediately), then paste multi-line text (confirmation bar opens; test `붙여넣기`, `한 줄로 붙여넣기` and `취소`). |
+| `src/ui/editor_language.rs` (completion/code-action overlay, parameter hint) | Completion and code-action lists stole focus from the code editor, and the parameter hint stayed pinned to the bottom of `.ed-main`. | compose-rust#553, #554, Ember #673 | Routed `ArrowUp`, `ArrowDown`, `Enter`, `Tab` and `Escape` from `on_key_preview` to the completion or code-action list while keeping focus in the code editor, and anchored the parameter hint above the caret when `caret_rect` is known (falling back to the bottom of `.ed-main`). Tests `fr_l31_13_on_key_preview_routes_list_navigation_accept_and_escape`, `fr_l31_13_parameter_hint_anchors_above_caret_with_bottom_fallback`. | By hand in the editor window: open completion or code actions, move with arrows and accept with `Enter`/`Tab` or close with `Escape` without losing editor focus; trigger parameter hints and confirm the popup sits above the caret. |
 
 ### Toolkit issue open
 
@@ -116,12 +153,10 @@ compiled or seen on a display yet, for the same reason as the table above.
 | `src/ui/vcs.rs:18`, `src/ui/cr/vcs.rs:2586` | The history is a list with a dot, with no lane graph. | compose-rust#308 | Open | Draw the graph on a `Canvas` with Path commands. |
 | `src/ui/cr/shell.rs:412` | The bottom bar has no backdrop blur. | compose-rust#300 | Open | Add the blur and the safe-area inset. |
 | `src/ui/cr/vcs.rs:344` `StageCheck` | A painted square lies over an invisible toolkit checkbox; a partial check reports unchecked. | compose-rust#767 | Open | Use the toolkit `Checkbox` with its shape and partial state. |
-| `src/ui/cr/components.rs:950` | The frame and the 12 px inset sit on a box around a bare field. | compose-rust#771 | Open | Move them onto the field. |
-| `src/ui/cr/components.rs:482`, `home.rs:826` | A popover menu has no arrow keys and no focus on the current row. | compose-rust#810 | Open | Add the keys and the focus from the toolkit. |
-| `src/ui/cr/home.rs:918` | The model popover's row takes a fixed height, not `equal_height`. | compose-rust#766 | Open | Use `equal_height` again. |
-| `src/ui/cr/project.rs:473` | The add chip has a solid border where the mockup has a dashed one. | compose-rust#817 | Open | Set the stroke dash. |
+| `src/ui/cr/components.rs` (`PopoverMenu`), `home.rs` (`mode_menu`) | A popover menu's arrow keys and focus on the selected row work on macOS (checked 2026-11-21, #888), but the row the keys move to shows no mark, and a bottom sheet at 560 and below has no menu keyboard. | compose-rust#810, #940, #941 | Closed, in the pin 519ffede (the renderer marks the row the keys moved to and runs the menu keyboard in a `Sheet`); the Host sends nothing new (2026-11-25, #888) | Check on a display that the mark shows and that the arrows wrap in a phone sheet. Tests `fr_l10_4_the_focused_row_of_a_popover_menu_is_the_current_one_and_can_take_the_mark`, `fr_l10_4_arrow_keys_move_within_a_phone_bottom_sheet_menu`. |
+| `src/ui/cr/home.rs` (`model_body`, `ModelRow`) | The Home model picker's search is a plain text field and its rows are list items in a list named 모델, selected on the drawn active row, where the mockup has a combobox, a listbox of options and `aria-activedescendant` ([leader, 2026-11-21], #888). | compose-rust#942 | Open | Make the search a combobox tied to the active option and the rows options when the roles and the relation land. |
 | `src/ui/cr/project.rs:457` | The strip's scroll step is taken from the window's width. | compose-rust#818 | Open | Read the viewport size from `ScrollState`. |
-| `src/lib.rs:206`, `lib.rs:219`, `src/ide.rs:109`, `ide.rs:167`, `src/ui/coexist.rs:281` | The editor is its own process started with `--editor`. | dioxus-compose#161 | Open. dioxus-compose#152 (the `Window` element) is closed and in the pin; the shell is a Compose root and the editor an HTML page. | Open the editor as a `Window` node on the shell's host and delete `editor_command`. |
+| `src/lib.rs:206`, `lib.rs:219`, `src/ide.rs:109`, `ide.rs:167`, `src/ui/coexist.rs:281` | The editor is its own process started with `--editor`. | dioxus-compose#161 | Open. dioxus-compose#152 (the `Window` element) is closed and in the pin. Since dioxus-compose `a64f3b92` (#161: events reach a `WidgetView` inside an `HtmlView` under a Compose root) the editor window is a Compose root holding the page in an `HtmlView` (#301, `editor_workbench::view::EditorRoot`), and since `89fa099c` (#295) a widget tree in that `HtmlView` gets its box and draws. It is still its own process. | Open the editor as a `Window` node on the shell's host and delete `editor_command`. |
 | `src/ui/editor_workbench.rs:3086` | Paste and IME composition handlers run in tests but not on screen. | dioxus-compose#205 | Open | Check the terminal's paste and composition on a display, then drop the note. |
 
 ### In the pin, waits for a display check
@@ -132,41 +167,42 @@ behaves, so a capture or a run decides it.
 | Place | Workaround | Toolkit issue | State | Action |
 |---|---|---|---|---|
 | `src/ui/cr/routines.rs` (`ListPane`, the filter row) | The project filter chips scroll sideways in a `ScrollRow`. Their width estimate (`seg_width`) is gone, see the removed rows. | compose-rust#427, #328 | In the pin since v0.0.7 | A capture of `EMBER_CR_ROUTE=routines` at 1440 with six or more projects must show whether the sixth chip still clips; if it does not, the row can become a `ChoiceRow`. |
-| `src/ui/cr/vcs.rs` (`ChangesPane`, `PaneLayout::Two`), `home.rs:328` (`ROW_TILE_H`) | Panes scroll on their own; tiles take a fixed height. | compose-rust#389 | In the pin (`Row::equal_height`, confirmed in `ui/widgets.rs`). Kept on `feat/673-drop-in-pin`: an `equal_height` row is sized by intrinsic heights, which is wrong for wrapped text and counts a scrolling child as 0 (compose-rust#766, open), and the diff pane holds wrapped code. | A capture of the two panes in one page scroll with `equal_height` must show the files card as tall as the diff and still in view while the diff scrolls. For the home tiles: the three tiles of the success row at 1440 and 1024 must be equally tall with `EmberCardSized` and no `ROW_TILE_H`. |
-| `src/ui/home.rs:1313` (`CHIP_WRAP_WIDTH`) | The Home composer puts its mode and computer chips and the send button on a second line below 1100 dp, by window width. | compose-rust#521 | In the pin (`FlowRow`, already used by `components::ChoiceRow`). Kept on `feat/673-drop-in-pin`: the split also moves the send button, which a `FlowRow` would wrap with the chips instead of keeping at the row's end. | A capture of the composer at 1440, 1100, 1024 and 390 with the chips in a `FlowRow` must show the send button at the end of the last line at every width. |
-| `src/terminal_input.rs:145`, `src/ui/editor_workbench.rs` (`terminal_body`, the paste chord) | A paste chord in the editor terminal shows a notice. | compose-rust#546 | In the pin (`compose_rust::clipboard::read_text(callback)`); dioxus-compose's HTML runtime makes the same call for its own Cmd+V, so the read answers in the editor window. Left on `feat/673-editor-in-pin` too: a multi-line paste must first ask (`needs_multiline_warning`, Code-OSS's dialog) and the window has no confirmation for it. The editor side's marker is `TODO(#673)`; `terminal_input.rs` is outside that branch. | Build the multi-line confirmation, read the clipboard on the chord, send `paste_bytes`, and check it in the editor window. |
-| `src/ui/editor_language.rs` module notes | A snippet is inserted as plain text. | compose-rust#556 | In the pin (`CodeEditorHandle::insert_snippet`). The session hands the window an `ember_editor::WidgetCommand::EditCode` with the expanded text, so `ember/editor` has to carry the snippet first; that is outside this branch, so the marker is `TODO(#673)`. | Carry the snippet in `WidgetCommand` and open a snippet session with `insert_snippet`. |
-| `src/ui/editor_status.rs:110` `list_window` | A picker list is windowed around the highlighted row. | dioxus-compose#200 | In the pin (`MountedData::scroll_to`). Kept on `feat/673-editor-in-pin`: with the windowed list removed, a capture of the language picker on a JSON file at 1440 showed the list at its top and the highlighted JSON row out of view, also with a reveal sent on every render, so the request does not move this list. | Scroll the row into view and delete `list_window` once a capture shows the row in view. |
+| `src/ui/cr/vcs.rs` (`ChangesPane`, `PaneLayout::Two`), `home.rs:328` (`ROW_TILE_H`) | Panes scroll on their own; tiles take a fixed height. | compose-rust#389 | In the pin (`Row::equal_height`), and since compose-rust#766 a scrolling child of fixed height measures at that height. Kept intentionally in `vcs.rs` with a factual layout-invariant comment (no `TODO(#673)` marker): the row is sized by the intrinsic heights of the diff pane's wrapped code, and one page scroll would take the files card out of view. | A capture of the two panes in one page scroll with `equal_height` must show the files card as tall as the diff and still in view while the diff scrolls. For the home tiles: the three tiles of the success row at 1440 and 1024 must be equally tall with `EmberCardSized` and no `ROW_TILE_H`. |
+| `src/ui/home.rs` (`CHIP_WRAP_WIDTH`) | The Home composer puts its mode and computer chips and the send button on a second line below 1100 dp, by window width. | compose-rust#521 | In the pin (`FlowRow`, already used by `components::ChoiceRow`). Kept intentionally with a factual layout-invariant comment (no `TODO(#673)` marker): the split also moves the send button, which a `FlowRow` would wrap with the chips; the chips need a `FlowRow` in a weighted box with the button after it. | A capture of the composer at 1440, 1100, 1024 and 390 with the chips in a `FlowRow` must show the send button at the end of the last line at every width. |
+| `src/ui/editor_language.rs` module notes | Snippet completions needed `CodeEditorHandle::insert_snippet` wiring. | compose-rust#556 | In the pin (`CodeEditorHandle::insert_snippet`). Wired via `WidgetCommand::InsertSnippet` and no `TODO(#673)` marker remains; awaits a display check in the editor window. | Confirm snippet tab-stops open a snippet session in the editor window on a display. |
 | `src/ui/cr/components.rs:1882` | The first composition falls back when the window reads 0x0. The editor side (a fixed height allowance) is already gone: the page follows the viewport (`editor::editor_page_size_style`, #301), checked on `feat/673-editor-in-pin`. | compose-rust#467, #479 | In the pin (`with_report_size`) | Follow the reported size. |
 | `src/ui/cr/channel_owner.rs:559`, `channels.rs:357`, `home.rs:1508`, `launcher.rs:171`, `new_channel.rs:242`, `new_session.rs:5`, `project.rs:1200`, `project.rs:1712` | Text fields are uncontrolled. | compose-rust#374 | In the pin (`TextField::text`) | Kept: each field needs its value held in state first. By hand, in each field: type in the middle of a Korean word with the IME composing; the caret stays where it is, no syllable is dropped or doubled, and a programmatic value (a suggestion, a reset) replaces the text. A capture cannot show this. |
-| `src/ui/cr/components.rs:1998`, `channels.rs:627`, `project.rs:371` | A field's frame is drawn on a box around a bare field. | compose-rust#376, #375 | In the pin | Kept: compose-rust#771 (open) still keeps the 12 px inset on a box. A capture of the search fields at 1440 and 390, light and dark, with the frame on the field must show the same 1 px `line` ring, the pill ends and the placeholder centred in the height. |
-| `src/ui/cr/components.rs:199`, `components.rs:238` | A modal list stands in for a dropdown popup. | compose-rust#383 | In the pin (`Select`, `Dropdown::closed`) | Kept. A capture of a toolkit `Select` open under its field must show an opaque `surface` box with a 1 px `line` border and the `corner-md` radius, 38 px rows with a left-aligned `text` label, the chosen row on `sel`, opening below the anchor. |
+| `src/ui/cr/components.rs` (`EmberField`, `BareField`), `channels.rs:627`, `project.rs:371` | A field's frame and its 12 px inset are drawn on a box around a bare field, so a click on the inset does not focus the field. | compose-rust#376, #375, #771 | In the pin: a bare single-line field centres its text in its height and `padding_each` sits inside the field (compose-rust#771). Kept intentionally (no `TODO(#673)` marker): the outer `Row` frame and `BareField` side spacers are pinned by 7 `fr_l10_2_*` display-verified parity tests. | Kept: the move rebuilds `BareField` and changes every field. A capture of the search fields at 1440 and 390, light and dark, with the frame on the field must show the same 1 px `line` ring, the pill ends and the placeholder centred in the height. |
+| `src/ui/cr/components.rs` (`OptionSheet`), `session.rs` (pane reorder, add-member) | A modal list stands in for a dropdown popup. | compose-rust#383 | In the pin (`Select`, `Dropdown::closed`) | The form `Select` no longer uses it: it opens the shared `PopoverMenu` (#888, 2026-11-25, one menu look everywhere). Kept only for the session's pane reorder and add-member lists, which have no menu in the mockup (FR-L10.4). Test `fr_l10_4_every_select_field_is_a_popover_menu_and_only_two_sheets_remain`. |
 | `src/ui/cr/theme.rs:341`, `components.rs:1849` | Corners are plain arcs. | compose-rust#294 | In the pin (`Modifier::corner_curve`) | Kept: the value goes on every card, sheet and rounded square at once. Captures of the home, project and session screens and a sheet at 1440, in both schemes, with `corner_curve(0.6)` must match the mockup's corners where it sets `corner-shape: squircle`, with the border and shadow following the same curve and no gap at a clipped child. |
 | `src/ui/cr/session.rs:5170`, `components.rs:1806` | Escape does not close the drawer; a modal passes its close callback by hand. | compose-rust#476 | In the pin (`on_key_down`, `request_focus`) | Kept. By hand with a keyboard: open the drawer, press Escape, and the drawer closes and the focus returns to the button that opened it; the same for a modal sheet. A capture cannot show it. |
 | `src/ui/cr/session.rs:1285` | The terminal rows are not in a `SelectionContainer`. | compose-rust#5 | In the pin | Kept. By hand with a pointer: drag across several terminal rows; the selection follows the text of each styled row, copies in reading order with line breaks, and a tap on a row's control still works. |
 | `src/ui/cr/home.rs:438`, `session.rs:3794`, `project.rs:1347`, `files.rs:506`, `characters_screen.rs:200`, `conversation.rs:257` | `EMBER_CR_SCROLL` leaves blocks out for review captures. | compose-rust#385 | In the pin (`ScrollState::scroll_to`) | Kept: the review capture script reads `EMBER_CR_SCROLL`. It goes when the script scrolls for real; the captures of the lower half of each of the six screens must then match the ones taken with blocks left out. |
 | `src/ui/cr/home.rs:2087` | The stripes take a fixed height. | compose-rust#388 | In the pin (`Canvas::view_box`) | Kept. A capture of the home 승인 대기 tile at 1440, 1024 and 390 with the stripes in a `view_box` canvas that fills its block must show the stripes reaching both edges of every block, at the same angle and spacing in each. |
 | `src/ui/vcs.rs:16` | A text Button is the hit target of a row or a diff line. | compose-rust#372 | In the pin (container `on_click`) | Migrate the VCS rows. |
+| `src/ui/cr/components.rs` (`EmberCardSized`, `InsetPanelSized`) | A uniform 16 (12 in an inset panel) and two 4 dp spacers make the mockup's 16/20 and 12/16. | compose-rust#826 | In the pin (`Modifier::padding_xy`, `padding_each`). Tried in `1f507612` and reverted: with `padding_xy` the first hatched bar of the home 비용과 토큰 추이 card at 1440 lost its left edge by one pixel (clipped). No captured screen shows an inset panel. | Find why the bar moves, then a capture of home, agents, routines and vcs at 1440 and 390, light and dark, with `padding_xy` must match the one with the spacers pixel for pixel, an inset panel included. |
+| `src/ui/cr/home.rs` (`model_popover`) | The model popover's row takes a fixed height, not `equal_height`, because an `equal_height` row once counted the scrolling list as 0 high (#849). | compose-rust#766 | In the pin: a scrolling child of fixed height measures at that height. Kept intentionally with a factual layout-invariant comment (no `TODO(#673)` marker): this list fills the row and has no height of its own, and test `fr_l15_model_popover_has_a_fixed_height_not_an_equal_height_row` keeps the fixed height. | A capture of the open picker at 1440 and 390 with `equal_height` must show every row; only then change the test with it. |
 
 ### Ember tasks with no toolkit issue
 
+Zero `TODO(#673)` markers remain in `ember/app/src/`. `CodeText` moved to `ScrollRow` on
+`feat/673-app-todos-and-workarounds` (table above).
+
 | Place | Note | Action |
 |---|---|---|
-| `src/ui/term_pane.rs:15` | 500 lines are drawn at once. The toolkit has `LazyColumn` (`compose-rust/src/ui/lazy.rs`). | Draw the lines in a `LazyColumn` and check it on a display. |
-| `src/ui/cr/compat.rs:146` `CodeText` | Long lines wrap. The toolkit has `ScrollRow`. | Put the text in a `ScrollRow` and check it on a display. |
+| `src/ui/term_pane.rs` (`PaneTerminal`) | 500 lines (`RENDER_LINES = 500`) are drawn at once in a `ScrollColumn`. Kept intentionally on the current pin (`compose-rust a85f02de`): `LazyColumn` (`compose-rust/src/ui/lazy.rs`) has no `scroll_state` parameter for `FollowNewest`. | Move to `LazyColumn` once the pinned toolkit exposes a `scroll_state` parameter on it, then check on a display. |
 
 ### Unfiled toolkit gaps
 
 These have no compose-rust issue in the saved list. The leader files them; the marker then takes
-the number.
+the number. (`compose-rust#826`, per-side padding, minimum height and read-only `TextField`, and
+`compose-rust#831`, an owned container accessible name, were filed from this list and are in the
+pin.)
 
 | Place | Gap | Toolkit source |
 |---|---|---|
-| `src/ui/cr/components.rs:1673` (`EmberCardSized`), `:1702` (`InsetPanelSized`) | `ui::Modifier` has no per-side padding. `Modifier::padding(dp)` is uniform and `padding_role` takes one role. The wire has `Modifier::PaddingEach`, with no builder. Ember adds 4 dp spacers to turn 16 into 16/20 and 12 into 12/16. | `compose-rust/src/ui/mod.rs:500`, `compose-rust/src/schema.rs:2421` |
-| `src/ui/cr/agents.rs:854` (`HeadedCard`) | `ui::Modifier` has no minimum height. Ember puts a zero-width spacer of the height in the row as a strut. compose-rust#778 is about a maximum by its title; whether its fix also gives a minimum is not known from the pin. | `compose-rust/src/ui/mod.rs` (`width`, `height`, `size` only) |
-| `src/ui/cr/components.rs` (`DataNamedOverlay`) | A clickable container has no owned accessible name. `Modifier::label` keeps every distinct name for the life of the program and drops names past 4096, so it suits a fixed set only. A `Button` with content (compose-rust#425) insets its children by the design system's 16 dp and gives no way to change it, so a painted row cannot move into one. A box named from data therefore keeps a clear `Button` over it. | `compose-rust/src/ui/mod.rs` (`keep_label`, `MAX_LABELS`), `renderer/desktop/src/renderer/HostButton.kt` (`labelPadding`); filed as compose-rust#831 |
-| `src/ui/cr/channel_owner.rs:467` | `TextField` has no read-only flag. The invite link is shown in an enabled field so it can be selected and copied, and typing changes what is drawn. | `compose-rust/src/ui/widgets.rs` (`TextFieldScope`, line 1163) |
 | `src/ui/editor_scm.rs` (`editable_body`) | A code editor's view zone follows a line (`ViewZone::after_line`), so none can stand above line 0. Base lines removed above a diff's first line stay a red rule and a hover list on the first row. | `compose-rust/src/code.rs` (`ViewZone`), `renderer/desktop/src/renderer/CodeEditorSurface.kt:591` |
+| `src/ui/cr/components.rs` (`NameThenPill`) | No weight leaves a child its own size (Compose `weight(fill = false)`), so a name and a pill in a row are measured through `observe_size_every_dp`. compose-rust#778 (closed) brought `max_width`, `max_height` and `size_in`, which cap a node at a fixed size, not at what its siblings leave. Marker `TODO(compose-rust, unfiled: a weight that leaves a child its own size)`. | `compose-rust/src/ui/mod.rs` (`Modifier::weight`), `renderer/desktop/src/renderer/RenderNode.kt` (`WeightedStackPolicy`) |
 
 ### Notes not changed in this pass
 
@@ -181,17 +217,18 @@ they are until those files are next edited.
 ### 규칙
 
 툴킷의 버그나 빈 곳을 피해 가는 Ember 코드는 모두 툴킷 이슈 번호를 적고, 고친 툴킷을 핀으로
-잡으면 지운다. 이슈가 없는 우회 코드는 지울 때를 알 수 없기 때문이다. 핀은 compose-rust 태그
-`v0.0.10`(커밋 `3df7c17`, 2026-11-14T09:44Z 배포)과 dioxus-compose 리비전 `f0e5b9f5`
-(2026-11-14T10:00Z 커밋, compose-rust v0.0.10 기준)이다.
+잡으면 지운다. 이슈가 없는 우회 코드는 지울 때를 알 수 없기 때문이다. 핀은 compose-rust 리비전
+`a85f02de`(태그 `v0.0.12` 뒤, 위젯이 호출 매크로)와 dioxus-compose 리비전 `3758928b`다. 표시
+작업과 아래 두 브랜치는 compose-rust `v0.0.11`(커밋 `732f69a5`)과 dioxus-compose `94ade333`을
+읽었다.
 
 표시는 다섯 가지 꼴 중 하나다. 다음 핀 때 grep 한 번으로 묶음을 찾기 위해서다.
 
 | 꼴 | 뜻 | 다음 핀에서 할 일 |
 |---|---|---|
 | `TODO(compose-rust#N)`, `TODO(dioxus-compose#N)` | 툴킷 이슈가 열려 있다. | 이슈 상태를 읽는다. 닫혔으면 새 핀에서 API를 확인하고 표시를 옮긴다. |
-| `TODO(compose-rust#N, after v0.0.10)`, `TODO(dioxus-compose#N, after f0e5b9f5)` | 이슈가 핀 뒤에 닫혔고 핀 소스에 API가 없다. | 새 핀에서 API를 확인하고 테스트와 함께 우회 코드를 지우거나, 화면 확인 목록으로 옮긴다. |
-| `TODO(compose-rust#N, in v0.0.10)`, `TODO(dioxus-compose#N, in f0e5b9f5)` | API가 핀 소스에 있다. 지우면 그림이나 입력 동작이 바뀌므로 화면을 볼 수 있는 빌더를 기다린다. | 핀을 기다리지 않는다. 빌더가 지우고 화면에서 확인한다. |
+| `TODO(compose-rust#N, after v0.0.11)`, `TODO(dioxus-compose#N, after 94ade333)` | 이슈가 핀 뒤에 닫혔고 핀 소스에 API가 없다. | 새 핀에서 API를 확인하고 테스트와 함께 우회 코드를 지우거나, 화면 확인 목록으로 옮긴다. |
+| `TODO(compose-rust#N, in v0.0.11)`, `TODO(dioxus-compose#N, in 94ade333)` | API가 핀 소스에 있다. 지우면 그림이나 입력 동작이 바뀌므로 화면을 볼 수 있는 빌더를 기다린다. | 핀을 기다리지 않는다. 빌더가 지우고 화면에서 확인한다. |
 | `v0.0.7: #N fixed; workaround kept until checked on a display` | 바로 위 꼴의 예전 표현이다(`#N`은 compose-rust 이슈). | 바로 위와 같다. |
 | `TODO(compose-rust, unfiled: <빈 곳>)` | 실제로 빈 곳인데 툴킷 이슈가 없다. | 이슈를 올리고 표시에 번호를 적는다. |
 
@@ -213,8 +250,9 @@ API는 핀에 있다.
 | 이슈 없는 툴킷 빈 곳 | 4줄, 3건 |
 | 툴킷 이슈 없는 Ember 일(`TODO(#673)`) | 2 |
 
-위 개수는 표시 작업 때의 값이다. `feat/673-drop-in-pin`과 `feat/673-editor-in-pin`에서는 다시 세지
-않았다.
+위 개수는 표시 작업 때의 값이다. `feat/673-drop-in-pin`, `feat/673-editor-in-pin`, 닫힌 이슈
+정리, `feat/673-app-todos-and-workarounds`에서는 다시 세지 않았다. `ember/app/src/`에
+`TODO(#673)` 표시는 하나도 남아 있지 않다.
 
 이번 작업의 첫 grep은 툴킷 이슈를 적은 줄 186개를 찾았다. 나머지는 이미 쓰고 있는 수정을
 가리키는 참조(예: 컨테이너 `on_click` 옆의 `compose-rust#372`)와, 지운 표시가 돌아오지 않게
@@ -226,6 +264,13 @@ API는 핀에 있다.
 |---|---|---|---|---|
 | `src/ui/cr/session.rs` `PaneTerminal` | 터미널 칸이 맨 위에서 열리고 새 출력을 따라가지 않았다. | compose-rust#385 | 닫힘, v0.0.5부터 핀에 있음(`ScrollState::scroll_to`) | 칸의 `ScrollColumn`이 `remember_scroll_state()`를 받고, 대화와 같이 `FollowNewest`가 옮긴다. 테스트 `pane_terminal_follows_its_newest_line_with_the_toolkit_scroll_state`. |
 | `src/ui/cr/compat.rs` `SplitPane` | 고정 두 칸 행이 분할 창을 대신했다. 부르는 곳이 없었다. | compose-rust#27 | 닫힘, 핀에 있음(`compose_rust::ui::SplitPane`) | 함수를 지웠다. 테스트 `no_stand_in_split_pane_is_left`. |
+| `src/ui/cr/channel_owner.rs`, `add_computer.rs`, `files.rs`, `project.rs` | 노드 높이에 상한을 둘 수 없어 시트 본문 높이를 고정하거나 어림했다. | compose-rust#778 | 닫힘, v0.0.11에 있음(`Modifier::max_height`) | 시트 본문이 `Modifier::max_height`로 상한을 둔 `ScrollColumn`을 쓰고 `new_project_body_estimate`, `add_body_estimate`, `share_body_estimate`를 지웠다. 테스트 `fr_l32_1_*`, `fr_l26_1_new_project_body_is_capped_at_the_room`. |
+| `src/ui/cr/vcs.rs`(`BranchMenu`, `FilesTreeCapped`) | 브랜치 목록은 300으로, 변경 트리는 행 수에서 구한 높이로 고정했다. | compose-rust#778 | 닫힘, v0.0.11에 있음(`Modifier::max_height`) | 둘 다 `Modifier::max_height`(`BRANCH_POP_LIST_MAX_H`, `tree_view_height(cap)`)를 쓰고 `branch_pop_list_height`를 지웠다. 테스트 `fr_l10_4_branch_menu_sizes`, `fr_l19_a_scrolling_tree_shows_whole_rows_at_rest`, `fr_l19_the_commit_box_is_in_the_changes_card_and_the_tree_leaves_it_room`. |
+| `src/ui/cr/agents.rs`(`HeadedCard`) | 폭 0 스페이서가 카드 헤더 행의 최소 높이 버팀목을 대신했다. | compose-rust#778, #826 | v0.0.11에 있음(`Modifier::min_height`) | 헤더 행이 `.min_height(CARD_HEAD_CONTENT_MIN_H)`를 받고 버팀목 스페이서를 지웠다. 테스트 `fr_l20_a_card_has_a_header_row_with_an_icon_tile_and_a_rule_across_the_card`. |
+| `src/ui/cr/vcs.rs`(`CircleIconButton`), `session.rs`(`IdeChevronSized`) | 누르는 영역이 행 높이를 넘지 못했고 IDE 화살표는 26x32였다. | compose-rust#472 | 닫힘, v0.0.11에 있음(`Modifier::min_touch_target`) | 둘 다 노드를 키우지 않는 `.min_touch_target(ICON_TOUCH_TARGET)`(44 dp)를 쓴다. 테스트 `fr_l7_ide_chevron_beside_the_default_opens_the_chooser_when_clicked`, `a_fixed_name_sits_on_the_painted_box_and_a_data_name_on_a_matched_button`. |
+| `src/ui/vcs.rs`, `src/ui/cr/vcs.rs`(`DiffViewAtWidth`) | diff 줄의 체크가 행과 함께 가로로 스크롤됐다. | compose-rust#424 | 닫힘, v0.0.11에 있음(`Modifier::sticky`) | diff 줄 체크 칸이 `Modifier::sticky()`를 쓴다. 테스트 `fr_l19_hunk_action_sits_in_the_header_row`. |
+| `src/ui/cr/components.rs` `OneLineHintField`, `new_session.rs` | 긴 힌트를 Ember가 필드 아래에 한 줄 라벨로 그렸다. | compose-rust#786 | 닫힘, v0.0.11에 있음(한 줄 `TextField`가 플레이스홀더를 한 줄 말줄임표로 유지함) | `OneLineHintField`와 `FieldOptions::one_line_hint`를 지우고 힌트를 필드의 `placeholder`로 넘긴다. 테스트 `fr_l10_1_one_line_hint_is_the_toolkit_placeholder`, `fr_l10_1_new_session_long_hints_are_the_field_placeholder`. |
+| `assets/editor/page.css`, `src/ui/editor_workbench.rs` | 자리 표시 주석 노드가 그리드나 플렉스 항목이 되지 않게 `.ed-none`이 닫힌 도구 창과 조건부 자식을 대신했다. | dioxus-compose#266 | 닫힘, `94ade333`에 있음(주석 노드가 레이아웃 상자를 만들지 않음) | `.ed-none`과 네 곳의 `div { class: "ed-none" }` 갈래를 지웠다. 테스트 `fr_l31_26_the_status_bar_is_32_high_and_flush_with_the_page_bottom`. |
 
 ### `feat/673-drop-in-pin`에서 지움, 캡처로 확인할 것
 
@@ -263,17 +308,37 @@ API는 핀에 있다.
 | `src/ui/editor.rs`(`DoubleClick`, `DOUBLE_CLICK_MS`), `src/ui/editor_workbench.rs`(`DOUBLE_CLICK`, 트리 행과 탭의 `onclick`) | 탭이나 트리 행을 500 ms 안에 두 번 누르면 두 번 클릭으로 쳤다. | compose-rust#417. dioxus-compose `f0e5b9f5`가 `click_count == 2`인 `Up`에 `dblclick`을 보낸다(`dom/pointer.rs`) | 행과 탭의 `ondoubleclick`이 미리 보기를 고정한다. `onclick`은 열거나 활성화만 한다. 구조체, 상수, 스레드 로컬, 테스트 `fr_l31_tabs_two_clicks_on_one_target_within_500_ms_are_a_double_click`(`tests/editor.rs`)을 지웠다. 테스트 `fr_l31_5_double_click_and_right_click_are_the_real_events`(`editor_workbench_glue_tests.rs`). | 에디터 창에서 포인터로 직접: 파일을 한 번 누르면 기울임 미리 보기 탭이 열리고, 행이나 탭을 두 번 누르면 고정되며, 느린 두 번 클릭은 고정하지 않는다. 터미널 탭을 두 번 누르면 이름 바꾸기가 시작된다. |
 | `src/ui/editor_tree_menu.rs`(`PLUS_MENU_HOLDS_SELECTION`, `SELECTION_HEADING`, `TreeMenuEntry::Heading`), `src/ui/editor_workbench.rs`(제목 갈래) | 헤더 "+" 메뉴에 컨텍스트 메뉴 항목을 담은 "선택한 항목" 구역이 있었다. | compose-rust#417. dioxus-compose `f0e5b9f5`가 `contextmenu`를 보낸다 | "+" 메뉴는 새 파일과 새 폴더뿐이다. 행의 `oncontextmenu`가 포인터 위치에 컨텍스트 메뉴를 연다. Shift+F10과 컨텍스트 메뉴 키는 Code-OSS의 키보드 경로라 대역이 아니므로 남는다. 테스트 `design_rule1_plus_menu_is_new_file_and_folder_only`(`design_rule1_plus_menu_is_new_file_and_folder_then_the_stand_in_section`를 대신함). 남은 것: 탭 줄에서 Shift+F10이 여는 ⋯ 메뉴의 현재 탭 묶음(`TODO(#673)`: 키보드로 탭 자체 메뉴를 탭 옆에 연다). | 프로젝트 창의 "+" 메뉴를 1440, 라이트와 다크로: 항목 둘. 포인터로 직접: 트리 행과 탭을 오른쪽 클릭하면 포인터 위치에 각자의 메뉴가 열리고, 가림막을 오른쪽 클릭하면 닫힌다. 키보드로 직접: 트리 행에서 Shift+F10을 누르면 컨텍스트 메뉴가 열린다. |
 
-### 핀 뒤에 닫힘
+### 닫힌 이슈 정리(2026-11-22), 캡처로 확인할 것
 
-| 위치 | 우회 코드 | 툴킷 이슈 | 상태 | 다음 핀에서 할 일 |
+2026-11-22에 이슈 상태를 확인했고, 기능은 모두 compose-rust `a85f02de`에서 읽었다. 우회 코드
+하나를 지운다. 카드와 안쪽 패널 여백도 바꿨다가 되돌렸다: `padding_xy`를 쓰면 1440의 홈 비용과
+토큰 추이 카드에서 첫 빗금 막대의 왼쪽 가장자리가 사라졌다(카드 내용 가장자리의 1 px 열이 회색에서
+흰색으로). 그래서 화면 확인 표로 옮겼다. compose-rust#817(점선 테두리)은 이미 쓰고 있어서
+(`project.rs`, `add_computer_chip_frame`) 열림 행을 지웠다. 나머지 닫힌 이슈는 아래 각 표(화면 확인을 기다림, 이슈 없는 빈 곳)에서 표시를 고쳐
+적었다. 테스트 `no_todo_cites_a_toolkit_issue_that_is_closed_in_the_pin`(`components.rs`)이 이
+표시가 있던 파일에 compose-rust #389, #521, #546, #771, #778, #826, #831의
+`TODO(compose-rust#N)`이 다시 들어오지 않게 막는다.
+
+| 위치 | 우회 코드 | 툴킷 이슈 | 대신 쓰는 것 | 확인할 캡처나 직접 확인 |
 |---|---|---|---|---|
-| `src/ui/cr/channel_owner.rs:381`, `add_computer.rs:423`, `files.rs:1584`, `project.rs:1157`, `project.rs:1384` | 노드 높이에 상한을 둘 수 없어 시트 본문 높이를 고정하거나 어림한다. | compose-rust#778 | 2026-11-14T16:50Z 닫힘. 핀의 `Modifier`에 최대 높이가 없다(`compose-rust/src/ui/mod.rs`). | 본문에 상한을 두고 어림 함수를 지운다(`sheet_body_max_height`를 부르는 곳, `new_project_body_estimate`, `add_body_estimate`). |
-| `src/ui/cr/vcs.rs:801`, `vcs.rs:1534` | 브랜치 목록은 300으로, 변경 트리는 정한 높이로 고정한다. | compose-rust#778 | 위와 같음 | 둘 다 상한으로 바꾸고 `branch_pop_list_height`와 `tree_cap`의 고정 높이를 지운다. |
-| `src/ui/cr/components.rs:1202` | 자식을 제 크기로 두는 weight가 없어, 한 행의 이름과 알약을 `observe_size_every_dp`로 잰다. | compose-rust#778 | 위와 같음(제목에 fill 없는 weight도 있다) | fill 없는 weight를 쓰고 재는 코드를 지운다. |
-| `src/ui/cr/vcs.rs:508`, `session.rs:558` | 누르는 영역이 행 높이를 넘지 못한다. IDE 화살표는 26x32다. | compose-rust#472 | 2026-11-14T22:03Z 닫힘. 핀에 누르는 영역 API가 없다. | 둘 다 노드를 키우지 않는 44x44 영역을 준다. |
-| `src/ui/vcs.rs:17` | diff 줄의 체크가 행과 함께 가로로 스크롤된다. | compose-rust#424 | 2026-11-14T17:07Z 닫힘. 핀에 고정 열이 없다. | 체크 열을 고정한다. |
-| `src/ui/cr/components.rs:1049` `OneLineHintField` | 힌트를 Ember가 필드 아래에 한 줄 라벨로 그린다. | compose-rust#786 | 2026-11-14T22:03Z 닫힘. 핀의 `TextField`에 플레이스홀더 줄 제한이 없다. | `OneLineHintField`를 지우고 힌트를 플레이스홀더로 넘긴다. |
-| `assets/editor/page.css:36` | `.ed-layers`와 `.ed-none`이 자리 표시 주석 노드를 그리드 행에서 뺀다. | dioxus-compose#266 | 2026-11-14T22:03Z 닫힘, 핀 커밋 뒤. | 두 규칙을 지우고 상태 표시줄 위치를 확인한다. |
+| `src/ui/cr/channel_owner.rs`(`InviteSection`), `components.rs`(`FieldOptions`, `FieldNode`) | 초대 링크가 보통 필드에 있었다. 입력하면 그려진 글만 바뀌고 링크는 바뀌지 않았다. | compose-rust#826 | `FieldOptions::read_only`가 `TextField`의 `read_only`를 보내고, 링크 필드가 이를 켠다. 테스트 `fr_t14_a_read_only_field_is_the_toolkits_read_only_text_field`(`components.rs`), `fr_t14_the_invite_link_field_is_read_only`(`channel_owner.rs`). | 서버에 연결한 채널의 멤버/게스트 시트에서 초대 만들기 뒤 직접: 링크가 전과 같아 보이고, 선택해 Cmd+C로 복사되며, 입력해도 바뀌지 않는다. VoiceOver가 편집할 수 없다고 읽는다. |
+
+### `feat/673-app-todos-and-workarounds`에서 지움, 캡처로 확인할 것
+
+`feat/673-app-todos-and-workarounds` 브랜치(2026-11-22, compose-rust `a85f02de`와
+dioxus-compose `3758928b` 기준)가 아래 우회 코드를 지우고 남은 `#673` 항목을 마친다. 아직
+컴파일하지 않았고 화면에서 보지도 않았다. `ember/app/src/`에는 `TODO(#673)` 표시가 하나도 남아
+있지 않다. 의도적으로 남긴 항목(`PaneTerminal`, `EmberField` / `BareField`, `model_popover`,
+`CHIP_WRAP_WIDTH`, `PaneLayout::Two`)에는 레이아웃 불변 조건을 설명하는 사실 주석을 두었다.
+
+| 위치 | 우회 코드 | 툴킷 이슈 | 대신 쓰는 것 | 확인할 캡처나 직접 확인 |
+|---|---|---|---|---|
+| `src/ui/cr/components.rs`(`DataNamedOverlay`, `NamedClickable`, `NamedClickableOn`, `NamedDisabled`), `agents.rs`, `routines.rs`, `vcs.rs` | 데이터로 접근성 이름을 짓는 그린 상자 위에 투명 `Button`(`DataNamedOverlay`)을 얹었다. | compose-rust#831(`Modifier::label(&str)`) | `NamedClickable`, `NamedClickableOn`, `NamedDisabled`의 `label`을 `&str`로 넓히고 `agents.rs`, `routines.rs`, `vcs.rs`의 호출부 14곳을 모두 옮긴 뒤 `DataNamedOverlay`를 지웠다. `a_data_named_overlay_takes_its_box_and_a_disabled_named_box_has_no_click`(`components.rs`)과 `vcs.rs`, `agents.rs`, `routines.rs` 테스트를 갱신해 `DataNamedOverlay`가 남지 않음을 확인한다. | `EMBER_CR_ROUTE=vcs`, `agents`, `routines`를 1440과 390, 라이트와 다크로: 모든 행, 칩, 라디오, 알약의 크기와 누름 모양이 전과 같다. 포인터, 키보드, VoiceOver로 직접: 그린 상자 자체가 클릭, 포커스 링, 데이터로 만든 이름을 받는다. |
+| `src/ui/cr/compat.rs`(`CodeText`) | 긴 고정폭 글이 가로 스크롤 대신 줄바꿈됐다. | Ember #673(툴킷 `ScrollRow`) | 고정폭 `Text!`를 툴킷 `ScrollRow`로 감쌌다. 테스트 `code_text_scrolls_horizontally_in_a_scroll_row`. | 뷰포트보다 긴 줄이 들어간 `CodeText` 화면에서 직접: 줄이 꺾이지 않고 컨테이너 안에서 가로로 스크롤된다. |
+| `src/ui/cr/files.rs`(`ShareSheet`) | `SHARE_SHEET_PICKS_FILES = false`가 공유 시트의 파일 카드 선택기를 막고 있었다. | compose-rust#483, Ember #673 | `SHARE_SHEET_PICKS_FILES`를 지우고 `FILE_PICKER_AVAILABLE`이 true인 macOS에서 공유 시트의 파일 카드가 `FileDialog::open_files()`를 열도록 연결했다. 테스트 `fr_l27_7_share_sheet_file_card_opens_file_dialog_when_available`. | macOS에서 데모 모드가 아닐 때 공유 시트를 열고 파일 카드를 누르면 시스템 파일 패널이 열리고 고른 파일이 초안에 들어간다. |
+| `src/ui/editor_workbench.rs`(탭 줄 `Shift+F10` / `ContextMenu`, `⋯` 메뉴) | 탭 줄의 `Shift+F10`이 `⋯` 메뉴 안의 중복된 현재 탭 묶음으로 이어졌다. | Ember #673 | `Shift+F10`과 `ContextMenu` 키가 현재 탭의 컨텍스트 메뉴를 바로 열고, `⋯` 메뉴에서 중복된 현재 탭 묶음을 지웠다. 테스트 `fr_l31_5_tab_strip_keyboard_menu_opens_tab_context_menu_and_main_menu_omits_tab_group`. | 에디터 창에서 키보드로 직접: 탭에 포커스를 두고 `Shift+F10`(또는 컨텍스트 메뉴 키)을 누르면 탭 자체 메뉴가 열리고, `⋯` 메뉴에는 현재 탭 묶음이 없다. |
+| `src/ui/editor_workbench.rs`(`terminal_body`), `src/terminal_input.rs` | 에디터 터미널의 붙여넣기 단축키가 클립보드를 읽지 않고 `PASTE_UNAVAILABLE` 안내만 띄웠다. | compose-rust#546(`compose_rust::clipboard::read_text`) | 붙여넣기 단축키를 `compose_rust::clipboard::read_text`와 `plan_paste`, 인라인 `role: "alertdialog"` 여러 줄 확인 막대(`붙여넣기`, `한 줄로 붙여넣기`, `취소`)에 연결하고 `PASTE_UNAVAILABLE`을 지웠다. 단축키는 `terminal.integrated.enableMultiLinePasteWarning`(예전 불리언 값 포함)을 따른다. 테스트 `fr_l31_21_the_setting_reads_strings_and_old_booleans`, `fr_l31_21_single_line_pastes_immediately_and_multiline_confirms`, `fr_l31_21_pending_paste_state_transitions`, `fr_l31_21_editor_terminal_paste_chord_reads_clipboard_and_confirms_multiline`. | 에디터 터미널에서 직접: 한 줄을 붙여넣으면 바로 전송되고, 여러 줄을 붙여넣으면 확인 막대가 열려 `붙여넣기`, `한 줄로 붙여넣기`, `취소`가 동작한다. |
+| `src/ui/editor_language.rs`(자동완성/코드 액션 오버레이, 매개변수 정보) | 자동완성과 코드 액션 목록이 코드 에디터의 포커스를 뺏어 갔고, 매개변수 정보는 `.ed-main` 아래에 고정돼 있었다. | compose-rust#553, #554, Ember #673 | `on_key_preview`에서 `ArrowUp`, `ArrowDown`, `Enter`, `Tab`, `Escape`를 자동완성이나 코드 액션 목록으로 넘겨 코드 에디터 포커스를 유지하고, `caret_rect`를 알 때 매개변수 정보를 캐럿 위에 띄우며 모르면 `.ed-main` 아래로 내린다. 테스트 `fr_l31_13_on_key_preview_routes_list_navigation_accept_and_escape`, `fr_l31_13_parameter_hint_anchors_above_caret_with_bottom_fallback`. | 에디터 창에서 직접: 자동완성이나 코드 액션을 연 채 방향키로 이동하고 `Enter`/`Tab`으로 수락하거나 `Escape`로 닫아도 에디터 포커스가 유지된다. 매개변수 정보를 띄우면 캐럿 위에 열린다. |
 
 ### 툴킷 이슈 열림
 
@@ -283,12 +348,10 @@ API는 핀에 있다.
 | `src/ui/vcs.rs:18`, `src/ui/cr/vcs.rs:2586` | 히스토리는 점이 붙은 목록이고 레인 그래프가 없다. | compose-rust#308 | 열림 | `Canvas`의 Path 명령으로 그래프를 그린다. |
 | `src/ui/cr/shell.rs:412` | 하단 바에 배경 흐림이 없다. | compose-rust#300 | 열림 | 흐림과 안전 영역 여백을 넣는다. |
 | `src/ui/cr/vcs.rs:344` `StageCheck` | 그린 네모 위에 보이지 않는 툴킷 체크박스를 얹는다. 부분 선택은 선택 안 됨으로 읽힌다. | compose-rust#767 | 열림 | 모양과 부분 상태가 있는 툴킷 `Checkbox`를 쓴다. |
-| `src/ui/cr/components.rs:950` | 테두리와 12 px 안쪽 여백이 맨 필드를 감싼 상자에 있다. | compose-rust#771 | 열림 | 필드로 옮긴다. |
-| `src/ui/cr/components.rs:482`, `home.rs:826` | 팝오버 메뉴에 방향키 이동과 현재 행 포커스가 없다. | compose-rust#810 | 열림 | 툴킷의 키와 포커스를 붙인다. |
-| `src/ui/cr/home.rs:918` | 모델 팝오버의 행이 `equal_height` 대신 고정 높이를 쓴다. | compose-rust#766 | 열림 | `equal_height`로 되돌린다. |
-| `src/ui/cr/project.rs:473` | 목업은 점선인데 추가 칩 테두리가 실선이다. | compose-rust#817 | 열림 | 선 무늬를 준다. |
+| `src/ui/cr/components.rs` (`PopoverMenu`), `home.rs` (`mode_menu`) | 팝오버 메뉴의 방향키와 선택된 행 초기 포커스는 macOS에서 동작한다(2026-11-21 확인, #888). 그러나 키로 옮긴 행에 아무 표시가 없고, 560 이하의 바텀 시트에는 메뉴 키보드가 없다. | compose-rust#810, #940, #941 | 닫힘, 핀 519ffede에 있음(렌더러가 키로 옮긴 행을 표시하고 `Sheet`에서도 메뉴 키보드를 돌린다). Host가 새로 보내는 것은 없다(2026-11-25, #888) | 화면에서 표시가 보이는지, 폰 시트에서 방향키가 끝에서 돌아가는지 확인한다. 테스트 `fr_l10_4_the_focused_row_of_a_popover_menu_is_the_current_one_and_can_take_the_mark`, `fr_l10_4_arrow_keys_move_within_a_phone_bottom_sheet_menu`. |
+| `src/ui/cr/home.rs` (`model_body`, `ModelRow`) | 홈 모델 선택기의 검색은 평범한 텍스트 필드이고, 행은 이름이 모델인 목록의 목록 항목이며 그려진 활성 행이 선택된 상태다. 목업은 콤보박스, 옵션 목록, `aria-activedescendant`를 쓴다([leader, 2026-11-21], #888). | compose-rust#942 | 열림 | 역할과 관계가 들어오면 검색을 활성 옵션에 묶인 콤보박스로, 행을 옵션으로 바꾼다. |
 | `src/ui/cr/project.rs:457` | 스트립의 스크롤 한 걸음을 창 폭에서 구한다. | compose-rust#818 | 열림 | `ScrollState`에서 뷰포트 크기를 읽는다. |
-| `src/lib.rs:206`, `lib.rs:219`, `src/ide.rs:109`, `ide.rs:167`, `src/ui/coexist.rs:281` | 에디터가 `--editor`로 띄운 별도 프로세스다. | dioxus-compose#161 | 열림. dioxus-compose#152(`Window` 요소)는 닫혔고 핀에 있다. 셸은 Compose 루트이고 에디터는 HTML 페이지다. | 에디터를 셸 호스트의 `Window` 노드로 열고 `editor_command`를 지운다. |
+| `src/lib.rs:206`, `lib.rs:219`, `src/ide.rs:109`, `ide.rs:167`, `src/ui/coexist.rs:281` | 에디터가 `--editor`로 띄운 별도 프로세스다. | dioxus-compose#161 | 열림. dioxus-compose#152(`Window` 요소)는 닫혔고 핀에 있다. dioxus-compose `a64f3b92`(#161: Compose 루트 아래 `HtmlView` 안의 `WidgetView`에 이벤트가 간다)부터 에디터 창은 페이지를 `HtmlView`로 담은 Compose 루트다(#301, `editor_workbench::view::EditorRoot`). `89fa099c`(#295)부터 그 `HtmlView` 안의 위젯 트리가 상자 크기를 받아 그려진다. 다만 아직 별도 프로세스다. | 에디터를 셸 호스트의 `Window` 노드로 열고 `editor_command`를 지운다. |
 | `src/ui/editor_workbench.rs:3086` | 붙여넣기와 IME 조합 핸들러가 테스트에서는 돌지만 화면에서는 돌지 않는다. | dioxus-compose#205 | 열림 | 터미널의 붙여넣기와 조합을 화면에서 확인하고 메모를 지운다. |
 
 ### 핀에 있음, 화면 확인을 기다림
@@ -298,40 +361,41 @@ API는 핀에 있다.
 | 위치 | 우회 코드 | 툴킷 이슈 | 상태 | 할 일 |
 |---|---|---|---|---|
 | `src/ui/cr/routines.rs`(`ListPane`의 필터 줄) | 프로젝트 필터 칩이 `ScrollRow` 안에서 가로로 스크롤된다. 폭 어림값(`seg_width`)은 지웠다(지운 행 참고). | compose-rust#427, #328 | v0.0.7부터 핀에 있음 | 프로젝트가 여섯 개 이상인 `EMBER_CR_ROUTE=routines`를 1440으로 찍어 여섯 번째 칩이 아직 잘리는지 본다. 잘리지 않으면 이 줄을 `ChoiceRow`로 바꿀 수 있다. |
-| `src/ui/cr/vcs.rs`(`ChangesPane`의 `PaneLayout::Two`), `home.rs:328`(`ROW_TILE_H`) | 두 칸이 따로 스크롤된다. 타일 높이가 고정이다. | compose-rust#389 | 핀에 있음(`Row::equal_height`, `ui/widgets.rs`에서 확인). `feat/673-drop-in-pin`에서도 그대로 둔다. `equal_height` 행은 고유 높이로 크기를 정하는데, 줄바꿈되는 글에서는 틀리고 스크롤되는 자식은 0으로 센다(compose-rust#766, 열림). diff 칸은 줄바꿈되는 코드를 담는다. | 두 칸을 페이지 스크롤 하나에 넣고 `equal_height`를 쓴 캡처에서 파일 카드가 diff만큼 높고, diff를 스크롤하는 동안에도 보여야 한다. 홈 타일은 1440과 1024에서 성공 행의 세 타일이 `EmberCardSized`로 같은 높이여야 하고 `ROW_TILE_H`가 없어야 한다. |
-| `src/ui/home.rs:1313`(`CHIP_WRAP_WIDTH`) | 홈 입력창이 1100 dp 아래에서 모드 칩, 컴퓨터 칩, 보내기 버튼을 창 폭을 보고 둘째 줄에 둔다. | compose-rust#521 | 핀에 있음(`FlowRow`, `components::ChoiceRow`가 이미 쓴다). `feat/673-drop-in-pin`에서도 그대로 둔다. 이 나눔은 보내기 버튼도 옮기는데, `FlowRow`는 버튼을 줄 끝에 두지 않고 칩과 함께 줄바꿈한다. | 칩을 `FlowRow`에 넣은 입력창을 1440, 1100, 1024, 390으로 찍어 모든 폭에서 보내기 버튼이 마지막 줄 끝에 있어야 한다. |
-| `src/terminal_input.rs:145`, `src/ui/editor_workbench.rs` (`terminal_body`, the paste chord) | 에디터 터미널에서 붙여넣기 단축키를 누르면 안내만 뜬다. | compose-rust#546 | 핀에 있음(`compose_rust::clipboard::read_text(callback)`). dioxus-compose의 HTML 런타임도 Cmd+V에 같은 호출을 쓰므로 에디터 창에서도 답이 온다. `feat/673-editor-in-pin`에서도 남겼다: 여러 줄 붙여넣기는 먼저 물어야 하는데(`needs_multiline_warning`, Code-OSS의 대화상자) 창에 그 확인이 없다. 에디터 쪽 표시는 `TODO(#673)`이고, `terminal_input.rs`는 이 브랜치 범위 밖이다. | 여러 줄 확인을 만들고, 단축키에서 클립보드를 읽어 `paste_bytes`를 보낸 뒤 에디터 창에서 확인한다. |
-| `src/ui/editor_language.rs` 모듈 메모 | 스니펫이 일반 글자로 들어간다. | compose-rust#556 | 핀에 있음(`CodeEditorHandle::insert_snippet`). 세션이 펼친 글자를 담은 `ember_editor::WidgetCommand::EditCode`를 창에 넘기므로 먼저 `ember/editor`가 스니펫을 실어야 한다. 이 브랜치의 범위 밖이라 표시는 `TODO(#673)`이다. | `WidgetCommand`에 스니펫을 싣고 `insert_snippet`으로 스니펫 세션을 연다. |
-| `src/ui/editor_status.rs:110` `list_window` | 고르기 목록을 강조된 행 둘레로 잘라 그린다. | dioxus-compose#200 | 핀에 있음(`MountedData::scroll_to`). `feat/673-editor-in-pin`에서 남겼다: 자른 목록을 지운 빌드에서 JSON 파일의 언어 고르기를 1440으로 찍으니 목록이 맨 위에 있고 강조된 JSON 행이 보이지 않았다. 렌더마다 요청을 보내도 같아서, 이 요청이 이 목록을 움직이지 못한다. | 캡처에서 행이 보이면 행을 보이게 스크롤하고 `list_window`를 지운다. |
+| `src/ui/cr/vcs.rs`(`ChangesPane`의 `PaneLayout::Two`), `home.rs:328`(`ROW_TILE_H`) | 두 칸이 따로 스크롤된다. 타일 높이가 고정이다. | compose-rust#389 | 핀에 있음(`Row::equal_height`). compose-rust#766부터 높이가 고정된 스크롤 자식은 그 높이로 잰다. `vcs.rs`에서는 레이아웃 불변 조건을 적은 사실 주석과 함께 의도적으로 남겼다(`TODO(#673)` 표시 없음): 행 높이를 diff 칸의 줄바꿈된 코드의 고유 높이로 정하고, 페이지 스크롤 하나로 묶으면 파일 카드가 화면 밖으로 나간다. | 두 칸을 페이지 스크롤 하나에 넣고 `equal_height`를 쓴 캡처에서 파일 카드가 diff만큼 높고, diff를 스크롤하는 동안에도 보여야 한다. 홈 타일은 1440과 1024에서 성공 행의 세 타일이 `EmberCardSized`로 같은 높이여야 하고 `ROW_TILE_H`가 없어야 한다. |
+| `src/ui/home.rs`(`CHIP_WRAP_WIDTH`) | 홈 입력창이 1100 dp 아래에서 모드 칩, 컴퓨터 칩, 보내기 버튼을 창 폭을 보고 둘째 줄에 둔다. | compose-rust#521 | 핀에 있음(`FlowRow`, `components::ChoiceRow`가 이미 쓴다). 레이아웃 불변 조건을 적은 사실 주석과 함께 의도적으로 남겼다(`TODO(#673)` 표시 없음): 이 나눔은 보내기 버튼도 옮기는데, `FlowRow`는 버튼을 칩과 함께 줄바꿈한다. 칩을 weight 상자 안의 `FlowRow`에 넣고 버튼을 그 뒤에 두어야 한다. | 칩을 `FlowRow`에 넣은 입력창을 1440, 1100, 1024, 390으로 찍어 모든 폭에서 보내기 버튼이 마지막 줄 끝에 있어야 한다. |
+| `src/ui/editor_language.rs` 모듈 메모 | 스니펫 완성에 `CodeEditorHandle::insert_snippet` 연결이 필요했다. | compose-rust#556 | 핀에 있음(`CodeEditorHandle::insert_snippet`). `WidgetCommand::InsertSnippet`으로 연결됐고 `TODO(#673)` 표시는 남아 있지 않으며 에디터 창 화면 확인만 기다린다. | 에디터 창 화면에서 스니펫 탭 정지가 스니펫 세션을 여는지 확인한다. |
 | `src/ui/cr/components.rs:1882` | 창이 0x0으로 읽히면 첫 구성이 대체값을 쓴다. 에디터 쪽(고정 높이 여유)은 이미 없다: 페이지가 뷰포트를 따른다(`editor::editor_page_size_style`, #301). `feat/673-editor-in-pin`에서 확인했다. | compose-rust#467, #479 | 핀에 있음(`with_report_size`) | 보고된 크기를 따른다. |
 | `src/ui/cr/channel_owner.rs:559`, `channels.rs:357`, `home.rs:1508`, `launcher.rs:171`, `new_channel.rs:242`, `new_session.rs:5`, `project.rs:1200`, `project.rs:1712` | 텍스트 필드가 비제어다. | compose-rust#374 | 핀에 있음(`TextField::text`) | 그대로 둔다. 먼저 필드마다 값을 상태로 쥐어야 한다. 필드마다 직접: IME로 조합하면서 한글 단어 중간에 입력한다. 캐럿이 제자리에 있고, 음절이 빠지거나 겹치지 않으며, 코드로 넣은 값(추천, 초기화)이 글을 바꾼다. 캡처로는 볼 수 없다. |
-| `src/ui/cr/components.rs:1998`, `channels.rs:627`, `project.rs:371` | 필드 테두리를 맨 필드를 감싼 상자에 그린다. | compose-rust#376, #375 | 핀에 있음 | 그대로 둔다. compose-rust#771(열림) 때문에 12 px 안쪽 여백이 아직 상자에 있다. 테두리를 필드에 둔 검색 필드를 1440과 390, 라이트와 다크로 찍어 1 px `line` 고리, 알약 끝, 높이 가운데의 플레이스홀더가 같아야 한다. |
-| `src/ui/cr/components.rs:199`, `components.rs:238` | 모달 목록이 드롭다운 팝업을 대신한다. | compose-rust#383 | 핀에 있음(`Select`, `Dropdown::closed`) | 그대로 둔다. 필드 아래에 열린 툴킷 `Select` 캡처에서 불투명한 `surface` 상자, 1 px `line` 테두리, `corner-md` 반지름, 왼쪽 정렬 `text` 라벨의 38 px 행, `sel` 위의 고른 행이 보이고 앵커 아래로 열려야 한다. |
+| `src/ui/cr/components.rs`(`EmberField`, `BareField`), `channels.rs:627`, `project.rs:371` | 필드 테두리와 12 px 안쪽 여백을 맨 필드를 감싼 상자에 그려서, 여백을 눌러도 필드에 포커스가 가지 않는다. | compose-rust#376, #375, #771 | 핀에 있음: 맨 한 줄 필드가 받은 높이 가운데에 글을 두고, `padding_each`가 필드 안쪽에 들어간다(compose-rust#771). 의도적으로 남겼다(`TODO(#673)` 표시 없음): 바깥 `Row` 테두리와 `BareField` 양옆 스페이서는 화면 검증된 `fr_l10_2_*` 일치 테스트 7개로 고정돼 있다. | 그대로 둔다. 옮기면 `BareField`를 다시 짜고 모든 필드가 바뀐다. 테두리를 필드에 둔 검색 필드를 1440과 390, 라이트와 다크로 찍어 1 px `line` 고리, 알약 끝, 높이 가운데의 플레이스홀더가 같아야 한다. |
+| `src/ui/cr/components.rs`(`OptionSheet`), `session.rs`(창 순서 바꾸기, 팀원 추가) | 모달 목록이 드롭다운 팝업을 대신한다. | compose-rust#383 | 핀에 있음(`Select`, `Dropdown::closed`) | 폼 `Select`는 더 이상 쓰지 않는다. 공용 `PopoverMenu`를 연다(#888, 2026-11-25, 어디서나 한 가지 메뉴 모양). 목업에 메뉴가 없는 세션의 창 순서 바꾸기와 팀원 추가 목록에만 남는다(FR-L10.4). 테스트 `fr_l10_4_every_select_field_is_a_popover_menu_and_only_two_sheets_remain`. |
 | `src/ui/cr/theme.rs:341`, `components.rs:1849` | 모서리가 단순 원호다. | compose-rust#294 | 핀에 있음(`Modifier::corner_curve`) | 그대로 둔다. 이 값은 모든 카드, 시트, 둥근 네모에 한꺼번에 들어간다. `corner_curve(0.6)`을 준 홈, 프로젝트, 세션 화면과 시트를 1440, 두 테마로 찍어, 목업이 `corner-shape: squircle`을 준 곳의 모서리와 같고 테두리와 그림자가 같은 곡선을 따르며 잘린 자식에 틈이 없어야 한다. |
 | `src/ui/cr/session.rs:5170`, `components.rs:1806` | Escape로 서랍이 닫히지 않는다. 모달은 닫기 콜백을 직접 넘긴다. | compose-rust#476 | 핀에 있음(`on_key_down`, `request_focus`) | 그대로 둔다. 키보드로 직접: 서랍을 열고 Escape를 누르면 서랍이 닫히고 포커스가 서랍을 연 버튼으로 돌아간다. 모달 시트도 같다. 캡처로는 볼 수 없다. |
 | `src/ui/cr/session.rs:1285` | 터미널 행이 `SelectionContainer` 안에 없다. | compose-rust#5 | 핀에 있음 | 그대로 둔다. 포인터로 직접: 터미널 행 여러 개를 끌어 선택한다. 선택이 꾸민 행의 글자를 따르고, 줄바꿈과 함께 읽는 순서로 복사되며, 행의 컨트롤은 여전히 눌린다. |
 | `src/ui/cr/home.rs:438`, `session.rs:3794`, `project.rs:1347`, `files.rs:506`, `characters_screen.rs:200`, `conversation.rs:257` | `EMBER_CR_SCROLL`이 검토 캡처용으로 블록을 뺀다. | compose-rust#385 | 핀에 있음(`ScrollState::scroll_to`) | 그대로 둔다. 검토 캡처 스크립트가 `EMBER_CR_SCROLL`을 읽는다. 스크립트가 실제로 스크롤하면 지운다. 그때 여섯 화면 아래쪽 절반의 캡처가 블록을 뺀 캡처와 같아야 한다. |
 | `src/ui/cr/home.rs:2087` | 줄무늬 높이가 고정이다. | compose-rust#388 | 핀에 있음(`Canvas::view_box`) | 그대로 둔다. 줄무늬를 블록을 채우는 `view_box` 캔버스에 그린 홈 승인 대기 타일을 1440, 1024, 390으로 찍어, 줄무늬가 모든 블록의 양끝에 닿고 각도와 간격이 같아야 한다. |
 | `src/ui/vcs.rs:16` | 텍스트 Button이 행이나 diff 줄의 누르는 대상이다. | compose-rust#372 | 핀에 있음(컨테이너 `on_click`) | VCS 행을 옮긴다. |
+| `src/ui/cr/components.rs`(`EmberCardSized`, `InsetPanelSized`) | 모든 변 16(안쪽 패널은 12)과 4 dp 스페이서 둘이 목업의 16/20과 12/16을 만든다. | compose-rust#826 | 핀에 있음(`Modifier::padding_xy`, `padding_each`). `1f507612`에서 바꿨다가 되돌렸다: `padding_xy`를 쓰면 1440의 홈 비용과 토큰 추이 카드에서 첫 빗금 막대의 왼쪽 가장자리가 1 px 잘렸다. 찍은 화면 어디에도 안쪽 패널이 없다. | 막대가 움직이는 까닭을 찾은 뒤, `padding_xy`로 홈, agents, routines, vcs를 1440과 390, 라이트와 다크로 찍은 캡처가 스페이서 캡처와 픽셀까지 같아야 하고 안쪽 패널도 담겨야 한다. |
+| `src/ui/cr/home.rs`(`model_popover`) | 모델 팝오버의 행이 `equal_height` 대신 고정 높이를 쓴다. `equal_height` 행이 스크롤 목록을 0으로 셌기 때문이다(#849). | compose-rust#766 | 핀에 있음: 높이가 고정된 스크롤 자식은 그 높이로 잰다. 레이아웃 불변 조건을 적은 사실 주석과 함께 의도적으로 남겼다(`TODO(#673)` 표시 없음): 이 목록은 행을 채울 뿐 제 높이가 없고, 테스트 `fr_l15_model_popover_has_a_fixed_height_not_an_equal_height_row`가 고정 높이를 지킨다. | `equal_height`로 연 고르기를 1440과 390으로 찍은 캡처에서 모든 행이 보여야 한다. 그때 테스트도 함께 바꾼다. |
 
 ### 툴킷 이슈 없는 Ember 일
 
+`ember/app/src/`에 `TODO(#673)` 표시는 하나도 남아 있지 않다. `CodeText`는
+`feat/673-app-todos-and-workarounds`에서 `ScrollRow`로 옮겼다(위 표 참고).
+
 | 위치 | 메모 | 할 일 |
 |---|---|---|
-| `src/ui/term_pane.rs:15` | 한 번에 500줄을 그린다. 툴킷에 `LazyColumn`이 있다(`compose-rust/src/ui/lazy.rs`). | 줄을 `LazyColumn`에 그리고 화면에서 확인한다. |
-| `src/ui/cr/compat.rs:146` `CodeText` | 긴 줄이 줄바꿈된다. 툴킷에 `ScrollRow`가 있다. | 글을 `ScrollRow`에 넣고 화면에서 확인한다. |
+| `src/ui/term_pane.rs`(`PaneTerminal`) | 한 번에 500줄(`RENDER_LINES = 500`)을 `ScrollColumn`에 그린다. 현재 핀(`compose-rust a85f02de`)에서는 의도적으로 남겼다: `LazyColumn`(`compose-rust/src/ui/lazy.rs`)에 `FollowNewest`용 `scroll_state` 매개변수가 없다. | 고정된 툴킷의 `LazyColumn`에 `scroll_state` 매개변수가 생기면 옮기고 화면에서 확인한다. |
 
 ### 이슈 없는 툴킷 빈 곳
 
-저장한 목록에 compose-rust 이슈가 없다. 리더가 이슈를 올리면 표시에 번호를 적는다.
+저장한 목록에 compose-rust 이슈가 없다. 리더가 이슈를 올리면 표시에 번호를 적는다. (변별 여백, 최소
+높이, 읽기 전용 `TextField`의 `compose-rust#826`과 클릭 컨테이너 소유 접근성 이름의
+`compose-rust#831`은 이 목록에서 올라갔고 핀에 있다.)
 
 | 위치 | 빈 곳 | 툴킷 소스 |
 |---|---|---|
-| `src/ui/cr/components.rs:1673`(`EmberCardSized`), `:1702`(`InsetPanelSized`) | `ui::Modifier`에 변마다 다른 안쪽 여백이 없다. `Modifier::padding(dp)`는 네 변이 같고 `padding_role`은 역할 하나를 받는다. 와이어에는 `Modifier::PaddingEach`가 있지만 빌더가 없다. Ember는 4 dp 스페이서를 넣어 16을 16/20으로, 12를 12/16으로 만든다. | `compose-rust/src/ui/mod.rs:500`, `compose-rust/src/schema.rs:2421` |
-| `src/ui/cr/agents.rs:854`(`HeadedCard`) | `ui::Modifier`에 최소 높이가 없다. Ember는 그 높이의 폭 0 스페이서를 행에 버팀목으로 넣는다. compose-rust#778은 제목으로는 최대 높이 이슈이고, 그 수정이 최소 높이도 주는지는 핀에서 알 수 없다. | `compose-rust/src/ui/mod.rs`(`width`, `height`, `size`뿐) |
-| `src/ui/cr/components.rs`(`DataNamedOverlay`) | 클릭 컨테이너에 소유한 접근성 이름이 없다. `Modifier::label`은 서로 다른 이름을 프로그램이 끝날 때까지 모두 쥐고 4096개를 넘으면 버리므로 정해진 이름에만 맞는다. 내용을 가진 `Button`(compose-rust#425)은 자식을 디자인 시스템의 16 dp만큼 안으로 밀고 바꿀 방법이 없어서, 그린 행을 그 안으로 옮길 수 없다. 그래서 데이터로 이름을 짓는 상자는 위에 투명 `Button`을 둔다. | `compose-rust/src/ui/mod.rs`(`keep_label`, `MAX_LABELS`), `renderer/desktop/src/renderer/HostButton.kt`(`labelPadding`) |
-| `src/ui/cr/channel_owner.rs:467` | `TextField`에 읽기 전용 설정이 없다. 초대 링크를 선택하고 복사할 수 있게 켜진 필드에 보여 주므로, 입력하면 그려진 글자가 바뀐다. | `compose-rust/src/ui/widgets.rs`(`TextFieldScope`, 1163행) |
 | `src/ui/editor_scm.rs`(`editable_body`) | 코드 에디터의 view zone은 줄 뒤에 붙으므로(`ViewZone::after_line`) 0번 줄 위에는 둘 수 없다. diff의 첫 줄 위에서 지운 기준 줄은 첫 행의 빨간 선과 호버 목록으로 남는다. | `compose-rust/src/code.rs`(`ViewZone`), `renderer/desktop/src/renderer/CodeEditorSurface.kt:591` |
+| `src/ui/cr/components.rs`(`NameThenPill`) | 자식을 제 크기로 두는 weight(Compose `weight(fill = false)`)가 없어, 한 행의 이름과 알약을 `observe_size_every_dp`로 잰다. compose-rust#778(닫힘)은 `max_width`, `max_height`, `size_in`을 들여왔지만 노드를 고정 크기로 묶을 뿐 형제가 남긴 폭으로 묶지 못한다. 표시는 `TODO(compose-rust, unfiled: a weight that leaves a child its own size)`이다. | `compose-rust/src/ui/mod.rs`(`Modifier::weight`), `renderer/desktop/src/renderer/RenderNode.kt`(`WeightedStackPolicy`) |
 
 ### 이번에 바꾸지 않은 메모
 

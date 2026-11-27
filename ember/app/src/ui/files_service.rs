@@ -189,6 +189,7 @@ fn result_of(r: TransferResult) -> HistoryResult {
         TransferResult::Done => HistoryResult::Done,
         TransferResult::Failed => HistoryResult::Failed,
         TransferResult::Declined => HistoryResult::Declined,
+        TransferResult::Expired => HistoryResult::Expired,
         TransferResult::Cancelled => HistoryResult::Cancelled,
     }
 }
@@ -368,6 +369,7 @@ impl Book {
             size: h.size,
             result: h.result,
             when: when_text(now_ms, h.at_ms),
+            timestamp_ms: (h.at_ms > 0).then_some(h.at_ms),
         });
         let recorded = s.history.iter().map(|h| {
             let mine = self.sent.iter().find(|(id, _)| id == &h.id);
@@ -381,6 +383,7 @@ impl Book {
                 size: h.size,
                 result: result_of(h.result),
                 when: when_text(now_ms, h.timestamp_ms),
+                timestamp_ms: (h.timestamp_ms > 0).then_some(h.timestamp_ms),
             }
         });
         relayed.chain(recorded).collect()
@@ -501,6 +504,7 @@ impl Book {
         let ended = match end {
             Ok(UploadEnd::Done(_)) => Some(HistoryResult::Done),
             Ok(UploadEnd::Declined) => Some(HistoryResult::Declined),
+            Err(TransferError::Expired) => Some(HistoryResult::Expired),
             _ => None,
         };
         if let (Some(result), o) = (ended, &self.outgoing[pos]) {
@@ -521,7 +525,7 @@ impl Book {
                     self.sent.push((id, o.device));
                 }
             }
-            Ok(UploadEnd::Declined) | Ok(UploadEnd::Cancelled) => {
+            Ok(UploadEnd::Declined | UploadEnd::Cancelled) | Err(TransferError::Expired) => {
                 self.outgoing.remove(pos);
             }
             Err(e) => {
@@ -620,6 +624,9 @@ async fn refresh(book: &Mutex<Book>, api: &Api) -> Result<(), TransferError> {
 
 /// Reads the snapshot for as long as the app runs: every second while something moves or
 /// waits for an answer, every five otherwise, and rarely against a server without the API.
+///
+/// A pushed `transfer_updated` (PR-1, FR-L27.8, #1049) wakes it at once ([`poke`]); the timer
+/// stays until every server publishes those pushes (the server part comes separately).
 async fn poll(book: Arc<Mutex<Book>>, api: Api) {
     loop {
         let wait = match refresh(&book, &api).await {
@@ -636,8 +643,22 @@ async fn poll(book: Arc<Mutex<Book>>, api: Api) {
             // Progress and rates move without the snapshot's shape changing.
             redraw();
         }
-        tokio::time::sleep(Duration::from_secs(wait)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(wait)) => {}
+            _ = pushed().notified() => {}
+        }
     }
+}
+
+/// Wakes the poll task for a pushed transfer change.
+fn pushed() -> &'static tokio::sync::Notify {
+    static PUSHED: OnceLock<tokio::sync::Notify> = OnceLock::new();
+    PUSHED.get_or_init(tokio::sync::Notify::new)
+}
+
+/// A transfer push arrived (or push reconnected): the files screen reads the snapshot now.
+pub fn poke() {
+    pushed().notify_one();
 }
 
 /// One send, from reading the files to the end. Run again for a retry.
@@ -713,8 +734,8 @@ async fn send_steps(
                 let _ = api.cancel_transfer_at(&target, &created.id).await;
                 return Ok(UploadEnd::Cancelled);
             }
-            // Only the server computer's offer is accepted here. A node accepts the owner's
-            // offer itself (`FR-F15`) and accepting for a computer is not relayed (403).
+            // Preserve the server-computer shortcut. A node in ask mode waits for an
+            // explicit answer, so the sender never accepts a pending node offer here.
             if created.status == "offered" && target == TransferTarget::Server {
                 api.accept_transfer_offer(&created.id).await.map_err(|e| TransferError::from_api(&e))?;
             }
@@ -814,8 +835,11 @@ impl TransferService for ServerTransferService {
                 Answer::Decline => api.decline_transfer_offer(&id).await.map(|_| ()),
             };
             if let Err(e) = result {
-                // 404: the sender withdrew it, or another client answered first.
-                notify(if e.status() == Some(404) { "이미 끝난 요청입니다." } else { ACTION_FAILED });
+                notify(match e.status() {
+                    Some(404) => "이미 끝난 요청입니다.",
+                    Some(410) => "만료된 요청입니다.",
+                    _ => ACTION_FAILED,
+                });
             }
             let _ = refresh(&book, &api).await;
             redraw();
@@ -1295,5 +1319,16 @@ mod tests {
         b.mark_failed(&TransferError::Connection);
         assert!(b.mark_failed(&TransferError::Unsupported));
         assert!(!b.lost());
+    }
+
+    #[test]
+    fn fr_l27_8_history_carries_timestamps_from_server_and_relayed_sends() {
+        let (mut b, id) = relayed_book();
+        b.finish_send_at(&id, &Ok(UploadEnd::Done(Vec::new())), NOW - 60_000);
+        let h = b.history(NOW);
+        assert_eq!(h[0].timestamp_ms, Some(NOW - 60_000));
+        assert_eq!(h[1].timestamp_ms, Some(NOW - 600_000));
+        assert_eq!(h[2].timestamp_ms, Some(NOW - 10_000));
+        assert_eq!(crate::ui::files::sent_week_bytes_at(&h, NOW), 1000);
     }
 }

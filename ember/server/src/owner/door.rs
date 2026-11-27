@@ -234,6 +234,8 @@ pub fn server_roots(shim_dir: Option<PathBuf>) -> Arc<dyn Fn() -> Vec<u32> + Sen
     })
 }
 
+type ConfirmationConsole = Arc<dyn Fn(&str, &Claimant) + Send + Sync>;
+
 /// How the door is set up. [`DoorConfig::for_server`] is what `main.rs` uses; tests replace
 /// the parts they drive.
 #[derive(Clone)]
@@ -244,7 +246,7 @@ pub struct DoorConfig {
     /// The process table.
     pub procs: Arc<dyn Fn() -> ProcTable + Send + Sync>,
     /// Where a confirmation code is shown: `(code, claimant)`. The server console.
-    pub console: Arc<dyn Fn(&str, &Claimant) + Send + Sync>,
+    pub console: ConfirmationConsole,
     pub confirm_timeout: Duration,
 }
 
@@ -297,18 +299,36 @@ pub struct OwnerDoor {
 #[cfg(unix)]
 impl OwnerDoor {
     /// Binds `<data_dir>/owner.sock` (mode 0600) and starts accepting claims. A socket file left
-    /// by a server that was killed is replaced; one a live server answers on is an error.
+    /// by a server that was killed (a connection to it is refused) is replaced; one a live server
+    /// answers on, or one whose probe fails for any other reason, is an error.
     /// Must be called inside a tokio runtime.
     pub fn bind(data_dir: &Path, owner: Arc<Owner>, cfg: DoorConfig) -> io::Result<OwnerDoor> {
         let path = socket_path(data_dir);
         if std::fs::symlink_metadata(&path).is_ok() {
-            if std::os::unix::net::UnixStream::connect(&path).is_ok() {
-                return Err(io::Error::new(
-                    io::ErrorKind::AddrInUse,
-                    format!("{} is held by a running server", path.display()),
-                ));
+            match std::os::unix::net::UnixStream::connect(&path) {
+                Ok(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AddrInUse,
+                        format!("{} is held by a running server", path.display()),
+                    ));
+                }
+                // Only a refusal (nothing listens) or a file that is gone shows the socket is
+                // stale (#924).
+                Err(e) if matches!(e.kind(), io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound) => {
+                    match std::fs::remove_file(&path) {
+                        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                        _ => {}
+                    }
+                }
+                // Any other error (no permission, no file descriptor left) says nothing about a
+                // server listening there: stop rather than take over a live socket.
+                Err(e) => {
+                    return Err(io::Error::new(
+                        e.kind(),
+                        format!("{} may be held by a running server (probing it failed: {e})", path.display()),
+                    ));
+                }
             }
-            std::fs::remove_file(&path)?;
         }
         let listener = UnixListener::bind(&path)?;
         {

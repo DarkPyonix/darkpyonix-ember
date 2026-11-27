@@ -1344,7 +1344,7 @@ impl Enrol {
             State::Expired => return Err(EnrolError::Expired(enrol_id.into())),
             other => return Err(EnrolError::WrongState { id: enrol_id.into(), state: other.as_str() }),
         }
-        if row.confirm_deadline_ms.map_or(true, |d| now_ms >= d) {
+        if row.confirm_deadline_ms.is_none_or(|d| now_ms >= d) {
             return Err(EnrolError::Expired(enrol_id.into()));
         }
         let expected = expect_fingerprint.map(normalise_fingerprint).transpose()?;
@@ -3118,7 +3118,7 @@ mod tests {
         let err = e.transition("x", Waiting, Joined, T0, None, None);
         assert!(matches!(err, Err(EnrolError::IllegalTransition { .. })));
         // A legal move on a row that is not in `from` is Ok(false), not a change.
-        assert_eq!(e.transition("x", Waiting, Expired, T0, None, None).unwrap(), false);
+        assert!(!e.transition("x", Waiting, Expired, T0, None, None).unwrap());
     }
 
     #[test]

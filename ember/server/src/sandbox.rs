@@ -9,9 +9,10 @@
 //! 2. **OS sandbox at spawn.** [`wrap`] starts the agent under the platform's sandbox with the
 //!    denied directories hidden: macOS `sandbox-exec` (Seatbelt profile with
 //!    `(deny file-read* file-write* (subpath ...))`), Linux `bwrap` (a tmpfs over each directory).
-//!    Directories the agent needs that sit inside a denied one (its account's `CLAUDE_CONFIG_DIR` or
-//!    `CODEX_HOME` under `<data dir>/accounts/`) are allowed again. Where neither tool works the
-//!    agent starts unwrapped and one warning is logged ("agent OS sandbox not available").
+//!    Directories the agent needs that sit inside a denied one (its account's `CLAUDE_CONFIG_DIR`,
+//!    `CODEX_HOME`, `GEMINI_CLI_HOME` or `PI_CODING_AGENT_DIR` under `<data dir>/accounts/`) are
+//!    allowed again. Where neither tool works the agent starts unwrapped and one warning is logged
+//!    ("agent OS sandbox not available").
 //! 3. **Per-harness file tools.** [`is_denied`] is the check Ember's own handlers use: the ACP file
 //!    methods (Gemini, omp), the agy hook, and Claude Code's `--settings` deny rules
 //!    ([`claude_settings`]).
@@ -39,8 +40,9 @@ pub const SECRET_VARS: &[&str] = &[
     "EMBER_HUB_TOKEN",
 ];
 
-/// Env variables whose value is a directory the agent itself must use (its account home).
-const CONFIG_DIR_VARS: &[&str] = &["CLAUDE_CONFIG_DIR", "CODEX_HOME"];
+/// Env variables whose value is a directory the agent itself must use (its account home, the
+/// `dir_var` of `accounts::isolation`; test `fr_u1_every_account_dir_variable_is_carved_out_of_the_agent_sandbox`).
+const CONFIG_DIR_VARS: &[&str] = &["CLAUDE_CONFIG_DIR", "CODEX_HOME", "GEMINI_CLI_HOME", "PI_CODING_AGENT_DIR"];
 
 /// An Ember variable that carries a secret: one of [`SECRET_VARS`], or `EMBER_*` with `TOKEN`,
 /// `SECRET` or `PASSWORD` in it, or ending in `_KEY`.
@@ -381,7 +383,7 @@ mod tests {
         let d = tmp.path().join("data");
         let acct = d.join("accounts/x");
         std::fs::create_dir_all(&acct).unwrap();
-        let (prog, args) = wrap_with(&Tool::Bwrap(p("/usr/bin/bwrap")), &[d.clone()], &[acct.clone()], &p("/bin/omp"), &["acp".into()]);
+        let (prog, args) = wrap_with(&Tool::Bwrap(p("/usr/bin/bwrap")), std::slice::from_ref(&d), std::slice::from_ref(&acct), &p("/bin/omp"), &["acp".into()]);
         assert_eq!(prog, p("/usr/bin/bwrap"));
         let joined = args.join(" ");
         assert!(joined.starts_with("--dev-bind / / --tmpfs "), "{joined}");

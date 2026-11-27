@@ -19,7 +19,8 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use ember_editor::{
-    DecorationKind, EditorSession, SessionConfig, SessionUpdate, Severity, WidgetCommand, WidgetEvent, WidgetPos, WidgetRange,
+    DecorationKind, EditorSession, HoverPhase, SessionConfig, SessionUpdate, Severity, WidgetCommand, WidgetEvent, WidgetPos,
+    WidgetRange,
 };
 use tokio::sync::mpsc;
 
@@ -36,6 +37,11 @@ struct Server {
 
 impl Server {
     fn start(bin: &Path, root: &Path) -> Self {
+        Self::start_with(bin, root, None)
+    }
+
+    /// As [`Server::start`], with `--extensions-dir` when `extensions` is given (the probe case).
+    fn start_with(bin: &Path, root: &Path, extensions: Option<&Path>) -> Self {
         let data = root.join("data");
         let machine = data.join("data").join("Machine");
         std::fs::create_dir_all(&machine).unwrap();
@@ -48,6 +54,7 @@ impl Server {
             .arg("--server-data-dir")
             .arg(&data)
             .args(["--telemetry-level", "off"])
+            .args(extensions.map(|e| vec!["--extensions-dir".into(), e.as_os_str().to_owned()]).unwrap_or_default())
             .stdin(Stdio::null())
             .stdout(log)
             .stderr(log_err);
@@ -446,4 +453,338 @@ async fn live_session_explorer_create_rename_delete() {
     assert!(ws.is_dir());
     assert!(!root.join("escape.txt").exists());
     session.shutdown().await;
+}
+
+/// SPEC FR-E12 (#32 phase A step 2): hover, CodeLens and inline completion from a real extension
+/// reach the session through the extension host and Ember's bridges. The probe extension
+/// (`.github/scripts/ose/regression/probe/`, packed by `pack.py`) answers each with a fixed marker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a real OSE server: EMBER_OSE_SERVER=<unpacked build>/bin/dpx-ose-server, and python3"]
+async fn live_session_probe_hover_codelens_inline() {
+    let Some(bin) = std::env::var_os("EMBER_OSE_SERVER").map(PathBuf::from) else {
+        eprintln!("[live-session] EMBER_OSE_SERVER not set; skipping");
+        return;
+    };
+    let root = std::env::temp_dir().join(format!("ember-probe-{}", uuid_short()));
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(&root).unwrap();
+    let ws = root.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let doc_path = ws.join("probe.txt");
+    std::fs::write(&doc_path, "hello probe world\nsecond line\n").unwrap();
+
+    // Pack and install the probe the way the regression harness installs extensions.
+    let vsix = root.join("ember-probe.vsix");
+    let pack = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/scripts/ose/regression/probe/pack.py");
+    let st = Command::new("python3").arg("-I").arg(&pack).arg(&vsix).status().expect("python3");
+    assert!(st.success(), "pack.py failed");
+    let ext = root.join("ext");
+    let data = root.join("data");
+    let out = Command::new(&bin)
+        .arg("--install-extension")
+        .arg(&vsix)
+        .arg("--extensions-dir")
+        .arg(&ext)
+        .arg("--server-data-dir")
+        .arg(&data)
+        .arg("--accept-server-license-terms")
+        .stdin(Stdio::null())
+        .output()
+        .expect("install the probe");
+    assert!(out.status.success(), "install failed: {}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+
+    let server = Server::start_with(&bin, &root, Some(&ext));
+    let addr = format!("127.0.0.1:{}", server.port);
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while tokio::net::TcpStream::connect(&addr).await.is_err() {
+        assert!(Instant::now() < deadline, "server not listening on {addr}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let config = SessionConfig::new(addr.clone(), ws.to_str().unwrap());
+    let (session, mut rx) = tokio::time::timeout(Duration::from_secs(120), EditorSession::connect_tcp(config))
+        .await
+        .expect("connect timed out")
+        .unwrap_or_else(|e| panic!("connect: {e}"));
+
+    let uri = session.uri(doc_path.to_str().unwrap());
+    session.open(uri.clone()).unwrap();
+    let generation = wait_for("Opened", 30, &mut rx, |u| match u {
+        SessionUpdate::Opened { generation, language_id, .. } => {
+            assert_eq!(language_id, "plaintext");
+            Some(*generation)
+        }
+        SessionUpdate::OpenFailed { error, .. } => panic!("open failed: {error}"),
+        _ => None,
+    })
+    .await;
+
+    // CodeLens: asked for when the document opens and its provider registers.
+    let t = Instant::now();
+    wait_for("the probe's CodeLens", 120, &mut rx, |u| match u {
+        SessionUpdate::Decorations { uri: du, decorations, .. } if du.path == uri.path => decorations
+            .iter()
+            .any(|d| d.kind == DecorationKind::CodeLens && d.text.contains("ember-probe lens"))
+            .then_some(()),
+        _ => None,
+    })
+    .await;
+    println!("[live-session] CodeLens after {:.1} s", t.elapsed().as_secs_f64());
+
+    // Hover: rest on `probe` (line 0, column 7) until the provider answers.
+    let t = Instant::now();
+    let hover = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let rest = WidgetEvent::CodeHovered { decoration: 0, pos: WidgetPos::new(0, 7), phase: HoverPhase::Rest };
+            session.widget_event(uri.clone(), generation, rest).unwrap();
+            let until = tokio::time::Instant::now() + Duration::from_secs(3);
+            while let Ok(Some(u)) = tokio::time::timeout_at(until, rx.recv()).await {
+                if let SessionUpdate::Hover(h) = &u {
+                    if let Some(m) = h.contents.iter().find(|m| m.value.contains("ember-probe hover")) {
+                        return m.value.clone();
+                    }
+                }
+            }
+        }
+    })
+    .await
+    .expect("no hover from the probe");
+    assert_eq!(hover, "ember-probe hover: probe");
+    println!("[live-session] hover after {:.1} s", t.elapsed().as_secs_f64());
+
+    // Inline completion: ask at the end of line 1 until ghost text arrives.
+    let t = Instant::now();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            session.trigger_inline_completion(uri.clone(), generation, WidgetPos::new(1, 11)).unwrap();
+            let until = tokio::time::Instant::now() + Duration::from_secs(3);
+            while let Ok(Some(u)) = tokio::time::timeout_at(until, rx.recv()).await {
+                if let SessionUpdate::Decorations { uri: du, decorations, .. } = &u {
+                    if du.path == uri.path
+                        && decorations.iter().any(|d| d.kind == DecorationKind::GhostText && d.text.contains("ember-probe-ghost"))
+                    {
+                        return;
+                    }
+                }
+            }
+        }
+    })
+    .await
+    .expect("no ghost text from the probe");
+    println!("[live-session] ghost text after {:.1} s", t.elapsed().as_secs_f64());
+
+    session.close(uri).unwrap();
+    session.shutdown().await;
+    drop(server);
+}
+
+/// Packs a minimal storage-probe VSIX into `vsix_path` for the live OSE storage persistence test.
+fn pack_storage_probe_vsix(vsix_path: &Path) {
+    let script = r#"
+import json, sys, zipfile
+
+package_json = {
+    "name": "ember-storage-probe",
+    "displayName": "Ember Storage Probe",
+    "version": "0.0.1",
+    "publisher": "ember-test",
+    "engines": {"vscode": "^1.80.0"},
+    "main": "./extension.js",
+    "activationEvents": [
+        "*",
+        "onCommand:emberStorageProbe.write",
+        "onCommand:emberStorageProbe.report"
+    ],
+    "contributes": {
+        "commands": [
+            {"command": "emberStorageProbe.write", "title": "Write Storage"},
+            {"command": "emberStorageProbe.report", "title": "Report Storage"}
+        ]
+    }
+}
+
+extension_js = r'''
+const vscode = require('vscode');
+
+exports.activate = function (context) {
+  context.subscriptions.push(vscode.commands.registerCommand('emberStorageProbe.write', async (gVal, wVal) => {
+    await context.globalState.update('gKey', gVal);
+    await context.workspaceState.update('wKey', wVal);
+    vscode.window.showInformationMessage('WROTE:' + JSON.stringify({ g: context.globalState.get('gKey', null), w: context.workspaceState.get('wKey', null) }));
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('emberStorageProbe.report', async () => {
+    vscode.window.showInformationMessage('REPORT:' + JSON.stringify({ g: context.globalState.get('gKey', null), w: context.workspaceState.get('wKey', null) }));
+  }));
+};
+
+exports.deactivate = function () {};
+'''
+
+manifest = '''<?xml version="1.0" encoding="utf-8"?>
+<PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011">
+  <Metadata>
+    <Identity Language="en-US" Id="ember-storage-probe" Version="0.0.1" Publisher="ember-test"/>
+    <DisplayName>Ember Storage Probe</DisplayName>
+    <Description>Test probe for MainThreadStorage persistence</Description>
+  </Metadata>
+  <Installation><InstallationTarget Id="Microsoft.VisualStudio.Code"/></Installation>
+  <Dependencies/>
+  <Assets><Asset Type="Microsoft.VisualStudio.Code.Manifest" Path="extension/package.json" Addressable="true"/></Assets>
+</PackageManifest>'''
+
+content_types = '''<?xml version="1.0" encoding="utf-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension=".json" ContentType="application/json"/>
+  <Default Extension=".js" ContentType="application/javascript"/>
+  <Default Extension=".vsixmanifest" ContentType="text/xml"/>
+</Types>'''
+
+with zipfile.ZipFile(sys.argv[1], 'w', zipfile.ZIP_DEFLATED) as z:
+    z.writestr('[Content_Types].xml', content_types)
+    z.writestr('extension.vsixmanifest', manifest)
+    z.writestr('extension/package.json', json.dumps(package_json, indent=2))
+    z.writestr('extension/extension.js', extension_js)
+"#;
+    let st = Command::new("python3")
+        .arg("-I")
+        .arg("-c")
+        .arg(script)
+        .arg(vsix_path)
+        .status()
+        .expect("python3");
+    assert!(st.success(), "failed to pack storage probe vsix");
+}
+
+/// Live OSE test: `MainThreadStorage` persists `globalState` across sessions and workspaces,
+/// and persists `workspaceState` per workspace while isolating different workspaces.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a real OSE server: EMBER_OSE_SERVER=<unpacked build>/bin/dpx-ose-server, and python3"]
+async fn live_session_main_thread_storage_persists_across_restarts() {
+    let Some(bin) = std::env::var_os("EMBER_OSE_SERVER").map(PathBuf::from) else {
+        eprintln!("[live-session] EMBER_OSE_SERVER not set; skipping");
+        return;
+    };
+    let root = std::env::temp_dir().join(format!("ember-storage-live-{}", uuid_short()));
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(&root).unwrap();
+    let ws_a = root.join("ws-a");
+    let ws_b = root.join("ws-b");
+    std::fs::create_dir_all(&ws_a).unwrap();
+    std::fs::create_dir_all(&ws_b).unwrap();
+
+    let vsix = root.join("ember-storage-probe.vsix");
+    pack_storage_probe_vsix(&vsix);
+    let ext = root.join("ext");
+    let data = root.join("data");
+    let out = Command::new(&bin)
+        .arg("--install-extension")
+        .arg(&vsix)
+        .arg("--extensions-dir")
+        .arg(&ext)
+        .arg("--server-data-dir")
+        .arg(&data)
+        .arg("--accept-server-license-terms")
+        .stdin(Stdio::null())
+        .output()
+        .expect("install storage probe");
+    assert!(
+        out.status.success(),
+        "install failed: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let server = Server::start_with(&bin, &root, Some(&ext));
+    let addr = format!("127.0.0.1:{}", server.port);
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while tokio::net::TcpStream::connect(&addr).await.is_err() {
+        assert!(Instant::now() < deadline, "server not listening on {addr}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // Helper: invoke a probe command, retrying briefly while the extension finishes registering
+    // its runtime command handler after activation.
+    async fn run_probe_cmd(
+        session: &EditorSession,
+        rx: &mut mpsc::UnboundedReceiver<SessionUpdate>,
+        cmd: &str,
+        args: Vec<serde_json::Value>,
+        prefix: &str,
+    ) -> String {
+        tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                session.execute_command(cmd, args.clone()).unwrap();
+                let until = tokio::time::Instant::now() + Duration::from_secs(2);
+                while let Ok(Some(u)) = tokio::time::timeout_at(until, rx.recv()).await {
+                    match u {
+                        SessionUpdate::ExtensionMessage(m) if m.message.starts_with(prefix) => {
+                            return m.message;
+                        }
+                        SessionUpdate::CommandFailed { id, error } => {
+                            panic!("command {id} failed: {error}");
+                        }
+                        SessionUpdate::ConnectionLost { reason } => {
+                            panic!("connection lost while running {cmd}: {reason}");
+                        }
+                        SessionUpdate::RunCommand { command } if command.id == cmd => {
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {prefix} from {cmd}"))
+    }
+
+    // Session 1 (ws-a): write both globalState and workspaceState.
+    let (s1, mut rx1) = tokio::time::timeout(
+        Duration::from_secs(120),
+        EditorSession::connect_tcp(SessionConfig::new(addr.clone(), ws_a.to_str().unwrap())),
+    )
+    .await
+    .expect("connect s1 timed out")
+    .unwrap_or_else(|e| panic!("connect s1: {e}"));
+    let wrote = run_probe_cmd(
+        &s1,
+        &mut rx1,
+        "emberStorageProbe.write",
+        vec![serde_json::json!("g-persisted"), serde_json::json!("w-alpha")],
+        "WROTE:",
+    )
+    .await;
+    println!("[live-session] s1 {wrote}");
+    s1.shutdown().await;
+
+    // Session 2 (ws-a): both globalState and workspaceState must be restored.
+    let (s2, mut rx2) = tokio::time::timeout(
+        Duration::from_secs(120),
+        EditorSession::connect_tcp(SessionConfig::new(addr.clone(), ws_a.to_str().unwrap())),
+    )
+    .await
+    .expect("connect s2 timed out")
+    .unwrap_or_else(|e| panic!("connect s2: {e}"));
+    let report_a = run_probe_cmd(&s2, &mut rx2, "emberStorageProbe.report", vec![], "REPORT:").await;
+    println!("[live-session] s2 {report_a}");
+    let payload_a: serde_json::Value = serde_json::from_str(report_a.trim_start_matches("REPORT:")).unwrap();
+    assert_eq!(payload_a["g"], "g-persisted");
+    assert_eq!(payload_a["w"], "w-alpha");
+    s2.shutdown().await;
+
+    // Session 3 (ws-b): globalState persists, workspaceState is isolated.
+    let (s3, mut rx3) = tokio::time::timeout(
+        Duration::from_secs(120),
+        EditorSession::connect_tcp(SessionConfig::new(addr.clone(), ws_b.to_str().unwrap())),
+    )
+    .await
+    .expect("connect s3 timed out")
+    .unwrap_or_else(|e| panic!("connect s3: {e}"));
+    let report_b = run_probe_cmd(&s3, &mut rx3, "emberStorageProbe.report", vec![], "REPORT:").await;
+    println!("[live-session] s3 {report_b}");
+    let payload_b: serde_json::Value = serde_json::from_str(report_b.trim_start_matches("REPORT:")).unwrap();
+    assert_eq!(payload_b["g"], "g-persisted");
+    assert!(payload_b["w"].is_null(), "workspaceState leaked across workspaces: {payload_b}");
+    s3.shutdown().await;
+    drop(server);
 }

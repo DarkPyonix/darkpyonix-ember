@@ -23,9 +23,9 @@ use super::components::{
 use super::theme::*;
 use crate::services::{run_shared, services};
 use crate::ui::characters::{
-    apply_character_override, build_character_override, characters_project, editor_save_needed, effective_character_overrides,
-    harness_label, page_width, state_label, style_apply_needed, supports_pin, team_cols, team_preview, updated_character_overrides,
-    with_topic, EDITOR_HARNESSES, EDITOR_ROLES, LEAD_MAX_W, PAGE_MAX_W, SILHOUETTES,
+    apply_character_override, build_character_override, characters_project, editor_fields_from_override, editor_save_needed,
+    effective_character_overrides, harness_label, page_width, state_label, style_apply_needed, supports_pin, team_cols,
+    team_preview, updated_character_overrides, with_topic, EDITOR_HARNESSES, EDITOR_ROLES, LEAD_MAX_W, PAGE_MAX_W, SILHOUETTES,
 };
 use crate::ui::coexist::shared_ui;
 use crate::ui::project::{effective_style, patch_error_message};
@@ -100,40 +100,40 @@ fn save_character_override(
 /// `cols` equal columns; a short last row keeps the cell width.
 fn Grid<T>(items: &[T], cols: usize, gap: f32, mut cell: impl FnMut(&T)) {
     let cols = cols.max(1);
-    cu::Column().spacing(gap).modifier(Modifier::new().fill_max_width()).content(|| {
+    { use ::compose_rust::ui::Column; Column!(spacing = gap, modifier = Modifier::new().fill_max_width(), {
         for row in items.chunks(cols) {
-            cu::Row().spacing(gap).modifier(Modifier::new().fill_max_width()).content(|| {
+            { use ::compose_rust::ui::Row; Row!(spacing = gap, modifier = Modifier::new().fill_max_width(), {
                 for item in row {
-                    cu::Column().alignment(Alignment::TopCenter).modifier(Modifier::new().weight(1.0)).content(|| cell(item));
+                    { use ::compose_rust::ui::Column; Column!(alignment = Alignment::TopCenter, modifier = Modifier::new().weight(1.0), content = || cell(item)) };
                 }
                 for _ in row.len()..cols {
-                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                 }
-            });
+            }) };
         }
-    });
+    }) };
 }
 
 fn Section(title: &str, note: &str, preview: bool, content: impl FnOnce()) {
     let p = ember_theme().palette;
-    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-        cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
+    { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
+        { use ::compose_rust::ui::Row; Row!(spacing = SP[1], alignment = Alignment::CenterStart, {
             Label(title, Fs::Xl, Weight::Semibold, None, Some(1));
             if preview {
                 Pill("미리보기", PillTone::Grey, true);
             }
-        });
+        }) };
         Label(note, Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
         content();
-    });
+    }) };
 }
 
 fn FieldRow(label: &str, content: impl FnOnce()) {
     let p = ember_theme().palette;
-    cu::Column().spacing(4.0).modifier(Modifier::new().fill_max_width()).content(|| {
+    { use ::compose_rust::ui::Column; Column!(spacing = 4.0, modifier = Modifier::new().fill_max_width(), {
         Label(label, Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(1));
         content();
-    });
+    }) };
 }
 
 fn spec(style: CharStyle, name: &str, agent: &str, role: &str, state: CharState, lead: bool, pin: Option<usize>) -> CharSpec {
@@ -152,25 +152,21 @@ fn spec(style: CharStyle, name: &str, agent: &str, role: &str, state: CharState,
 /// One catalog cell (`.cell`): the character on a card with its caption.
 fn Cell(spec: &CharSpec, caption: &str) {
     let p = ember_theme().palette;
-    cu::Column()
-        .alignment(Alignment::TopCenter)
-        .spacing(6.0)
-        .modifier(Modifier::new().fill_max_width().background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_LG).padding(SP[2]))
-        .content(|| {
+    { use ::compose_rust::ui::Column; Column!(alignment = Alignment::TopCenter, spacing = 6.0, modifier = Modifier::new().fill_max_width().background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_LG).padding(SP[2]), {
             draw(spec, 64.0);
             Label(caption, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
-        });
+        }) };
 }
 
 /// One numbered style section of the catalog (mockup `#cands`): the five states, the three
 /// harnesses and the leader crown, nine cells.
 fn StyleSection(index: usize, style: CharStyle, cols: usize) {
     let p = ember_theme().palette;
-    cu::Column().spacing(6.0).modifier(Modifier::new().fill_max_width()).content(|| {
-        cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).content(|| {
+    { use ::compose_rust::ui::Column; Column!(spacing = 6.0, modifier = Modifier::new().fill_max_width(), {
+        { use ::compose_rust::ui::Row; Row!(spacing = SP[2], alignment = Alignment::CenterStart, {
             Label(&format!("{}. {}", index + 1, style.label()), Fs::Xl, Weight::Semibold, None, Some(1));
             Pill(style.id(), PillTone::Grey, true);
-        });
+        }) };
         Label(style.blurb(), Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
         let mut cells: Vec<(CharSpec, &str)> = CharState::ALL
             .iter()
@@ -181,7 +177,7 @@ fn StyleSection(index: usize, style: CharStyle, cols: usize) {
         }
         cells.push((spec(style, "ember-리더", "claude", "리더", CharState::Done, true, None), "리더 왕관"));
         Grid(&cells, cols, SP[2], |(s, label)| Cell(s, label));
-    });
+    }) };
 }
 
 /// Where a review capture starts the screen (`EMBER_CR_SCROLL` here, read in debug builds only).
@@ -239,7 +235,18 @@ pub fn CharactersScreen() {
     let cols = team_cols(width);
     let asked = ui.characters.get().unwrap_or_default();
     let svc = crate::services::try_services();
-    let names: Vec<String> = svc.as_ref().map(|s| s.client.read(|st| st.projects().into_iter().map(|v| v.name).collect())).unwrap_or_default();
+    let names: Vec<String> = svc
+        .as_ref()
+        .map(|s| {
+            s.client.read(|st| {
+                st.projects()
+                    .into_iter()
+                    .filter(|v| !st.project(&v.name).is_some_and(|pr| pr.archived))
+                    .map(|v| v.name)
+                    .collect()
+            })
+        })
+        .unwrap_or_default();
     let project = characters_project(&asked, ui.selected_project.get().as_deref(), &names);
     let project_name = project.clone().unwrap_or_default();
     let (server, server_overrides) = svc
@@ -294,59 +301,50 @@ pub fn CharactersScreen() {
     let ed_style = remember(|| mutable_state_of(None::<CharStyle>));
     let ed_state = remember(|| mutable_state_of(CharState::Idle));
     let ed_pin = remember(|| mutable_state_of(None::<usize>));
-    let ed_loaded_key = remember(|| mutable_state_of(String::new()));
+    let ed_loaded_key = remember(|| mutable_state_of(None::<(String, Option<ember_client::wire::CharacterOverride>)>));
     let trimmed_ed_name = ed_name.get().trim().to_string();
-    let load_key = format!("{project_name}|{trimmed_ed_name}");
+    let saved_for_member = current_overrides.get(&trimmed_ed_name).cloned();
+    let load_key = Some((format!("{project_name}|{trimmed_ed_name}"), saved_for_member.clone()));
     if ed_loaded_key.get_untracked() != load_key {
         ed_loaded_key.set(load_key);
-        if let Some(ov) = current_overrides.get(&trimmed_ed_name) {
-            if let Some(h) = ov.harness.as_deref() {
-                if let Some(pos) = EDITOR_HARNESSES.iter().position(|(id, _)| *id == h) {
-                    ed_harness.set(pos);
-                }
-            }
-            if let Some(r) = ov.role.as_deref() {
-                if let Some(pos) = EDITOR_ROLES.iter().position(|&x| x == r) {
-                    ed_role.set(pos);
-                }
-            }
-            ed_style.set(ov.style.as_deref().and_then(CharStyle::from_id));
-            if let Some(st) = ov.state.as_deref().and_then(CharState::from_id) {
-                ed_state.set(st);
-            }
-            ed_pin.set(ov.silhouette.filter(|&i| i < SILHOUETTES.len()));
-        }
+        let matching_member = members.iter().find(|m| m.name == trimmed_ed_name);
+        let fields = editor_fields_from_override(saved_for_member.as_ref(), matching_member, style);
+        ed_harness.set(fields.harness_idx);
+        ed_role.set(fields.role_idx);
+        ed_style.set(fields.style);
+        ed_state.set(fields.state);
+        ed_pin.set(fields.pin);
     }
 
     // `.wrapx`: the content is at most 1148 dp wide and centred; a narrower room is used whole.
     let room = super::home::content_width(width, SP[4]);
     let page_w = page_width(room);
     let page = if room > PAGE_MAX_W { Modifier::new().width(page_w) } else { Modifier::new().fill_max_width() };
-    cu::ScrollColumn().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
-        cu::Column().alignment(Alignment::TopCenter).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
-        cu::Column().spacing(SP[5]).modifier(page).content(|| {
+    { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().fill_max_width().fill_max_height(), {
+        { use ::compose_rust::ui::Column; Column!(alignment = Alignment::TopCenter, modifier = Modifier::new().fill_max_width().padding(SP[4]), {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[5], modifier = page, {
             if start == CaptureStart::Top {
                 // Back to where it was opened from; no sidebar entry (D26).
-                cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                { use ::compose_rust::ui::Row; Row!(spacing = SP[1], alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
                     let u = ui.clone();
                     AppButton("뒤로", Some(IconRole::Back), ButtonKind::Default, true, true, false, move || u.close_characters());
-                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                     if compact {
-                        cu::Spacer().modifier(Modifier::new().width(super::project::PHONE_MENU_ROOM));
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(super::project::PHONE_MENU_ROOM)) };
                     }
-                });
-                cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                }) };
+                { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
                     Label("팀 캐릭터", if compact { Fs::Xl } else { Fs::Xl2 }, Weight::Regular, None, Some(1));
                     // `.lead{max-width:820px}`.
-                    cu::Column().modifier(Modifier::new().width(LEAD_MAX_W.min(page_w))).content(|| {
+                    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().width(LEAD_MAX_W.min(page_w)), {
                         Label(LEAD, Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
-                    });
+                    }) };
                     let sub = match &project {
                         Some(n) => format!("{n} 프로젝트의 스타일은 {}입니다.", current.label()),
                         None => "프로젝트가 아직 없어 기본 스타일로 보여 드립니다.".to_string(),
                     };
                     Label(&sub, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
-                });
+                }) };
 
                 // 1. The catalog: one numbered section per style.
                 for (i, s) in CharStyle::ALL.iter().copied().enumerate() {
@@ -365,7 +363,7 @@ pub fn CharactersScreen() {
                     // `.segx`: six style buttons; a phone puts three on a line.
                     let per_line = if compact { 3 } else { CharStyle::ALL.len() };
                     for line in CharStyle::ALL.chunks(per_line) {
-                        cu::Row().spacing(6.0).alignment(Alignment::CenterStart).content(|| {
+                        { use ::compose_rust::ui::Row; Row!(spacing = 6.0, alignment = Alignment::CenterStart, {
                             for &s in line {
                                 let (c, m) = (chosen.clone(), message.clone());
                                 // The chosen style says it is pressed (aria-pressed, compose-rust#473).
@@ -374,10 +372,10 @@ pub fn CharactersScreen() {
                                     m.set(None);
                                 });
                             }
-                        });
+                        }) };
                     }
                     let needed = style_apply_needed(current, style);
-                    cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                    { use ::compose_rust::ui::Row; Row!(spacing = SP[2], alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
                         let (pr, sv, ms) = (project.clone(), saving.clone(), message.clone());
                         AppButton(
                             if saving.get() { "저장 중" } else { "이 프로젝트에 적용" },
@@ -398,14 +396,11 @@ pub fn CharactersScreen() {
                             Some(n) => format!("{n}의 현재 스타일은 {}입니다", current.label()),
                         };
                         Label(&note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
-                    });
+                    }) };
                     if let Some(m) = message.get() {
                         Label(&m, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), None);
                     }
-                    cu::Column()
-                        .spacing(SP[3])
-                        .modifier(Modifier::new().fill_max_width().background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_LG).padding(SP[4]))
-                        .content(|| {
+                    { use ::compose_rust::ui::Column; Column!(spacing = SP[3], modifier = Modifier::new().fill_max_width().background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_LG).padding(SP[4]), {
                             let ov_map = current_overrides.clone();
                             let proj_id = project_name.clone();
                             Grid(&team.cells, cols, SP[3], |m| {
@@ -418,12 +413,12 @@ pub fn CharactersScreen() {
                             if team.more > 0 {
                                 Label(&format!("외 {}명", team.more), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                             }
-                        });
+                        }) };
                 });
             }
 
             // 3. The editor: a stage and a form side by side (one column up to 1000 dp).
-            Section("편집기", "이름을 바꾸면 캐릭터가 바뀝니다. 말랑과 키링은 실루엣을 고정할 수 있습니다. 저장한 팀원 설정은 프로젝트에 기록됩니다.", false, || {
+            Section("편집기", "이름을 바꾸면 캐릭터가 바뀝니다. 말랑과 키링은 실루엣을 고정할 수 있습니다. 저장한 팀원 설정은 프로젝트에 기록됩니다.", project.is_none(), || {
                 let name = ed_name.get();
                 let trimmed_name = name.trim().to_string();
                 let shown_name = if trimmed_name.is_empty() { "이름 없음".to_string() } else { trimmed_name.clone() };
@@ -442,18 +437,32 @@ pub fn CharactersScreen() {
                     && !trimmed_name.is_empty()
                     && current_overrides.contains_key(&trimmed_name);
                 let stage = || {
-                    cu::Column()
-                        .alignment(Alignment::Center)
-                        .spacing(SP[3])
-                        .modifier(Modifier::new().fill_max_width().height(if compact { 300.0 } else { 320.0 }).background(paint(p.surface_2)).corner_radius(CORNER_MD))
-                        .content(|| {
+                    { use ::compose_rust::ui::Column; Column!(alignment = Alignment::Center, spacing = SP[3], modifier = Modifier::new().fill_max_width().height(if compact { 300.0 } else { 320.0 }).background(paint(p.surface_2)).corner_radius(CORNER_MD), {
                             draw(&spec(ed_v, &shown_name, agent_id, role, ed_state.get(), role == "리더", pin), if compact { 160.0 } else { 200.0 });
-                            cu::Row().spacing(10.0).content(|| {
+                            { use ::compose_rust::ui::Row; Row!(spacing = 10.0, {
                                 for suffix in ["-2", "-리뷰", "-테스트", "-문서", "-조사"] {
                                     draw(&spec(ed_v, &format!("{shown_name}{suffix}"), agent_id, &suffix[1..], CharState::Idle, false, pin), 44.0);
                                 }
+                            }) };
+                        }) };
+                };
+                let member_field = || {
+                    if !members.is_empty() {
+                        FieldRow("팀원 선택", || {
+                            let labels: Vec<String> = members.iter().map(|m| m.name.clone()).collect();
+                            let at = labels.iter().position(|n| *n == trimmed_name);
+                            let shown = at.map(|i| labels[i].as_str()).unwrap_or("직접 입력");
+                            let chosen = at.unwrap_or(0);
+                            let (n, m) = (ed_name.clone(), ed_message.clone());
+                            let pick_labels = labels.clone();
+                            NamedSelect("팀원", shown, &labels, chosen, 260.0, move |i| {
+                                if let Some(picked) = pick_labels.get(i) {
+                                    n.set(picked.clone());
+                                    m.set(None);
+                                }
                             });
                         });
+                    }
                 };
                 let name_field = || {
                     FieldRow("이름", || {
@@ -525,7 +534,7 @@ pub fn CharactersScreen() {
                     FieldRow("상태", || {
                         let per_line = if compact { 3 } else { CharState::ALL.len() };
                         for line in CharState::ALL.chunks(per_line) {
-                            cu::Row().spacing(6.0).content(|| {
+                            { use ::compose_rust::ui::Row; Row!(spacing = 6.0, {
                                 for &s in line {
                                     let (st, m) = (ed_state.clone(), ed_message.clone());
                                     ChoiceButton(state_label(s), Choice::Toggle, ed_state.get() == s, true, true, move || {
@@ -533,7 +542,7 @@ pub fn CharactersScreen() {
                                         m.set(None);
                                     });
                                 }
-                            });
+                            }) };
                         }
                     });
                 };
@@ -548,8 +557,8 @@ pub fn CharactersScreen() {
                     Some(n) => format!("{n} 프로젝트에 {trimmed_name} 팀원 설정을 저장합니다"),
                 };
                 let actions_row = || {
-                    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-                        cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                    { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
+                        { use ::compose_rust::ui::Row; Row!(spacing = SP[2], alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
                             let (pr, nm, cand, ovs, sv, ms) = (
                                 project.clone(),
                                 trimmed_name.clone(),
@@ -596,17 +605,18 @@ pub fn CharactersScreen() {
                             if !compact {
                                 Label(&status_note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
                             }
-                        });
+                        }) };
                         if compact {
                             Label(&status_note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
                         }
                         if let Some(m) = ed_message.get() {
                             Label(&m, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), None);
                         }
-                    });
+                    }) };
                 };
                 let form = || {
-                    cu::Column().spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(|| {
+                    { use ::compose_rust::ui::Column; Column!(spacing = SP[3], modifier = Modifier::new().fill_max_width(), {
+                        member_field();
                         name_field();
                         if compact {
                             harness_field();
@@ -619,32 +629,32 @@ pub fn CharactersScreen() {
                         }
                         state_field();
                         actions_row();
-                    });
+                    }) };
                 };
                 let card = Modifier::new().fill_max_width().background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_LG).padding(SP[5]);
                 if wide {
-                    cu::Row().spacing(SP[5]).alignment(Alignment::CenterStart).modifier(card).content(|| {
-                        cu::Column().modifier(Modifier::new().weight(1.0)).content(stage);
-                        cu::Column().modifier(Modifier::new().weight(1.2)).content(form);
-                    });
+                    { use ::compose_rust::ui::Row; Row!(spacing = SP[5], alignment = Alignment::CenterStart, modifier = card, {
+                        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), content = stage) };
+                        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.2), content = form) };
+                    }) };
                 } else {
-                    cu::Column().spacing(SP[5]).modifier(card).content(|| {
+                    { use ::compose_rust::ui::Column; Column!(spacing = SP[5], modifier = card, {
                         stage();
                         form();
-                    });
+                    }) };
                 }
             });
-        });
-        });
-    });
+        }) };
+        }) };
+    }) };
 }
 
 /// Two form fields side by side, equal width (`.ed-form` two columns).
 fn Pair(a: impl FnOnce(), b: impl FnOnce()) {
-    cu::Row().spacing(SP[3]).alignment(Alignment::TopStart).modifier(Modifier::new().fill_max_width()).content(|| {
-        cu::Column().modifier(Modifier::new().weight(1.0)).content(a);
-        cu::Column().modifier(Modifier::new().weight(1.0)).content(b);
-    });
+    { use ::compose_rust::ui::Row; Row!(spacing = SP[3], alignment = Alignment::TopStart, modifier = Modifier::new().fill_max_width(), {
+        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), content = a) };
+        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), content = b) };
+    }) };
 }
 
 /// The mockup's lead paragraph (`.lead`).
@@ -698,7 +708,13 @@ mod tests {
         let _guard = crate::services::test_guard();
         let svc = crate::services::try_services().expect("test services");
         let ui = shared_ui();
-        let names: Vec<String> = svc.client.read(|st| st.projects().into_iter().map(|v| v.name).collect());
+        let names: Vec<String> = svc.client.read(|st| {
+            st.projects()
+                .into_iter()
+                .filter(|v| !st.project(&v.name).is_some_and(|pr| pr.archived))
+                .map(|v| v.name)
+                .collect()
+        });
         let asked = ui.characters.get_untracked().unwrap_or_default();
         let project = characters_project(&asked, ui.selected_project.get_untracked().as_deref(), &names).unwrap_or_default();
         let members = svc.client.read(|st| {
@@ -811,7 +827,7 @@ mod tests {
         let mut last = Vec::new();
         for name in ["크루", "포켓"] {
             let (node_id, handler_id) = nodes.button(name);
-            let (bytes, _) = host.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("dispatch");
+            let (bytes, _) = host.dispatch(HostEvent::new(node_id, handler_id, EventPayload::Clicked)).expect("dispatch");
             let batch = compose_rust::protocol::decode_batch(bytes).expect("decode");
             last = texts_of(&batch).into_iter().map(|(n, t)| (n, t.to_string())).collect::<Vec<_>>();
             nodes.take(&batch);
@@ -828,8 +844,9 @@ mod tests {
         let src = &src[..src.find("#[cfg(test)]").unwrap()];
         assert!(src.contains("let page_w = page_width(room);"));
         assert!(src.contains("let page = if room > PAGE_MAX_W { Modifier::new().width(page_w) } else { Modifier::new().fill_max_width() };"));
-        assert!(src.contains("cu::Column().alignment(Alignment::TopCenter).modifier(Modifier::new().fill_max_width().padding(SP[4]))"));
-        assert!(src.contains("cu::Column().spacing(SP[5]).modifier(page).content(|| {"));
+        assert!(src.contains("Column!(alignment = Alignment::TopCenter, modifier = Modifier::new().fill_max_width().padding(SP[4]), {"));
+        assert!(src.contains("Column!(spacing = SP[5], modifier = page, {"));
+
         assert!(src.contains("Modifier::new().width(LEAD_MAX_W.min(page_w))"));
         // The screen still composes with the cap in place.
         let _guard = crate::services::test_guard();
@@ -879,11 +896,7 @@ mod tests {
         nodes.take(&compose_rust::protocol::decode_batch(host.rebuild().expect("rebuild")).expect("decode"));
 
         let (save_id, save_handler) = nodes.button("팀원 설정 저장");
-        host.dispatch(HostEvent {
-            node_id: save_id,
-            handler_id: save_handler,
-            payload: EventPayload::Clicked,
-        })
+        host.dispatch(HostEvent::new(save_id, save_handler, EventPayload::Clicked))
         .expect("dispatch click on 팀원 설정 저장");
 
         // Wait briefly for the async run_shared task on test_services().rt to apply the patch.
@@ -903,6 +916,100 @@ mod tests {
         assert!(
             !stored.is_empty(),
             "clicking '팀원 설정 저장' must persist character_overrides on the project: {stored:?}"
+        );
+        shared_ui().close_characters();
+    }
+
+    #[test]
+    fn fr_l22_editor_renders_save_and_reset_without_preview_pill_for_real_project() {
+        use compose_rust::protocol::HostEvent;
+        use compose_rust::EventPayload;
+        let _guard = crate::services::test_guard();
+        let svc = crate::services::test_services();
+        svc.reset_demo();
+        shared_ui().update_prefs(|p| p.set_character_overrides("demo-project", std::collections::BTreeMap::new()));
+        shared_ui().open_characters("demo-project");
+
+        let mut host = Host::new(|| Box::new(Recomposer::new(CharactersScreen)));
+        let batch = compose_rust::protocol::decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let texts = texts_of(&batch);
+        assert!(texts.iter().any(|(_, t)| *t == "편집기"));
+        assert!(texts.iter().any(|(_, t)| *t == "팀원 선택"));
+        assert!(texts.iter().any(|(_, t)| *t == "팀원 설정 저장"));
+        assert!(
+            !texts.iter().any(|(_, t)| *t == "미리보기"),
+            "real project with members must not show the 미리보기 pill"
+        );
+
+        let mut nodes = Nodes::default();
+        nodes.take(&batch);
+        let (save_id, save_handler) = nodes.button("팀원 설정 저장");
+        host.dispatch(HostEvent::new(save_id, save_handler, EventPayload::Clicked))
+            .expect("dispatch click on 팀원 설정 저장");
+
+        for _ in 0..40 {
+            let synced = svc
+                .client
+                .read(|st| st.project("demo-project").is_some_and(|p| !p.character_overrides.is_empty()))
+                && shared_ui()
+                    .prefs
+                    .get_untracked()
+                    .saved_character_overrides("demo-project")
+                    .is_some_and(|m| !m.is_empty());
+            if synced {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            shared_ui()
+                .prefs
+                .get_untracked()
+                .saved_character_overrides("demo-project")
+                .is_some_and(|m| !m.is_empty()),
+            "prefs must persist saved character_overrides"
+        );
+
+        // Reopen the screen and verify the reset control appears and clears both server and prefs.
+        let mut host2 = Host::new(|| Box::new(Recomposer::new(CharactersScreen)));
+        let batch2 = compose_rust::protocol::decode_batch(host2.rebuild().expect("rebuild")).expect("decode");
+        let texts2 = texts_of(&batch2);
+        assert!(texts2.iter().any(|(_, t)| *t == "초기화"), "saved member must show 초기화");
+        assert!(!texts2.iter().any(|(_, t)| *t == "미리보기"));
+
+        let mut nodes2 = Nodes::default();
+        nodes2.take(&batch2);
+        let (reset_id, reset_handler) = nodes2.button("초기화");
+        host2
+            .dispatch(HostEvent::new(reset_id, reset_handler, EventPayload::Clicked))
+            .expect("dispatch click on 초기화");
+
+        for _ in 0..40 {
+            let cleared = svc
+                .client
+                .read(|st| st.project("demo-project").is_some_and(|p| p.character_overrides.is_empty()))
+                && shared_ui()
+                    .prefs
+                    .get_untracked()
+                    .saved_character_overrides("demo-project")
+                    .is_none();
+            if cleared {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            svc.client
+                .read(|st| st.project("demo-project").is_some_and(|p| p.character_overrides.is_empty())),
+            "clicking 초기화 must clear project character_overrides"
+        );
+        assert!(
+            shared_ui()
+                .prefs
+                .get_untracked()
+                .saved_character_overrides("demo-project")
+                .is_none(),
+            "clicking 초기화 must clear prefs character_overrides"
         );
         shared_ui().close_characters();
     }

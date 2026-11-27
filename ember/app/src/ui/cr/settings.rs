@@ -1,7 +1,7 @@
 //! compose-rust settings sheet (#220 phase 8): theme preference (FR-L28), editor keymap and
-//! shortcut reference (FR-L30), remembered default IDE target (FR-L7), archived-session
-//! visibility (FR-L9), this device on the transport (FR-N9), updates (NFR-R2), and server/data
-//! paths.
+//! shortcut reference (FR-L30), archived-session visibility (FR-L9), this device on the
+//! transport (FR-N9), the editor server settings for the owner (FR-W7), updates (NFR-R2), and
+//! server/data paths.
 
 #![allow(non_snake_case)]
 
@@ -15,7 +15,6 @@ use super::components::{
     SheetFooter, Txt,
 };
 use super::theme::*;
-use crate::ide::IdeKind;
 use crate::services::try_services;
 use crate::ui::coexist::shared_ui;
 use crate::ui::keymap::{Action, Keymap, Os};
@@ -48,24 +47,6 @@ pub fn shortcut_rows(keymap: Keymap, os: Os) -> Vec<ShortcutRow> {
         .collect()
 }
 
-/// Label for the remembered default IDE target (`Prefs::ide_target`, FR-L7).
-pub fn ide_choice_label(key: Option<&str>) -> &'static str {
-    match key.and_then(IdeKind::from_key) {
-        Some(IdeKind::Ember) => "Ember 에디터",
-        Some(IdeKind::VsCode) => "VS Code",
-        Some(IdeKind::Gateway) => "JetBrains Gateway",
-        None => "매번 선택",
-    }
-}
-
-/// The `(Option<&'static str>, &'static str)` options for the default IDE selector (FR-L7).
-pub const IDE_CHOICES: [(Option<&str>, &str); 4] = [
-    (None, "매번 선택"),
-    (Some("ember"), "Ember 에디터"),
-    (Some("vscode"), "VS Code"),
-    (Some("gateway"), "JetBrains Gateway"),
-];
-
 /// The settings modal (`EmberSheet`), composed with `open` and `on_dismiss`.
 pub fn SettingsSheet(open: bool, on_dismiss: impl FnMut() + Clone + 'static) {
     let close_footer = on_dismiss.clone();
@@ -78,8 +59,11 @@ pub fn SettingsSheet(open: bool, on_dismiss: impl FnMut() + Clone + 'static) {
     });
 }
 
-/// Body of the settings sheet: theme (FR-L28), keymap (FR-L30), default IDE (FR-L7),
-/// archived sessions (FR-L9), and server/data paths.
+/// Body of the settings sheet: theme (FR-L28), keymap (FR-L30), archived sessions (FR-L9), the
+/// editor server settings (FR-W7), and server/data paths. There is no device-wide default IDE:
+/// the chooser remembers the last pick per project (FR-W7b), and the default for a project with
+/// no pick is the server's editor settings (`default_ide`, FR-W7, INTENT D56), edited in the
+/// "에디터 서버" section by the owner.
 pub fn SettingsContent() {
     let theme = ember_theme();
     let p = theme.palette;
@@ -87,7 +71,6 @@ pub fn SettingsContent() {
     let current_theme = ui.theme_pref.get();
     let prefs = ui.prefs.get();
     let current_keymap = prefs.keymap;
-    let current_ide = prefs.ide_target.clone();
     let show_archived = ui.show_archived.get();
     let shortcuts_open = remember(|| mutable_state_of(false));
 
@@ -103,10 +86,7 @@ pub fn SettingsContent() {
         None => ("http://127.0.0.1:8880".to_string(), "기본 경로".to_string()),
     };
 
-    cu::Column()
-        .spacing(SP[3])
-        .modifier(Modifier::new().fill_max_width().padding(SP[4]))
-        .content(|| {
+    { use ::compose_rust::ui::Column; Column!(spacing = SP[3], modifier = Modifier::new().fill_max_width().padding(SP[4]), {
             // 1. Theme preference (FR-L28)
             SectionBlock("화면 테마", "앱 전체의 색상 모드를 선택합니다.", || {
                 ChoiceRow(|| {
@@ -119,17 +99,17 @@ pub fn SettingsContent() {
                 });
             });
 
-            cu::Separator(Some(paint(p.line)));
+            { use ::compose_rust::ui::Separator; Separator!(Some(paint(p.line))) };
 
             // 2. Editor keymap (FR-L30)
             SectionBlock(
                 "에디터 단축키",
                 "Ember 에디터의 기본 단축키 체계를 선택합니다.",
                 || {
-                    cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                    { use ::compose_rust::ui::Row; Row!(spacing = SP[1], alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
                         // The choices wrap in the room the table button leaves: a zero width
                         // keeps a weighted child from asking for its whole line first.
-                        cu::Column().modifier(Modifier::new().weight(1.0).width(0.0)).content(|| {
+                        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0).width(0.0), {
                             ChoiceRow(|| {
                                 for km in Keymap::ALL {
                                     let u = ui.clone();
@@ -138,7 +118,7 @@ pub fn SettingsContent() {
                                     });
                                 }
                             });
-                        });
+                        }) };
                         let toggle = shortcuts_open.clone();
                         let is_open = shortcuts_open.get();
                         AppButton(
@@ -150,38 +130,17 @@ pub fn SettingsContent() {
                             false,
                             move || toggle.set(!is_open),
                         );
-                    });
+                    }) };
                     if shortcuts_open.get() {
-                        cu::Spacer().modifier(Modifier::new().height(SP[1]));
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[1])) };
                         ShortcutTableView(current_keymap, Os::current());
                     }
                 },
             );
 
-            cu::Separator(Some(paint(p.line)));
+            { use ::compose_rust::ui::Separator; Separator!(Some(paint(p.line))) };
 
-            // 3. Remembered default IDE target (FR-L7)
-            SectionBlock(
-                "기본 IDE",
-                "프로젝트나 세션에서 IDE 열기를 눌렀을 때 기본으로 실행할 대상입니다.",
-                || {
-                    ChoiceRow(|| {
-                        for (key, label) in IDE_CHOICES {
-                            let u = ui.clone();
-                            let selected = current_ide.as_deref() == key;
-                            let next = key.map(str::to_string);
-                            ChoiceButton(label, Choice::Radio, selected, true, true, move || {
-                                let v = next.clone();
-                                u.update_prefs(|pr| pr.ide_target = v);
-                            });
-                        }
-                    });
-                },
-            );
-
-            cu::Separator(Some(paint(p.line)));
-
-            // 4. Archived sessions visibility (FR-L9)
+            // 3. Archived sessions visibility (FR-L9)
             SectionBlock(
                 "세션 목록",
                 "보관 처리된 이전 세션을 목록에 함께 표시합니다.",
@@ -196,11 +155,8 @@ pub fn SettingsContent() {
                         Alignment::CenterStart,
                         move || u.set_show_archived(!show_archived),
                         || {
-                            cu::Row()
-                                .alignment(Alignment::CenterStart)
-                                .modifier(Modifier::new().fill_max_width())
-                                .content(|| {
-                                    cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
+                                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
                                     Label(
                                         "보관된 세션 표시",
                                         Fs::Sm,
@@ -208,38 +164,47 @@ pub fn SettingsContent() {
                                         Some(paint(p.text)),
                                         Some(1),
                                     );
-                                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                                     Pill(
                                         if show_archived { "켜짐" } else { "꺼짐" },
                                         if show_archived { PillTone::Green } else { PillTone::Grey },
                                         true,
                                     );
-                                    cu::Spacer().modifier(Modifier::new().width(SP[2]));
-                                });
+                                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
+                                }) };
                         },
                     );
                 },
             );
 
-            cu::Separator(Some(paint(p.line)));
+            { use ::compose_rust::ui::Separator; Separator!(Some(paint(p.line))) };
 
-            // 5. This device on the transport (FR-N9, #856)
+            // 4. This device on the transport (FR-N9, #856)
             SectionBlock(
                 super::this_device::TITLE,
                 super::this_device::SUBTITLE,
                 super::this_device::ThisDeviceSection,
             );
 
-            cu::Separator(Some(paint(p.line)));
+            { use ::compose_rust::ui::Separator; Separator!(Some(paint(p.line))) };
 
-            // 6. Per-device scope (FR-N8, #817)
+            // 5. Per-device scope (FR-N8, #817)
             SectionBlock(
                 "기기 권한",
                 "서버에 등록된 기기마다 할 수 있는 작업을 정합니다.",
                 super::device_scope::DeviceScopeSection,
             );
 
-            cu::Separator(Some(paint(p.line)));
+            { use ::compose_rust::ui::Separator; Separator!(Some(paint(p.line))) };
+
+            // 6. The editor server settings, owner only (FR-W7, INTENT D56)
+            SectionBlock(
+                super::editor_settings::TITLE,
+                super::editor_settings::SUBTITLE,
+                super::editor_settings::EditorServerSection,
+            );
+
+            { use ::compose_rust::ui::Separator; Separator!(Some(paint(p.line))) };
 
             // 7. Updates of the installed app (NFR-R2, #880)
             SectionBlock(
@@ -248,65 +213,54 @@ pub fn SettingsContent() {
                 super::self_update::SelfUpdateSection,
             );
 
-            cu::Separator(Some(paint(p.line)));
+            { use ::compose_rust::ui::Separator; Separator!(Some(paint(p.line))) };
 
             // 8. Connection & local storage info
             SectionBlock("연결 및 저장소", "현재 연결된 메인 서버 주소와 로컬 데이터 폴더입니다.", || {
                 InsetPanel(true, || {
-                    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                    { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
                         InfoRow("메인 서버", &server_url);
                         InfoRow("데이터 경로", &data_dir);
-                    });
+                    }) };
                 });
             });
-        });
+        }) };
 }
 
 fn SectionBlock(title: &str, subtitle: &str, content: impl FnOnce()) {
     let p = ember_theme().palette;
-    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+    { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
         Label(title, Fs::Md, Weight::Semibold, Some(paint(p.text)), Some(1));
         Label(subtitle, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
-        cu::Spacer().modifier(Modifier::new().height(2.0));
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(2.0)) };
         content();
-    });
+    }) };
 }
 
 fn InfoRow(label: &str, value: &str) {
     let p = ember_theme().palette;
-    cu::Row()
-        .alignment(Alignment::CenterStart)
-        .modifier(Modifier::new().fill_max_width().height(24.0))
-        .content(|| {
+    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width().height(24.0), {
             Label(label, Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(1));
-            cu::Spacer().modifier(Modifier::new().weight(1.0));
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
             Txt(value, TypeRole::Mono, Some(paint(p.text)), Some(1), None, None, None);
-        });
+        }) };
 }
 
 fn ShortcutTableView(keymap: Keymap, os: Os) {
     let p = ember_theme().palette;
     let rows = shortcut_rows(keymap, os);
     InsetPanel(true, || {
-        cu::Column().spacing(4.0).modifier(Modifier::new().fill_max_width()).content(|| {
+        { use ::compose_rust::ui::Column; Column!(spacing = 4.0, modifier = Modifier::new().fill_max_width(), {
             for row in rows.iter().take(8) {
-                cu::Row()
-                    .alignment(Alignment::CenterStart)
-                    .modifier(Modifier::new().fill_max_width().height(24.0))
-                    .content(|| {
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width().height(24.0), {
                         Label(row.label, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));
-                        cu::Spacer().modifier(Modifier::new().weight(1.0));
-                        cu::Row()
-                            .alignment(Alignment::Center)
-                            .modifier(
-                                Modifier::new()
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
+                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::Center, modifier = Modifier::new()
                                     .height(20.0)
                                     .background(paint(p.surface))
                                     .border(1.0, paint(p.line))
-                                    .shape_role(ShapeRole::Full),
-                            )
-                            .content(|| {
-                                cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                                    .shape_role(ShapeRole::Full), {
+                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[1])) };
                                 Txt(
                                     &row.chord,
                                     TypeRole::Mono,
@@ -316,11 +270,11 @@ fn ShortcutTableView(keymap: Keymap, os: Os) {
                                     None,
                                     None,
                                 );
-                                cu::Spacer().modifier(Modifier::new().width(SP[1]));
-                            });
-                    });
+                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[1])) };
+                            }) };
+                    }) };
             }
-        });
+        }) };
     });
 }
 
@@ -351,22 +305,12 @@ mod tests {
     }
 
     #[test]
-    fn fr_l7_ide_choice_labels_cover_all_targets() {
-        assert_eq!(ide_choice_label(None), "매번 선택");
-        assert_eq!(ide_choice_label(Some("ember")), "Ember 에디터");
-        assert_eq!(ide_choice_label(Some("vscode")), "VS Code");
-        assert_eq!(ide_choice_label(Some("gateway")), "JetBrains Gateway");
-        assert_eq!(ide_choice_label(Some("unknown")), "매번 선택");
-    }
-
-    #[test]
     fn fr_l28_fr_l30_settings_sheet_composes_and_updates_prefs() {
         let _guard = crate::services::test_guard();
         let ui = shared_ui();
         ui.set_theme_pref(ThemePref::System);
         ui.update_prefs(|p| {
             p.keymap = Keymap::VsCode;
-            p.ide_target = None;
         });
         ui.set_show_archived(false);
 
@@ -387,14 +331,15 @@ mod tests {
             "에디터 단축키",
             "VS Code",
             "JetBrains",
-            "기본 IDE",
-            "매번 선택",
-            "Ember 에디터",
             "보관된 세션 표시",
             "꺼짐",
             "메인 서버",
             "이 기기",
             "이 기기의 peer id",
+            // FR-N9, FR-N2 (#1044): the hub path beside the hand-typed one.
+            crate::ui::cr::hub_pairing::TITLE,
+            crate::ui::cr::hub_pairing::REGISTER_LABEL,
+            crate::ui::cr::hub_pairing::MANUAL_LABEL,
             "서버 주소",
             "릴레이 (선택)",
             "저장",
@@ -402,12 +347,20 @@ mod tests {
         ] {
             assert!(all.iter().any(|t| t == want), "missing {want}: {all:?}");
         }
+        // FR-W7: the demo is the owner, so the sheet has the editor server section's form.
+        for want in [crate::ui::cr::editor_settings::TITLE, "Code OSE", "직접 스크립트", crate::ui::cr::editor_settings::LICENSE_URL, "IDE 기본값"] {
+            assert!(all.iter().any(|t| t == want), "missing {want}: {all:?}");
+        }
+        // FR-W7b, INTENT D56: no device-wide default IDE; the chooser remembers per project and
+        // the server's editor settings hold the default (FR-W7).
+        for gone in ["기본 IDE", "매번 선택", "JetBrains Gateway"] {
+            assert!(!all.iter().any(|t| t == gone), "{gone} is not in the settings: {all:?}");
+        }
 
-        // Updating theme, keymap, ide_target and show_archived re-renders the sheet cleanly.
+        // Updating theme, keymap and show_archived re-renders the sheet cleanly.
         ui.set_theme_pref(ThemePref::Dark);
         ui.update_prefs(|p| {
             p.keymap = Keymap::JetBrains;
-            p.ide_target = Some("vscode".into());
         });
         ui.set_show_archived(true);
 
@@ -415,7 +368,6 @@ mod tests {
         let next_texts = texts(&next);
         assert!(next_texts.iter().any(|t| t == "켜짐"), "expected 켜짐 after toggling show_archived: {next_texts:?}");
         assert_eq!(ui.prefs.get_untracked().keymap, Keymap::JetBrains);
-        assert_eq!(ui.prefs.get_untracked().ide_target.as_deref(), Some("vscode"));
         assert_eq!(ui.theme_pref.get_untracked(), ThemePref::Dark);
 
         // Restore defaults for other tests.
@@ -423,7 +375,6 @@ mod tests {
         ui.set_show_archived(false);
         ui.update_prefs(|p| {
             p.keymap = Keymap::VsCode;
-            p.ide_target = None;
         });
     }
 
@@ -511,17 +462,16 @@ mod tests {
     fn pointer_up_event(node_id: u32, handler_id: u64) -> compose_rust::protocol::HostEvent<'static> {
         use compose_rust::protocol::HostEvent;
         use compose_rust::EventPayload;
-        HostEvent { node_id, handler_id, payload: EventPayload::Clicked }
+        HostEvent::new(node_id, handler_id, EventPayload::Clicked)
     }
 
     #[test]
-    fn fr_l7_fr_l28_fr_l30_clicking_settings_chips_updates_theme_keymap_ide_and_archived() {
+    fn fr_l28_fr_l30_clicking_settings_chips_updates_theme_keymap_and_archived() {
         let _guard = crate::services::test_guard();
         let ui = shared_ui();
         ui.set_theme_pref(ThemePref::System);
         ui.update_prefs(|p| {
             p.keymap = Keymap::VsCode;
-            p.ide_target = None;
         });
         ui.set_show_archived(false);
 
@@ -543,22 +493,7 @@ mod tests {
         host.dispatch(pointer_up_event(node, handler)).expect("click JetBrains");
         assert_eq!(ui.prefs.get_untracked().keymap, Keymap::JetBrains);
 
-        // 3. Click "VS Code" IDE target chip (note: "VS Code" appears twice, once in keymap and
-        // once in IDE choices; click "JetBrains Gateway" first, then "매번 선택").
-        let (node, handler) = clickable_for_label(&batch, "JetBrains Gateway");
-        host.dispatch(pointer_up_event(node, handler))
-            .expect("click JetBrains Gateway");
-        assert_eq!(
-            ui.prefs.get_untracked().ide_target.as_deref(),
-            Some("gateway")
-        );
-
-        let (node, handler) = clickable_for_label(&batch, "매번 선택");
-        host.dispatch(pointer_up_event(node, handler))
-            .expect("click 매번 선택");
-        assert_eq!(ui.prefs.get_untracked().ide_target, None);
-
-        // 4. Click "꺼짐" archived toggle -> show_archived becomes true.
+        // 3. Click "꺼짐" archived toggle -> show_archived becomes true.
         let (node, handler) = clickable_for_label(&batch, "꺼짐");
         host.dispatch(pointer_up_event(node, handler)).expect("click 꺼짐");
         assert!(ui.show_archived.get_untracked());
@@ -568,7 +503,6 @@ mod tests {
         ui.set_show_archived(false);
         ui.update_prefs(|p| {
             p.keymap = Keymap::VsCode;
-            p.ide_target = None;
         });
     }
 }

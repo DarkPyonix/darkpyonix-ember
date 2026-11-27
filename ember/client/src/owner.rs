@@ -56,10 +56,12 @@ pub const OWNER_ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/computers/enrol-codes/{id}/confirm"),
     ("POST", "/api/computers/enrol-codes/{id}/deny"),
     ("DELETE", "/api/computers/{id}"),
+    ("PUT", "/api/computers/{id}/editor/settings"),
     ("GET", "/api/devices"),
     ("POST", "/api/devices"),
     ("DELETE", "/api/devices/{peer}"),
     ("PATCH", "/api/devices/{peer}"),
+    ("PUT", "/api/editor/settings"),
     ("POST", "/api/hub/check"),
     ("DELETE", "/api/hub/devices/{id}"),
     ("POST", "/api/hub/devices/{id}/computer"),
@@ -128,13 +130,19 @@ pub fn socket_path(data_dir: Option<&Path>, home: Option<&Path>) -> Option<PathB
     server_dir(data_dir, home).map(|d| d.join(SOCKET_FILE))
 }
 
-/// [`socket_path`] over the process environment (`EMBER_DATA_DIR`, `HOME`).
+/// [`socket_path`] over the process environment (`EMBER_DATA_DIR`, `HOME`, else `USERPROFILE`).
 pub fn socket_path_from_env() -> Option<PathBuf> {
-    socket_path(env_dir("EMBER_DATA_DIR").as_deref(), env_dir("HOME").as_deref())
+    let (data_dir, home) = dirs_from_vars(|name| std::env::var_os(name));
+    socket_path(data_dir.as_deref(), home.as_deref())
 }
 
-fn env_dir(name: &str) -> Option<PathBuf> {
-    std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from)
+/// `EMBER_DATA_DIR` and the home folder over the variables `var` returns (an empty value counts
+/// as unset): `HOME`, or `USERPROFILE` when `HOME` is unset or empty, because a Windows program
+/// started from the Start menu has no `HOME`. The token lookup (`crate::token::TokenLookup`)
+/// and the server's own data folder use the same rule (FR-S11, FR-S12).
+pub fn dirs_from_vars(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> (Option<PathBuf>, Option<PathBuf>) {
+    let path = |name: &str| var(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+    (path("EMBER_DATA_DIR"), path("HOME").or_else(|| path("USERPROFILE")))
 }
 
 /// The claim pipe for the data folder whose canonical path is `canonical` (Windows):
@@ -174,10 +182,17 @@ impl OwnerEndpoint {
         Some(if cfg!(windows) { OwnerEndpoint::Pipe(pipe_name(&dir)) } else { OwnerEndpoint::Socket(dir.join(SOCKET_FILE)) })
     }
 
-    /// [`OwnerEndpoint::for_dir`] over the process environment (`EMBER_DATA_DIR`, `HOME`), the
-    /// variables the server reads for its own folder.
+    /// [`OwnerEndpoint::for_dir`] over the process environment (`EMBER_DATA_DIR`, `HOME`, else
+    /// `USERPROFILE`), the variables the server reads for its own folder.
     pub fn from_env() -> Option<OwnerEndpoint> {
-        OwnerEndpoint::for_dir(env_dir("EMBER_DATA_DIR").as_deref(), env_dir("HOME").as_deref())
+        OwnerEndpoint::for_vars(|name| std::env::var_os(name))
+    }
+
+    /// [`OwnerEndpoint::for_dir`] over the variables `var` returns ([`dirs_from_vars`]). Tests
+    /// pass their own `var`, so the process environment is never read or changed.
+    pub fn for_vars(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<OwnerEndpoint> {
+        let (data_dir, home) = dirs_from_vars(var);
+        OwnerEndpoint::for_dir(data_dir.as_deref(), home.as_deref())
     }
 }
 
@@ -440,6 +455,30 @@ mod tests {
         assert_eq!(socket_path(Some(Path::new("/d")), Some(Path::new("/h"))), Some("/d/owner.sock".into()));
         assert_eq!(socket_path(None, Some(Path::new("/h"))), Some("/h/.ember/owner.sock".into()));
         assert_eq!(socket_path(None, None), None);
+    }
+
+    /// A Windows app started from the Start menu has no `HOME`: the endpoint is found under
+    /// `USERPROFILE`, as the token is (#1042).
+    #[test]
+    fn fr_s12_endpoint_uses_userprofile_without_home() {
+        use std::ffi::OsString;
+        let vars = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| pairs.iter().find(|(k, _)| *k == name).map(|(_, v)| OsString::from(*v))
+        };
+        let sock = |home: &str| {
+            let dir = Path::new(home).join(".ember");
+            if cfg!(windows) {
+                OwnerEndpoint::Pipe(pipe_name(&dir))
+            } else {
+                OwnerEndpoint::Socket(dir.join(SOCKET_FILE))
+            }
+        };
+        assert_eq!(OwnerEndpoint::for_vars(vars(&[("USERPROFILE", "/u")])), Some(sock("/u")));
+        assert_eq!(OwnerEndpoint::for_vars(vars(&[("HOME", ""), ("USERPROFILE", "/u")])), Some(sock("/u")));
+        assert_eq!(OwnerEndpoint::for_vars(vars(&[("HOME", "/h"), ("USERPROFILE", "/u")])), Some(sock("/h")));
+        assert_eq!(OwnerEndpoint::for_vars(vars(&[("USERPROFILE", "")])), None);
+        let (data, home) = dirs_from_vars(vars(&[("EMBER_DATA_DIR", "/d"), ("USERPROFILE", "/u")]));
+        assert_eq!((data, home), (Some(PathBuf::from("/d")), Some(PathBuf::from("/u"))));
     }
 
     #[test]

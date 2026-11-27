@@ -9,7 +9,8 @@ use std::cell::RefCell;
 use dioxus_compose::html::prelude::dioxus_core::ScopeId;
 use dioxus_compose::html::prelude::dioxus_elements::{Code, Key, Modifiers};
 use dioxus_compose::html::prelude::*;
-use dioxus_compose::html::{HtmlDom, NodeId};
+use dioxus_compose::html::{HtmlDom, NodeId, PointerInput};
+use dioxus_compose::prelude::ReadableExt;
 use ember_editor::{SessionUpdate, WidgetEvent};
 use ember_editor_conn::uri::UriComponents;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -35,10 +36,17 @@ fn target() -> EditorTarget {
         project: String::new(),
         folder: FOLDER.with(|f| f.borrow().clone()),
         endpoint: String::new(),
-        token: String::new(),
+        ose_path: String::new(),
+        ticket: String::new(),
         server_url: String::new(),
         computer: String::new(),
         relay: String::new(),
+        vscode_url: String::new(),
+        vscode_relay: String::new(),
+        vscode_path: String::new(),
+        vscode_ticket: String::new(),
+        vscode_folder: String::new(),
+        vscode_session: String::new(),
     }
 }
 
@@ -64,7 +72,12 @@ fn describe(command: &HostCommand) -> String {
             format!("save {} generation {generation} version {version}", uri.path)
         }
         HostCommand::Widget(uri, _, _) => format!("widget event {}", uri.path),
+        HostCommand::Restore { path, text } => format!("restore {path} text {text:?}"),
+        HostCommand::RestoreWithBase { path, text, base } => format!("restore {path} text {text:?} base {base:?}"),
+        HostCommand::SetIndentation { path, action } => format!("set indentation {path} {action:?}"),
         HostCommand::CreateFile { parent, name } => format!("create file {parent} {name}"),
+        HostCommand::Rename { path, new_name } => format!("rename {path} {new_name}"),
+        HostCommand::MovePaths { sources, dest_dir } => format!("move {} -> {dest_dir}", sources.join(",")),
         HostCommand::Webview(event) => match event {
             ember_editor::webview::WebviewEvent::Ready { handle } => format!("webview ready {handle}"),
             ember_editor::webview::WebviewEvent::Message { handle, message } => format!("webview message {handle} {}", message.json),
@@ -309,7 +322,7 @@ fn fr_l31_leaving_an_empty_new_name_field_closes_it_and_a_typed_name_stays() {
 
 // FR-L31 (#832, #827 rule 2): Shift+F10 or the context-menu key on a focused tree row opens the
 // tree's context menu with the row's items, as in Code-OSS, beside right-click (compose-rust#417).
-// This pins Ember's side of the key path; compose-rust#100 and #717 are in the v0.0.10 pin, and a
+// This pins Ember's side of the key path; compose-rust#100 and #717 are in the v0.0.11 pin, and a
 // real run reaching this handler is not yet checked on a display.
 #[test]
 fn fr_l31_shift_f10_and_the_context_menu_key_on_a_tree_row_open_its_context_menu() {
@@ -365,7 +378,7 @@ fn fr_l31_5_double_click_and_right_click_are_the_real_events() {
     assert!(!editor.contains(concat!("pub struct Double", "Click")) && !editor.contains(concat!("DOUBLE_CLICK", "_MS")));
     let tree = &production[production.find(r#"role: "treeitem", "aria-label": "{row_label}""#).expect("tree row")..];
     let tree = &tree[..tree.find("chev-sp").expect("row content")];
-    assert!(tree.contains("ondoubleclick:") && tree.contains("keep_open(&keep_path)"), "a double-click keeps the preview");
+    assert!(tree.contains("ondoubleclick:") && tree.contains("open_tab_file(&keep_s, &keep_path)"), "a double-click keeps the preview");
     assert!(tree.contains("oncontextmenu:") && tree.contains("TreeMenuAt::Pointer"), "a right-click opens the context menu");
     let tab = &production[production.find(r#"role: "tab", "aria-selected": "{selected}""#).expect("editor tab")..];
     let tab = &tab[..tab.find("onkeydown:").expect("tab keys")];
@@ -659,6 +672,11 @@ fn fr_l31_26_the_status_bar_is_32_high_and_flush_with_the_page_bottom() {
         ed_rect.y + ed_rect.height,
     );
     assert!(close(ed_rect.y + ed_rect.height, 900.0), "the page fills the viewport: {ed_rect:?}");
+    let page_css = include_str!("../../assets/editor/page.css");
+    let wb = include_str!("editor_workbench.rs");
+    assert!(!page_css.contains(&[".ed", "-none"].concat()), "dioxus-compose#266: .ed-none stand-in is gone");
+    assert!(!page_css.contains(concat!("TODO(dioxus-compose#", "266")));
+    assert!(!wb.contains(&["\"ed", "-none\""].concat()), "dioxus-compose#266: no ed-none div in the workbench");
 }
 
 /// A node's laid-out box in the page, as `(x, y, width, height)`: its layout's location added up
@@ -677,13 +695,13 @@ fn page_box(page: &Page, node: NodeId) -> (f32, f32, f32, f32) {
     (x, y, size.width, size.height)
 }
 
-// FR-L31.40 (#301): the code editor's box is the editor pane under the breadcrumb row less the
-// 8 px above the first line (FR-L31.27), and ends where the pane does, above the bottom panel: the
+// FR-L31.40 (#301): the code editor's box is the editor pane under the breadcrumb row (the 8 px
+// above the first line is the editor's own content padding since #477, FR-L31.27), and ends where the pane does, above the bottom panel: the
 // box `use_widget_box` hands the editor is the area the reader sees, so a line the editor counts
 // as on screen is drawn there. The window measured the same (pane 1054x456 at 337,135 and box
 // 1054x448 at 1440x900); this keeps the stylesheet and the pane's inline sizes from drifting.
 #[test]
-fn fr_l31_40_the_code_editor_box_is_the_pane_under_the_breadcrumb_less_the_top_room() {
+fn fr_l31_40_the_code_editor_box_is_the_pane_under_the_breadcrumb() {
     let _guard = crate::services::test_guard();
     let mut page = Page::open_styled();
     page.click_row();
@@ -700,7 +718,7 @@ fn fr_l31_40_the_code_editor_box_is_the_pane_under_the_breadcrumb_less_the_top_r
         assert!(p.3 > 0.0 && w.3 > 0.0, "laid out {at}");
         assert!(close(p.1, c.1 + c.3), "the pane starts under the breadcrumb row {at}");
         assert!(close(w.0, p.0) && close(w.2, p.2), "the box is the pane's width {at}");
-        assert!(close(w.1, p.1 + 8.0), "8 px above the box {at}");
+        assert!(close(w.1, p.1), "the box starts at the pane's top; the 8 px is padding inside the editor {at}");
         assert!(close(w.1 + w.3, p.1 + p.3), "the box ends where the pane does {at}");
         assert!(w.1 + w.3 <= b.1 + 0.5, "the box ends above the bottom panel {at}");
     }
@@ -1028,7 +1046,7 @@ fn fr_l31_36_the_editor_has_no_tab_strip_while_no_tab_is_open() {
 
 #[compose_rust::runtime::Composable]
 fn toolkit_probe() {
-    compose_rust::ui::Text("probe".to_string());
+    { use ::compose_rust::ui::Text; Text!("probe".to_string()) };
 }
 
 // FR-L33.1 (#875): the window's safe area reaches the toolkit after the page's first render. The
@@ -1053,10 +1071,7 @@ fn fr_l33_1_the_safe_area_arriving_after_the_first_render_moves_the_top_bar() {
 
     let lights = SafeArea { top: 28.0, leading: 78.0, trailing: 0.0 };
     toolkit
-        .dispatch(HostEvent {
-            node_id: 0,
-            handler_id: 0,
-            payload: EventPayload::WindowSizeChanged {
+        .dispatch(HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
                 width_dp: 1440.0,
                 height_dp: 900.0,
                 class: WindowSizeClass::from_width_dp(1440.0),
@@ -1064,8 +1079,8 @@ fn fr_l33_1_the_safe_area_arriving_after_the_first_render_moves_the_top_bar() {
                 safe_area_top: lights.top,
                 safe_area_leading: lights.leading,
                 safe_area_trailing: lights.trailing,
-            },
-        })
+                safe_area_bottom: 0.0,
+            }))
         .expect("dispatch");
     // The report woke the page; nothing else asks it to render.
     page.dom.virtual_dom_mut().process_events();
@@ -1076,4 +1091,969 @@ fn fr_l33_1_the_safe_area_arriving_after_the_first_render_moves_the_top_bar() {
     assert_eq!(after, expected, "the top bar follows the reported safe area with the prompt up");
     assert!(page.find("aria-label", crate::ui::workspace_trust::PROMPT_TITLE).is_some(), "the prompt is still up");
     compose_rust::window::reset_window_size();
+}
+
+fn compose_root() -> Element {
+    super::view::root_with(app)
+}
+
+// #301: the editor window is a Compose root with the page in an `HtmlView`. The page mounts there
+// with its own stylesheets and draws the project tree; the events of the code editor inside it reach
+// the page through the root since dioxus-compose a64f3b92 (its fr34_3 island tests). The rendered
+// window is a display check.
+#[test]
+fn fr_l31_the_editor_page_mounts_inside_a_compose_root() {
+    let _guard = crate::services::test_guard();
+    FOLDER.with(|f| *f.borrow_mut() = ROOT.to_string());
+    let (host, _commands) = EditorHost::fake();
+    {
+        let mut state = host.state.lock().unwrap();
+        state.connected = true;
+        state.listings.insert(ROOT.to_string(), vec![("a.rs".to_string(), ember_editor_conn::remote_fs::file_type::FILE)]);
+    }
+    FAKE.with(|f| *f.borrow_mut() = Some(host));
+    let mut root = dioxus_compose::Host::new(compose_root);
+    let bytes = root.rebuild().expect("the Compose root with the editor page did not build");
+    let batch = dioxus_compose::protocol::decode_batch(bytes).expect("decode");
+    let sent: Vec<String> = batch.iter().map(|m| format!("{m:?}")).collect();
+    assert!(sent.iter().any(|m| m.contains("\"a.rs\"")), "the project tree row a.rs is not in the root's first batch");
+}
+
+// SPEC FR-E3 (#32 phase A step 7): a hover update for the active document draws the hover card over
+// the editor once the editor has said where the hovered word is; a hover for another place, or
+// none, draws nothing.
+#[test]
+fn fr_e3_a_hover_draws_the_card_where_the_editor_says_the_word_is() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open();
+    page.click_row();
+    page.deliver(opened(7));
+    let word = ember_editor::WidgetRange::new(ember_editor::WidgetPos::new(0, 3), ember_editor::WidgetPos::new(0, 7));
+    let popup = ember_editor::hover::HoverPopup {
+        doc: uri().key(),
+        generation: 7,
+        pos: ember_editor::WidgetPos::new(0, 5),
+        range: Some(word),
+        diagnostics: Vec::new(),
+        contents: vec![ember_editor::hover::MarkdownString { value: "fn main()".into(), is_trusted: false, support_theme_icons: false, support_html: false, raw: serde_json::Value::Null }],
+        complete: true,
+    };
+    page.deliver(SessionUpdate::Hover(popup));
+    assert!(page.find("data-ed", "hover-card").is_none(), "no card before the editor answers");
+    super::set_hover_rect((7, 0, 9), Some(compose_rust::code::CodeRect::new(40.0, 60.0, 2.0, 18.0)));
+    page.redraw();
+    assert!(page.find("data-ed", "hover-card").is_none(), "an answer for another position draws nothing");
+    super::set_hover_rect((7, 0, 3), Some(compose_rust::code::CodeRect::new(40.0, 60.0, 2.0, 18.0)));
+    page.redraw();
+    let card = page.find("data-ed", "hover-card").expect("the card is drawn");
+    assert!(page.attr(card, "style").unwrap_or_default().contains("top:80px;"));
+    assert!(page.text().contains("fn main()"));
+    page.deliver(SessionUpdate::HoverHidden { uri: uri() });
+    assert!(page.find("data-ed", "hover-card").is_none(), "the card goes with the hover");
+    super::set_hover_rect((0, 0, 0), None);
+}
+
+impl Page {
+    /// The page with `a.rs` and `b.rs` listed under the project folder.
+    fn open_two_files() -> Page {
+        let mut page = Page::open();
+        page.host().state.lock().unwrap().listings.insert(
+            ROOT.to_string(),
+            vec![
+                ("a.rs".to_string(), ember_editor_conn::remote_fs::file_type::FILE),
+                ("b.rs".to_string(), ember_editor_conn::remote_fs::file_type::FILE),
+            ],
+        );
+        page.redraw();
+        page
+    }
+
+    fn tree_row(&self, name: &str) -> NodeId {
+        self.find_where(&format!("the {name} tree row"), |id| {
+            self.attr(id, "role").as_deref() == Some("treeitem") && self.attr(id, "aria-label").as_deref() == Some(name)
+        })
+        .unwrap_or_else(|| panic!("the {name} row in the project tree"))
+    }
+
+    fn tab_of(&self, path: &str) -> NodeId {
+        self.find_where(&format!("the tab of {path}"), |id| {
+            self.attr(id, "role").as_deref() == Some("tab") && self.attr(id, "title").as_deref() == Some(path)
+        })
+        .unwrap_or_else(|| panic!("the tab of {path}"))
+    }
+
+    fn press(&mut self, node: Option<NodeId>, key: Key, code: Code) {
+        let input = dioxus_compose::html::KeyInput::new(key, code, Modifiers::empty());
+        self.dom.key_down_input(node, &input);
+        self.dom.render();
+    }
+}
+
+// FR-L31.5 (#302): Down from a.rs, then Enter, opens b.rs, the row the arrow key selected, and never
+// a.rs, the row that had focus before it.
+#[test]
+fn fr_l31_tree_enter_opens_the_row_the_arrow_keys_selected() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_two_files();
+    page.click_row();
+    page.sent();
+
+    let a = page.tree_row("a.rs");
+    page.press(Some(a), Key::ArrowDown, Code::ArrowDown);
+    assert_eq!(page.attr(page.tree_row("b.rs"), "aria-selected").as_deref(), Some("true"));
+    page.sent();
+
+    // The key goes to whichever row holds focus, as the window delivers it.
+    page.press(None, Key::Enter, Code::Enter);
+    let sent = page.sent();
+    assert!(sent.contains(&format!("open {ROOT}/b.rs")), "{sent:?}");
+    assert!(!sent.contains(&format!("open {ROOT}/a.rs")), "{sent:?}");
+}
+
+// FR-L31.5 (#302): an arrow key moves keyboard focus to the row it selected, as Code-OSS does, so
+// the row with `tabindex="0"`, the selected row and the focused row are one.
+#[test]
+fn fr_l31_tree_focus_follows_the_arrow_selection() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_two_files();
+    page.click_row();
+
+    let a = page.tree_row("a.rs");
+    page.press(Some(a), Key::ArrowDown, Code::ArrowDown);
+    assert_eq!(page.dom.focused(), Some(page.tree_row("b.rs")), "Down moves focus to b.rs");
+    assert_eq!(page.attr(page.tree_row("b.rs"), "tabindex").as_deref(), Some("0"));
+
+    let b = page.tree_row("b.rs");
+    page.press(Some(b), Key::ArrowUp, Code::ArrowUp);
+    assert_eq!(page.dom.focused(), Some(page.tree_row("a.rs")), "Up moves focus back to a.rs");
+}
+
+// FR-L31.5 (#302): the arrow keys in the tab strip move focus to the tab they activated, as they do
+// in the tree.
+#[test]
+fn fr_l31_tabs_arrow_keys_move_focus_with_the_selection() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_two_files();
+    {
+        use dioxus_compose::html::prelude::dioxus_signals::WritableExt;
+        let mut tabs = super::shared().tabs;
+        let mut tabs = tabs.write();
+        tabs.open(&format!("{ROOT}/a.rs"));
+        tabs.open(&format!("{ROOT}/b.rs"));
+        tabs.activate(&format!("{ROOT}/a.rs"));
+    }
+    page.redraw();
+
+    let a = page.tab_of(&format!("{ROOT}/a.rs"));
+    page.press(Some(a), Key::ArrowRight, Code::ArrowRight);
+    assert!(page.current_tab_is(&format!("{ROOT}/b.rs")));
+    assert_eq!(page.dom.focused(), Some(page.tab_of(&format!("{ROOT}/b.rs"))), "Right moves focus to b.rs");
+
+    let b = page.tab_of(&format!("{ROOT}/b.rs"));
+    page.press(Some(b), Key::ArrowLeft, Code::ArrowLeft);
+    assert_eq!(page.dom.focused(), Some(page.tab_of(&format!("{ROOT}/a.rs"))), "Left moves focus back to a.rs");
+}
+
+// FR-L31.7 (#302): the tab width is a button with a name, as the line ending, the encoding and the
+// language are; it opens the indentation pick.
+#[test]
+fn fr_l31_status_tab_width_is_a_button_with_a_name() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open();
+    page.click_row();
+    page.deliver(opened(1));
+
+    let item = page.find("aria-label", "들여쓰기 선택: 4칸").expect("the tab width item is named");
+    let tag = page.dom.document().get_node(item).and_then(|n| n.element_data().map(|e| e.name.local.to_string()));
+    assert_eq!(tag.as_deref(), Some("button"), "the tab width is a button, not static text");
+    assert_eq!(page.attr(item, "title").as_deref(), Some("들여쓰기 선택"));
+
+    page.click("aria-label", "들여쓰기 선택: 4칸");
+    assert!(page.find("aria-label", "들여쓰기 작업 검색").is_some(), "the indentation pick is open");
+    assert!(page.find("aria-label", "설정 검색").is_none(), "the settings view is not");
+}
+
+impl Page {
+    /// The titles of the rows of the open pick, in order.
+    fn pick_rows(&self) -> Vec<String> {
+        // Document order: node ids follow creation order, and a row the list drew again has a new id.
+        let doc = self.dom.document();
+        let mut rows = Vec::new();
+        let mut stack = vec![doc.root_element().id];
+        while let Some(id) = stack.pop() {
+            if self.attr(id, "role").as_deref() == Some("option") {
+                rows.push(doc.get_node(id).map(|n| n.text_content()).unwrap_or_default());
+            }
+            if let Some(node) = doc.get_node(id) {
+                stack.extend(node.children.iter().rev());
+            }
+        }
+        rows
+    }
+
+    /// Clicks the row of the open pick whose text is `text`.
+    fn click_pick_row(&mut self, text: &str) {
+        let row = self
+            .find_where(&format!("the pick row {text:?}"), |id| {
+                self.attr(id, "role").as_deref() == Some("option")
+                    && self.dom.document().get_node(id).is_some_and(|n| n.text_content() == text)
+            })
+            .unwrap_or_else(|| panic!("no pick row {text:?} in {:?}", self.pick_rows()));
+        self.dom.click_node(row);
+        self.dom.render();
+    }
+
+    /// The indentation commands sent since the last call (closing a pick also cancels the file index).
+    fn sent_indentation(&mut self) -> Vec<String> {
+        self.sent().into_iter().filter(|c| c.starts_with("set indentation ")).collect()
+    }
+
+    /// A page with `a.rs` open and the indentation pick showing.
+    fn open_indentation_pick() -> Page {
+        let mut page = Page::open();
+        page.click_row();
+        page.deliver(opened(1));
+        let _ = page.sent();
+        page.click("aria-label", "들여쓰기 선택: 4칸");
+        page
+    }
+}
+
+// FR-L31.7 (#302): the status bar's indentation item opens Code-OSS's "Select Indentation" pick: the
+// rows of `showIndentationPicker` in its order, as Code-OSS's Korean pack words them.
+#[test]
+fn fr_l31_status_indentation_opens_the_select_indentation_pick() {
+    let _guard = crate::services::test_guard();
+    let page = Page::open_indentation_pick();
+    assert_eq!(
+        page.pick_rows(),
+        [
+            "공백을 사용한 들여쓰기",
+            "탭을 사용한 들여쓰기",
+            "탭 표시 크기 변경",
+            "콘텐츠에서 들여쓰기 감지",
+            "들여쓰기를 공백으로 변환",
+            "들여쓰기를 탭으로 변환",
+            "후행 공백 자르기",
+        ]
+    );
+}
+
+// FR-L31.7 (#302): spaces, then a size: the list of sizes marks the current one, the choice goes to
+// the session as that document's options, and the setting is not touched.
+#[test]
+fn fr_l31_indent_using_spaces_then_size_sets_the_document_options() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_indentation_pick();
+    page.click_pick_row("공백을 사용한 들여쓰기");
+    assert!(page.find("aria-label", "탭 크기 검색").is_some(), "the size list is open");
+    let rows = page.pick_rows();
+    assert_eq!(rows.len(), 8);
+    assert_eq!(rows[3], "4구성된 탭 크기", "the settings' size is marked");
+    assert_eq!(rows[1], "2");
+    page.click_pick_row("2");
+    let sent = page.sent_indentation();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(sent[0].starts_with("set indentation ") && sent[0].ends_with("IndentUsing { insert_spaces: true, size: 2 }"), "{sent:?}");
+
+    // The session answers with the document's options: the item shows them.
+    page.deliver(SessionUpdate::Indentation { uri: uri(), indentation: ember_editor::Indentation::new(2, true) });
+    assert!(page.find("aria-label", "들여쓰기 선택: 2칸").is_some());
+    page.deliver(SessionUpdate::Indentation { uri: uri(), indentation: ember_editor::Indentation::new(4, false) });
+    assert!(page.find("aria-label", "들여쓰기 선택: 탭 크기: 4").is_some());
+    // The user setting is what it was: the document's choice is not a setting.
+    assert_eq!(page.host().state.lock().unwrap().settings.editor(None).tab_size, 4);
+}
+
+#[test]
+fn fr_l31_change_tab_display_size_keeps_insert_spaces() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_indentation_pick();
+    page.click_pick_row("탭 표시 크기 변경");
+    page.click_pick_row("8");
+    let sent = page.sent_indentation();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(sent[0].ends_with("DisplaySize(8)"), "only the tab's width changes: {sent:?}");
+    page.deliver(SessionUpdate::Indentation {
+        uri: uri(),
+        indentation: ember_editor::Indentation { tab_size: 8, indent_size: 4, insert_spaces: true },
+    });
+    assert!(page.find("aria-label", "들여쓰기 선택: 4칸 (탭 크기: 8)").is_some());
+}
+
+#[test]
+fn fr_l31_detect_and_convert_indentation_go_to_the_session() {
+    let _guard = crate::services::test_guard();
+    sends_indentation_action("콘텐츠에서 들여쓰기 감지", "Detect");
+}
+
+#[test]
+fn fr_l31_convert_indentation_to_spaces_goes_to_the_session() {
+    let _guard = crate::services::test_guard();
+    sends_indentation_action("들여쓰기를 공백으로 변환", "Convert { to_spaces: true }");
+}
+
+#[test]
+fn fr_l31_convert_indentation_to_tabs_goes_to_the_session() {
+    let _guard = crate::services::test_guard();
+    sends_indentation_action("들여쓰기를 탭으로 변환", "Convert { to_spaces: false }");
+}
+
+#[test]
+fn fr_l31_trim_trailing_whitespace_goes_to_the_session() {
+    let _guard = crate::services::test_guard();
+    sends_indentation_action("후행 공백 자르기", "TrimTrailingWhitespace");
+}
+
+/// One page per test: the page's UI signals live in the first page's scope, so a second page in the
+/// same test reads dropped signals.
+fn sends_indentation_action(row: &str, ends_with: &str) {
+    let mut page = Page::open_indentation_pick();
+    page.click_pick_row(row);
+    let sent = page.sent_indentation();
+    assert_eq!(sent.len(), 1, "{row}: {sent:?}");
+    assert!(sent[0].ends_with(ends_with), "{row}: {sent:?}");
+}
+
+#[test]
+fn fr_e3_hover_renders_markdown_instead_of_raw_syntax() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open();
+    page.click_row();
+    page.deliver(opened(7));
+    let word = ember_editor::WidgetRange::new(ember_editor::WidgetPos::new(0, 3), ember_editor::WidgetPos::new(0, 7));
+    let markdown = "## Heading\n\nUse **bold**, *italic*, `inline_code()`, and [docs](https://example.com).\n\n- first item\n- second item\n\n```rust\nlet x = 1;\n```";
+    let popup = ember_editor::hover::HoverPopup {
+        doc: uri().key(),
+        generation: 7,
+        pos: ember_editor::WidgetPos::new(0, 5),
+        range: Some(word),
+        diagnostics: Vec::new(),
+        contents: vec![ember_editor::hover::MarkdownString {
+            value: markdown.into(),
+            is_trusted: false,
+            support_theme_icons: false,
+            support_html: false,
+            raw: serde_json::Value::Null,
+        }],
+        complete: true,
+    };
+    page.deliver(SessionUpdate::Hover(popup));
+    super::set_hover_rect((7, 0, 3), Some(compose_rust::code::CodeRect::new(40.0, 60.0, 2.0, 18.0)));
+    page.redraw();
+    let card = page.find("data-ed", "hover-card").expect("the hover card is drawn");
+    let card_text = page.dom.document().get_node(card).expect("card node").text_content();
+    assert!(!card_text.contains("**bold**"), "raw bold markers must not appear: {card_text}");
+    assert!(!card_text.contains("`inline_code()`"), "raw backticks must not appear: {card_text}");
+    assert!(!card_text.contains("```rust"), "raw fence markers must not appear: {card_text}");
+    assert!(!card_text.contains("## Heading"), "raw heading markers must not appear: {card_text}");
+    assert!(card_text.contains("Heading"), "heading text present: {card_text}");
+    assert!(card_text.contains("bold"), "bold text present: {card_text}");
+    assert!(card_text.contains("italic"), "italic text present: {card_text}");
+    assert!(card_text.contains("inline_code()"), "inline code text present: {card_text}");
+    assert!(card_text.contains("let x = 1;"), "fenced code text present: {card_text}");
+    assert!(card_text.contains("first item"), "list item text present: {card_text}");
+    assert!(card_text.contains("docs"), "link text present: {card_text}");
+    super::set_hover_rect((0, 0, 0), None);
+}
+
+#[test]
+fn fr_e3_hover_positioning_uses_window_height() {
+    use compose_rust::protocol::HostEvent;
+    use compose_rust::{EventPayload, WindowHeightClass, WindowSizeClass};
+    let _guard = crate::services::test_guard();
+    let mut toolkit = compose_rust::Host::new(|| Box::new(compose_rust::Recomposer::new(toolkit_probe)));
+    toolkit.rebuild().expect("rebuild");
+    let mut page = Page::open();
+    page.click_row();
+    page.deliver(opened(7));
+    let word = ember_editor::WidgetRange::new(ember_editor::WidgetPos::new(0, 3), ember_editor::WidgetPos::new(0, 7));
+    let popup = ember_editor::hover::HoverPopup {
+        doc: uri().key(),
+        generation: 7,
+        pos: ember_editor::WidgetPos::new(0, 5),
+        range: Some(word),
+        diagnostics: Vec::new(),
+        contents: vec![ember_editor::hover::MarkdownString {
+            value: "fn main()".into(),
+            is_trusted: false,
+            support_theme_icons: false,
+            support_html: false,
+            raw: serde_json::Value::Null,
+        }],
+        complete: true,
+    };
+    page.deliver(SessionUpdate::Hover(popup));
+
+    // Short window (400px tall): rect.y = 300.0 has only 80px below vs 298px above, so it must flip above.
+    toolkit
+        .dispatch(HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
+            width_dp: 800.0,
+            height_dp: 400.0,
+            class: WindowSizeClass::from_width_dp(800.0),
+            height_class: WindowHeightClass::from_height_dp(400.0),
+            safe_area_top: 0.0,
+            safe_area_leading: 0.0,
+            safe_area_trailing: 0.0,
+            safe_area_bottom: 0.0,
+        }))
+        .expect("dispatch 400");
+    super::set_hover_rect((7, 0, 3), Some(compose_rust::code::CodeRect::new(40.0, 300.0, 2.0, 18.0)));
+    page.redraw();
+    let card = page.find("data-ed", "hover-card").expect("hover card in 400px window");
+    let short_style = page.attr(card, "style").unwrap_or_default();
+    assert!(short_style.contains("bottom:calc(100vh - 298px);"), "short window must flip above: {short_style}");
+
+    // Tall window (1200px tall): rect.y = 380.0 has 800px below, so it must stay below.
+    toolkit
+        .dispatch(HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
+            width_dp: 1200.0,
+            height_dp: 1200.0,
+            class: WindowSizeClass::from_width_dp(1200.0),
+            height_class: WindowHeightClass::from_height_dp(1200.0),
+            safe_area_top: 0.0,
+            safe_area_leading: 0.0,
+            safe_area_trailing: 0.0,
+            safe_area_bottom: 0.0,
+        }))
+        .expect("dispatch 1200");
+    super::set_hover_rect((7, 0, 3), Some(compose_rust::code::CodeRect::new(40.0, 380.0, 2.0, 18.0)));
+    page.redraw();
+    let card = page.find("data-ed", "hover-card").expect("hover card in 1200px window");
+    let tall_style = page.attr(card, "style").unwrap_or_default();
+    assert!(tall_style.contains("top:400px;"), "tall window must stay below: {tall_style}");
+
+    super::set_hover_rect((0, 0, 0), None);
+    compose_rust::window::reset_window_size();
+}
+
+#[test]
+fn double_click_pins_preview_tab_from_tree_and_tab_strip() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_styled();
+    page.host().state.lock().unwrap().listings.insert(
+        ROOT.to_string(),
+        vec![
+            ("a.rs".to_string(), ember_editor_conn::remote_fs::file_type::FILE),
+            ("b.rs".to_string(), ember_editor_conn::remote_fs::file_type::FILE),
+            ("c.rs".to_string(), ember_editor_conn::remote_fs::file_type::FILE),
+            ("d.rs".to_string(), ember_editor_conn::remote_fs::file_type::FILE),
+        ],
+    );
+    page.redraw();
+    let _ = page.dom.layout(1280.0, 820.0, 1.0);
+
+    let row_of = |p: &Page, name: &str| {
+        p.find_where(&format!("tree row {name}"), |id| {
+            p.attr(id, "role").as_deref() == Some("treeitem") && p.attr(id, "aria-label").as_deref() == Some(name)
+        })
+        .unwrap_or_else(|| panic!("missing tree row {name}"))
+    };
+    let tab_of = |p: &Page, path: &str| {
+        p.find_where(&format!("tab {path}"), |id| {
+            p.attr(id, "role").as_deref() == Some("tab") && p.attr(id, "title").as_deref() == Some(path)
+        })
+    };
+
+    // Single-click opens a.rs as a preview tab.
+    let row_a = row_of(&page, "a.rs");
+    page.dom.click_node(row_a);
+    page.dom.render();
+    let _ = page.dom.layout(1280.0, 820.0, 1.0);
+    assert!(super::shared().tabs.read().is_preview("/w/a.rs"));
+
+    // Double-click on the tree row keeps a.rs permanent.
+    let row_a = row_of(&page, "a.rs");
+    page.dom.pointer_event(row_a, &PointerInput::press(10.0, 10.0, 1, 2));
+    page.dom.pointer_event(row_a, &PointerInput::release(10.0, 10.0, 1, 2));
+    page.dom.render();
+    let _ = page.dom.layout(1280.0, 820.0, 1.0);
+    assert!(!super::shared().tabs.read().is_preview("/w/a.rs"), "tree double-click keeps a.rs permanent");
+
+    // Single-click b.rs opens b.rs as preview without replacing a.rs.
+    let row_b = row_of(&page, "b.rs");
+    page.dom.click_node(row_b);
+    page.dom.render();
+    let _ = page.dom.layout(1280.0, 820.0, 1.0);
+    assert!(tab_of(&page, "/w/a.rs").is_some(), "a.rs stays open");
+    assert!(super::shared().tabs.read().is_preview("/w/b.rs"), "b.rs opens as preview");
+
+    // Double-click on the b.rs tab in the tab strip keeps b.rs permanent.
+    let tab_b = tab_of(&page, "/w/b.rs").expect("b.rs tab");
+    page.dom.pointer_event(tab_b, &PointerInput::press(10.0, 10.0, 1, 2));
+    page.dom.pointer_event(tab_b, &PointerInput::release(10.0, 10.0, 1, 2));
+    page.dom.render();
+    let _ = page.dom.layout(1280.0, 820.0, 1.0);
+    assert!(!super::shared().tabs.read().is_preview("/w/b.rs"), "tab double-click keeps b.rs permanent");
+
+    // Single-click c.rs opens c.rs as preview alongside both permanent tabs.
+    let row_c = row_of(&page, "c.rs");
+    page.dom.click_node(row_c);
+    page.dom.render();
+    let _ = page.dom.layout(1280.0, 820.0, 1.0);
+    assert!(tab_of(&page, "/w/a.rs").is_some());
+    assert!(tab_of(&page, "/w/b.rs").is_some());
+    assert!(tab_of(&page, "/w/c.rs").is_some());
+
+    // Double-clicking an unopened tree row directly (before onclick) opens it as permanent.
+    let row_d = row_of(&page, "d.rs");
+    page.dom.pointer_event(row_d, &PointerInput::press(10.0, 10.0, 1, 2));
+    page.dom.pointer_event(row_d, &PointerInput::release(10.0, 10.0, 1, 2));
+    page.dom.render();
+    assert!(!super::shared().tabs.read().is_preview("/w/d.rs"), "direct double-click opens d.rs permanent");
+    assert!(tab_of(&page, "/w/d.rs").is_some());
+}
+
+#[test]
+fn ctrl_tab_and_ctrl_shift_tab_switch_open_tabs() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open();
+    page.host().state.lock().unwrap().listings.insert(
+        ROOT.to_string(),
+        vec![
+            ("a.rs".to_string(), ember_editor_conn::remote_fs::file_type::FILE),
+            ("b.rs".to_string(), ember_editor_conn::remote_fs::file_type::FILE),
+            ("c.rs".to_string(), ember_editor_conn::remote_fs::file_type::FILE),
+        ],
+    );
+    super::page::open_tab_file(&super::shared(), "/w/a.rs");
+    super::page::open_tab_file(&super::shared(), "/w/b.rs");
+    super::page::open_tab_file(&super::shared(), "/w/c.rs");
+    page.redraw();
+    let _ = page.sent();
+    assert!(page.current_tab_is("/w/c.rs"));
+
+    let root = page.find("class", "ed").expect("workbench root");
+    page.dom.key_down(root, Key::Tab, Code::Tab, Modifiers::CONTROL);
+    page.dom.render();
+    assert!(page.current_tab_is("/w/a.rs"), "Ctrl+Tab wraps from last tab to first");
+    assert!(page.sent().iter().any(|c| c == "focus /w/a.rs"));
+
+    let root = page.find("class", "ed").expect("workbench root");
+    page.dom.key_down(root, Key::Tab, Code::Tab, Modifiers::CONTROL);
+    page.dom.render();
+    assert!(page.current_tab_is("/w/b.rs"), "Ctrl+Tab advances to second tab");
+    assert!(page.sent().iter().any(|c| c == "focus /w/b.rs"));
+
+    let root = page.find("class", "ed").expect("workbench root");
+    page.dom.key_down(root, Key::Tab, Code::Tab, Modifiers::CONTROL | Modifiers::SHIFT);
+    page.dom.render();
+    assert!(page.current_tab_is("/w/a.rs"), "Ctrl+Shift+Tab moves back to first tab");
+    assert!(page.sent().iter().any(|c| c == "focus /w/a.rs"));
+}
+
+#[test]
+fn tree_self_drop_and_unchanged_rename_do_not_send_noop_commands() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_styled();
+    page.host().state.lock().unwrap().listings.insert(
+        ROOT.to_string(),
+        vec![
+            ("a.rs".to_string(), ember_editor_conn::remote_fs::file_type::FILE),
+            ("b.rs".to_string(), ember_editor_conn::remote_fs::file_type::FILE),
+        ],
+    );
+    page.redraw();
+    let _ = page.dom.layout(1280.0, 820.0, 1.0);
+
+    let row_a = page
+        .find_where("a.rs tree row", |id| {
+            page.attr(id, "role").as_deref() == Some("treeitem") && page.attr(id, "aria-label").as_deref() == Some("a.rs")
+        })
+        .expect("a.rs row");
+    page.dom.click_node(row_a);
+    page.dom.render();
+    let _ = page.dom.layout(1280.0, 820.0, 1.0);
+    let _ = page.sent();
+
+    // Drag a.rs slightly and drop it on itself: same parent directory, so no MovePaths is sent.
+    let row_a = page
+        .find_where("a.rs tree row", |id| {
+            page.attr(id, "role").as_deref() == Some("treeitem") && page.attr(id, "aria-label").as_deref() == Some("a.rs")
+        })
+        .expect("a.rs row");
+    page.dom.pointer_event(row_a, &PointerInput::press(10.0, 10.0, 1, 1));
+    let mut move_ev = PointerInput::press(20.0, 10.0, 1, 0);
+    move_ev.kind = dioxus_compose::html::PointerKind::Move;
+    move_ev.buttons = 1;
+    page.dom.pointer_event(row_a, &move_ev);
+    page.dom.pointer_event(row_a, &PointerInput::release(20.0, 10.0, 1, 1));
+    page.dom.render();
+    let sent = page.sent();
+    assert!(
+        !sent.iter().any(|c| c.starts_with("move ")),
+        "dropping a file onto itself must not send MovePaths: {sent:?}"
+    );
+
+    // F2 starts rename; pressing Enter without editing closes the prompt without sending Rename.
+    let tree = page.find("role", "tree").expect("project tree");
+    page.dom.key_down(tree, Key::F2, Code::F2, Modifiers::empty());
+    page.dom.render();
+    let input = page.find("aria-label", "새 이름").expect("inline rename input");
+    page.dom.key_down(input, Key::Enter, Code::Enter, Modifiers::empty());
+    page.dom.render();
+    assert!(page.find("aria-label", "새 이름").is_none(), "rename input closes on unchanged Enter");
+    let sent = page.sent();
+    assert!(
+        !sent.iter().any(|c| c.starts_with("rename ")),
+        "unchanged rename must not send Rename: {sent:?}"
+    );
+
+    // F2 + new name + Enter still sends Rename.
+    let tree = page.find("role", "tree").expect("project tree");
+    page.dom.key_down(tree, Key::F2, Code::F2, Modifiers::empty());
+    page.dom.render();
+    let input = page.find("aria-label", "새 이름").expect("inline rename input");
+    page.dom.input(input, "renamed.rs");
+    page.dom.render();
+    let input = page.find("aria-label", "새 이름").expect("inline rename input");
+    page.dom.key_down(input, Key::Enter, Code::Enter, Modifiers::empty());
+    page.dom.render();
+    let sent = page.sent();
+    assert!(
+        sent.iter().any(|c| c == "rename /w/a.rs renamed.rs"),
+        "changed rename sends Rename: {sent:?}"
+    );
+}
+
+// FR-L31.6 (A3, window half): the editor pane tells the bridge about every mount of its code editor,
+// once per mount. A mount of a document the reader already typed in puts the widget's count back to 0,
+// so an edit the session queued for the widget is written against the widget's own numbering.
+#[test]
+fn fr_l31_6_a3_window_a_remount_is_reported_once_and_queued_edits_use_the_widget_numbering() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open();
+    page.click_row();
+    page.deliver(opened(7));
+    let shared = super::shared();
+    let other = UriComponents::remote("test", "/w/b.rs");
+    super::forget_mount();
+
+    // First mount, then one character typed: the widget is at version 1, and so is the session.
+    assert!(super::report_mount(&shared, &uri(), 7), "the first mount is reported");
+    let typed = shared.bridge.borrow_mut().on_code_changed(&uri(), 1, ember_editor::WidgetRange::empty(ember_editor::WidgetPos::new(0, 0)), "x".into());
+    assert!(matches!(typed, Some((_, 7, WidgetEvent::CodeChanged { version: 1, .. }))));
+    // A render without a remount does not report again.
+    assert!(!super::report_mount(&shared, &uri(), 7), "a re-render is not a mount");
+
+    // To b.rs and back: the editor is built again and counts from 0.
+    assert!(super::report_mount(&shared, &other, 8));
+    assert!(super::report_mount(&shared, &uri(), 7), "coming back is a new mount");
+    assert_eq!(shared.bridge.borrow().document(&uri()).unwrap().widget_version_of(1), 0);
+
+    // An edit the session wrote against its version 1 reaches the widget as version 0.
+    page.deliver(SessionUpdate::Command {
+        uri: uri(),
+        command: ember_editor::WidgetCommand::EditCode { request_id: 9, base_version: 1, range: ember_editor::WidgetRange::empty(ember_editor::WidgetPos::new(0, 0)), text: "y".into() },
+    });
+    let queued = shared.bridge.borrow_mut().take_pending_edits(&uri());
+    assert!(matches!(queued.as_slice(), [ember_editor::WidgetCommand::EditCode { base_version: 0, .. }]), "{queued:?}");
+
+    // The next character typed in the widget (its version 1) is the session's version 2: no gap.
+    let typed = shared.bridge.borrow_mut().on_code_changed(&uri(), 1, ember_editor::WidgetRange::empty(ember_editor::WidgetPos::new(0, 1)), "z".into());
+    assert!(matches!(typed, Some((_, 7, WidgetEvent::CodeChanged { version: 2, .. }))));
+    assert_eq!(shared.bridge.borrow().document(&uri()).unwrap().text, "xzfn main() {}\n");
+    super::forget_mount();
+}
+
+// FR-L31.6 (A3, compare view): the compare view's editable side is a code editor of its own over the same
+// document. Opening it is a mount; going back to the tab's pane is another; and the compare view going
+// away while the pane is on screen does not make the pane's next render count as a mount, which would
+// reset the version count under a widget that kept its own.
+#[test]
+fn fr_l31_6_a3_window_the_compare_view_editor_is_its_own_mount() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open();
+    page.click_row();
+    page.deliver(opened(7));
+    let shared = super::shared();
+    super::forget_mount();
+    super::forget_view_mount("diff");
+
+    assert!(super::report_mount(&shared, &uri(), 7), "the pane's first mount is reported");
+    let typed = shared.bridge.borrow_mut().on_code_changed(&uri(), 1, ember_editor::WidgetRange::empty(ember_editor::WidgetPos::new(0, 0)), "x".into());
+    assert!(matches!(typed, Some((_, 7, WidgetEvent::CodeChanged { version: 1, .. }))));
+
+    // The compare view opens over the same document and generation: a new widget, counted from 0.
+    assert!(super::report_view_mount(&shared, &uri(), 7, "diff"), "the compare view's editor is a mount");
+    assert!(!super::report_view_mount(&shared, &uri(), 7, "diff"), "a re-render of it is not");
+    assert_eq!(shared.bridge.borrow().document(&uri()).unwrap().widget_version_of(1), 0);
+    let typed = shared.bridge.borrow_mut().on_code_changed(&uri(), 1, ember_editor::WidgetRange::empty(ember_editor::WidgetPos::new(0, 1)), "y".into());
+    assert!(matches!(typed, Some((_, 7, WidgetEvent::CodeChanged { version: 2, .. }))), "{typed:?}");
+
+    // Back to the tab: the pane's editor is built again, so that is a mount too.
+    assert!(super::report_mount(&shared, &uri(), 7), "the pane after the compare view is a mount");
+    // The compare view's scope ends after the pane drew: the pane's record stays.
+    drop(super::MountGuard("diff"));
+    assert!(!super::report_mount(&shared, &uri(), 7), "the pane's re-render is still not a mount");
+    assert_eq!(shared.bridge.borrow().document(&uri()).unwrap().text, "xyfn main() {}\n");
+    super::forget_mount();
+}
+
+#[test]
+fn fr_l31_6_a3_window_the_compare_view_reports_its_mount_before_it_copies_the_document() {
+    // The compare view's render tells the bridge it is a new widget, then copies the document,
+    // so the copy carries the widget's numbering.
+    let src = include_str!("editor_scm.rs");
+    let src = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
+    let report = src.find("report_view_mount(&s, &uri, generation, DIFF_VIEW);").expect("the compare view reports its mount");
+    let copy = src[report..].find("let doc = s.bridge.borrow().document(&uri).cloned();").expect("then copies the document");
+    assert!(copy > 0);
+}
+
+const OTHER: &str = "/w/b.rs";
+
+fn other_opened(generation: u64, text: &str) -> SessionUpdate {
+    SessionUpdate::Opened { uri: UriComponents::remote("test", OTHER), generation, text: text.into(), language_id: "rust".into(), tab_width: 4 }
+}
+
+impl Page {
+    /// a.rs (with one character typed, so it has unsaved edits) and b.rs (untouched) are open in tabs.
+    fn open_dirty_a_clean_b() -> Page {
+        let mut page = Page::open_two_files();
+        let shared = super::shared();
+        { let mut tabs = shared.tabs; let mut tabs = dioxus_compose::prelude::WritableExt::write(&mut tabs); tabs.open(FILE); tabs.open(OTHER); tabs.activate(FILE); }
+        page.deliver(opened(7));
+        page.deliver(other_opened(8, "fn other() {}\n"));
+        shared.bridge.borrow_mut().on_code_changed(&uri(), 1, ember_editor::WidgetRange::empty(ember_editor::WidgetPos::new(0, 0)), "x".into()).expect("a.rs is open");
+        page.sent();
+        page
+    }
+
+    /// The window's connection came back: the host counts one more reconnect.
+    fn reconnect(&mut self) {
+        self.host().state.lock().unwrap().reconnects += 1;
+        self.redraw();
+    }
+}
+
+// FR-L31.6 (A2, window half): after a reconnect the tab with unsaved edits is put back with the file
+// text it was based on, and the tab without is only opened again, so it shows the file as it is now.
+#[test]
+fn fr_l31_6_a2_window_a_reconnect_restores_only_the_dirty_tab_and_passes_its_disk_base() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_dirty_a_clean_b();
+    page.reconnect();
+    let sent = page.sent();
+    assert!(sent.contains(&format!("restore {FILE} text \"xfn main() {{}}\\n\" base Some(\"fn main() {{}}\\n\")")), "{sent:?}");
+    assert!(sent.contains(&format!("open {OTHER}")), "{sent:?}");
+    assert!(sent.iter().all(|c| !c.starts_with(&format!("restore {OTHER}"))), "a clean tab is not restored: {sent:?}");
+}
+
+// FR-L31.6 (A2, window half): a dirty tab over a file that changed while the connection was lost shows
+// the conflict bar, and a clean tab shows the new file text.
+#[test]
+fn fr_l31_6_a2_window_after_a_reconnect_a_dirty_tab_shows_the_conflict_and_a_clean_tab_the_new_disk_text() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open_dirty_a_clean_b();
+    page.reconnect();
+    // The new session answers: b.rs as the file is now, and a.rs raised as changed under its edits.
+    page.deliver(other_opened(9, "fn other_new() {}\n"));
+    page.deliver(SessionUpdate::ExternalChange { uri: uri(), change: ember_editor::ExternalChange::ChangedWhileDirty });
+    let shared = super::shared();
+    let b = shared.bridge.borrow().document(&UriComponents::remote("test", OTHER)).cloned().expect("b.rs is open");
+    assert_eq!(b.text, "fn other_new() {}\n");
+    assert!(!b.dirty);
+    assert!(page.text().contains("a.rs 파일이 디스크에서 바뀌었습니다"), "{}", page.text());
+}
+
+fn posted_notice() -> Option<String> {
+    crate::ui::coexist::shared_ui().notice.get_untracked().map(|(_, text)| text)
+}
+
+// FR-L31.6 (B3, window half): a file notice from the session (a reload that failed, a watch the server
+// refused, a watcher error, an edit the editor did not apply) is shown, in Korean, naming the file.
+#[test]
+fn fr_l31_6_b3_window_each_file_notice_kind_is_shown_with_the_file_name() {
+    use ember_editor::FileNoticeKind::{EditRejected, ReloadFailed, WatchRefused, WatcherError};
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open();
+    page.click_row();
+    page.deliver(opened(7));
+    let mut seen = Vec::new();
+    for (kind, uri_of, expect) in [
+        (ReloadFailed, Some(uri()), "다시 읽지 못했습니다"),
+        (WatchRefused, Some(uri()), "감시"),
+        (WatcherError, None, "파일 감시"),
+        (EditRejected, Some(uri()), "적용하지 못했습니다"),
+    ] {
+        page.deliver(SessionUpdate::FileNotice { uri: uri_of.clone(), kind, detail: "EIO: raw server text at /secret".into() });
+        let text = posted_notice().unwrap_or_else(|| panic!("{kind:?} shows nothing"));
+        assert!(text.contains(expect), "{kind:?}: {text}");
+        assert_eq!(text.contains("a.rs"), uri_of.is_some(), "{kind:?} names the file when it has one: {text}");
+        assert!(!text.contains("secret") && !text.contains("EIO"), "the server's words are not shown: {text}");
+        assert!(!seen.contains(&text), "each kind says its own thing");
+        seen.push(text);
+    }
+}
+
+// FR-L31.6 (B3, window half): a save the session refused because the file changed on disk says so in
+// Korean, not in the session's English.
+#[test]
+fn fr_l31_6_b3_window_a_stale_save_is_shown_in_korean() {
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open();
+    page.click_row();
+    page.deliver(opened(7));
+    page.deliver(SessionUpdate::ExternalChange { uri: uri(), change: ember_editor::ExternalChange::ChangedWhileDirty });
+    page.deliver(SessionUpdate::SaveFailed {
+        uri: uri(),
+        error: "the file changed on disk after it was opened or last saved, so nothing was written".into(),
+    });
+    let text = posted_notice().expect("the failed save is shown");
+    assert!(text.contains("a.rs") && text.contains("디스크에서 바뀌어"), "{text}");
+    assert!(!text.contains("nothing was written") && !text.contains("알 수 없는 오류"), "{text}");
+}
+
+/// The modifiers and key of a keymap chord, as a key event carries them.
+fn chord_event(chord: &Chord) -> (Key, Modifiers) {
+    let Chord::Keys { ctrl, shift, alt, meta, key } = chord else {
+        panic!("a key chord, not {chord:?}");
+    };
+    let mut modifiers = Modifiers::empty();
+    if *ctrl { modifiers |= Modifiers::CONTROL; }
+    if *shift { modifiers |= Modifiers::SHIFT; }
+    if *alt { modifiers |= Modifiers::ALT; }
+    if *meta { modifiers |= Modifiers::META; }
+    let key = if key.chars().count() == 1 { Key::Character(key.to_lowercase()) } else { Key::Character(key.clone()) };
+    (key, modifiers)
+}
+
+// FR-L31.21 (#1133): with the code editor focused, the keys the terminal keeps for the shell still run
+// their page actions: 최근 파일 (JetBrains ⌘E / Ctrl+E, VS Code ⌃R / Ctrl+R) opens its list from the page.
+#[test]
+fn fr_l31_21_terminal_keys_still_run_their_actions_from_the_code_editor() {
+    use crate::ui::keymap::Keymap;
+    use dioxus_compose::html::prelude::dioxus_signals::WritableExt;
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open();
+    for keymap in Keymap::ALL {
+        let (mut keymap_sig, mut palette_open) = (super::shared().keymap, super::shared().palette_open);
+        keymap_sig.set(keymap);
+        palette_open.set(false);
+        page.redraw();
+        let chord = keymap.chord(Action::Recent, Os::current()).expect("최근 파일 has a chord");
+        let (key, modifiers) = chord_event(&chord);
+        let root = page.find("class", "ed").expect("the page's key listener (.ed)");
+        page.dom.key_down(root, key, Code::Unidentified, modifiers);
+        page.dom.render();
+        assert!(*super::shared().palette_open.read(), "{keymap:?}: {chord:?} opens 최근 파일 from the code editor");
+        assert_eq!(*super::shared().palette_mode.read(), crate::ui::palette::Mode::Recent, "{keymap:?}");
+    }
+}
+
+// FR-L31.21 (#1133): the terminal asks the page what a key would run, through the page's own keymap and
+// keybindings.json: 최근 파일, an unbound Ctrl+D and Ctrl+R/Ctrl+E stay with the shell; the palette, quick
+// open and Shift+F5 (중지, Code-OSS debug.stop) go on to the page.
+#[test]
+fn fr_l31_21_the_terminal_keeps_shell_keys_and_passes_the_palette() {
+    use crate::ui::keymap::{terminal_keeps_key, Keymap, PageKey};
+    use dioxus_compose::html::prelude::dioxus_signals::WritableExt;
+    let _guard = crate::services::test_guard();
+    let _page = Page::open();
+    let s = super::shared();
+    for keymap in Keymap::ALL {
+        let mut keymap_sig = s.keymap;
+        keymap_sig.set(keymap);
+        // The shell's bytes for the chord, as the terminal handler computes them.
+        let keeps = |chord: &Chord| {
+            let Chord::Keys { key, ctrl, alt, shift, meta } = chord else { panic!("{chord:?}") };
+            let (_, modifiers) = chord_event(chord);
+            let (k, c, page) = super::page::terminal_page_key(&s, key, modifiers);
+            let bytes = super::page::terminal_input(key, *ctrl, *alt, *shift, *meta).is_some();
+            (page.clone(), terminal_keeps_key(k, &c, &page, bytes))
+        };
+        if let Some(chord @ Chord::Keys { .. }) = keymap.chord(Action::Recent, Os::current()) {
+            let (page, kept) = keeps(&chord);
+            assert_eq!(page, PageKey::Action(Action::Recent), "{keymap:?} {chord:?}");
+            // ⌘E on macOS has no shell bytes and goes on, as in Code-OSS; Ctrl+R / Ctrl+E stay.
+            let meta = matches!(chord, Chord::Keys { meta: true, .. });
+            assert_eq!(kept, !meta, "{keymap:?} {chord:?}");
+        }
+        for key in ["R", "E", "D"] {
+            let chord = Chord::Keys { ctrl: true, shift: false, alt: false, meta: false, key: key.into() };
+            assert!(keeps(&chord).1, "{keymap:?}: Ctrl+{key} reaches the shell");
+        }
+        for action in [Action::Palette, Action::Find, Action::Stop] {
+            if let Some(chord @ Chord::Keys { .. }) = keymap.chord(action, Os::current()) {
+                let (page, kept) = keeps(&chord);
+                assert_eq!(page, PageKey::Action(action), "{keymap:?} {chord:?}");
+                assert!(!kept, "{keymap:?}: {action:?} runs from the terminal");
+            }
+        }
+    }
+}
+
+// FR-L31.21 (#1133): the terminal's key handler asks `terminal_keeps_key` before it stops a key, and a key
+// it does not keep is left to bubble to the page unsent.
+#[test]
+fn fr_l31_21_terminal_key_handler_consults_the_one_rule() {
+    let src = include_str!("editor_workbench.rs");
+    let term = &src[src.find("fn terminal_body(").expect("terminal_body")..src.find("fn problems_body(").expect("problems_body")];
+    let keys = &term[term.find("let bytes = terminal_input(").expect("terminal key bytes")..term.find("oncompositionstart").expect("ime")];
+    assert!(keys.contains("terminal_page_key(&term_key_s, &name, m)"), "the terminal asks what the page would run");
+    let rule = keys.find("crate::ui::keymap::terminal_keeps_key(").expect("the terminal consults the rule");
+    let stop = keys.find("event.stop_propagation();").expect("the terminal stops the keys it keeps");
+    let send = keys.find("send_input(").expect("the terminal sends the shell its bytes");
+    assert!(rule < stop && stop < send, "the rule is asked before the key is stopped or sent");
+    assert!(keys[rule..stop].contains("return;"), "a key the terminal does not keep goes on unsent");
+}
+
+#[test]
+fn fr_l31_7_language_picker_shows_every_row_and_moves_the_highlight() {
+    use crate::ui::palette::{Mode, search_label};
+
+    let _guard = crate::services::test_guard();
+    let mut page = Page::open();
+    page.click_row();
+    page.deliver(opened(1));
+    page.deliver(SessionUpdate::Format {
+        uri: uri(),
+        format: ember_editor::DocumentFormat {
+            eol: ember_editor::Eol::Lf,
+            encoding: ember_editor::Encoding::Utf8,
+            language_id: "rust".into(),
+            language_name: "Rust".into(),
+        },
+    });
+    let languages: Vec<_> = (0..40)
+        .map(|i| ember_editor::LanguageInfo {
+            id: format!("language-{i:02}"),
+            name: format!("Alpha {i:02}"),
+        })
+        .chain([
+            ember_editor::LanguageInfo { id: "rust".into(), name: "Rust".into() },
+            ember_editor::LanguageInfo { id: "zeta".into(), name: "Zeta".into() },
+        ])
+        .collect();
+    let option_count = languages.len() + 1;
+    page.host().state.lock().unwrap().languages = languages;
+    page.redraw();
+    page.click("title", "언어 모드 선택");
+
+    let options: Vec<_> = page
+        .connected()
+        .into_iter()
+        .filter(|&id| page.attr(id, "role").as_deref() == Some("option"))
+        .collect();
+    assert_eq!(options.len(), option_count, "every language and auto-detect should be rendered");
+    assert!(page.find("aria-label", "위 항목 더 보기").is_none());
+
+    let selected_text = |page: &Page| {
+        let row = page
+            .find_where("selected language", |id| {
+                page.attr(id, "role").as_deref() == Some("option")
+                    && page.attr(id, "aria-selected").as_deref() == Some("true")
+            })
+            .expect("a highlighted language");
+        page.dom.document().get_node(row).unwrap().text_content()
+    };
+    assert!(selected_text(&page).starts_with("Rust"));
+    let input = page.find("aria-label", search_label(Mode::Language)).expect("language search");
+    page.dom.key_down(input, Key::ArrowDown, Code::ArrowDown, Modifiers::empty());
+    page.dom.render();
+    assert!(selected_text(&page).starts_with("Zeta"));
+    page.dom.key_down(input, Key::ArrowUp, Code::ArrowUp, Modifiers::empty());
+    page.dom.render();
+    assert!(selected_text(&page).starts_with("Rust"));
 }

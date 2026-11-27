@@ -185,6 +185,17 @@ pub fn shim_died(session: &str) -> bool {
     })
 }
 
+/// Whether a live shim of `session` is recorded: its agent may be rejoined by the next start
+/// (FR-S8), so what that agent was given must stay valid (the A2A runtime token, FR-T2a). False
+/// with shims off or no runtime installed.
+pub fn shim_alive(session: &str) -> bool {
+    active_runtime().is_some_and(|rt| {
+        session_shim::scan(&rt.dir)
+            .into_iter()
+            .any(|meta| meta.session == session && session_shim::pid_alive(meta.shim_pid))
+    })
+}
+
 /// The `ember-shim` binary next to the running server (or `EMBER_SHIM_BIN`).
 pub fn find_shim_bin() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("EMBER_SHIM_BIN") {
@@ -240,8 +251,13 @@ pub enum ProcHandle {
     Shim { client: Arc<ShimClient>, exited: watch::Receiver<bool> },
 }
 
+/// After [`ProcHandle::shutdown`] sent `KILL`, how long it waits for the shim to report the
+/// agent's end before it gives up acknowledging it.
+pub const KILL_END_WAIT: Duration = Duration::from_secs(10);
+
 impl ProcHandle {
-    /// Wait up to `grace` for the agent to exit (after its stdin was closed), then kill it.
+    /// Wait up to `grace` for the agent to exit (after its stdin was closed), then kill it. Under
+    /// a shim the end is then acknowledged, so the shim exits at once instead of lingering (#923).
     pub async fn shutdown(self, grace: Duration) -> anyhow::Result<()> {
         match self {
             ProcHandle::Direct(mut child) => match tokio::time::timeout(grace, child.wait()).await {
@@ -254,11 +270,54 @@ impl ProcHandle {
                 let _ = client.close_stdin().await;
                 if tokio::time::timeout(grace, exited.wait_for(|v| *v)).await.is_err() {
                     client.kill().await?;
+                    if tokio::time::timeout(KILL_END_WAIT, exited.wait_for(|v| *v)).await.is_err() {
+                        tracing::warn!(
+                            target: "ember::shim",
+                            session = %client.session,
+                            "the shim did not report the agent's end within {KILL_END_WAIT:?} of KILL; it lingers until its linger time"
+                        );
+                        return Ok(());
+                    }
                 }
+                // The session is over and the agent has ended (or its shim connection is gone):
+                // acknowledge everything, so the shim exits now. The adapter reads no more output.
+                let _ = client.ack(u64::MAX).await;
             }
         }
         Ok(())
     }
+}
+
+/// Agent process ids by session, for the monitor's member rows (FR-X7, #389). Every agent runs
+/// on this server's machine, so these are pids of the local computer.
+static AGENT_PIDS: Mutex<std::collections::BTreeMap<String, u32>> = Mutex::new(std::collections::BTreeMap::new());
+
+/// Record the agent process of `session`; a later pid for the same session replaces it.
+pub fn note_agent_pid(session: &str, pid: u32) {
+    if pid == 0 {
+        return;
+    }
+    AGENT_PIDS.lock().unwrap_or_else(|e| e.into_inner()).insert(session.to_string(), pid);
+}
+
+/// The recorded agent pids by session, oldest session id first. A pid whose process is gone is
+/// dropped here, so an ended agent is not shown; a pid the OS reused for another process before
+/// this read can still be named for a moment (the monitor polls every few seconds).
+pub fn agent_pids() -> Vec<(String, u32)> {
+    let mut map = AGENT_PIDS.lock().unwrap_or_else(|e| e.into_inner());
+    map.retain(|_, pid| pid_is_alive(*pid));
+    map.iter().map(|(s, p)| (s.clone(), *p)).collect()
+}
+
+#[cfg(unix)]
+fn pid_is_alive(pid: u32) -> bool {
+    session_shim::pid_alive(pid)
+}
+
+/// No liveness check off Unix; the pid stays until the session starts another agent.
+#[cfg(not(unix))]
+fn pid_is_alive(_pid: u32) -> bool {
+    true
 }
 
 /// Attach to an existing session without starting a new process (FR-S8).
@@ -271,6 +330,9 @@ pub async fn reattach_agent(env: &[(String, String)]) -> anyhow::Result<Option<A
         return Ok(None);
     };
     let pid = agent_pid(&rt.dir, &session).await;
+    if let Some(p) = pid {
+        note_agent_pid(&session, p);
+    }
     Ok(Some(bridge(rt, session, client, pid, true, stored)))
 }
 
@@ -278,10 +340,14 @@ pub async fn reattach_agent(env: &[(String, String)]) -> anyhow::Result<Option<A
 pub async fn spawn_agent(mut cmd: AgentCommand) -> anyhow::Result<AgentProc> {
     let session = cmd.env.iter().find(|(k, _)| k == SESSION_ENV).map(|(_, v)| v.clone());
     cmd.env.retain(|(k, _)| k != SESSION_ENV);
-    match (active_runtime(), session) {
+    let proc = match (active_runtime(), session.clone()) {
         (Some(rt), Some(session)) if safe_id(&session) => spawn_shimmed(rt, session, cmd).await,
         _ => spawn_direct(cmd),
+    }?;
+    if let (Some(session), Some(pid)) = (&session, proc.pid) {
+        note_agent_pid(session, pid);
     }
+    Ok(proc)
 }
 
 fn safe_id(id: &str) -> bool {
@@ -357,7 +423,12 @@ async fn start_shim(rt: &ShimRuntime, session: &str, cmd: &AgentCommand) -> anyh
 /// Kill a shim's agent, drain its end and acknowledge it so the shim exits and cleans up.
 async fn stop_shim(mut c: ShimClient, dir: &Path, id: &str) {
     let _ = c.kill().await;
-    while let Ok(Some(ev)) = tokio::time::timeout(Duration::from_secs(5), c.events.recv()).await {
+    // The shim reports the end only after the agent's output ended, which may take its whole
+    // stdout limit (5 s); wait longer than that in total, not 5 s per event, so the end is
+    // acknowledged and the shim exits at once (#923). A shim that is not acknowledged still ends
+    // after `session_shim::KILLED_LINGER`.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while let Ok(Some(ev)) = tokio::time::timeout_at(deadline, c.events.recv()).await {
         if let ShimEvent::Exited(_) = ev {
             let _ = c.ack(u64::MAX).await;
             break;
@@ -491,11 +562,14 @@ fn bridge(
     let client = Arc::new(client);
     let (exited_tx, exited_rx) = watch::channel(false);
 
-    // stdout: shim events -> ShimReader. The relay ends (detaching, agent left running) when the
-    // reader is gone.
+    // stdout: shim events -> ShimReader. When the reader is gone the relay stops forwarding but
+    // keeps reading, only to learn the agent's end for [`ProcHandle::shutdown`] (#923). It ends
+    // with the agent's end or with the connection (detaching leaves the agent running: dropping
+    // the client closes the connection).
     let (chunk_tx, chunk_rx) = tokio::sync::mpsc::channel::<Chunk>(64);
     let (ack_tx, mut ack_rx) = tokio::sync::mpsc::unbounded_channel::<Ack>();
     tokio::spawn(async move {
+        let mut forward = true;
         while let Some(ev) = events.recv().await {
             let (chunk, ended) = match ev {
                 ShimEvent::Output { start, data } => (Chunk::Data { start, data }, None),
@@ -505,7 +579,10 @@ fn bridge(
                 tracing::info!(target: "ember::shim", "agent ended: {reason}");
                 let _ = exited_tx.send(true);
             }
-            if chunk_tx.send(chunk).await.is_err() || ended.is_some() {
+            if forward && chunk_tx.send(chunk).await.is_err() {
+                forward = false;
+            }
+            if ended.is_some() {
                 return;
             }
         }
@@ -655,4 +732,31 @@ pub async fn drain_surviving_lines(
     }
     rt.store.clear_shim_offset(session)?;
     Ok(lines)
+}
+
+#[cfg(test)]
+mod agent_pid_tests {
+    use super::*;
+
+    #[test]
+    fn fr_x7_agent_pids_are_kept_per_session_and_dead_ones_dropped() {
+        let me = std::process::id();
+        note_agent_pid("fr-x7-a", me);
+        assert!(agent_pids().contains(&("fr-x7-a".to_string(), me)));
+        // A pid of 0 is no process.
+        note_agent_pid("fr-x7-zero", 0);
+        assert!(!agent_pids().iter().any(|(s, _)| s == "fr-x7-zero"));
+        #[cfg(unix)]
+        {
+            // A process that has exited (and been reaped) is dropped.
+            let mut child = std::process::Command::new("true").spawn().unwrap();
+            let dead = child.id();
+            child.wait().unwrap();
+            note_agent_pid("fr-x7-b", dead);
+            assert!(!agent_pids().iter().any(|(s, _)| s == "fr-x7-b"));
+            // A new pid for a session replaces the old one.
+            note_agent_pid("fr-x7-a", dead);
+            assert!(!agent_pids().iter().any(|(s, _)| s == "fr-x7-a"));
+        }
+    }
 }

@@ -66,6 +66,7 @@ pub mod ports;
 pub mod relay;
 pub mod schema;
 pub mod shim;
+pub mod status_push;
 pub mod terms;
 pub mod transfers;
 
@@ -122,10 +123,9 @@ pub enum ComputerAddress {
 fn split_http_url(url: &str) -> Option<(&str, &str, &str)> {
     let (scheme, rest) = if let Some(r) = url.strip_prefix("http://") {
         ("http://", r)
-    } else if let Some(r) = url.strip_prefix("https://") {
-        ("https://", r)
     } else {
-        return None;
+        let r = url.strip_prefix("https://")?;
+        ("https://", r)
     };
     let rest = rest.split(['?', '#']).next().unwrap_or("");
     let (authority, path) = match rest.find('/') {
@@ -192,7 +192,7 @@ fn rewrite_urls_in_text(text: &str, clean: impl Fn(&str) -> String) -> String {
         .min()
     {
         // A scheme that is the tail of a longer word (`xhttp://`) is left alone.
-        let starts_word = rest[..i].chars().next_back().map_or(true, |c| !c.is_ascii_alphanumeric());
+        let starts_word = rest[..i].chars().next_back().is_none_or(|c| !c.is_ascii_alphanumeric());
         out.push_str(&rest[..i]);
         let tail = &rest[i..];
         let end = tail
@@ -361,8 +361,12 @@ pub(crate) fn backfill_peer_ids(conn: &rusqlite::Connection) -> rusqlite::Result
 /// is still held. Only the test `fr_c2_the_duplicate_check_and_the_insert_share_one_hold` sets
 /// it, under `HOOK_TEST_LOCK`; it is `None` otherwise and then does nothing.
 #[cfg(test)]
-pub(crate) static AFTER_DUP_CHECK: std::sync::Mutex<Option<Arc<dyn Fn(&ember_transport::PeerId) + Send + Sync>>> =
+pub(crate) static AFTER_DUP_CHECK: std::sync::Mutex<Option<AfterDupCheckHook>> =
     std::sync::Mutex::new(None);
+
+/// The hook [`AFTER_DUP_CHECK`] holds.
+#[cfg(test)]
+pub(crate) type AfterDupCheckHook = Arc<dyn Fn(&ember_transport::PeerId) + Send + Sync>;
 
 /// Computers and each session's current computer, in the main [`Store`]'s database (tables
 /// from store migration 3, [`schema::MIGRATION`]).
@@ -516,6 +520,8 @@ impl Registry {
         let tx = conn.transaction()?;
         // Its project assignments go with it (FR-L4); the API pushes the affected projects.
         tx.execute("DELETE FROM project_computers WHERE computer_id = ?1", params![id])?;
+        // Its editor settings overrides and last report too (FR-W7a).
+        tx.execute("DELETE FROM computer_editor_settings WHERE computer_id = ?1", params![id])?;
         let removed = tx.execute("DELETE FROM computers WHERE id = ?1", params![id])? > 0;
         tx.commit()?;
         Ok(removed)
@@ -856,6 +862,15 @@ pub struct CurrentComputer {
     pub designated_computer_id: Option<String>,
 }
 
+/// Told about every move [`Computers::reconcile`] makes: the switch, and whether it was a fall
+/// back from the designated computer to the main server (true) or a return (false).
+pub type MoveListener = Arc<dyn Fn(&SwitchOutcome, bool) + Send + Sync>;
+
+/// Called with a computer's id right after its row is created ([`Computers::register`],
+/// [`Computers::register_peer`]), so the computer gets its editor settings at enrolment (FR-W7a).
+/// It runs on the caller's thread and must not block.
+pub type RegisterListener = Arc<dyn Fn(&str) + Send + Sync>;
+
 pub struct Computers {
     registry: Registry,
     connector: Connector,
@@ -877,6 +892,10 @@ pub struct Computers {
     watch_secs: std::sync::atomic::AtomicU64,
     /// Per session: how many consecutive probes wanted a move (FR-X3 debounce).
     flap: Mutex<HashMap<String, u32>>,
+    /// Called after the watcher moved a session (FR-X3), so teams can tell the leader (#82).
+    move_listeners: Mutex<Vec<MoveListener>>,
+    /// Called after a computer is registered (FR-W7a).
+    register_listeners: Mutex<Vec<RegisterListener>>,
     /// This machine's in-process node, started on first use of the local computer's terminals
     /// (FR-W4, #455). Dropping it closes the loopback port.
     local_node: Mutex<Option<local_node::LocalNode>>,
@@ -947,6 +966,8 @@ impl Computers {
             debounce: std::sync::atomic::AtomicU32::new(fallback_env().0),
             watch_secs: std::sync::atomic::AtomicU64::new(fallback_env().1),
             flap: Mutex::new(HashMap::new()),
+            move_listeners: Mutex::new(Vec::new()),
+            register_listeners: Mutex::new(Vec::new()),
             local_node: Mutex::new(None),
             local_node_options: Mutex::new(local_node::LocalNodeOptions::default()),
         })
@@ -1015,6 +1036,18 @@ impl Computers {
             ComputerError::BadRequest("the local computer has no node client".into())
         })?;
         Ok(node_client(&c, self.dialer.as_ref())?)
+    }
+
+    /// A [`NodeClient`] for any computer a relay route serves: this machine's in-process node for
+    /// [`LOCAL`] ([`Computers::local_node_client`]), else [`Computers::client`]. The metrics,
+    /// ports and file relays use it, so the local computer answers like a registered one instead
+    /// of 400 (#981).
+    pub fn relay_client(&self, id: &str) -> Result<NodeClient, ComputerError> {
+        if id == LOCAL {
+            self.local_node_client()
+        } else {
+            self.client(id)
+        }
     }
 
     /// A [`NodeClient`] for this machine's in-process node, which is started on the first call
@@ -1110,7 +1143,21 @@ impl Computers {
         }
         // Validates the URL form the client accepts.
         NodeClient::new(url, token).map_err(|e| ComputerError::BadRequest(e.to_string()))?;
-        self.registry.insert(name, url.trim_end_matches('/'), token)
+        let c = self.registry.insert(name, url.trim_end_matches('/'), token)?;
+        self.registered(&c.id);
+        Ok(c)
+    }
+
+    /// Adds a listener called with the id of every computer registered from now on (FR-W7a).
+    pub fn add_register_listener(&self, listener: RegisterListener) {
+        self.register_listeners.lock().unwrap().push(listener);
+    }
+
+    fn registered(&self, id: &str) {
+        let listeners = self.register_listeners.lock().unwrap().clone();
+        for l in listeners {
+            l(id);
+        }
     }
 
     /// Register a node reached over the transport (`FR-N1`) by its peer address. The node must
@@ -1134,6 +1181,7 @@ impl Computers {
         if !peer.is_empty() {
             dialer.transport().add_peer_addr(peer.clone());
         }
+        self.registered(&c.id);
         Ok(c)
     }
 
@@ -1418,6 +1466,19 @@ impl Computers {
         self.debounce.store(probes.max(1), std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Register a [`MoveListener`] (FR-T7, #82: the team tells the leader).
+    pub fn on_move(&self, listener: MoveListener) {
+        self.move_listeners.lock().unwrap().push(listener);
+    }
+
+    /// `(designated computer id, current computer id)` of a session, each `None` when nothing
+    /// is recorded (FR-T7 team views, #82). Read errors count as nothing recorded.
+    pub fn placement(&self, session_id: &str) -> (Option<String>, Option<String>) {
+        let designated = self.registry.designated(session_id).ok().flatten();
+        let current = self.registry.session_computer(session_id).ok().flatten().map(|sc| sc.computer_id);
+        (designated, current)
+    }
+
     /// Designate `computer_id` for the session, or clear it with `None` (FR-X3). The session
     /// does not move until [`Computers::reconcile`] runs (the watcher, or the caller).
     pub fn designate(&self, session_id: &str, computer_id: Option<&str>) -> Result<(), ComputerError> {
@@ -1469,6 +1530,11 @@ impl Computers {
         match self.switch(sessions, session_id, &want).await {
             Ok(out) => {
                 self.flap.lock().unwrap().remove(session_id);
+                let fell_back = !up;
+                let listeners = self.move_listeners.lock().unwrap().clone();
+                for l in listeners {
+                    l(&out, fell_back);
+                }
                 Ok(Some(out))
             }
             Err(ComputerError::Busy(_)) => Ok(None),

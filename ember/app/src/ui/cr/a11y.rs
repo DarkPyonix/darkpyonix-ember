@@ -8,8 +8,11 @@
 //! `accessible_name`, which is owned.
 
 pub const THEME: &str = "테마 전환";
+pub const SEARCH: &str = "검색";
 pub const SETTINGS: &str = "설정";
-pub const PLATFORM: &str = "플랫폼";
+pub const PLATFORM: &str = "플랫폼 미리보기 전환";
+pub const DEMO_RESET: &str = "데모 초기화";
+pub const SIDEBAR_TOGGLE: &str = "사이드바 접기/펼치기";
 pub const MENU: &str = "메뉴";
 pub const NEW_CHANNEL: &str = "새 채널";
 pub const MEMBERS: &str = "멤버";
@@ -27,6 +30,11 @@ pub const SESSION_MENU: &str = "세션 메뉴";
 pub const OPEN_SCREEN: &str = "화면 열기";
 /// The back button of a phone detail view (`.icon-btn.sm.backbtn`, #885).
 pub const BACK: &str = "뒤로";
+/// The three buttons of the session view switcher (`.seg.viewseg`). The phone drops their
+/// visible text, so these are their only names there.
+pub const VIEW_MULTI: &str = "멀티";
+pub const VIEW_SINGLE: &str = "싱글";
+pub const VIEW_STATUS: &str = "상태";
 /// The scroll arrows of the project screen's computer strip (FR-L26, #671).
 pub const SCROLL_LEFT: &str = "왼쪽으로 스크롤";
 pub const SCROLL_RIGHT: &str = "오른쪽으로 스크롤";
@@ -41,6 +49,8 @@ pub const WEB_MENU: &str = "웹 페이지 열기";
 pub const PROJECT_PICKER: &str = "프로젝트 선택";
 pub const COMPUTER_PICKER: &str = "컴퓨터 선택";
 pub const MODEL_PICKER: &str = "하네스와 모델 선택";
+/// The model picker's list of models (mockup `#mplist`, `role="listbox" aria-label="모델"`).
+pub const MODEL_LIST: &str = "모델";
 pub const ACCOUNT_PICKER: &str = "계정 선택";
 /// The 버전 관리 branch popover (mockup `aria-label="브랜치 전환"`).
 pub const BRANCH_PICKER: &str = "브랜치 전환";
@@ -51,11 +61,11 @@ pub const BASE_PICKER: &str = "기준 브랜치 선택";
 
 /// The reviewed Korean names of the icon-only controls outside the nav menus (those take
 /// `NavMenu::label`).
-pub fn rail_labels() -> [&'static str; 21] {
+pub fn rail_labels() -> [&'static str; 24] {
     [
-        THEME, SETTINGS, PLATFORM, MENU, NEW_CHANNEL, MEMBERS, MORE, ATTACH, EMOJI,
-        VERSION_CONTROL, PROJECT_SETTINGS, OPEN_SESSION, CLOSE, SEND, SHARE, OTHER_IDE,
-        SESSION_MENU, OPEN_SCREEN, BACK, SCROLL_LEFT, SCROLL_RIGHT,
+        THEME, SEARCH, SETTINGS, PLATFORM, DEMO_RESET, SIDEBAR_TOGGLE, MENU, NEW_CHANNEL, MEMBERS,
+        MORE, ATTACH, EMOJI, VERSION_CONTROL, PROJECT_SETTINGS, OPEN_SESSION, CLOSE, SEND, SHARE,
+        OTHER_IDE, SESSION_MENU, OPEN_SCREEN, BACK, SCROLL_LEFT, SCROLL_RIGHT,
     ]
 }
 

@@ -1,10 +1,59 @@
 //! Runtime owner for a remote editor session.
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use dioxus_compose::prelude::*;
-use ember_editor::{EditorSession, SessionConfig, SessionUpdate, WidgetEvent};
+use ember_editor::{ConnectOutcome, EditorSession, SessionConfig, SessionUpdate, StorageHub, WidgetEvent};
 use ember_editor_conn::uri::UriComponents;
 use tokio::sync::mpsc;
 use crate::ui::editor::EditorTarget;
+
+/// Canonical server key scoping one in-process [`StorageHub`], so two windows on the same server
+/// share `globalState` updates while windows on different servers stay isolated.
+pub(crate) fn canonical_server_key(target: &EditorTarget) -> String {
+    if !target.relay.trim().is_empty() {
+        let server = target.server_url.trim().trim_end_matches('/').to_ascii_lowercase();
+        let computer = target.computer.trim().to_ascii_lowercase();
+        if !computer.is_empty() {
+            return format!("relay:{server}:{computer}");
+        }
+        return format!("relay:{server}:{}", target.relay.trim());
+    }
+    let host = if target.endpoint.trim().is_empty() { "localhost" } else { target.endpoint.trim() };
+    format!("direct:{}", ember_editor::storage::canonicalize_authority(host))
+}
+
+/// Process-local pool owning one [`StorageHub`] per canonical server key.
+#[derive(Default)]
+pub(crate) struct StorageHubPool {
+    hubs: Mutex<HashMap<String, StorageHub>>,
+}
+
+impl StorageHubPool {
+    pub(crate) fn hub_for(&self, target: &EditorTarget) -> StorageHub {
+        let key = canonical_server_key(target);
+        self.hubs.lock().unwrap().entry(key).or_default().clone()
+    }
+}
+
+fn storage_hubs() -> &'static StorageHubPool {
+    static HUBS: OnceLock<StorageHubPool> = OnceLock::new();
+    HUBS.get_or_init(StorageHubPool::default)
+}
+
+/// Build the base [`SessionConfig`] for `target`, wiring the per-server [`StorageHub`].
+pub(crate) fn session_config_for(target: &EditorTarget, hubs: &StorageHubPool) -> SessionConfig {
+    // The endpoint names the OSE's host in its requests; through the relay without one, `localhost`.
+    let host = if target.endpoint.trim().is_empty() { "localhost".to_owned() } else { target.endpoint.clone() };
+    let mut config = SessionConfig::new(host, target.folder.clone());
+    // Behind the DarkPyonix manager every request goes below its path with its ticket as the
+    // `dpx-editor` cookie; the editor server has no connection token (FR-W4c (1), INTENT D55).
+    if !target.ose_path.trim().is_empty() {
+        config.path = target.ose_path.trim().to_owned();
+    }
+    config.ticket = ember_editor_conn::handshake::Ticket::new(target.ticket.clone());
+    config.storage_hub = Some(hubs.hub_for(target));
+    config
+}
 
 /// Commands are serialized with session updates on the application runtime.
 pub enum HostCommand {
@@ -16,6 +65,8 @@ pub enum HostCommand {
     Resync(UriComponents),
     /// Show `text` as the buffer of `path`, opening it if needed (FR-L31.6, after a reconnect).
     Restore { path: String, text: String },
+    /// [`HostCommand::Restore`] with the file text the buffer was based on: a file that changed since raises the conflict.
+    RestoreWithBase { path: String, text: String, base: Option<String> },
     /// Take the disk version of an open file even with unsaved edits (디스크 버전으로 되돌리기).
     Reload(String),
     /// Read the disk version of `path` for the compare view; the answer is [`HostState::compare`].
@@ -43,6 +94,10 @@ pub enum HostCommand {
     CancelSearch(u64),
     /// A language feature at the caret: completion, definition, rename and the rest (FR-L31.13).
     Language(ember_editor::LanguageRequest),
+    Debug(ember_editor::debugger::DebugRequest),
+    /// Open `.vscode/launch.json`, first writing `text` there when the file does not exist
+    /// (FR-L31.42). An existing file is never overwritten.
+    OpenLaunchJson { text: String },
     Replace { id: u64, request: ember_editor::search::ReplaceRequest },
     /// Discard working-tree changes for a file by reading it through the session, reconstructing
     /// the base text from `diff`, and writing it back only if reading succeeds.
@@ -51,12 +106,19 @@ pub enum HostCommand {
     SetEol { path: String, eol: ember_editor::Eol },
     SetEncoding { path: String, encoding: ember_editor::Encoding, mode: ember_editor::EncodingMode },
     SetLanguage { path: String, language_id: Option<String> },
+    /// One choice of the indentation pick for an open file: its own options, or its leading whitespace.
+    SetIndentation { path: String, action: ember_editor::IndentationAction },
     /// The answer to the workspace trust prompt (FR-L31.18); the window has saved it already.
     DecideTrust(bool),
     /// Answer extension message `id` with the chosen button's handle, or `undefined` (FR-L31.16).
     AnswerMessage { id: u64, handle: Option<i64> },
+    /// The output channel the window shows (FR-L31.16).
+    ActiveOutputChannel(Option<String>),
     /// Read the project's `.vscode/tasks.json` for the 실행 window (FR-L31.16).
     LoadTasks,
+    /// What a task's problem matchers found (FR-L31.42): the markers of `owner` per path, `None`
+    /// removing them, for the problems and the squiggles.
+    TaskMarkers { owner: String, entries: Vec<(String, Option<Vec<ember_editor_conn::exthost::MarkerData>>)> },
     /// Read the extension scan again on the management connection (FR-L31.14): after an install,
     /// an uninstall, or on the panel's refresh.
     RescanExtensions,
@@ -111,6 +173,11 @@ pub struct HostState {
     pub tasks: Option<crate::ui::editor_tasks::TasksLoad>,
     /// The extensions the OSE has and the ones the extension host runs (FR-L31.14).
     pub extensions: crate::ui::editor_extensions::ExtensionScan,
+    /// The debuggers the running extensions contribute, for creating `launch.json` (FR-L31.42).
+    pub debuggers: Vec<ember_editor::debugger::launch::DebuggerContribution>,
+    /// The problem matchers of tasks: Code-OSS's and the running extensions' (FR-L31.42); `None`
+    /// before the first connection, when only the built-ins are known.
+    pub problem_matchers: Option<std::sync::Arc<ember_editor::problem_matcher::Registry>>,
     /// The settings of every scope, the list the settings view shows and the user's key bindings (FR-L31.17).
     pub settings: crate::ui::editor_settings::SettingsState,
     /// The language features' sheet, messages and symbols (FR-L31.13).
@@ -118,6 +185,10 @@ pub struct HostState {
     pub updates: Vec<SessionUpdate>,
     /// Workspace trust of the folder: the prompt and the restricted-mode banner (FR-L31.18).
     pub trust: crate::ui::workspace_trust::TrustState,
+    /// The server is a Code-OSS commit this editor does not support (or one it cannot read), so the
+    /// window does not connect and offers VS Code instead (SPEC FR-E10, #32). Never set for a
+    /// network or auth error, which stay [`HostState::error`].
+    pub fallback: Option<ember_editor::fallback::FallbackTarget>,
 }
 
 const CONNECT_ERROR: &str = "서버에 연결할 수 없습니다";
@@ -126,6 +197,15 @@ impl HostState {
     /// State for a target whose endpoint is empty: nothing to connect to.
     pub fn missing_endpoint() -> Self {
         Self { error: Some(CONNECT_ERROR.into()), ..Self::default() }
+    }
+
+    /// The server is not a supported Code-OSS commit: the window shows the fallback instead of
+    /// the editor (SPEC FR-E10). It does not retry: another attempt meets the same server.
+    pub fn fall_back(&mut self, target: ember_editor::fallback::FallbackTarget) {
+        self.connected = false;
+        self.reconnecting = false;
+        self.error = None;
+        self.fallback = Some(target);
     }
 
     /// The initial connection failed.
@@ -295,6 +375,28 @@ async fn finish_edit(session: &ember_editor::EditorSession, shared: &Arc<Mutex<H
     shared.lock().unwrap().set_dir_listing(parent, listed);
 }
 
+/// The path of `.vscode/launch.json` in `folder`.
+pub fn launch_json_path(folder: &str) -> String {
+    format!("{}/{}", folder.trim_end_matches('/'), ember_editor::debugger::launch::LAUNCH_JSON)
+}
+
+/// `.vscode/launch.json` of `folder`, written with `text` when it is not there (FR-L31.42). An
+/// existing file is kept as it is, as Code-OSS opens it instead of writing it again.
+async fn ensure_launch_json(session: &ember_editor::EditorSession, folder: &str, text: &str) -> Result<String, ember_editor::Error> {
+    let path = launch_json_path(folder);
+    if session.stat(&session.uri(&path)).await.is_ok() {
+        return Ok(path);
+    }
+    let vscode = format!("{}/.vscode", folder.trim_end_matches('/'));
+    if session.stat(&session.uri(&vscode)).await.is_err() {
+        session.create_dir(folder, ".vscode").await?;
+    }
+    // `create_file` never overwrites, so a file made since the stat above is kept.
+    session.create_file(&vscode, "launch.json").await?;
+    session.write_file(&path, text.as_bytes()).await?;
+    Ok(path)
+}
+
 /// While the connection is lost: wait for 다시 연결. Other commands have no session to go to and are
 /// dropped. False when the window is gone.
 async fn wait_for_reconnect(rx: &mut mpsc::UnboundedReceiver<HostCommand>, shared: &Arc<Mutex<HostState>>, mut revision: SyncSignal<u64>) -> bool {
@@ -344,10 +446,7 @@ impl EditorHost {
             let mut attempt = 0u32;
             loop {
                 attempt += 1;
-                // The endpoint names the OSE's host in its requests; through the relay without one, `localhost`.
-                let host = if target.endpoint.trim().is_empty() { "localhost".to_owned() } else { target.endpoint.clone() };
-                let mut config = SessionConfig::new(host, target.folder.clone());
-                config.connection_token = (!target.token.is_empty()).then(|| target.token.clone());
+                let mut config = session_config_for(&target, storage_hubs());
                 config.app_language = "ko".into();
                 // The answer given since the window opened holds across a reconnect (FR-L31.18, FR-L31.6).
                 config.workspace_trusted = shared.lock().unwrap().trust.trusted;
@@ -359,21 +458,31 @@ impl EditorHost {
                 config.user_settings = user_layer;
                 config.user_files = user_files.paths();
                 config.server_settings = true;
+                // An old server's VS Code URL, echoed into the fallback (SPEC FR-E10). The window's
+                // button opens `VsCodeFallback::for_editor(&target)`, which prefers the relay launch.
+                config.vscode_url = (!target.vscode_url.trim().is_empty()).then(|| target.vscode_url.clone());
                 // With a relay path every socket goes through the server's relay route, over the transport or
                 // HTTP as the app reaches the server (FR-N9.1); direct TCP only without one (the demo endpoint).
+                // The server's commit is checked at connect; an unsupported one is a fallback, not an
+                // error (SPEC FR-E10, #32).
                 let connected = if target.relay.trim().is_empty() {
-                    EditorSession::connect_tcp(config).await
+                    EditorSession::connect_tcp_or_fallback(config).await
                 } else {
                     let reach = crate::editor_reach::reach_for(&target.server_url);
                     let relay = target.relay.clone();
-                    EditorSession::connect(config, move || {
+                    EditorSession::connect_or_fallback(config, move || {
                         let (reach, relay) = (reach.clone(), relay.clone());
                         async move { crate::editor_reach::dial(&reach, &relay).await }
                     })
                     .await
                 };
                 let (session, mut updates) = match connected {
-                    Ok(pair) => pair,
+                    Ok(ConnectOutcome::Connected { session, updates }) => (session, updates),
+                    Ok(ConnectOutcome::Fallback(fallback)) => {
+                        shared.lock().unwrap().fall_back(fallback);
+                        *revision.write() += 1;
+                        return;
+                    }
                     Err(error) => {
                         if attempt == 1 {
                             shared.lock().unwrap().connect_failed(error);
@@ -401,9 +510,18 @@ impl EditorHost {
                     state.settings = crate::ui::editor_settings::start_state(&session, &user_files, user_error);
                     // The scan of this connection, on the first one and after a reconnect (FR-L31.14).
                     state.extensions.connected(session.installed_extensions().to_vec(), session.running_extensions());
+                    state.debuggers = session.debuggers().to_vec();
+                    state.problem_matchers = Some(session.problem_matchers().clone());
                     if attempt == 1 && crate::ui::editor_extensions::capture_hook().is_some_and(|c| c.adds_samples()) {
                         state.extensions.add_capture_samples();
                     }
+                }
+                let _ = session.debug(ember_editor::debugger::DebugRequest::ListConfigurations);
+                // The breakpoints the workspace kept (FR-L31.42, Code-OSS `DebugStorage`), on the first
+                // connection and after a reconnect, whose session starts with an empty registry.
+                let kept = crate::services::services().ui.prefs.get_untracked().debug_store(&target.computer, &target.folder).breakpoints;
+                if !kept.is_empty() {
+                    let _ = session.debug(ember_editor::debugger::DebugRequest::RestoreBreakpoints(kept));
                 }
                 *revision.write() += 1;
                 let mut index_task: Option<tokio::task::JoinHandle<()>> = None;
@@ -578,7 +696,24 @@ impl EditorHost {
                             }
                             Some(HostCommand::Replace { id, request }) => { let _ = session.replace(id, request); }
                             Some(HostCommand::Language(request)) => { let _ = session.language(request); }
+                            Some(HostCommand::Debug(request)) => { let _ = session.debug(request); }
+                            Some(HostCommand::TaskMarkers { owner, entries }) => { let _ = session.task_markers(owner, entries); }
+                            Some(HostCommand::OpenLaunchJson { text }) => {
+                                match ensure_launch_json(&session, &root, &text).await {
+                                    Ok(path) => {
+                                        let uri = session.document_uri(&path);
+                                        let _ = session.open(uri.clone());
+                                        let _ = session.focus(uri);
+                                        let _ = session.debug(ember_editor::debugger::DebugRequest::ListConfigurations);
+                                    }
+                                    Err(error) => {
+                                        tracing::warn!("launch.json: {error}");
+                                        shared.lock().unwrap().edit_errors.push(format!("launch.json을 만들지 못했습니다: {error}"));
+                                    }
+                                }
+                            }
                             Some(HostCommand::AnswerMessage { id, handle }) => { let _ = session.answer_message(id, handle); }
+                            Some(HostCommand::ActiveOutputChannel(id)) => { let _ = session.set_active_output_channel(id); }
                             Some(HostCommand::LoadTasks) => {
                                 shared.lock().unwrap().tasks = Some(crate::ui::editor_tasks::TasksLoad::Loading);
                                 *revision.write() += 1;
@@ -617,7 +752,9 @@ impl EditorHost {
                             Some(HostCommand::SetEol { path, eol }) => { let _ = session.set_eol(session.document_uri(&path), eol); }
                             Some(HostCommand::SetEncoding { path, encoding, mode }) => { let _ = session.set_encoding(session.document_uri(&path), encoding, mode); }
                             Some(HostCommand::SetLanguage { path, language_id }) => { let _ = session.set_language(session.document_uri(&path), language_id); }
+                            Some(HostCommand::SetIndentation { path, action }) => { let _ = session.set_indentation(session.document_uri(&path), action); }
                             Some(HostCommand::Restore { path, text }) => { let _ = session.restore(session.document_uri(&path), text); }
+                            Some(HostCommand::RestoreWithBase { path, text, base }) => { let _ = session.restore_with_base(session.document_uri(&path), text, base); }
                             Some(HostCommand::Reload(path)) => { let _ = session.reload(session.document_uri(&path)); }
                             Some(HostCommand::CompareWithDisk(path)) => {
                                 let result = session.read_file_text(&path).await.map_err(|e| e.to_string());
@@ -660,7 +797,7 @@ impl EditorHost {
                             }
                             None => {
                                 // The session ended without saying why.
-                                shared.lock().unwrap().connection_lost("session ended");
+                                shared.lock().unwrap().apply_update(SessionUpdate::ConnectionLost { reason: "session ended".into() });
                                 lost = true;
                                 break;
                             }
@@ -725,6 +862,22 @@ mod tests {
         assert_eq!(state.reconnects, 1);
     }
 
+    /// SPEC FR-E10 (#32 phase A step 5): an unsupported server commit reaches the window state as a
+    /// fallback (the window shows the sentence and the button), never as an error; a network error
+    /// stays an error with no fallback.
+    #[test]
+    fn fr_e10_host_state_carries_fallback() {
+        use ember_editor::{Fallback, FallbackTarget};
+        let mut state = HostState { reconnecting: true, ..Default::default() };
+        state.connect_failed("connection refused");
+        assert!(state.fallback.is_none(), "a network error is not a fallback");
+        let target = FallbackTarget { fallback: Fallback::OpenInVsCode { server_commit: Some("abc123".into()) }, vscode_url: None };
+        state.fall_back(target.clone());
+        assert_eq!(state.fallback, Some(target));
+        assert!(state.error.is_none(), "the fallback replaces the connect error");
+        assert!(!state.connected && !state.reconnecting);
+    }
+
     #[test]
     fn fr_e1_updates_are_queued_in_order_and_drained() {
         let mut state = HostState::default();
@@ -787,5 +940,94 @@ mod tests {
         let mut state = HostState::default();
         state.connect_failed("refused");
         assert_eq!(state.error.as_deref(), Some("서버에 연결할 수 없습니다: refused"));
+    }
+
+    /// SPEC FR-W4c (1), FR-N9.1, INTENT D55: the editor window's session goes below the
+    /// manager's path with its ticket; the demo's direct OSE stays at the root with no cookie.
+    #[test]
+    fn fr_w4c_editor_session_takes_the_manager_path_and_ticket() {
+        let pool = StorageHubPool::default();
+        let relayed = EditorTarget {
+            project: "p".into(),
+            folder: "/work".into(),
+            ose_path: "/ide/ose/".into(),
+            ticket: "tk-ember".into(),
+            relay: "/api/computers/local/ide/relay/e1".into(),
+            ..Default::default()
+        };
+        let config = session_config_for(&relayed, &pool);
+        let opts = ember_editor::session::connect_options(&config);
+        assert_eq!(opts.path, "/ide/ose/");
+        assert_eq!(opts.ticket.as_ref().map(|t| t.as_str()), Some("tk-ember"));
+        assert_eq!(opts.host, "localhost");
+        assert!(ember_editor_conn::handshake::upgrade_request(&opts, false).starts_with("GET /ide/ose/?reconnectionToken="));
+
+        let demo = EditorTarget { project: "p".into(), folder: "/work".into(), endpoint: "127.0.0.1:18765".into(), ..Default::default() };
+        let opts = ember_editor::session::connect_options(&session_config_for(&demo, &pool));
+        assert_eq!((opts.path.as_str(), opts.ticket.is_none(), opts.host.as_str()), ("/", true, "127.0.0.1:18765"));
+    }
+
+    #[test]
+    fn storage_hub_pool_shares_per_canonical_server_and_isolates_distinct_servers() {
+        let pool = StorageHubPool::default();
+        let make_direct = |endpoint: &str, folder: &str| EditorTarget {
+            project: "p".into(),
+            folder: folder.into(),
+            endpoint: endpoint.into(),
+            ose_path: String::new(),
+            ticket: String::new(),
+            server_url: String::new(),
+            computer: String::new(),
+            relay: String::new(),
+            vscode_url: String::new(),
+            vscode_relay: String::new(),
+            vscode_path: String::new(),
+            vscode_ticket: String::new(),
+            vscode_folder: String::new(),
+            vscode_session: String::new(),
+        };
+
+        // Same server (localhost vs 127.0.0.1) in two different folders shares one StorageHub.
+        let cfg_a = session_config_for(&make_direct("localhost:8000", "/work/a"), &pool);
+        let cfg_b = session_config_for(&make_direct("127.0.0.1:8000", "/work/b"), &pool);
+        let hub_a = cfg_a.storage_hub.expect("storage_hub must be wired");
+        let hub_b = cfg_b.storage_hub.expect("storage_hub must be wired");
+        let mut rx_b = hub_b.subscribe();
+        hub_a.publish(1, "pub.ext".into(), Some(r#"{"v":1}"#.into()));
+        let msg = rx_b.try_recv().expect("two sessions on the same server must share one StorageHub");
+        assert_eq!(msg.extension_id, "pub.ext");
+
+        // Different direct server gets a distinct StorageHub.
+        let cfg_other = session_config_for(&make_direct("other-host:8000", "/work/a"), &pool);
+        let hub_other = cfg_other.storage_hub.expect("storage_hub must be wired");
+        let mut rx_other = hub_other.subscribe();
+        hub_a.publish(1, "pub.ext".into(), Some(r#"{"v":2}"#.into()));
+        assert!(rx_other.try_recv().is_err(), "different servers must not share a StorageHub");
+
+        // Relay targets on the same server + computer share one hub; different computers stay isolated.
+        let make_relay = |computer: &str, folder: &str| EditorTarget {
+            project: "p".into(),
+            folder: folder.into(),
+            endpoint: String::new(),
+            ose_path: "/ide/ose/".into(),
+            ticket: "tk".into(),
+            server_url: "https://Ember.Example.com/".into(),
+            computer: computer.into(),
+            relay: format!("/api/computers/{computer}/ide/relay/1"),
+            vscode_url: String::new(),
+            vscode_relay: String::new(),
+            vscode_path: String::new(),
+            vscode_ticket: String::new(),
+            vscode_folder: String::new(),
+            vscode_session: String::new(),
+        };
+        let r1 = session_config_for(&make_relay("mac-mini", "/a"), &pool).storage_hub.unwrap();
+        let r2 = session_config_for(&make_relay("MAC-MINI", "/b"), &pool).storage_hub.unwrap();
+        let r3 = session_config_for(&make_relay("linux-box", "/a"), &pool).storage_hub.unwrap();
+        let mut rx_r2 = r2.subscribe();
+        let mut rx_r3 = r3.subscribe();
+        r1.publish(1, "pub.relay".into(), Some(r#"{"ok":true}"#.into()));
+        assert_eq!(rx_r2.try_recv().expect("same relay computer shares hub").extension_id, "pub.relay");
+        assert!(rx_r3.try_recv().is_err(), "different relay computers must have distinct hubs");
     }
 }

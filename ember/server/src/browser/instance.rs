@@ -640,6 +640,12 @@ const DRIVE_MAX_RETRIES: u32 = 5;
 const DRIVE_RETRY_WINDOW: Duration = Duration::from_secs(5);
 /// Base backoff delay between `drive_inner` retry attempts (doubles up to 800 ms).
 const DRIVE_INITIAL_BACKOFF: Duration = Duration::from_millis(50);
+/// Maximum consecutive `Target.attachToTarget` failures inside one `drive_inner` pass.
+const ATTACH_MAX_CONSECUTIVE_FAILURES: usize = 10;
+/// How long one `drive_inner` attempt may take to reach an attached page (target discovery,
+/// choosing or creating a tab, attaching). An attempt over it fails and counts as a retry, so a
+/// driver whose calls hang does not run on unbounded (#344). An attached page is not limited.
+const DRIVE_ATTACH_LIMIT: Duration = Duration::from_secs(30);
 
 /// Keeps one page attached for streaming and input, follows new tabs, and runs the screencast
 /// while anyone watches. Ends when the connection closes, the instance is gone, or retries are
@@ -655,12 +661,23 @@ async fn drive_with_limits(
     retry_window: Duration,
     initial_backoff: Duration,
 ) {
+    drive_bounded(me, cdp, max_retries, retry_window, initial_backoff, DRIVE_ATTACH_LIMIT).await
+}
+
+async fn drive_bounded(
+    me: Weak<BrowserInstance>,
+    cdp: Arc<Cdp>,
+    max_retries: u32,
+    retry_window: Duration,
+    initial_backoff: Duration,
+    attach_limit: Duration,
+) {
     let mut retries = 0u32;
     let mut window_start: Option<Instant> = None;
     let mut gave_up_err: Option<String> = None;
 
     loop {
-        match drive_inner(&me, &cdp).await {
+        match drive_inner(&me, &cdp, attach_limit).await {
             Ok(()) => break,
             Err(e) => {
                 if !cdp.is_open() || me.upgrade().is_none() {
@@ -706,10 +723,29 @@ async fn drive_with_limits(
     }
 }
 
-async fn drive_inner(me: &Weak<BrowserInstance>, cdp: &Arc<Cdp>) -> anyhow::Result<()> {
+/// `fut`, failing with the attach limit's reason when `deadline` passes first.
+async fn within<T>(
+    deadline: tokio::time::Instant,
+    limit: Duration,
+    fut: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    match tokio::time::timeout_at(deadline, fut).await {
+        Ok(r) => r,
+        Err(_) => Err(attach_limit_error(limit)),
+    }
+}
+
+fn attach_limit_error(limit: Duration) -> anyhow::Error {
+    anyhow!("no page attached within {} s", limit.as_secs_f64())
+}
+
+async fn drive_inner(me: &Weak<BrowserInstance>, cdp: &Arc<Cdp>, attach_limit: Duration) -> anyhow::Result<()> {
+    // Every attach phase (this one, and the one after each tab switch) has to reach an attached
+    // page by its deadline (#344).
+    let mut deadline = tokio::time::Instant::now() + attach_limit;
     let mut events = cdp.events();
-    cdp.call("Target.setDiscoverTargets", json!({ "discover": true }), None).await?;
-    let targets = cdp.call("Target.getTargets", json!({}), None).await?;
+    within(deadline, attach_limit, cdp.call("Target.setDiscoverTargets", json!({ "discover": true }), None)).await?;
+    let targets = within(deadline, attach_limit, cdp.call("Target.getTargets", json!({}), None)).await?;
     // Newest last; Chrome lists newest first.
     let mut tabs: Vec<Tab> = targets["targetInfos"]
         .as_array()
@@ -721,7 +757,11 @@ async fn drive_inner(me: &Weak<BrowserInstance>, cdp: &Arc<Cdp>) -> anyhow::Resu
         (me.viewers.subscribe(), me.follow.subscribe(), me.screencast.subscribe())
     };
 
+    let mut consecutive_attach_failures: usize = 0;
     loop {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(attach_limit_error(attach_limit));
+        }
         // Choose the tab: the selected one if it still exists, else the newest.
         let want = follow.borrow_and_update().clone();
         let target = match want.and_then(|w| tabs.iter().find(|t| t.target_id == w).cloned()) {
@@ -729,7 +769,12 @@ async fn drive_inner(me: &Weak<BrowserInstance>, cdp: &Arc<Cdp>) -> anyhow::Resu
             None => match tabs.last().cloned() {
                 Some(t) => t,
                 None => {
-                    let r = cdp.call("Target.createTarget", json!({ "url": "about:blank" }), None).await?;
+                    let r = within(
+                        deadline,
+                        attach_limit,
+                        cdp.call("Target.createTarget", json!({ "url": "about:blank" }), None),
+                    )
+                    .await?;
                     let id = r["targetId"].as_str().unwrap_or_default().to_string();
                     let t = Tab { target_id: id, url: "about:blank".into(), title: String::new() };
                     tabs.push(t.clone());
@@ -737,20 +782,30 @@ async fn drive_inner(me: &Weak<BrowserInstance>, cdp: &Arc<Cdp>) -> anyhow::Resu
                 }
             },
         };
-        let att = cdp
-            .call("Target.attachToTarget", json!({ "targetId": target.target_id, "flatten": true }), None)
-            .await;
+        let att = within(
+            deadline,
+            attach_limit,
+            cdp.call("Target.attachToTarget", json!({ "targetId": target.target_id, "flatten": true }), None),
+        )
+        .await;
         let session_id = match att {
-            Ok(v) => v["sessionId"].as_str().unwrap_or_default().to_string(),
+            Ok(v) => {
+                consecutive_attach_failures = 0;
+                v["sessionId"].as_str().unwrap_or_default().to_string()
+            }
             Err(e) => {
-                tracing::debug!("attach {} failed: {e:#}", target.target_id);
+                consecutive_attach_failures += 1;
+                tracing::debug!("attach {} failed ({consecutive_attach_failures}): {e:#}", target.target_id);
                 tabs.retain(|t| t.target_id != target.target_id);
+                if consecutive_attach_failures >= ATTACH_MAX_CONSECUTIVE_FAILURES {
+                    return Err(e.context("too many consecutive Target.attachToTarget failures"));
+                }
                 continue;
             }
         };
         let page = PageRef { target_id: target.target_id.clone(), session_id: session_id.clone() };
         let sid = Some(session_id.as_str());
-        cdp.call("Page.enable", json!({}), sid).await.ok();
+        within(deadline, attach_limit, cdp.call("Page.enable", json!({}), sid)).await.ok();
         {
             let me = me.upgrade().context("gone")?;
             *me.page.lock().unwrap() = Some((page.clone(), cdp.clone()));
@@ -869,6 +924,8 @@ async fn drive_inner(me: &Weak<BrowserInstance>, cdp: &Arc<Cdp>) -> anyhow::Resu
         if switch {
             cdp.call("Target.detachFromTarget", json!({ "sessionId": session_id }), None).await.ok();
         }
+        // The next attach phase gets its own limit.
+        deadline = tokio::time::Instant::now() + attach_limit;
     }
 }
 
@@ -934,8 +991,7 @@ mod tests {
         let err = inst
             .wait_page(Duration::from_secs(60))
             .await
-            .err()
-            .expect("wait_page should fail when driver gives up");
+            .expect_err("wait_page should fail when driver gives up");
         driver.await.unwrap();
         server.abort();
 
@@ -947,5 +1003,126 @@ mod tests {
         assert!(!state.running, "instance must mark running=false after driver gives up");
         assert!(state.error.as_deref().unwrap_or_default().contains("gave up after 4 attempts"));
         assert!(cdp.is_open(), "CDP stayed open; bound stopped the retry loop");
+    }
+
+    #[tokio::test]
+    async fn drive_inner_bounds_consecutive_attach_failures() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let attach_calls = Arc::new(AtomicUsize::new(0));
+        let attach_srv = attach_calls.clone();
+
+        // Fake CDP server where discovery/create succeed, but Target.attachToTarget always fails.
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let (mut sink, mut rx) = ws.split();
+            let mut created = 0usize;
+            while let Some(Ok(msg)) = rx.next().await {
+                if let Message::Text(text) = msg {
+                    if let Ok(v) = serde_json::from_str::<Value>(&text) {
+                        if let Some(id) = v.get("id").and_then(Value::as_u64) {
+                            let method = v.get("method").and_then(Value::as_str).unwrap_or_default();
+                            let reply = match method {
+                                "Target.setDiscoverTargets" => json!({ "id": id, "result": {} }),
+                                "Target.getTargets" => json!({ "id": id, "result": { "targetInfos": [] } }),
+                                "Target.createTarget" => {
+                                    created += 1;
+                                    json!({ "id": id, "result": { "targetId": format!("t-{created}") } })
+                                }
+                                "Target.attachToTarget" => {
+                                    attach_srv.fetch_add(1, Ordering::SeqCst);
+                                    json!({
+                                        "id": id,
+                                        "error": { "code": -32000, "message": "cannot attach target" }
+                                    })
+                                }
+                                _ => json!({ "id": id, "result": {} }),
+                            };
+                            let _ = sink.send(Message::Text(reply.to_string().into())).await;
+                        }
+                    }
+                }
+            }
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = BrowserConfig {
+            root: dir.path().to_path_buf(),
+            chrome: Some(PathBuf::from("/bin/true")),
+            headless: true,
+            window: (800, 600),
+            screencast: ScreencastOptions::default(),
+        };
+        let inst = BrowserInstance::new("p", dir.path().to_path_buf(), &cfg, Egress::Direct, None);
+        let ws_url = format!("ws://{addr}/devtools/browser/fake");
+        let cdp = Cdp::connect(&ws_url).await.unwrap();
+
+        let err = drive_inner(&Arc::downgrade(&inst), &cdp, DRIVE_ATTACH_LIMIT)
+            .await
+            .expect_err("drive_inner must fail after consecutive attach failures");
+        server.abort();
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("too many consecutive Target.attachToTarget failures"),
+            "unexpected error: {msg}"
+        );
+        assert_eq!(attach_calls.load(Ordering::SeqCst), ATTACH_MAX_CONSECUTIVE_FAILURES);
+    }
+
+    /// #344: one driver attempt is bounded too. A DevTools endpoint that accepts every call and
+    /// answers none used to keep `drive_inner` waiting on one call after another; now the attempt
+    /// ends at its attach limit, and the reason reaches `wait_page`.
+    #[tokio::test]
+    async fn drive_attach_phase_is_bounded_against_a_hanging_cdp() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_srv = calls.clone();
+        // Fake CDP WebSocket server that stays open, reads every request and answers none.
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let (_sink, mut rx) = ws.split();
+            while let Some(Ok(msg)) = rx.next().await {
+                if let Message::Text(_) = msg {
+                    calls_srv.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = BrowserConfig {
+            root: dir.path().to_path_buf(),
+            chrome: Some(PathBuf::from("/bin/true")),
+            headless: true,
+            window: (800, 600),
+            screencast: ScreencastOptions::default(),
+        };
+        let inst = BrowserInstance::new("p", dir.path().to_path_buf(), &cfg, Egress::Direct, None);
+        inst.state.send_modify(|s| s.running = true);
+        let cdp = Cdp::connect(&format!("ws://{addr}/devtools/browser/fake")).await.unwrap();
+        let driver = tokio::spawn(drive_bounded(
+            Arc::downgrade(&inst),
+            cdp.clone(),
+            0,
+            Duration::from_secs(60),
+            Duration::from_millis(1),
+            Duration::from_millis(200),
+        ));
+
+        // Well below the 30 s a single CDP call may take: the attach limit ended the attempt.
+        let err = tokio::time::timeout(Duration::from_secs(10), inst.wait_page(Duration::from_secs(60)))
+            .await
+            .expect("the attempt ends at its attach limit, not at a call timeout")
+            .expect_err("wait_page fails when no page was attached");
+        tokio::time::timeout(Duration::from_secs(10), driver).await.expect("the driver ended").unwrap();
+        server.abort();
+
+        let msg = format!("{err:#}");
+        assert!(msg.contains("no page attached within"), "unexpected error: {msg}");
+        assert!(calls.load(Ordering::SeqCst) >= 1, "the driver called the endpoint");
+        assert!(!inst.state.borrow().running, "the instance is marked not running");
     }
 }

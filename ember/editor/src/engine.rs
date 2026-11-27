@@ -11,11 +11,11 @@
 //! Time is an input too (`now` on every call, plus [`SessionCore::next_wake`]), so debounces are
 //! deterministic in tests.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use ember_editor_conn::document::DocumentMirror;
-use ember_editor_conn::exthost::{self, Call, DocumentsAndEditorsDelta, MainThreadCall};
+use ember_editor_conn::exthost::{self, Call, DocumentsAndEditorsDelta};
 use ember_editor_conn::remote_fs::{FileChange, FileChangeType};
 use ember_editor_conn::rpc::{js_error, Arg, IncomingRequest, Reply};
 use ember_editor_conn::uri::UriComponents;
@@ -24,7 +24,7 @@ use serde_json::{json, Value};
 use crate::codelens::{CodeLenses, CommandDto};
 use crate::coords::{WidgetPos, WidgetRange};
 use crate::diagnostics::Diagnostics;
-use crate::document::{decode, OpenDocument};
+use crate::document::{decode, DiskBase, OpenDocument};
 use crate::folding::{parse_provider_folds, DocFolds, FoldRegion};
 use crate::highlight::{Action as HighlightAction, HighlightJob, HighlightOutput, Highlights, Problem};
 use crate::hover::{HoverPopup, HoverState};
@@ -33,11 +33,12 @@ use crate::inline::{self, EndReason, Ghost, InlineDoc, ReplyOutcome, TypeThrough
 use crate::languages::{LanguageInfo, LanguageRegistry};
 use crate::text_format::{decode_as, decode_detect, decode_reload, DocumentFormat, Encoding, EncodingMode, Eol};
 use crate::registry::{KindTag, ProviderKind, Registry, RegistryChange};
-use crate::replies::session_reply;
 use crate::search::{FileHits, ReplaceReport, ReplaceRequest, SearchEnd, SearchRequest, Target};
 use crate::semantic::{decode_semantic_tokens, overlay_semantic_runs, DocSemanticTokens};
 use crate::widget::{Decoration, DecorationKind, WidgetCommand, WidgetEvent};
 
+mod actors;
+mod debugging;
 mod language;
 
 /// How many versions behind the document an answer of the highlighter may be and still be shown.
@@ -87,8 +88,12 @@ pub enum ReadPurpose {
     Replace { id: u64 },
     /// A file that is not open, read for workspace edit `id` (FR-L31.13).
     WorkspaceEdit { id: u64 },
+    /// The log file of output channel `id`, read after `MainThreadOutputService.$update`.
+    OutputChannel { id: String },
     /// A local resource request `request` of webview `handle` (FR-E8).
     WebviewResource { handle: String, request: u64 },
+    /// `.vscode/launch.json` for debug start `start`.
+    LaunchJson { start: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -101,8 +106,11 @@ pub enum Input {
     Focus { uri: UriComponents },
     /// Show `text` (widget form) as the buffer of `uri`, opening the file first if it is not open: the
     /// window's buffer kept across a reconnect (FR-L31.6). The document is dirty unless `text` equals
-    /// the file on disk; equal text changes nothing.
-    Restore { uri: UriComponents, text: String },
+    /// the file on disk; equal text changes nothing. `base` is the file text (widget form) the window's
+    /// buffer was based on, when it knows it: a file that no longer holds it changed meanwhile, so a
+    /// buffer with edits raises the conflict instead of silently standing in for the newer file, and a
+    /// buffer without edits yields to the newer file. With no base the buffer is put back as it is.
+    Restore { uri: UriComponents, text: String, base: Option<String> },
     /// An event from the `CodeEditor` node rendered with key `generation`.
     Widget { uri: UriComponents, generation: u64, event: WidgetEvent },
     /// Explicit inline-completion request at `pos` (a keyboard command).
@@ -111,6 +119,9 @@ pub enum Input {
     RpcReply { token: Token, result: Result<Value, String> },
     FileRead { uri: UriComponents, purpose: ReadPurpose, result: Result<Vec<u8>, String> },
     FileWritten { uri: UriComponents, token: Token, result: Result<(), String> },
+    /// The file no longer holds what a save expected ([`Effect::WriteFile::expect`]), so the write for
+    /// `token` was not made.
+    SaveStale { uri: UriComponents, token: Token },
     FilesChanged(Vec<FileChange>),
     /// The highlighting worker finished a batch of jobs.
     Highlighted(HighlightOutput),
@@ -127,6 +138,9 @@ pub enum Input {
     /// Reopen an open document in `encoding` (its unsaved edits are discarded) or save it in
     /// `encoding` (FR-L31.7).
     SetEncoding { uri: UriComponents, encoding: Encoding, mode: EncodingMode },
+    /// Change the indentation options of an open document, or its leading whitespace: one choice of
+    /// the status bar's indentation pick. Options belong to the document, not to the settings.
+    SetIndentation { uri: UriComponents, action: crate::indentation::IndentationAction },
     /// Put an open document under a language id; `None` detects it from the path again (FR-L31.7).
     SetLanguage { uri: UriComponents, language_id: Option<String> },
     /// The user's answer to the workspace trust prompt (FR-L31.18): `true` grants trust.
@@ -134,10 +148,31 @@ pub enum Input {
     /// The user closed extension message `id`: with the chosen button's handle, or `None` for
     /// `undefined` (FR-L31.16).
     AnswerMessage { id: u64, handle: Option<i64> },
+    /// The window shows output channel `id`; a log channel is read again only while it is shown.
+    ActiveOutputChannel { id: Option<String> },
     /// A language feature the window asks for (FR-L31.13); answered with [`SessionUpdate::Language`].
     Language(crate::language::LanguageRequest),
     /// An event of an extension webview or its host (FR-E8).
     Webview(crate::webview::WebviewEvent),
+    /// Outcome of a `MainThreadSecretState` operation (`$getPassword`, `$setPassword`, `$deletePassword`).
+    SecretState { req: u32, result: Result<crate::secret_state::SecretReply, String> },
+    /// A request of the debugging window; answered with [`SessionUpdate::Debug`].
+    Debug(crate::debugger::DebugRequest),
+    /// What the problem matchers of a task found (FR-L31.42): the markers of `owner` per file,
+    /// `None` removing them, as `MainThreadDiagnostics.$changeMany` gives them.
+    TaskMarkers { owner: String, entries: Vec<(UriComponents, Option<Vec<ember_editor_conn::exthost::MarkerData>>)> },
+    /// Result of reading one persisted extension storage file (`MainThreadStorage`).
+    StorageRead { shared: bool, extension_id: String, result: Result<Option<Vec<u8>>, String> },
+    /// Result of moving a corrupt extension storage file aside to `*.corrupt.<millis>-<seq>`.
+    StorageQuarantined { shared: bool, extension_id: String, result: Result<(), String> },
+    /// Result of writing or deleting one persisted extension storage file (`MainThreadStorage`).
+    StorageWritten { token: Token, result: Result<(), String> },
+    /// A `shared = true` (`globalState`) update broadcast from another session on the same hub.
+    SharedStorageChanged { extension_id: String, value: Option<String> },
+    /// Result of reloading a `shared = true` storage file after a watcher event or hub lag.
+    SharedStorageReloaded { extension_id: String, generation: u64, result: Result<Option<Vec<u8>>, String> },
+    /// Resync all cached `shared = true` keys from disk (e.g. after `StorageHub` broadcast lag).
+    ResyncSharedStorage,
     /// Nothing happened; run due timers.
     Tick,
 }
@@ -152,11 +187,28 @@ pub enum Effect {
     /// Answer extension-host request `req`.
     Respond { req: u32, result: Result<Reply, Option<Value>> },
     ReadFile { uri: UriComponents, purpose: ReadPurpose },
-    WriteFile { uri: UriComponents, bytes: Vec<u8>, token: Token },
+    /// Write `bytes`. With `expect`, the file is read first and the write is made only when it still
+    /// holds that; otherwise the answer is [`Input::SaveStale`] and nothing is written. A file that
+    /// is not there passes the check.
+    WriteFile { uri: UriComponents, bytes: Vec<u8>, token: Token, expect: Option<DiskBase> },
+    /// Read one extension storage file; answered with [`Input::StorageRead`].
+    ReadStorage { uri: UriComponents, shared: bool, extension_id: String },
+    /// Reload one `shared = true` storage file after a watcher event or hub lag; answered with
+    /// [`Input::SharedStorageReloaded`].
+    ReloadSharedStorage { uri: UriComponents, extension_id: String, generation: u64 },
+    /// Move a corrupt extension storage file aside (`*.corrupt.<millis>-<seq>`); answered with
+    /// [`Input::StorageQuarantined`].
+    QuarantineStorage { from: UriComponents, to: UriComponents, shared: bool, extension_id: String },
+    /// Atomically write (`Some`) or delete (`None`) one extension storage file; answered with [`Input::StorageWritten`].
+    WriteStorage { uri: UriComponents, bytes: Option<Vec<u8>>, token: Token },
+    /// Broadcast a `shared = true` (`globalState`) update to peer sessions on the same [`crate::storage::StorageHub`].
+    BroadcastStorage { extension_id: String, value: Option<String> },
     Watch { uri: UriComponents },
     Unwatch { uri: UriComponents },
     /// Work for the highlighting thread; its answer comes back as [`Input::Highlighted`].
     Highlight(HighlightJob),
+    /// Run a `MainThreadSecretState` operation against the secret store; answered with [`Input::SecretState`].
+    SecretState { req: u32, op: crate::secret_state::SecretOp },
     Ui(SessionUpdate),
 }
 
@@ -164,6 +216,27 @@ pub enum Effect {
 fn is_missing_file(error: &str) -> bool {
     let e = error.to_lowercase();
     e.contains("entrynotfound") || e.contains("enoent") || e.contains("not found") || e.contains("no such file")
+}
+
+/// What a [`SessionUpdate::FileNotice`] is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileNoticeKind {
+    /// The file changed on disk but reading or decoding the new content failed, so the buffer may be behind it.
+    ReloadFailed,
+    /// The server refused to watch the file, so a change to it is not reported.
+    WatchRefused,
+    /// The server's file watcher reported an error.
+    WatcherError,
+    /// The widget did not apply an edit the session sent (the user edited the same place).
+    EditRejected,
+}
+
+/// The generation of the next widget node, counted across every session of the process. A session
+/// made after a reconnect must not hand out a number the window's widget still has as its key.
+static GENERATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn next_generation() -> u64 {
+    GENERATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,14 +300,25 @@ pub enum SessionUpdate {
     /// The line ending, encoding and language of an open document (FR-L31.7): after it opens, is
     /// reloaded, or any of the three changes.
     Format { uri: UriComponents, format: DocumentFormat },
+    /// The indentation options of an open document: after it opens, or the person changes them. The
+    /// widget's tab width follows `tab_size`.
+    Indentation { uri: UriComponents, indentation: crate::indentation::Indentation },
     /// Reopening with an encoding failed; the document is unchanged (FR-L31.7).
     FormatFailed { uri: UriComponents, error: String },
+    /// Something about a file went wrong that no user action caused: the window shows it.
+    FileNotice { uri: Option<UriComponents>, kind: FileNoticeKind, detail: String },
     /// Every language the extensions contribute, for the language mode picker (FR-L31.7).
     Languages { languages: Vec<LanguageInfo> },
     /// The answer to a language feature request (FR-L31.13).
     Language(crate::language::LanguageUpdate),
     /// An extension webview changed (FR-E8): the window applies it to its webview host and panes.
     Webview(crate::webview::WebviewUpdate),
+    /// Debug sessions, call stacks, variables, console lines and breakpoints.
+    Debug(crate::debugger::DebugUpdate),
+    /// A call to a `todo` method of the coverage ledger that returns a value got the fallback
+    /// reply (FR-E9). `count` is the number of such calls to `proxy.method` in this session so
+    /// far; `extension` is set only when an argument of this call names the extension.
+    ProtocolGap { proxy: String, method: String, extension: Option<String>, count: u32 },
 }
 
 #[derive(Debug, Clone)]
@@ -250,10 +334,14 @@ enum Pending {
     Command { id: String },
     /// `$provideTextSearchResults` of search `id`.
     Search { id: u64 },
+    /// `$provideFileSearchResults` answering the extension host's `$checkExists` request `req`.
+    CheckExists { req: u32 },
     /// A call of the language features (FR-L31.13).
     Language(language::PendingLang),
     /// A call of the webview model (FR-E8).
     Webview(crate::webview::Pending),
+    /// A call of the debug session layer.
+    Debug(crate::debugger::Pending),
 }
 
 /// The running search: the window's id, the provider session, its call, and the open documents whose
@@ -286,6 +374,9 @@ struct ReplaceWrite {
     open: Option<(u64, String)>,
 }
 
+/// TextMate runs of one document: the version they were made for, the line window, and the runs.
+type TextmateRuns = (u32, (u32, u32), Vec<crate::textmate::DocRun>);
+
 pub struct SessionCore {
     opts: CoreOptions,
     /// The window's settings (FR-L31.17); `None` until the session has read them.
@@ -295,7 +386,7 @@ pub struct SessionCore {
     docs: HashMap<String, OpenDocument>,
     opening: HashSet<String>,
     /// Buffers to restore once their file has been read ([`Input::Restore`] before the open finished).
-    restores: HashMap<String, String>,
+    restores: HashMap<String, (String, Option<String>)>,
     /// Documents announced to the extension host only (for `$tryOpenDocument`): key → (uri, version).
     exthost_only: HashMap<String, (UriComponents, u64)>,
     active: Option<String>,
@@ -303,7 +394,7 @@ pub struct SessionCore {
     diagnostics: Diagnostics,
     lenses: CodeLenses,
     highlights: Highlights,
-    textmate_runs: HashMap<String, (u32, (u32, u32), Vec<crate::textmate::DocRun>)>,
+    textmate_runs: HashMap<String, TextmateRuns>,
     folds: HashMap<String, DocFolds>,
     folding_due: HashMap<String, inline::Debouncer>,
     folding_inflight: HashMap<(String, i64), Token>,
@@ -316,11 +407,23 @@ pub struct SessionCore {
     inline: HashMap<String, InlineDoc>,
     ids: DecorationIds,
     pending: HashMap<Token, Pending>,
+    /// `(extension_id, key)` of each secret write or delete awaiting its outcome, by request id.
+    pub(crate) secret_writes: HashMap<u32, (String, String)>,
     saves: HashMap<Token, (String, u64, Vec<u8>)>,
+    /// The write in flight per document key: one at a time, so an older write cannot land after a newer one.
+    saving: HashMap<String, Token>,
+    /// Documents asked to save while a write was in flight: they are written again, with the text of that time.
+    save_queued: HashSet<String>,
+    /// Documents whose file changed behind a buffer with edits and where the user has not chosen yet; a
+    /// save then is the user's explicit overwrite.
+    conflicts: HashSet<String>,
     /// Documents being read again in a chosen encoding (FR-L31.7): key → encoding.
     reopen: HashMap<String, Encoding>,
     /// Handle of the extension host's text search provider for the workspace's scheme (FR-E7).
     search_provider: Option<i64>,
+    /// Handle of the extension host's file search provider for the workspace's scheme
+    /// (`MainThreadWorkspace.$checkExists`, FR-E9).
+    file_search_provider: Option<i64>,
     search_session: i64,
     search: Option<ActiveSearch>,
     replaces: HashMap<u64, ReplaceJob>,
@@ -328,8 +431,11 @@ pub struct SessionCore {
     lang: language::LangState,
     /// Extension webviews (FR-E8).
     webviews: crate::webview::Webviews,
+    /// Debug configurations, sessions and breakpoints.
+    debug: crate::debugger::DebugState,
+    /// Persistent extension storage (`MainThreadStorage`).
+    storage: crate::storage::ExtensionStorage,
     next_token: Token,
-    next_generation: u64,
     next_editor: u64,
     next_edit_request: u32,
     reply_seq: u64,
@@ -337,9 +443,15 @@ pub struct SessionCore {
     trust: crate::trust::WorkspaceTrust,
     output_seq: u64,
     output_channels: Vec<crate::output::OutputChannel>,
+    /// The output channel the window shows, as [`Input::ActiveOutputChannel`] last said.
+    active_output: Option<String>,
+    /// When the log channels are read again (one second apart while any is visible).
+    log_poll: crate::inline::Debouncer,
     /// Open `$showMessage` calls by Ember message id (FR-L31.16).
     pending_messages: HashMap<u64, u32>,
     next_message_id: u64,
+    /// Extension-host requests no actor trait implements: (proxy, method) to how often they came.
+    unimplemented: BTreeMap<(String, String), u32>,
     touched: BTreeSet<String>,
     out: Vec<Effect>,
     now: Instant,
@@ -386,25 +498,34 @@ impl SessionCore {
             inline: HashMap::new(),
             ids: DecorationIds::new(),
             pending: HashMap::new(),
+            secret_writes: HashMap::new(),
             saves: HashMap::new(),
+            saving: HashMap::new(),
+            save_queued: HashSet::new(),
+            conflicts: HashSet::new(),
             reopen: HashMap::new(),
             search_provider: None,
+            file_search_provider: None,
             search_session: 0,
             search: None,
             replaces: HashMap::new(),
             replace_writes: HashMap::new(),
             lang: language::LangState::default(),
             webviews: crate::webview::Webviews::new(),
+            debug: crate::debugger::DebugState::new(now),
+            storage: crate::storage::ExtensionStorage::default(),
             next_token: 0,
-            next_generation: 0,
             next_editor: 0,
             next_edit_request: 0,
             reply_seq: 0,
             trust: crate::trust::WorkspaceTrust::default(),
             output_seq: 0,
             output_channels: Vec::new(),
+            active_output: None,
+            log_poll: Default::default(),
             pending_messages: HashMap::new(),
             next_message_id: 0,
+            unimplemented: BTreeMap::new(),
             touched: BTreeSet::new(),
             out: Vec::new(),
             now,
@@ -437,13 +558,14 @@ impl SessionCore {
             Input::Close { uri } => self.on_close(&uri),
             Input::Reload { uri } => self.on_reload(uri),
             Input::Focus { uri } => self.on_focus(&uri),
-            Input::Restore { uri, text } => self.on_restore(uri, text),
+            Input::Restore { uri, text, base } => self.on_restore(uri, text, base),
             Input::Widget { uri, generation, event } => self.on_widget(&uri, generation, event),
             Input::TriggerInline { uri, generation, pos } => self.on_trigger_inline(&uri, generation, pos),
             Input::ExtHostRequest(r) => self.on_exthost_request(r),
             Input::RpcReply { token, result } => self.on_rpc_reply(token, result),
             Input::FileRead { uri, purpose, result } => self.on_file_read(uri, purpose, result),
             Input::FileWritten { uri, token, result } => self.on_file_written(&uri, token, result),
+            Input::SaveStale { uri, token } => self.on_save_stale(&uri, token),
             Input::FilesChanged(changes) => self.on_files_changed(changes),
             Input::Highlighted(output) => self.on_highlighted(output),
             Input::ExecuteCommand { id, arguments } => {
@@ -454,8 +576,10 @@ impl SessionCore {
             Input::Replace { id, request } => self.on_replace(id, request),
             Input::SetEol { uri, eol } => self.on_set_eol(&uri, eol),
             Input::SetEncoding { uri, encoding, mode } => self.on_set_encoding(&uri, encoding, mode),
+            Input::SetIndentation { uri, action } => self.on_set_indentation(&uri, action),
             Input::SetLanguage { uri, language_id } => self.on_set_language(&uri, language_id),
             Input::DecideWorkspaceTrust { trusted } => self.on_decide_trust(trusted),
+            Input::ActiveOutputChannel { id } => self.active_output = id,
             Input::AnswerMessage { id, handle } => {
                 if let Some(req) = self.pending_messages.remove(&id) {
                     let reply = match handle { Some(h) => Reply::Json(Value::from(h)), None => Reply::Empty };
@@ -466,6 +590,62 @@ impl SessionCore {
             Input::Webview(event) => {
                 let out = self.webviews.on_event(event);
                 self.apply_webview(out);
+            }
+            Input::SecretState { req, result } => self.on_secret_state_result(req, result),
+            Input::Debug(request) => self.on_debug_request(request),
+            Input::TaskMarkers { owner, entries } => self.on_task_markers(&owner, entries),
+            Input::StorageRead { shared, extension_id, result } => {
+                let next = self.next_token + 1;
+                let outcome = self.storage.on_read_done(self.now, shared, &extension_id, result, || next);
+                for (req, reply) in outcome.replies {
+                    self.respond(req, reply);
+                }
+                if let Some((from, to, key)) = outcome.quarantine {
+                    self.out.push(Effect::QuarantineStorage {
+                        from,
+                        to,
+                        shared: key.shared,
+                        extension_id: key.extension_id,
+                    });
+                }
+                if let Some(write) = outcome.write {
+                    self.next_token = write.token;
+                    self.out.push(Effect::WriteStorage { uri: write.uri, bytes: write.bytes, token: write.token });
+                }
+            }
+            Input::StorageQuarantined { shared, extension_id, result } => {
+                let next = self.next_token + 1;
+                let outcome = self.storage.on_quarantine_done(shared, &extension_id, result, || next);
+                for (req, reply) in outcome.replies {
+                    self.respond(req, reply);
+                }
+                if let Some(write) = outcome.write {
+                    self.next_token = write.token;
+                    self.out.push(Effect::WriteStorage { uri: write.uri, bytes: write.bytes, token: write.token });
+                }
+            }
+            Input::StorageWritten { token, result } => {
+                let next = self.next_token + 1;
+                if let Some(write) = self.storage.on_write_done(self.now, token, result, || next) {
+                    self.next_token = write.token;
+                    self.out.push(Effect::WriteStorage { uri: write.uri, bytes: write.bytes, token: write.token });
+                }
+            }
+            Input::SharedStorageChanged { extension_id, value } => {
+                self.storage.on_external_shared_change(&extension_id, value.clone());
+                let raw = value.as_deref().unwrap_or("{}");
+                self.rpc(ember_editor_conn::exthost::accept_storage_value(true, &extension_id, raw));
+            }
+            Input::SharedStorageReloaded { extension_id, generation, result } => {
+                if let Some(value) = self.storage.on_shared_reload_done(&extension_id, generation, result) {
+                    let raw = value.as_deref().unwrap_or("{}");
+                    self.rpc(ember_editor_conn::exthost::accept_storage_value(true, &extension_id, raw));
+                }
+            }
+            Input::ResyncSharedStorage => {
+                for (uri, extension_id, generation) in self.storage.cached_shared_keys() {
+                    self.out.push(Effect::ReloadSharedStorage { uri, extension_id, generation });
+                }
             }
             Input::Tick => {}
         }
@@ -483,13 +663,25 @@ impl SessionCore {
         self.highlights.set_catalog(catalog);
     }
 
-    /// When [`Input::Tick`] must be delivered next (earliest debounce deadline).
+    /// When [`Input::Tick`] must be delivered next (earliest debounce, log poll, debug, or storage retry deadline).
     pub fn next_wake(&self) -> Option<Instant> {
         let a = self.inline.values().filter_map(|s| s.debounce.deadline());
         let b = self.codelens_due.values().filter_map(|d| d.deadline());
         let c = self.folding_due.values().filter_map(|d| d.deadline());
         let d = self.semantic_due.values().filter_map(|d| d.deadline());
-        a.chain(b).chain(c).chain(d).min()
+        let e = self.log_poll.deadline();
+        let f = self.storage.next_wake();
+        a.chain(b).chain(c).chain(d).chain(e).chain(f).chain(self.debug.next_deadline()).min()
+    }
+
+    /// Whether any extension storage write, retry, or quarantine is still pending.
+    pub fn has_pending_storage_writes(&self) -> bool {
+        self.storage.has_pending_writes()
+    }
+
+    /// Earliest deadline for a pending storage write retry.
+    pub fn storage_next_wake(&self) -> Option<Instant> {
+        self.storage.next_wake()
     }
 
     /// Every known language with its display name (FR-L31.7).
@@ -508,7 +700,10 @@ impl SessionCore {
         self.now = now;
         let key = uri.key();
         if let Some(text) = self.docs.get(&key).map(|d| d.lines().join("\n")) {
-            self.reset_doc(&key, &text, None);
+            // The buffer goes back to the widget as it is. It is not the disk's text, so what the
+            // buffer was based on stays: a dirty document is still dirty afterwards.
+            self.replace_doc(&key, |doc, generation| doc.restore(&text, generation));
+            self.announce_buffer_state(&key);
         }
         self.flush_decorations();
         std::mem::take(&mut self.out)
@@ -543,10 +738,41 @@ impl SessionCore {
         self.out.push(Effect::Ui(u));
     }
 
+    /// The workspace folder: where `.vscode/launch.json` is read and what `${workspaceFolder}`
+    /// stands for. Set once, before the first input.
+    pub fn set_workspace_folder(&mut self, folder: UriComponents) {
+        self.debug.set_workspace(folder);
+    }
+
     /// The trust state the extension host was started with (FR-L31.18); set once, before the
     /// first input.
     pub fn set_workspace_trust(&mut self, trust: crate::trust::WorkspaceTrust) {
         self.trust = trust;
+    }
+
+    /// Configure persistent storage roots for `MainThreadStorage`; without roots, storage stays
+    /// in memory for the lifetime of this core.
+    pub fn set_storage_roots(&mut self, roots: crate::storage::StorageRoots) {
+        self.storage.set_roots(roots);
+    }
+
+    /// Register known extension ids so global storage watch events can map filenames back to them.
+    pub fn register_storage_extensions(&mut self, ids: impl IntoIterator<Item = String>) {
+        for id in ids {
+            self.storage.register_shared_extension(&id);
+        }
+    }
+
+    /// The extension storage state of this session.
+    pub fn storage(&self) -> &crate::storage::ExtensionStorage {
+        &self.storage
+    }
+
+    /// The extension-host requests that fell back to the default reply because no actor trait
+    /// implements them: (proxy, method) to the number of calls. It decides which actor gets
+    /// behaviour next.
+    pub fn unimplemented_calls(&self) -> &BTreeMap<(String, String), u32> {
+        &self.unimplemented
     }
 
     pub fn workspace_trusted(&self) -> bool {
@@ -560,6 +786,29 @@ impl SessionCore {
             let path = doc.uri.path.trim_end_matches('/');
             (path == prefix || path.strip_prefix(prefix).is_some_and(|r| r.starts_with('/'))) && doc.is_dirty()
         })
+    }
+
+    fn on_secret_state_result(&mut self, req: u32, result: Result<crate::secret_state::SecretReply, String>) {
+        use crate::secret_state::SecretReply;
+        let write = self.secret_writes.remove(&req);
+        match result {
+            Ok(SecretReply::Value(Some(value))) => {
+                self.respond(req, Ok(Reply::Json(Value::String(value))));
+            }
+            Ok(SecretReply::Value(None)) => self.respond(req, Ok(Reply::Empty)),
+            Ok(reply @ (SecretReply::Unit | SecretReply::Deleted { .. })) => {
+                self.respond(req, Ok(Reply::Empty));
+                // The secret storage service raises a change only when a stored value changed,
+                // so deleting an entry that did not exist is silent.
+                let changed = !matches!(reply, SecretReply::Deleted { existed: false });
+                if let (true, Some((extension_id, key))) = (changed, write) {
+                    self.rpc(exthost::secret_changed(&extension_id, &key));
+                }
+            }
+            Err(err) => {
+                self.respond(req, Err(Some(js_error("Error", &err))));
+            }
+        }
     }
 
     fn on_decide_trust(&mut self, trusted: bool) {
@@ -603,7 +852,7 @@ impl SessionCore {
     fn emit_folds(&mut self, key: &str) {
         let Some(doc) = self.docs.get(key) else { return };
         let (uri, generation, version) = (doc.uri.clone(), doc.generation(), doc.widget_version());
-        let tab_width = self.indent_for(&doc.language_id).0;
+        let tab_width = doc.indentation().tab_size;
         let folds = self
             .folds
             .entry(key.to_owned())
@@ -678,10 +927,15 @@ impl SessionCore {
                 generation: d.generation(),
                 text: d.widget_text(),
                 language_id: d.language_id.clone(),
-                tab_width: self.indent_for(&d.language_id).0,
+                tab_width: d.indentation().tab_size,
             };
+            let dirty = SessionUpdate::Dirty { uri: d.uri.clone(), dirty: d.is_dirty() };
             self.ui(u);
+            // The window may rebuild its state for the document from `Opened`; say again whether
+            // the buffer is unsaved so it never shows an unsaved buffer as saved.
+            self.ui(dirty);
             self.emit_format(&key);
+            self.emit_indentation(&key);
             self.emit_folds(&key);
             if self.textmate_runs.contains_key(&key) || self.semantic.contains_key(&key) {
                 self.emit_syntax(&key);
@@ -712,7 +966,7 @@ impl SessionCore {
             self.rpc(exthost::accept_documents_and_editors_delta(&delta));
             ext_version = v + 1;
         }
-        self.next_generation += 1;
+        let generation = next_generation();
         self.next_editor += 1;
         let editor_id = format!("ember-editor-{}", self.next_editor);
         let (tab_width, insert_spaces) = self.indent_for(&language);
@@ -723,11 +977,12 @@ impl SessionCore {
             &language,
             &editor_id,
             ext_version,
-            self.next_generation,
+            generation,
             tab_width,
             insert_spaces,
         );
         calls.extend(doc.set_encoding(encoding));
+        doc.note_disk_encoding();
         for c in calls {
             self.rpc(c);
         }
@@ -740,6 +995,7 @@ impl SessionCore {
         });
         self.docs.insert(key.clone(), doc);
         self.emit_format(&key);
+        self.emit_indentation(&key);
         self.folds.insert(key.clone(), DocFolds::default());
         self.emit_folds(&key);
         self.highlight_open(&key);
@@ -750,18 +1006,18 @@ impl SessionCore {
         self.schedule_folding(&key, Duration::ZERO);
         self.schedule_semantic(&key, Duration::ZERO);
         self.touched.insert(key.clone());
-        if let Some(text) = self.restores.remove(&key) {
-            self.restore_doc(&key, &text);
+        if let Some((text, base)) = self.restores.remove(&key) {
+            self.restore_doc(&key, &text, base.as_deref());
         }
     }
 
-    fn on_restore(&mut self, uri: UriComponents, text: String) {
+    fn on_restore(&mut self, uri: UriComponents, text: String, base: Option<String>) {
         let key = uri.key();
         if self.docs.contains_key(&key) {
-            self.restore_doc(&key, &text);
+            self.restore_doc(&key, &text, base.as_deref());
             return;
         }
-        self.restores.insert(key.clone(), text);
+        self.restores.insert(key.clone(), (text, base));
         if self.opening.insert(key) {
             self.out.push(Effect::ReadFile { uri, purpose: ReadPurpose::Open });
         }
@@ -769,22 +1025,57 @@ impl SessionCore {
 
     /// Put `text` (widget form) in the buffer of open document `key` as a new generation and tell the
     /// window whether it is dirty. Text equal to the buffer changes nothing.
-    fn restore_doc(&mut self, key: &str, text: &str) {
+    ///
+    /// `base` is the file text the window's buffer was based on. When the file no longer holds it, the
+    /// file changed while the window was away: a buffer without edits (`text == base`) is not put back,
+    /// the newer file stays; a buffer with edits is put back and the conflict is raised, so a save
+    /// cannot overwrite the newer file unnoticed.
+    fn restore_doc(&mut self, key: &str, text: &str, base: Option<&str>) {
         let normalized = text.replace("\r\n", "\n");
-        match self.docs.get(key) {
-            Some(doc) if doc.widget_text() != normalized => {}
-            _ => return,
+        let Some(doc) = self.docs.get(key) else { return };
+        let disk = doc.disk_widget_text();
+        let mut conflict = false;
+        if let Some(base) = base.map(|b| b.replace("\r\n", "\n")) {
+            if disk != base {
+                if normalized == base {
+                    return;
+                }
+                conflict = normalized != disk;
+            }
         }
-        self.replace_doc(key, |doc, generation| doc.restore(&normalized, generation));
-        if let Some(doc) = self.docs.get(key) {
-            let (uri, dirty) = (doc.uri.clone(), doc.is_dirty());
-            self.ui(SessionUpdate::Dirty { uri, dirty });
+        if doc.widget_text() != normalized {
+            self.replace_doc(key, |doc, generation| doc.restore(&normalized, generation));
+            self.announce_buffer_state(key);
         }
+        if conflict {
+            self.raise_conflict(key);
+        }
+    }
+
+    /// Tell the window whether the buffer is dirty, and show again the conflict bar a new widget node
+    /// would have dropped.
+    fn announce_buffer_state(&mut self, key: &str) {
+        let Some(doc) = self.docs.get(key) else { return };
+        let (uri, dirty) = (doc.uri.clone(), doc.is_dirty());
+        self.ui(SessionUpdate::Dirty { uri, dirty });
+        if self.conflicts.contains(key) {
+            self.raise_conflict(key);
+        }
+    }
+
+    /// The file changed on disk behind a buffer that must not be replaced: the window asks the user.
+    fn raise_conflict(&mut self, key: &str) {
+        let Some(doc) = self.docs.get(key) else { return };
+        let uri = doc.uri.clone();
+        self.conflicts.insert(key.to_owned());
+        self.ui(SessionUpdate::ExternalChange { uri, change: ExternalChange::ChangedWhileDirty });
     }
 
     fn on_close(&mut self, uri: &UriComponents) {
         let key = uri.key();
         self.restores.remove(&key);
+        self.save_queued.remove(&key);
+        self.conflicts.remove(&key);
         self.language_close(&key);
         let Some(doc) = self.docs.remove(&key) else { return };
         self.rpc(doc.remove_call());
@@ -874,6 +1165,8 @@ impl SessionCore {
             WidgetEvent::CodeChanged { version, range, text } => self.on_code_changed(&key, version, range, &text),
             WidgetEvent::CodeEditRejected { request_id, base_version, current_version, .. } => {
                 tracing::debug!("ember-editor: EditCode {request_id} on {key} rejected (base {base_version}, now {current_version})");
+                let detail = format!("edit {request_id} was not applied: the text changed there (version {base_version}, now {current_version})");
+                self.ui(SessionUpdate::FileNotice { uri: Some(uri.clone()), kind: FileNoticeKind::EditRejected, detail });
             }
             WidgetEvent::CodeHovered { decoration, pos, phase } => match phase {
                 crate::widget::HoverPhase::Rest => self.on_hover_rest(&key, decoration, pos),
@@ -1029,6 +1322,51 @@ impl SessionCore {
         self.ui(SessionUpdate::Format { uri, format });
     }
 
+    fn emit_indentation(&mut self, key: &str) {
+        let Some(doc) = self.docs.get(key) else { return };
+        let (uri, indentation) = (doc.uri.clone(), doc.indentation());
+        self.ui(SessionUpdate::Indentation { uri, indentation });
+    }
+
+    /// One choice of the indentation pick (Code-OSS `indentation.ts`): the document's options change,
+    /// the extension host is told, and a conversion edits the widget's text like any other edit (the
+    /// widget answers with `CodeChanged`, which makes the document dirty and undoable).
+    fn on_set_indentation(&mut self, uri: &UriComponents, action: crate::indentation::IndentationAction) {
+        use crate::indentation::{convert_indentation_edits, guess_indentation, trim_trailing_whitespace_edits, Indentation, IndentationAction};
+        let key = uri.key();
+        let Some(doc) = self.docs.get(&key) else { return };
+        let current = doc.indentation();
+        let next = match action {
+            IndentationAction::IndentUsing { insert_spaces, size } => Indentation { tab_size: size, indent_size: size, insert_spaces },
+            IndentationAction::DisplaySize(size) => Indentation { tab_size: size, ..current },
+            IndentationAction::Detect => {
+                // The defaults are the ones a document of this language opens with.
+                let (default_size, default_spaces) = self.indent_for(&doc.language_id);
+                let (size, insert_spaces) = guess_indentation(doc.lines(), default_size, default_spaces);
+                Indentation::new(size, insert_spaces)
+            }
+            IndentationAction::Convert { to_spaces } => {
+                let edits = convert_indentation_edits(doc.lines(), current.tab_size, to_spaces);
+                let (uri, version) = (doc.uri.clone(), doc.widget_version());
+                self.lang_edit_widget(&uri, version, &edits);
+                Indentation { insert_spaces: to_spaces, ..current }
+            }
+            IndentationAction::TrimTrailingWhitespace => {
+                let edits = trim_trailing_whitespace_edits(doc.lines());
+                let (uri, version) = (doc.uri.clone(), doc.widget_version());
+                self.lang_edit_widget(&uri, version, &edits);
+                current
+            }
+        };
+        let Some(doc) = self.docs.get_mut(&key) else { return };
+        let Some(call) = doc.set_indentation(next) else { return };
+        self.rpc(call);
+        self.emit_indentation(&key);
+        if next.tab_size != current.tab_size {
+            self.emit_folds(&key);
+        }
+    }
+
     /// Code-OSS `ChangeEOLAction`: `pushEOL` on the model, which the extension host gets as a
     /// content change with `isEolChange`; the document is dirty after it.
     fn on_set_eol(&mut self, uri: &UriComponents, eol: Eol) {
@@ -1101,15 +1439,9 @@ impl SessionCore {
 
     /// `MainThreadLanguages.$changeLanguage(resource, languageId)` (`languages.setTextDocumentLanguage`):
     /// refused for an id no extension contributes, as Code-OSS does.
-    fn on_change_language_request(&mut self, r: &IncomingRequest) {
-        let uri: Option<UriComponents> = r.args.first().and_then(Arg::as_json).and_then(|v| serde_json::from_value(v.clone()).ok());
-        let id = r.args.get(1).and_then(Arg::as_json).and_then(Value::as_str).map(str::to_owned);
-        let (Some(uri), Some(id)) = (uri, id) else {
-            self.respond(r.req, Err(Some(js_error("Error", "bad arguments"))));
-            return;
-        };
-        if !self.language_ids.iter().any(|l| *l == id) {
-            self.respond(r.req, Err(Some(js_error("Error", &format!("Unknown language id: {id}")))));
+    fn on_change_language_request(&mut self, req: u32, uri: UriComponents, id: String) {
+        if !self.language_ids.contains(&id) {
+            self.respond(req, Err(Some(js_error("Error", &format!("Unknown language id: {id}")))));
             return;
         }
         let key = uri.key();
@@ -1119,18 +1451,44 @@ impl SessionCore {
             self.rpc(exthost::activate_by_event(&format!("onLanguage:{id}")));
             self.rpc(exthost::accept_model_language_changed(&u, &id));
         }
-        self.respond(r.req, Ok(Reply::Empty));
+        self.respond(req, Ok(Reply::Empty));
     }
 
     // ---- save ---------------------------------------------------------------------------------
 
+    /// Save document `key`. One write per document is in flight at a time: a request made meanwhile is
+    /// run when that write is done, with the text the document has then.
     fn on_save(&mut self, key: &str) {
+        if !self.docs.contains_key(key) {
+            return;
+        }
+        if self.saving.contains_key(key) {
+            self.save_queued.insert(key.to_owned());
+            return;
+        }
+        self.start_save(key);
+    }
+
+    fn start_save(&mut self, key: &str) {
         let Some(doc) = self.docs.get(key) else { return };
         let bytes = doc.save_bytes();
+        // Once the user has been told that the file changed, a save is their choice to overwrite it.
+        let expect = if self.conflicts.contains(key) { None } else { Some(doc.disk_base()) };
         let (uri, ext_version) = (doc.uri.clone(), doc.ext_version());
         let t = self.token();
         self.saves.insert(t, (key.to_owned(), ext_version, bytes.clone()));
-        self.out.push(Effect::WriteFile { uri, bytes, token: t });
+        self.saving.insert(key.to_owned(), t);
+        self.out.push(Effect::WriteFile { uri, bytes, token: t, expect });
+    }
+
+    /// The write of `token` ended: the next save asked for meanwhile can start.
+    fn save_ended(&mut self, key: &str, token: Token) {
+        if self.saving.get(key) == Some(&token) {
+            self.saving.remove(key);
+        }
+        if self.save_queued.remove(key) {
+            self.on_save(key);
+        }
     }
 
     fn on_file_written(&mut self, uri: &UriComponents, token: Token, result: Result<(), String>) {
@@ -1144,18 +1502,38 @@ impl SessionCore {
         let Some((key, ext_version, bytes)) = self.saves.remove(&token) else { return };
         match result {
             Ok(()) => {
-                let Some(doc) = self.docs.get_mut(&key) else { return };
-                let calls = doc.saved(ext_version, &bytes);
-                let dirty = doc.is_dirty();
-                for c in calls {
-                    self.rpc(c);
+                if let Some(doc) = self.docs.get_mut(&key) {
+                    let calls = doc.saved(ext_version, &bytes);
+                    let dirty = doc.is_dirty();
+                    for c in calls {
+                        self.rpc(c);
+                    }
+                    self.conflicts.remove(&key);
+                    self.ui(SessionUpdate::Saved { uri: uri.clone() });
+                    self.ui(SessionUpdate::Dirty { uri: uri.clone(), dirty });
+                    self.send_tab_model();
                 }
-                self.ui(SessionUpdate::Saved { uri: uri.clone() });
-                self.ui(SessionUpdate::Dirty { uri: uri.clone(), dirty });
-                self.send_tab_model();
             }
             Err(error) => self.ui(SessionUpdate::SaveFailed { uri: uri.clone(), error }),
         }
+        self.save_ended(&key, token);
+    }
+
+    /// The file no longer holds what the buffer was based on, so the save was not written. The window
+    /// gets the conflict (reload or overwrite is the user's choice) and the failed save.
+    fn on_save_stale(&mut self, uri: &UriComponents, token: Token) {
+        let Some((key, _, _)) = self.saves.remove(&token) else { return };
+        // A save queued behind this one would overwrite what this one refused to.
+        self.save_queued.remove(&key);
+        self.save_ended(&key, token);
+        if !self.docs.contains_key(&key) {
+            return;
+        }
+        self.raise_conflict(&key);
+        self.ui(SessionUpdate::SaveFailed {
+            uri: uri.clone(),
+            error: "the file changed on disk after it was opened or last saved, so nothing was written".to_owned(),
+        });
     }
 
     // ---- decoration activation / commands -----------------------------------------------------
@@ -1539,137 +1917,7 @@ impl SessionCore {
                 }
             }
         }
-        let parsed = MainThreadCall::parse(&r);
-        match parsed {
-            Ok(MainThreadCall::DiagnosticsChangeMany { owner, entries }) => {
-                let keys = self.diagnostics.change_many(&owner, entries);
-                self.touched.extend(keys);
-                self.ui(SessionUpdate::Problems { problems: self.diagnostics.problems() });
-                self.respond(r.req, Ok(Reply::Empty));
-            }
-            Ok(MainThreadCall::DiagnosticsClear { owner }) => {
-                let keys = self.diagnostics.clear(&owner);
-                self.touched.extend(keys);
-                self.ui(SessionUpdate::Problems { problems: self.diagnostics.problems() });
-                self.respond(r.req, Ok(Reply::Empty));
-            }
-            Ok(MainThreadCall::ExecuteCommand { id, args }) => {
-                // The extension host runs its own commands locally; what reaches us is a workbench
-                // command. `setContext` (context keys) is a no-op for Ember for now.
-                if id != "setContext" && !self.registry.has_command(&id) {
-                    let arguments = match args {
-                        Value::Array(a) => a,
-                        Value::Null => Vec::new(),
-                        other => vec![other],
-                    };
-                    self.ui(SessionUpdate::RunCommand { command: CommandDto { id, title: String::new(), tooltip: None, arguments } });
-                }
-                self.respond(r.req, Ok(Reply::Empty));
-            }
-            Ok(MainThreadCall::OutputRegister { label, .. }) => {
-                self.output_seq += 1;
-                let id = format!("ember-output-{}", self.output_seq);
-                self.output_channels.push(crate::output::OutputChannel::new(id.clone(), label));
-                self.ui(SessionUpdate::OutputChannels {
-                    channels: self.output_channels.clone(),
-                    active_id: Some(id.clone()),
-                });
-                self.respond(r.req, Ok(Reply::Json(serde_json::json!(id))));
-            }
-            Ok(MainThreadCall::OutputAppend { channel_id, value }) => {
-                if let Some(ch) = self.output_channels.iter_mut().find(|c| c.id == channel_id) {
-                    ch.append(&value);
-                    self.ui(SessionUpdate::OutputChannels {
-                        channels: self.output_channels.clone(),
-                        active_id: None,
-                    });
-                }
-                self.respond(r.req, Ok(Reply::Empty));
-            }
-            Ok(MainThreadCall::OutputUpdate { .. }) => {
-                self.respond(r.req, Ok(Reply::Empty));
-            }
-            Ok(MainThreadCall::OutputClear { channel_id, .. }) => {
-                if let Some(ch) = self.output_channels.iter_mut().find(|c| c.id == channel_id) {
-                    ch.clear();
-                    self.ui(SessionUpdate::OutputChannels {
-                        channels: self.output_channels.clone(),
-                        active_id: None,
-                    });
-                }
-                self.respond(r.req, Ok(Reply::Empty));
-            }
-            Ok(MainThreadCall::OutputReveal { channel_id, .. }) => {
-                self.ui(SessionUpdate::OutputChannels {
-                    channels: self.output_channels.clone(),
-                    active_id: Some(channel_id),
-                });
-                self.respond(r.req, Ok(Reply::Empty));
-            }
-            Ok(MainThreadCall::OutputDispose { channel_id }) => {
-                self.output_channels.retain(|c| c.id != channel_id);
-                self.ui(SessionUpdate::OutputChannels {
-                    channels: self.output_channels.clone(),
-                    active_id: None,
-                });
-                self.respond(r.req, Ok(Reply::Empty));
-            }
-            Ok(MainThreadCall::ShowMessage { severity, message, options, commands }) => {
-                // Code-OSS answers when the notification closes: the chosen button's handle, or
-                // `undefined`. The call stays open until the UI says (FR-L31.16).
-                self.next_message_id += 1;
-                let id = self.next_message_id;
-                self.pending_messages.insert(id, r.req);
-                self.ui(SessionUpdate::ExtensionMessage(crate::output::ExtensionMessage::from_show_message(
-                    id, severity, message, &options, &commands,
-                )));
-            }
-            Ok(MainThreadCall::RegisterTextSearchProvider { handle, scheme }) => {
-                // The remote scheme wins over `file` should both ever be registered.
-                if scheme == ember_editor_conn::uri::SCHEME_REMOTE || (scheme == "file" && self.search_provider.is_none()) {
-                    self.search_provider = Some(handle);
-                }
-                self.respond(r.req, Ok(Reply::Empty));
-            }
-            Ok(MainThreadCall::UnregisterSearchProvider { handle }) => {
-                if self.search_provider == Some(handle) {
-                    self.search_provider = None;
-                }
-                self.respond(r.req, Ok(Reply::Empty));
-            }
-            Ok(MainThreadCall::HandleTextMatch { session, matches, .. }) => {
-                self.respond(r.req, Ok(Reply::Empty));
-                self.on_text_matches(session, matches);
-            }
-            Ok(MainThreadCall::Other { proxy: Some("MainThreadDocuments"), method }) if method == "$tryOpenDocument" => {
-                self.on_try_open_document(&r);
-            }
-            Ok(MainThreadCall::Other { proxy: Some("MainThreadLanguages"), method }) if method == "$changeLanguage" => {
-                self.on_change_language_request(&r);
-            }
-            Ok(MainThreadCall::Other { proxy: Some("MainThreadBulkEdits"), method }) if method == "$tryApplyWorkspaceEdit" => {
-                self.on_try_apply_workspace_edit(&r);
-            }
-            Ok(MainThreadCall::Other { proxy, method }) => match self.trust.on_request(proxy, &method, r.req) {
-                // Workspace trust (FR-L31.18).
-                Some(crate::trust::TrustAnswer::Now(reply)) => self.respond(r.req, Ok(reply)),
-                Some(crate::trust::TrustAnswer::Ask) => self.out.push(Effect::Ui(SessionUpdate::WorkspaceTrustRequested)),
-                None => {
-                    let reply = session_reply(proxy, &method, self.reply_seq, &self.language_ids);
-                    self.respond(r.req, Ok(reply));
-                }
-            },
-            Ok(call) => {
-                let change = self.registry.apply(&call);
-                self.on_registry_change(change);
-                self.respond(r.req, Ok(Reply::Empty));
-            }
-            Err(e) => {
-                tracing::warn!("ember-editor: cannot decode {:?}.{}: {e}", r.proxy, r.method);
-                let reply = session_reply(r.proxy, &r.method, self.reply_seq, &self.language_ids);
-                self.respond(r.req, Ok(reply));
-            }
-        }
+        self.route_exthost_request(r);
     }
 
     fn on_registry_change(&mut self, change: RegistryChange) {
@@ -1739,17 +1987,12 @@ impl SessionCore {
     }
 
     /// `$tryOpenDocument(uri, options?)` → the URI once the document is in the extension host.
-    fn on_try_open_document(&mut self, r: &IncomingRequest) {
-        let uri: Option<UriComponents> = r.args.first().and_then(Arg::as_json).and_then(|v| serde_json::from_value(v.clone()).ok());
-        let Some(uri) = uri else {
-            self.respond(r.req, Err(Some(js_error("Error", "bad uri"))));
-            return;
-        };
+    fn on_try_open_document(&mut self, req: u32, uri: UriComponents) {
         let key = uri.key();
         if self.docs.contains_key(&key) || self.exthost_only.contains_key(&key) {
-            self.respond(r.req, Ok(Reply::Json(serde_json::to_value(&uri).unwrap_or(Value::Null))));
+            self.respond(req, Ok(Reply::Json(serde_json::to_value(&uri).unwrap_or(Value::Null))));
         } else {
-            self.out.push(Effect::ReadFile { uri, purpose: ReadPurpose::ExtHostOpen { req: r.req } });
+            self.out.push(Effect::ReadFile { uri, purpose: ReadPurpose::ExtHostOpen { req } });
         }
     }
 
@@ -1816,11 +2059,13 @@ impl SessionCore {
                 }
             }
             Pending::Search { id } => self.on_search_reply(id, result),
+            Pending::CheckExists { req } => self.on_check_exists_reply(req, result),
             Pending::Language(pending) => self.on_language_reply(token, pending, result),
             Pending::Webview(pending) => {
                 let out = self.webviews.on_reply(pending, result);
                 self.apply_webview(out);
             }
+            Pending::Debug(pending) => self.on_debug_reply(pending, result),
         }
     }
 
@@ -1863,6 +2108,10 @@ impl SessionCore {
                         // put back over an empty document marked deleted, so the edits stay and a save writes
                         // the file again.
                         if self.restores.contains_key(&key) && is_missing_file(&error) {
+                            // There is no file to compare with: the buffer goes back as it is.
+                            if let Some(restore) = self.restores.get_mut(&key) {
+                                restore.1 = None;
+                            }
                             self.finish_open(uri.clone(), Vec::new());
                             if self.docs.contains_key(&key) {
                                 self.ui(SessionUpdate::ExternalChange { uri, change: ExternalChange::Deleted });
@@ -1878,20 +2127,24 @@ impl SessionCore {
             }
             ReadPurpose::Reload => {
                 let key = uri.key();
-                let Ok(bytes) = result else { return };
                 let Some(doc) = self.docs.get(&key) else { return };
-                let (text, encoding) = match decode_reload(&bytes, doc.encoding()) {
+                let (text, encoding) = match result.map_err(|e| e.to_string()).and_then(|bytes| decode_reload(&bytes, doc.encoding()).map_err(|e| e.to_string())) {
                     Ok(t) => t,
-                    Err(_) => return,
+                    Err(detail) => {
+                        // The buffer may be behind the file now: say so, a save would overwrite the change.
+                        let uri = doc.uri.clone();
+                        self.ui(SessionUpdate::FileNotice { uri: Some(uri), kind: FileNoticeKind::ReloadFailed, detail });
+                        return;
+                    }
                 };
                 if doc.matches_disk(&text) || doc.matches_buffer(&text) {
                     return; // our own save, or nothing new
                 }
                 if doc.is_dirty() {
-                    let uri = doc.uri.clone();
-                    self.ui(SessionUpdate::ExternalChange { uri, change: ExternalChange::ChangedWhileDirty });
+                    self.raise_conflict(&key);
                     return;
                 }
+                self.conflicts.remove(&key);
                 self.reset_doc(&key, &text, Some(encoding));
             }
             ReadPurpose::ForceReload => {
@@ -1921,10 +2174,12 @@ impl SessionCore {
                         return;
                     }
                 };
+                self.conflicts.remove(&key);
                 self.reset_doc(&key, &text, Some(encoding));
                 self.ui(SessionUpdate::Dirty { uri, dirty: false });
             }
             ReadPurpose::ExtHostOpen { req } => self.finish_exthost_open(uri, req, result),
+            ReadPurpose::OutputChannel { id } => self.finish_output_read(&id, result),
             ReadPurpose::Grammar { scope } => self.on_grammar_read(&scope, &uri, result),
             ReadPurpose::Replace { id } => self.on_replace_read(id, uri, result),
             ReadPurpose::WorkspaceEdit { id } => self.on_workspace_edit_read(id, uri, result),
@@ -1932,6 +2187,7 @@ impl SessionCore {
                 let out = self.webviews.on_resource_read(handle, request, &uri, result);
                 self.apply_webview(out);
             }
+            ReadPurpose::LaunchJson { start } => self.on_launch_json_read(start, result),
         }
     }
 
@@ -2010,6 +2266,18 @@ impl SessionCore {
         self.ui(SessionUpdate::SearchDone { id, end });
     }
 
+    /// The provider's answer to the file search of a `$checkExists` request (Code-OSS
+    /// `checkGlobFileExists`): `limitHit` means a file matched. A cancelled search is `false`; any
+    /// other failure rejects the request, as Code-OSS passes the search error on.
+    fn on_check_exists_reply(&mut self, req: u32, result: Result<Value, String>) {
+        let reply = match result {
+            Ok(v) => Ok(Reply::Json(Value::Bool(ember_editor_conn::search::SearchComplete::from_json(&v).limit_hit))),
+            Err(e) if e.contains("Canceled") => Ok(Reply::Json(Value::Bool(false))),
+            Err(e) => Err(Some(js_error("Error", &e))),
+        };
+        self.respond(req, reply);
+    }
+
     fn on_replace(&mut self, id: u64, request: ReplaceRequest) {
         let mut targets: HashMap<String, Vec<Target>> = HashMap::new();
         let mut uris: Vec<UriComponents> = Vec::new();
@@ -2081,7 +2349,7 @@ impl SessionCore {
                 let token = self.token();
                 let write = ReplaceWrite { id, key, replaced: r.replaced, skipped: r.skipped, open: open.map(|v| (v, r.text)) };
                 self.replace_writes.insert(token, write);
-                self.out.push(Effect::WriteFile { uri, bytes, token });
+                self.out.push(Effect::WriteFile { uri, bytes, token, expect: None });
             }
             Err(e) => self.replace_file_failed(id, &uri, e),
         }
@@ -2228,7 +2496,14 @@ impl SessionCore {
     }
 
     fn on_files_changed(&mut self, changes: Vec<FileChange>) {
+        let mut reload_shared: HashSet<String> = HashSet::new();
         for c in changes {
+            if let Some((uri, extension_id, generation)) = self.storage.shared_extension_for_path(&c.resource.path) {
+                if reload_shared.insert(extension_id.clone()) {
+                    self.out.push(Effect::ReloadSharedStorage { uri, extension_id, generation });
+                }
+                continue;
+            }
             // Match by path: the server's URI transformer decides the authority it sends back.
             let Some(uri) = self.docs.values().find(|d| d.uri.path == c.resource.path).map(|d| d.uri.clone()) else { continue };
             match c.kind {
@@ -2252,8 +2527,7 @@ impl SessionCore {
     /// Replace a document's content with what `replace` puts in it, as a new widget generation: the
     /// extension host is re-announced, the overlays of the old text end, and the widget gets `SetText`.
     fn replace_doc(&mut self, key: &str, replace: impl FnOnce(&mut OpenDocument, u64) -> Vec<Call>) {
-        self.next_generation += 1;
-        let generation = self.next_generation;
+        let generation = next_generation();
         let Some(doc) = self.docs.get_mut(key) else { return };
         let calls = replace(doc, generation);
         let (uri, widget_text) = (doc.uri.clone(), doc.widget_text());
@@ -2308,6 +2582,9 @@ impl SessionCore {
 
     fn run_timers(&mut self) {
         let now = self.now;
+        if self.log_poll.take_due(now) {
+            self.poll_log_channel();
+        }
         let due_inline: Vec<String> =
             self.inline.iter_mut().filter_map(|(k, s)| s.debounce.take_due(now).then(|| k.clone())).collect();
         for k in due_inline {
@@ -2328,6 +2605,23 @@ impl SessionCore {
         for k in due_sem {
             self.fire_semantic(&k);
         }
+        let mut next_tok = self.next_token;
+        let tick = self.storage.on_tick(now, || {
+            next_tok += 1;
+            next_tok
+        });
+        self.next_token = next_tok;
+        for write in tick.writes {
+            self.out.push(Effect::WriteStorage { uri: write.uri, bytes: write.bytes, token: write.token });
+        }
+        for read in tick.reads {
+            self.out.push(Effect::ReadStorage {
+                uri: read.uri,
+                shared: read.key.shared,
+                extension_id: read.key.extension_id,
+            });
+        }
+        self.debug_tick();
     }
 
     /// The `Decorations` prop of every document whose decorations may have changed.

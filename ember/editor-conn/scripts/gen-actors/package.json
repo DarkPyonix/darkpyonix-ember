@@ -1,0 +1,9 @@
+{
+  "name": "ember-editor-conn-gen-actors",
+  "private": true,
+  "description": "Generates ember/editor-conn/src/actors/generated.rs from extHost.protocol.ts",
+  "type": "module",
+  "devDependencies": {
+    "typescript": "5.9.2"
+  }
+}

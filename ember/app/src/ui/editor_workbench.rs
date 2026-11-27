@@ -1,7 +1,8 @@
 //! Remote editor workbench.
 use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
+use dioxus_compose::html::prelude::dioxus_elements::{MountedData, ScrollBehavior};
 use dioxus_compose::prelude::*;
-use ember_editor::{BridgeAction, WidgetBridge, WidgetPos, WidgetRange};
+use ember_editor::{BridgeAction, WidgetBridge, WidgetEvent, WidgetPos, WidgetRange};
 use ember_editor::widget::HoverPhase as EditorHoverPhase;
 use crate::editor_host::{EditorHost, HostCommand};
 use super::{editor::{EditorTarget, EditorTabs, Stripes, base_name, position_text}, keymap::Keymap, workbench};
@@ -47,11 +48,44 @@ pub struct PendingGoto {
     pub col: u32,
 }
 
+#[derive(Default)]
+struct PickerScroll {
+    rows: HashMap<usize, Rc<MountedData>>,
+    mode: Option<crate::ui::palette::Mode>,
+    selected: Option<usize>,
+}
+
+impl PickerScroll {
+    fn select(&mut self, mode: crate::ui::palette::Mode, count: usize, row: usize) {
+        if self.mode != Some(mode) {
+            *self = Self { mode: Some(mode), ..Self::default() };
+        }
+        self.rows.retain(|&index, _| index < count);
+        let selected = (count > 0).then_some(row);
+        if self.selected != selected {
+            self.selected = selected;
+            if let Some(data) = selected.and_then(|index| self.rows.get(&index)) {
+                drop(data.scroll_to(ScrollBehavior::Instant));
+            }
+        }
+    }
+
+    fn mounted(&mut self, row: usize, data: Rc<MountedData>) {
+        if self.selected == Some(row) {
+            drop(data.scroll_to(ScrollBehavior::Instant));
+        }
+        self.rows.insert(row, data);
+    }
+}
+
 #[derive(Clone)]
 pub struct Shared {
     pub host: EditorHost,
     pub bridge: Rc<RefCell<WidgetBridge>>,
     pub revision: SyncSignal<u64>,
+    pub(crate) debug: Signal<super::editor_debug::DebugControls>,
+    /// Run and Debug and the debug console (FR-L31.42).
+    pub(crate) debug_view: Signal<super::editor_debug_view::DebugView>,
     pub tabs: Signal<EditorTabs>,
     pub directory: Signal<String>,
     pub expanded: Signal<std::collections::HashSet<String>>,
@@ -68,6 +102,7 @@ pub struct Shared {
     pub palette_mode: Signal<crate::ui::palette::Mode>,
     pub palette_query: Signal<String>,
     pub palette_sel: Signal<usize>,
+    picker_scroll: Rc<RefCell<PickerScroll>>,
     pub recent_files: Signal<Vec<String>>,
     pub theme: Signal<crate::ui::theme::ThemePref>,
     pub position: Signal<(usize, usize)>,
@@ -77,10 +112,15 @@ pub struct Shared {
     pub tab_menu: Signal<Option<(String, f64, f64)>>,
     /// The unsaved-changes question on a close, while it is open (FR-L31.5).
     pub close_confirm: Signal<Option<crate::ui::editor::CloseRequest>>,
+    /// Pending multi-line paste waiting for confirmation in the editor terminal (FR-L31.21).
+    pub term_paste_confirm: Signal<crate::terminal_input::PendingPaste>,
     pub keymap: Signal<Keymap>,
     pub folder: String,
     pub server_url: String,
     pub computer: String,
+    /// What `VS Code에서 열기` opens on a fallback (SPEC FR-E10): the VS Code target's relay
+    /// launch, or an old server's URL. `None` when the target offers neither.
+    pub vscode: Option<crate::ide::VsCodeFallback>,
     pub project: String,
     pub project_name: String,
     pub uris: Rc<RefCell<HashMap<String, ember_editor_conn::uri::UriComponents>>>,
@@ -117,6 +157,61 @@ pub(crate) fn now_ms() -> u64 {
 
 thread_local! { static ICON_DARK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 thread_local! { static MODIFIER_CLICK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+/// The hover card's anchor (SPEC FR-E3, #32 phase A step 7): the hover it was asked for (document
+/// generation, line, column) and the rectangle the editor answered for that position, in the
+/// window's dp. Asked once per hover; the card is drawn only while the answer matches the hover.
+thread_local! {
+    /// The code editor last drawn, as (view, document key, generation): a draw of any other editor is a mount.
+    /// The view tells the tab's pane from the compare view's editable side: both key their editor by the
+    /// document's generation, but each is its own widget with its own version count.
+    static MOUNTED: RefCell<Option<(&'static str, String, u64)>> = const { RefCell::new(None) };
+}
+/// The editor pane's name in `MOUNTED`.
+const PANE_VIEW: &str = "pane";
+/// The pane drew the code editor of `uri` with node key `generation`. Tells the bridge once per mount:
+/// a new editor counts versions from 0 while the session keeps its own count. A re-render of the same
+/// editor is not a mount. Returns whether it was reported.
+fn report_mount(s: &Shared, uri: &ember_editor_conn::uri::UriComponents, generation: u64) -> bool {
+    report_view_mount(s, uri, generation, PANE_VIEW)
+}
+/// `report_mount` for the editor of `view` (the pane, or the compare view's editable side).
+pub(crate) fn report_view_mount(s: &Shared, uri: &ember_editor_conn::uri::UriComponents, generation: u64, view: &'static str) -> bool {
+    let now = (view, uri.key(), generation);
+    if MOUNTED.with(|m| m.borrow().as_ref() == Some(&now)) {
+        return false;
+    }
+    MOUNTED.with(|m| *m.borrow_mut() = Some(now));
+    s.bridge.borrow_mut().on_widget_mounted(uri, generation);
+    true
+}
+/// The pane has no editor on screen, so the next one it draws is a mount.
+fn forget_mount() {
+    forget_view_mount(PANE_VIEW);
+}
+/// `view` has no editor on screen. Another view's mount stays recorded: that editor is still the one on
+/// screen, and reporting it again would reset its version count under it.
+pub(crate) fn forget_view_mount(view: &'static str) {
+    MOUNTED.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.as_ref().is_some_and(|(v, _, _)| *v == view) {
+            *m = None;
+        }
+    });
+}
+/// Held by a view's scope: when the view goes (a compare view or another kind of tab covers the pane) its
+/// editor goes with it, so the next one is a mount even for the same document.
+pub(crate) struct MountGuard(pub(crate) &'static str);
+impl Drop for MountGuard {
+    fn drop(&mut self) { forget_view_mount(self.0); }
+}
+thread_local! { static HOVER_ASKED: std::cell::Cell<Option<(u64, u32, u32)>> = const { std::cell::Cell::new(None) }; }
+thread_local! { static HOVER_RECT: std::cell::Cell<Option<((u64, u32, u32), compose_rust::code::CodeRect)>> = const { std::cell::Cell::new(None) }; }
+
+/// Record where the editor draws the hovered position (the answer to `query_position_rect`).
+pub(crate) fn set_hover_rect(key: (u64, u32, u32), rect: Option<compose_rust::code::CodeRect>) {
+    HOVER_RECT.with(|cell| cell.set(rect.map(|r| (key, r))));
+}
+
 thread_local! { static SHARED: RefCell<Option<Shared>> = const { RefCell::new(None) }; }
 pub(crate) fn shared() -> Shared { SHARED.with(|s| s.borrow().as_ref().expect("workbench initialized").clone()) }
 
@@ -126,6 +221,12 @@ fn init(target: EditorTarget) {
     let root = dioxus_compose::html::prelude::dioxus_core::ScopeId::ROOT;
     let revision = use_hook(|| SyncSignal::<u64>::new_maybe_sync_in_scope(0, root));
     let host = use_hook(|| EditorHost::start(target.clone(), revision));
+    let debug = use_hook(|| Signal::new_in_scope(super::editor_debug::DebugControls::default(), root));
+    // The watch expressions the workspace kept when it last closed (FR-L31.42, Code-OSS `DebugStorage`).
+    let debug_view = use_hook(|| {
+        let kept = crate::services::services().ui.prefs.get_untracked().debug_store(&target.computer, &target.folder);
+        Signal::new_in_scope(super::editor_debug_view::DebugView::with_watches(&kept.watch_expressions), root)
+    });
     let tabs = use_hook(|| Signal::new_in_scope(EditorTabs::default(), root));
     let directory = use_hook(|| Signal::new_in_scope(target.folder.clone(), root));
     let expanded = use_hook(|| Signal::new_in_scope(std::collections::HashSet::<String>::new(), root));
@@ -155,13 +256,15 @@ fn init(target: EditorTarget) {
     let palette_mode = use_hook(|| Signal::new_in_scope(crate::ui::palette::Mode::Commands, root));
     let palette_query = use_hook(|| Signal::new_in_scope(String::new(), root));
     let palette_sel = use_hook(|| Signal::new_in_scope(0usize, root));
+    let picker_scroll = use_hook(|| Rc::new(RefCell::new(PickerScroll::default())));
     let recent_files = use_hook(|| Signal::new_in_scope(Vec::<String>::new(), root));
     let prompt_at = use_hook(|| Signal::new_in_scope(0u64, root));
     let prompt_text = use_hook(|| Signal::new_in_scope(String::new(), root));
     let bottom_max = use_hook(|| Signal::new_in_scope(false, root));
     let position = use_hook(|| Signal::new_in_scope((1, 1), root));
     let stripes = use_hook(|| {
-        let mut initial = Stripes::default();
+        // FR-L31.41: a window 900 px wide or less opens with the left tool window closed.
+        let mut initial = Stripes::opening(crate::ui::window_size::window_size_untracked().width_dp);
         // Debug capture hook: start with the 확장 window showing (FR-L31.14).
         if crate::ui::editor_extensions::capture_hook().is_some() {
             initial.toggle(crate::ui::editor::ToolWindow::Extensions);
@@ -171,6 +274,7 @@ fn init(target: EditorTarget) {
     let menu_open = use_hook(|| Signal::new_in_scope(false, root));
     let tab_menu = use_hook(|| Signal::new_in_scope(None::<(String, f64, f64)>, root));
     let close_confirm = use_hook(|| Signal::new_in_scope(None::<crate::ui::editor::CloseRequest>, root));
+    let term_paste_confirm = use_hook(|| Signal::new_in_scope(crate::terminal_input::PendingPaste::default(), root));
     let keymap = use_hook(|| Signal::new_in_scope(crate::services::services().ui.prefs.get_untracked().keymap, root));
     // The saved zoom (Code-OSS's window.zoomLevel) applies when the window opens (FR-L31.15).
     use_hook(|| compose_rust::zoom::set_zoom_level(crate::services::services().ui.prefs.get_untracked().editor_zoom_level));
@@ -211,7 +315,8 @@ fn init(target: EditorTarget) {
     });
     let extensions = use_hook(|| crate::ui::editor_extensions::Extensions::new(&target.computer, revision));
     let agent = use_hook(|| crate::ui::editor_agent::AgentTool::new(&target.project, &target.folder, revision));
-    SHARED.with(|s| *s.borrow_mut() = Some(Shared { extensions, agent, host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, tree_multi_sel, tree_clipboard, tree_drag_src, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, recent_files, theme, position, stripes, menu_open, tab_menu, close_confirm, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris, open_errors, editor_versions, last_find_cmd, pending_goto, next_goto_id, last_goto_id, problems_limit, selected_output_channel, workbench_logs, scm, notifications }));
+    let vscode = crate::ide::VsCodeFallback::for_editor(&target);
+    SHARED.with(|s| *s.borrow_mut() = Some(Shared { extensions, agent, host, bridge, revision, debug, debug_view, tabs, directory, expanded, bottom_max, tree_sel, tree_multi_sel, tree_clipboard, tree_drag_src, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, picker_scroll, recent_files, theme, position, stripes, menu_open, tab_menu, close_confirm, term_paste_confirm, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, vscode, server_url: target.server_url, computer: target.computer, uris, open_errors, editor_versions, last_find_cmd, pending_goto, next_goto_id, last_goto_id, problems_limit, selected_output_channel, workbench_logs, scm, notifications }));
 }
 
 pub(crate) fn join_path(dir: &str, name: &str) -> String {
@@ -292,21 +397,48 @@ fn editor_pane() -> Element {
     // The editor fills the box the page's layout gave this tree. Until the first layout the
     // box is empty, and a CodeEditor measured without a limit would abort the renderer.
     let (box_w, box_h) = dioxus_compose::use_widget_box();
+    let _mounts = use_hook(|| std::rc::Rc::new(MountGuard(PANE_VIEW)));
     if box_w <= 0.0 || box_h <= 0.0 {
+        forget_mount();
         return rsx! {};
     }
     let _ = *s.revision.read();
     let _ = s.tabs.read();
+    let active = s.bridge.borrow().active_document().map(|d| (d.uri.clone(), d.generation));
+    match &active {
+        Some((uri, generation)) => { report_mount(&s, uri, *generation); }
+        None => forget_mount(),
+    }
+    // After the mount is reported, so the copy carries the widget's numbering.
     let doc = s.bridge.borrow().active_document().cloned();
     let Some(doc) = doc else { return rsx! {}; };
     let generation = doc.generation;
     let uri = doc.uri.clone();
     let handle = dioxus_compose::use_code_editor();
+    // SPEC FR-E3 (#32 phase A step 7): a new hover asks the editor where its position is drawn;
+    // the answer places the card ([`hover_card`]).
+    if let Some(hover) = doc.hover.as_ref() {
+        let key = crate::ui::editor::hover_key(generation, hover);
+        if HOVER_ASKED.with(|cell| cell.get()) != Some(key) {
+            HOVER_ASKED.with(|cell| cell.set(Some(key)));
+            let revision = s.revision;
+            handle.query_position_rect(compose_rust::code::Position::new(key.1, key.2), move |rect| {
+                set_hover_rect(key, rect);
+                let mut revision = revision;
+                *revision.write() += 1;
+            });
+        }
+    } else {
+        HOVER_ASKED.with(|cell| cell.set(None));
+    }
+    // FR-L31.42: the debug hover's card is placed the same way.
+    super::editor_debug_hover::view::place(&s, &uri, &handle);
     let version = {
         let mut map = s.editor_versions.borrow_mut();
         let current = map.entry(generation).or_insert(doc.version);
         *current = (*current).max(doc.version);
-        *current
+        // The widget counts from its own base after a remount; every version handed to it is in that numbering.
+        doc.widget_version_of(*current)
     };
     if let Some(cmd) = s.find.cmd.read().clone() {
         let mut last_cmd = s.last_find_cmd.borrow_mut();
@@ -345,9 +477,15 @@ fn editor_pane() -> Element {
     // Edits the session asks for (an accepted completion, formatting, a rename, a code action) go to
     // the widget, which applies them as the reader's own and reports them back as changes.
     for command in s.bridge.borrow_mut().take_pending_edits(&doc.uri) {
-        if let ember_editor::WidgetCommand::EditCode { request_id, base_version, range, text } = command {
-            use compose_rust::code::CodeRange;
-            handle.edit(request_id, base_version, CodeRange::of(range.start.line, range.start.col, range.end.line, range.end.col), text);
+        use compose_rust::code::CodeRange;
+        match command {
+            ember_editor::WidgetCommand::EditCode { request_id, base_version, range, text } => {
+                handle.edit(request_id, base_version, CodeRange::of(range.start.line, range.start.col, range.end.line, range.end.col), text);
+            }
+            ember_editor::WidgetCommand::InsertSnippet { base_version, range, snippet } => {
+                handle.insert_snippet(base_version, CodeRange::of(range.start.line, range.start.col, range.end.line, range.end.col), snippet);
+            }
+            ember_editor::WidgetCommand::SetText { .. } => {}
         }
     }
     let gutter_decorations = {
@@ -358,6 +496,9 @@ fn editor_pane() -> Element {
             compose_rust::code::GutterDecorations::default()
         }
     };
+    let gutter_decorations = super::editor_debug::gutter(&s, &uri, &doc.text, version, gutter_decorations);
+    // FR-L31.42: the line a thread is stopped at is tinted over the document's own decorations.
+    let decorations = super::editor_debug::decorations(&s, &uri, version, compose_rust::code::Decorations::from_bytes(doc.decoration_bytes.clone()));
     let change_s = s.clone(); let change_uri = uri.clone();
     let save_s = s.clone(); let save_uri = uri.clone();
     let hover_s = s.clone(); let hover_uri = uri.clone();
@@ -365,13 +506,18 @@ fn editor_pane() -> Element {
     let fold_s = s.clone(); let fold_uri = uri.clone();
     let selection_s = s.clone(); let selection_uri = uri;
     let key_s = s.clone(); let pointer_s = s.clone(); let caret_s = s.clone();
+    let syntax_spans = crate::ui::editor::syntax_spans_at(&doc.syntax, doc.widget_version_of(doc.syntax.version));
     rsx! { CodeEditor {
         key: "{generation}", width: Some(box_w), height: Some(box_h), handle,
-        text: doc.text, decorations: compose_rust::code::Decorations::from_bytes(doc.decoration_bytes), syntax_spans: crate::ui::editor::syntax_spans(&doc.syntax), folds: crate::ui::editor::folds(&doc.folds), tab_width: Some(doc.tab_width),
+        text: doc.text, decorations, syntax_spans, folds: crate::ui::editor::folds_from(&doc.folds, doc.widget_base), tab_width: Some(doc.tab_width),
         gutter_decorations,
         // FR-L31.27: the mockup's code type, row pitch and line number column (`editor.css:2`, `:71`).
         font_size: Some(crate::ui::fonts::CODE_FONT_SIZE), line_height: Some(crate::ui::fonts::CODE_LINE_HEIGHT),
         gutter_min_width: Some(crate::ui::fonts::CODE_GUTTER_MIN_WIDTH), gutter_padding: Some(crate::ui::fonts::CODE_GUTTER_PADDING), text_inset: Some(crate::ui::fonts::CODE_TEXT_INSET),
+        // FR-L31.27 (#477): the fold and change columns stay on every file, so the text starts at
+        // one column, and the mockup's 8px above the first line and below the last scrolls with it.
+        fixed_gutter_columns: crate::ui::fonts::CODE_FIXED_GUTTER_COLUMNS,
+        content_padding_dp: Some(crate::ui::fonts::CODE_CONTENT_PADDING),
         colors: crate::ui::fonts::CODE_EDITOR_COLORS,
         // FR-L31.13: the language chords from the focused code (compose-rust#554), Cmd/Ctrl+click to a
         // definition (compose-rust#555) and the caret a list opens under (compose-rust#553).
@@ -379,13 +525,38 @@ fn editor_pane() -> Element {
         pointer_kinds: Some(compose_rust::PointerKinds::DOWN),
         on_code_pointer: move |e: compose_rust::code::CodePointer| crate::ui::editor_language::view::code_pointer(&pointer_s, &e),
         on_caret_rect: move |e: compose_rust::code::CaretRect| crate::ui::editor_language::view::set_caret_rect(&caret_s, e.rect),
-        on_change: move |e: compose_rust::code::CodeChange| { keep_edited_tab(&change_s, &change_uri.path); change_s.editor_versions.borrow_mut().insert(generation, e.version); let event = change_s.bridge.borrow_mut().on_code_changed(&change_uri, e.version, WidgetRange::new(pos(e.range.start), pos(e.range.end)), e.text); send(&change_s, event); crate::ui::editor_states::view::edited(&change_s, &change_uri.path); },
+        on_change: move |e: compose_rust::code::CodeChange| { keep_edited_tab(&change_s, &change_uri.path); let event = change_s.bridge.borrow_mut().on_code_changed(&change_uri, e.version, WidgetRange::new(pos(e.range.start), pos(e.range.end)), e.text); if let Some((_, _, WidgetEvent::CodeChanged { version, .. })) = &event { change_s.editor_versions.borrow_mut().insert(generation, *version); } send(&change_s, event); crate::ui::editor_states::view::edited(&change_s, &change_uri.path); },
         on_save: move |e: compose_rust::code::SaveRequest| { if !crate::ui::editor_states::view::manual_save_allowed(&save_s, &save_uri.path) { return; } let event = save_s.bridge.borrow().on_save_requested(&save_uri, e.version); send(&save_s, event); save_s.scm.refresh(); },
-        on_hover: move |e: compose_rust::code::CodeHover| { let phase = match e.phase { compose_rust::schema::HoverPhase::Rest => EditorHoverPhase::Rest, _ => EditorHoverPhase::Leave }; let event = hover_s.bridge.borrow().on_code_hovered(&hover_uri, e.decoration.unwrap_or(0), pos(e.position), phase); send(&hover_s, event); },
-        on_decoration_click: move |id| { let event = click_s.bridge.borrow().on_decoration_activated(&click_uri, id); send(&click_s, event); },
+        // FR-L31.42: while a thread is stopped the debug hover takes the rest first (Code-OSS shows it
+        // instead of the language hover).
+        on_hover: move |e: compose_rust::code::CodeHover| { let phase = match e.phase { compose_rust::schema::HoverPhase::Rest => EditorHoverPhase::Rest, _ => EditorHoverPhase::Leave }; if super::editor_debug_hover::view::code_hover(&hover_s, &hover_uri, e.decoration.unwrap_or(0), pos(e.position), phase) { return; } let event = hover_s.bridge.borrow().on_code_hovered(&hover_uri, e.decoration.unwrap_or(0), pos(e.position), phase); send(&hover_s, event); },
+        on_decoration_click: move |id| {
+            if !super::editor_debug::activate_gutter(&click_s, &click_uri, id) {
+                let event = click_s.bridge.borrow().on_decoration_activated(&click_uri, id);
+                send(&click_s, event);
+            }
+        },
         on_fold_change: move |e: compose_rust::code::FoldChange| { let event = fold_s.bridge.borrow_mut().on_fold_changed(&fold_uri, e.start_line, e.collapsed); send(&fold_s, event); let mut rev = fold_s.revision; *rev.write() += 1; },
         on_selection_change: move |e: compose_rust::code::SelectionChange| { crate::ui::editor_language::view::caret_moved(); let mut position = selection_s.position; position.set((e.active.line as usize + 1, e.active.column as usize + 1)); let mut find_sel = selection_s.find.selection; find_sel.set(((e.anchor.line, e.anchor.column), (e.active.line, e.active.column))); let event = selection_s.bridge.borrow().on_selection_changed(&selection_uri, e.version, pos(e.anchor), pos(e.active)); send(&selection_s, event); },
     } }
+}
+
+/// The Compose side of the editor window (#301): the root fills the window and holds the HTML
+/// page in an `HtmlView`, as the workbench chrome does.
+pub mod view {
+    use dioxus_compose::prelude::*;
+
+    #[component]
+    pub fn EditorRoot() -> Element {
+        root_with(super::page::app)
+    }
+
+    /// The root around `page`: the editor's stylesheets, filling the window.
+    pub(crate) fn root_with(page: fn() -> Element) -> Element {
+        rsx! {
+            HtmlView { app: page, config: Some(super::page::config as fn() -> dioxus_compose::html::HtmlConfig), fill_max_height: true }
+        }
+    }
 }
 
 pub mod page {
@@ -439,6 +610,47 @@ pub mod page {
         }
     }
 
+    /// What a key does on the page: the keymap's action, with the user's `keybindings.json` read on
+    /// top of it (FR-L31.17). `Default` here means the key runs nothing. The page's key handler and the
+    /// terminal's (which asks whether a key goes on to the page, #1133) both read it.
+    pub(crate) fn page_key_resolution(s: &Shared, keymap: Keymap, name: &str, m: Modifiers) -> crate::ui::editor_settings::KeyResolution {
+        use crate::ui::editor_settings::KeyResolution;
+        let (ctrl, shift, alt, meta) = (m.contains(Modifiers::CONTROL), m.contains(Modifiers::SHIFT), m.contains(Modifiers::ALT), m.contains(Modifiers::META));
+        let default_action = action_for_key(keymap, Os::current(), name, ctrl, shift, alt, meta);
+        let user_rules = s.host.state.lock().unwrap().settings.keybindings.clone();
+        let resolution = if user_rules.is_empty() {
+            KeyResolution::Default
+        } else {
+            let chord = crate::ui::editor::chord_from_key(name, ctrl, shift, alt, meta);
+            crate::ui::editor_settings::resolve_key(&user_rules, &chord, default_action)
+        };
+        match (resolution, default_action) {
+            (KeyResolution::Default, Some(action)) => KeyResolution::Action(action),
+            (resolution, _) => resolution,
+        }
+    }
+
+    /// What a key pressed in the integrated terminal would do on the page, for
+    /// [`crate::ui::keymap::terminal_keeps_key`] (#1133): the chord, the keymap and what it runs.
+    pub(crate) fn terminal_page_key(s: &Shared, name: &str, m: Modifiers) -> (Keymap, Chord, crate::ui::keymap::PageKey) {
+        use crate::ui::editor_settings::KeyResolution;
+        use crate::ui::keymap::PageKey;
+        let (ctrl, shift, alt, meta) = (m.contains(Modifiers::CONTROL), m.contains(Modifiers::SHIFT), m.contains(Modifiers::ALT), m.contains(Modifiers::META));
+        let keymap = *s.keymap.peek();
+        let page = match page_key_resolution(s, keymap, name, m) {
+            KeyResolution::Action(action) => PageKey::Action(action),
+            KeyResolution::Command(id) => PageKey::Command(id),
+            KeyResolution::Default | KeyResolution::Unbound => {
+                if crate::ui::editor_language::action_for_key(name, ctrl, shift, alt, meta).is_some() {
+                    PageKey::Editor
+                } else {
+                    PageKey::Nothing
+                }
+            }
+        };
+        (keymap, crate::ui::editor::chord_from_key(name, ctrl, shift, alt, meta), page)
+    }
+
     fn notice(text: impl Into<String>) {
         crate::ui::cr::notice::post(text);
     }
@@ -474,6 +686,20 @@ pub mod page {
         }
         if action == Action::Format {
             crate::ui::editor_language::view::run(s, crate::ui::editor_language::LangAction::Format);
+            return;
+        }
+        // FR-L31.42: F5 and Shift+F5 (Code-OSS's debug start/continue and stop).
+        if action == Action::Debug {
+            crate::ui::editor_debug::start_or_continue(s);
+            return;
+        }
+        if action == Action::Stop {
+            crate::ui::editor_debug::stop(s);
+            return;
+        }
+        // Ctrl+F5: Run Without Debugging (`workbench.action.debug.run`).
+        if action == Action::RunConfig {
+            crate::ui::editor_debug::run_without_debugging(s);
             return;
         }
         if action == Action::Ask {
@@ -532,6 +758,28 @@ pub mod page {
                     open_tab_file(s, &path);
                 }
                 None => notice("다시 열 편집기가 없습니다"),
+            }
+            return;
+        }
+        if matches!(action, Action::NextTab | Action::PrevTab) {
+            let next = {
+                let mut tabs = s.tabs;
+                if action == Action::NextTab { tabs.write().next_tab() } else { tabs.write().prev_tab() }
+            };
+            if let Some(path) = next {
+                s.scm.close_diff();
+                let mut recent = s.recent_files;
+                record_recent_file(&mut recent, &path);
+                if let Some(handle) = webview_handle_from_tab(&path) {
+                    s.host.send(HostCommand::Webview(ember_editor::webview::WebviewEvent::ViewState {
+                        handle: handle.to_string(),
+                        visible: true,
+                        active: true,
+                        position: 1,
+                    }));
+                } else {
+                    s.host.send(HostCommand::Focus(path));
+                }
             }
             return;
         }
@@ -744,6 +992,7 @@ pub mod page {
         let mut open = s.palette_open;
         if *open.read() {
             open.set(false);
+            *s.picker_scroll.borrow_mut() = super::PickerScroll::default();
             s.host.send(HostCommand::CancelIndexFiles);
         }
     }
@@ -784,6 +1033,8 @@ pub mod page {
             | crate::ui::palette::Payload::EncodingAction(_)
             | crate::ui::palette::Payload::SetEncoding { .. }
             | crate::ui::palette::Payload::SetLanguage(_)
+            | crate::ui::palette::Payload::IndentationSize(_)
+            | crate::ui::palette::Payload::SetIndentation(_)
             | crate::ui::palette::Payload::Cancel) => choose_format_item(s, payload),
         }
     }
@@ -809,6 +1060,17 @@ pub mod page {
         let bridge = s.bridge.borrow();
         let doc = bridge.document(&uri)?;
         Some((path, doc.format.clone(), doc.dirty))
+    }
+
+    /// The active document's own indentation options and the tab size its settings give it, for the
+    /// indentation pick.
+    fn active_indentation(s: &Shared) -> Option<(ember_editor::Indentation, u32)> {
+        let path = s.tabs.read().current_path().map(str::to_owned)?;
+        let uri = s.uris.borrow().get(&path).cloned()?;
+        let current = s.bridge.borrow().document(&uri)?.effective_indentation();
+        let language = s.bridge.borrow().document(&uri).map(|d| d.language_id.clone());
+        let configured = s.host.state.lock().unwrap().settings.editor(language.as_deref()).tab_size;
+        Some((current, configured))
     }
 
     /// Open one of the status bar's pickers in the palette sheet, on the current item (FR-L31.7).
@@ -840,6 +1102,8 @@ pub mod page {
             }
             Payload::SetEncoding { mode, encoding } => { s.host.send(HostCommand::SetEncoding { path, encoding, mode }); }
             Payload::SetLanguage(language_id) => { s.host.send(HostCommand::SetLanguage { path, language_id }); }
+            Payload::IndentationSize(kind) => open_picker(s, Mode::IndentationSize(kind)),
+            Payload::SetIndentation(action) => { s.host.send(HostCommand::SetIndentation { path, action }); }
             _ => {}
         }
     }
@@ -871,7 +1135,12 @@ pub mod page {
             if crate::ui::editor_status::is_picker(mode) {
                 let format = active_format(s).and_then(|(_, f, _)| f);
                 let languages = s.host.state.lock().unwrap().languages.clone();
-                let items = crate::ui::editor_status::picker_items(mode, format.as_ref(), &languages);
+                let items = match active_indentation(s) {
+                    Some((current, configured)) if crate::ui::editor_status::is_indentation_pick(mode) => {
+                        crate::ui::editor_status::indentation_items(mode, current, configured)
+                    }
+                    _ => crate::ui::editor_status::picker_items(mode, format.as_ref(), &languages),
+                };
                 let ranked = rank(&effective_query, &items);
                 (std::borrow::Cow::Owned(items), ranked, None)
             } else {
@@ -884,22 +1153,29 @@ pub mod page {
             }
         };
         let hint_text = placeholder(mode, keymap);
-        // A picker lists every row (a language list is longer than 50) and shows the window of rows that
-        // holds the highlighted one, so the current language or encoding is in view when it opens (FR-L31.7).
+        // A picker renders all rows and asks the renderer to reveal the highlighted row.
         let picker = crate::ui::editor_status::is_picker(mode);
         let shown: Vec<_> = ranked.iter().take(if picker { usize::MAX } else { 50 }).cloned().collect();
         let chosen = if picker {
             let format = active_format(s).and_then(|(_, f, _)| f);
             let languages = s.host.state.lock().unwrap().languages.clone();
-            crate::ui::editor_status::resolve_selection(*sel.read(), mode, format.as_ref(), &languages, shown.len())
+            match active_indentation(s) {
+                Some((current, _)) if crate::ui::editor_status::is_indentation_pick(mode) => {
+                    let row = if *sel.read() == crate::ui::editor_status::FOLLOW_CURRENT {
+                        crate::ui::editor_status::indentation_initial_selection(mode, current)
+                    } else {
+                        *sel.read()
+                    };
+                    row.min(shown.len().saturating_sub(1))
+                }
+                _ => crate::ui::editor_status::resolve_selection(*sel.read(), mode, format.as_ref(), &languages, shown.len()),
+            }
         } else {
             (*sel.read()).min(shown.len().saturating_sub(1))
         };
-        let (win_start, _) = if picker {
-            crate::ui::editor_status::list_window(chosen, shown.len(), crate::ui::editor_status::PICKER_VISIBLE_ROWS)
-        } else {
-            (0, shown.len())
-        };
+        if picker {
+            s.picker_scroll.borrow_mut().select(mode, shown.len(), chosen);
+        }
         // A command the editor cannot do yet is listed but does nothing: Enter on it leaves the sheet open.
         let enter_payload = shown
             .get(chosen)
@@ -947,13 +1223,7 @@ pub mod page {
                 }
                 div { class: "ed-pall", role: "listbox",
                     if shown.is_empty() { div { style: "padding:var(--sp3); color:var(--muted);", "{crate::ui::palette::empty_text(mode, index_running)}" } }
-                    if win_start > 0 {
-                        div { class: "ed-tn", role: "option", "aria-label": "위 항목 더 보기", style: "--d:0; height:34px; color:var(--muted);",
-                            onclick: move |_| sel.set(win_start - 1),
-                            "{crate::ui::editor_status::more_above_text(win_start)}"
-                        }
-                    }
-                    for (row, r) in shown.iter().enumerate().skip(win_start) {
+                    for (row, r) in shown.iter().enumerate() {
                         {
                             let item = &items[r.index];
                             let segments = highlight_segments(&item.title, &r.matched);
@@ -961,9 +1231,15 @@ pub mod page {
                             let hint = if enabled { item.hint.clone() } else if mode == crate::ui::palette::Mode::GotoLine { String::new() } else if let crate::ui::palette::Payload::Action(a) = &item.payload { crate::ui::editor_actions::not_ready_hint(*a) } else { "준비 중".to_string() };
                             let payload = apply_line_suffix(item.payload.clone(), line_suffix);
                             let click_s = s.clone();
+                            let picker_scroll = s.picker_scroll.clone();
                             let class = if row == chosen { "ed-tn sel" } else { "ed-tn" };
                             let row_style = if enabled { "--d:0; height:34px;" } else { "--d:0; height:34px; color:var(--muted);" };
-                            rsx! { div { key: "{row}", class, role: "option", "aria-selected": "{row == chosen}", "aria-disabled": "{!enabled}", style: "{row_style}",
+                            rsx! { div { key: "{mode:?}-{row}", class, role: "option", "aria-selected": "{row == chosen}", "aria-disabled": "{!enabled}", style: "{row_style}",
+                                onmounted: move |event| {
+                                    if picker {
+                                        picker_scroll.borrow_mut().mounted(row, event.data());
+                                    }
+                                },
                                 onclick: move |_| {
                                     if !enabled { return; }
                                     close_palette(&click_s);
@@ -1263,6 +1539,91 @@ pub mod page {
         }
     }
 
+    /// The hover card over the editor, when the active document has a hover and its position's
+    /// rectangle is known (SPEC FR-E3).
+    pub(super) fn hover_card(s: &super::Shared) -> Element {
+        let doc = s.bridge.borrow().active_document().cloned();
+        let Some(doc) = doc else { return rsx! {} };
+        let Some(hover) = doc.hover.as_ref() else { return rsx! {} };
+        let Some(card) = crate::ui::editor::hover_card(hover) else { return rsx! {} };
+        let key = crate::ui::editor::hover_key(doc.generation, hover);
+        let Some((at, rect)) = super::HOVER_RECT.with(|cell| cell.get()) else { return rsx! {} };
+        if at != key {
+            return rsx! {};
+        }
+        let height = crate::ui::window_size::current_window_size().height_dp;
+        let style = crate::ui::editor::hover_card_style(rect, height);
+        rsx! {
+            div { class: "ed-menu", role: "tooltip", "aria-label": "호버 정보", "data-ed": "hover-card", style: "{style}",
+                for (i, line) in card.diagnostics.iter().enumerate() {
+                    div { key: "d{i}", style: "padding:var(--sp1) var(--sp3); color:var(--danger);", "{line}" }
+                }
+                for (i, source) in card.contents.iter().enumerate() {
+                    div { key: "c{i}", style: "padding:var(--sp1) var(--sp3);",
+                        for (j, block) in crate::ui::editor::markdown_blocks(source).iter().enumerate() {
+                            div { key: "b{j}", {hover_markdown_block(block)} }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// One Markdown block of a hover card (SPEC FR-E3), drawn as elements: the provider's text is
+    /// never interpreted as HTML.
+    fn hover_markdown_block(block: &crate::ui::editor::MdBlock) -> Element {
+        use crate::ui::editor::MdBlock;
+        match block {
+            MdBlock::Heading { level, spans } => {
+                let size = if *level <= 2 { "1.05em" } else { "inherit" };
+                rsx! { div { role: "heading", "aria-level": "{level}", style: "font-weight:var(--fw-semibold); font-size:{size}; margin:var(--sp1) 0;", {hover_markdown_spans(spans)} } }
+            }
+            MdBlock::Paragraph(spans) => rsx! { div { style: "margin:var(--sp1) 0; white-space:normal;", {hover_markdown_spans(spans)} } },
+            MdBlock::List { ordered, items } => {
+                let rows: Vec<(String, Element)> = items
+                    .iter()
+                    .enumerate()
+                    .map(|(i, item)| (if *ordered { format!("{}.", i + 1) } else { "\u{2022}".to_owned() }, hover_markdown_spans(item)))
+                    .collect();
+                rsx! {
+                    div { role: "list", style: "margin:var(--sp1) 0;",
+                        for (i, (marker, body)) in rows.into_iter().enumerate() {
+                            div { key: "{i}", role: "listitem", style: "display:flex; gap:var(--sp2);",
+                                span { style: "color:var(--muted);", "{marker}" }
+                                span { {body} }
+                            }
+                        }
+                    }
+                }
+            }
+            MdBlock::Code { lang, text } => rsx! {
+                div { "data-lang": "{lang}", style: "margin:var(--sp1) 0; padding:var(--sp1) var(--sp2); background:var(--surface-2); border-radius:var(--r-xs); font-family:var(--mono); font-size:var(--fs-xs); white-space:pre; overflow-x:auto;", "{text}" }
+            },
+            MdBlock::Rule => rsx! { div { role: "separator", style: "border-top:1px solid var(--line); margin:var(--sp1) 0;" } },
+        }
+    }
+
+    /// The inline runs of one hover Markdown block.
+    fn hover_markdown_spans(spans: &[crate::ui::editor::MdSpan]) -> Element {
+        use crate::ui::editor::MdSpan;
+        const CODE: &str = "font-family:var(--mono); font-size:var(--fs-xs); background:var(--surface-2); border-radius:var(--r-xs); padding:0 2px;";
+        let runs: Vec<(String, &'static str, String)> = spans
+            .iter()
+            .map(|span| match span {
+                MdSpan::Text(t) => (t.clone(), "", String::new()),
+                MdSpan::Strong(t) => (t.clone(), "font-weight:var(--fw-semibold);", String::new()),
+                MdSpan::Emphasis(t) => (t.clone(), "font-style:italic;", String::new()),
+                MdSpan::Code(t) => (t.clone(), CODE, String::new()),
+                MdSpan::Link { text, href } => (text.clone(), "color:var(--c-blue); text-decoration:underline;", href.clone()),
+            })
+            .collect();
+        rsx! {
+            for (i, (text, style, href)) in runs.into_iter().enumerate() {
+                span { key: "{i}", style: "{style}", title: "{href}", "{text}" }
+            }
+        }
+    }
+
     pub(super) fn workbench_page() -> Element {
         let s = shared();
         // FR-L33.1 (#875): the window's safe area is 0 until the renderer first reports it, which
@@ -1272,10 +1633,18 @@ pub mod page {
         let window_safe = dioxus_compose::use_window_safe_area();
         let safe = crate::ui::safe_area::safe_area_from_toolkit(window_safe.top, window_safe.leading, window_safe.trailing);
         let _ = *s.revision.read();
-        let (error, updates, edit_errors, gone, renamed) = {
+        let (error, fallback, updates, edit_errors, gone, renamed) = {
             let mut state = s.host.state.lock().unwrap();
-            (state.error.clone(), std::mem::take(&mut state.updates), std::mem::take(&mut state.edit_errors), std::mem::take(&mut state.gone), std::mem::take(&mut state.renamed))
+            (state.error.clone(), state.fallback.clone(), std::mem::take(&mut state.updates), std::mem::take(&mut state.edit_errors), std::mem::take(&mut state.gone), std::mem::take(&mut state.renamed))
         };
+        // SPEC FR-E10, Q-E2 (#32): an unsupported server shows one sentence and the VS Code button
+        // instead of the editor; the user chooses, nothing switches by itself.
+        let fallback_text_for = |has_vscode: bool| fallback.as_ref().map(|f| crate::ui::editor::fallback_sentence(&f.fallback, has_vscode));
+        // The VS Code target's relay launch (FR-W4c, INTENT D55), else an old server's http(s) URL,
+        // else the session whose launch the button asks for (FR-W4c (1c)), checked as `crate::ide::plan` checks the VS Code target (`VsCodeFallback::for_editor`).
+        let fallback_vscode = fallback.as_ref().and(s.vscode.clone());
+        let fallback_button = crate::ui::editor::FALLBACK_BUTTON;
+        let fallback_text = fallback_text_for(fallback_vscode.is_some());
         for (old, new) in renamed {
             // The tabs below the renamed path follow it (clean ones only: a rename with unsaved
             // changes is refused before it is sent); the session reopens them under the new name.
@@ -1311,7 +1680,7 @@ pub mod page {
         }
         let saved = updates.iter().any(|u| matches!(u, ember_editor::SessionUpdate::Saved { .. }));
         let mut saved_paths: Vec<String> = Vec::new();
-        let widget_edits = updates.iter().any(|u| matches!(u, ember_editor::SessionUpdate::Command { command: ember_editor::WidgetCommand::EditCode { .. }, .. }));
+        let widget_edits = updates.iter().any(|u| matches!(u, ember_editor::SessionUpdate::Command { command: ember_editor::WidgetCommand::EditCode { .. } | ember_editor::WidgetCommand::InsertSnippet { .. }, .. }));
         for update in updates {
             if let ember_editor::SessionUpdate::Opened { uri, .. } = &update { s.uris.borrow_mut().insert(uri.path.clone(), uri.clone()); }
             if let ember_editor::SessionUpdate::Closed { uri } = &update { s.uris.borrow_mut().remove(&uri.path); }
@@ -1319,6 +1688,8 @@ pub mod page {
             if let ember_editor::SessionUpdate::Saved { uri } = &update { saved_paths.push(uri.path.clone()); }
             // Hot exit (FR-L31.6a): the disk text of a restored buffer, or its failed open.
             crate::editor_backup::view::on_update(&s, &update);
+            crate::ui::editor_debug::on_update(&s, &update);
+            crate::ui::editor_debug_view::on_update(&s, &update);
             let action = s.bridge.borrow_mut().apply(update);
             match action {
                 BridgeAction::Resync(uri) => { s.host.send(HostCommand::Resync(uri)); }
@@ -1350,8 +1721,18 @@ pub mod page {
                     tracing::warn!(path = %uri.path, %error, "reopening a file with an encoding failed");
                     notice(crate::ui::editor_status::reopen_failure_text(&crate::ui::editor::display_name(base_name(&uri.path)), None, &error));
                 }
+                BridgeAction::FileNotice { uri, kind, detail } => {
+                    tracing::warn!(path = ?uri.as_ref().map(|u| u.path.as_str()), ?kind, %detail, "the editor session reported a file problem");
+                    let name = uri.as_ref().map(|u| crate::ui::editor::display_name(base_name(&u.path)));
+                    notice(crate::ui::editor::file_notice_text(kind, name.as_deref()));
+                }
                 BridgeAction::Webview(ref wv_update) => {
                     handle_webview_update(&s, wv_update);
+                }
+                // FR-L31.42: the bridge has kept the sessions, the stop and the breakpoints; the
+                // controls take them, and the launch picker its configurations.
+                BridgeAction::Debug(ref debug_update) => {
+                    crate::ui::editor_debug::on_debug(&s, debug_update);
                 }
                 _ => {}
             }
@@ -1376,6 +1757,8 @@ pub mod page {
             *revision.write() += 1;
         }
         crate::ui::editor_language::view::after_updates(&s, saved);
+        // FR-L31.42: a preLaunchTask or postDebugTask on its way (tasks.json read, task ended).
+        crate::ui::editor_debug_tasks::poll(&s);
         let tabs = s.tabs;
         let current = tabs.read().current_path().map(str::to_owned);
         let paths: Vec<String> = tabs.read().paths().into_iter().map(str::to_owned).collect();
@@ -1466,39 +1849,38 @@ pub mod page {
                             run_action(&key_s, action);
                         }
                     }
-                    let default_action = action_for_key(
-                        keymap,
-                        Os::current(),
-                        &key_name(&event.key()),
-                        m.contains(Modifiers::CONTROL),
-                        m.contains(Modifiers::SHIFT),
-                        m.contains(Modifiers::ALT),
-                        m.contains(Modifiers::META),
-                    );
-                    // The user's keybindings.json is read on top of the keymap (FR-L31.17).
-                    let user_rules = key_s.host.state.lock().unwrap().settings.keybindings.clone();
-                    let resolution = if user_rules.is_empty() {
+                    match page_key_resolution(&key_s, keymap, &name, m) {
                         crate::ui::editor_settings::KeyResolution::Default
-                    } else {
-                        let chord = crate::ui::editor::chord_from_key(
-                            &key_name(&event.key()),
-                            m.contains(Modifiers::CONTROL),
-                            m.contains(Modifiers::SHIFT),
-                            m.contains(Modifiers::ALT),
-                            m.contains(Modifiers::META),
-                        );
-                        crate::ui::editor_settings::resolve_key(&user_rules, &chord, default_action)
-                    };
-                    match resolution {
-                        crate::ui::editor_settings::KeyResolution::Default => {
-                            if let Some(action) = default_action { run_action(&key_s, action); }
+                        | crate::ui::editor_settings::KeyResolution::Unbound => {}
+                        crate::ui::editor_settings::KeyResolution::Action(action) => {
+                            event.prevent_default();
+                            run_action(&key_s, action);
                         }
-                        crate::ui::editor_settings::KeyResolution::Unbound => {}
-                        crate::ui::editor_settings::KeyResolution::Action(action) => run_action(&key_s, action),
-                        crate::ui::editor_settings::KeyResolution::Command(id) => { key_s.host.send(HostCommand::ExecuteCommand(id)); }
+                        crate::ui::editor_settings::KeyResolution::Command(id) => {
+                            event.prevent_default();
+                            key_s.host.send(HostCommand::ExecuteCommand(id));
+                        }
                     }
                 },
-                if let Some(error) = error {
+                if let Some(text) = fallback_text {
+                    div { style: "{error_style}", "{text}"
+                        if let Some(vscode) = fallback_vscode {
+                            button {
+                                onclick: move |_| {
+                                    // A relay launch starts the `ember-app --vscode-window` helper with no
+                                    // credential in argv (`crate::ide::open_ide_relay`); a target with no launch
+                                    // asks the server for one first (`crate::ide::start_vscode`).
+                                    if let Err(e) = vscode.open() {
+                                        tracing::warn!("could not open the VS Code target: {e}");
+                                        notice(format!("VS Code: 열지 못했습니다: {e}"));
+                                    }
+                                },
+                                "{fallback_button}"
+                            }
+                        }
+                        button { onclick: move |_| crate::services::services().ui.close_editor(), "닫기" }
+                    }
+                } else if let Some(error) = error {
                     div { style: "{error_style}", "{error}" button { onclick: move |_| crate::services::services().ui.close_editor(), "닫기" } }
                 } else {
                     {top_bar(&s, &branch, keymap, safe)}
@@ -1519,22 +1901,24 @@ pub mod page {
                             {crate::ui::editor_extensions::view::panel(&s)}
                         } else if w == ToolWindow::Agent {
                             {crate::ui::editor_agent::view::panel(&s)}
+                        } else if w == ToolWindow::Debug {
+                            {crate::ui::editor_debug_view::panel(&s)}
                         } else {
                             {side_note(w, "ed-left")}
                         }
-                    } else {
-                        // FR-L31.26 (#874): an element that takes no grid cell, not a placeholder.
-                        div { class: "ed-none" }
                     }
                     section { class: "ed-main", style: if maximized { "display:none;" } else if has_left { "" } else { "margin-left:calc(var(--gap) * -1);" }, "aria-label": "편집기",
                         {crate::ui::workspace_trust::view::banner(&s)}
                         // FR-L31.36: no tab strip while no tab is open, as the mockup's empty editor
                         // (`editor.js:81`), so the empty state takes the whole panel. The ⋯ of the strip
                         // goes with it; its commands stay in quick open.
-                        if paths.is_empty() { div { class: "ed-none" } } else { {tab_strip(&s, &paths, &dirty, current.as_deref())} }
+                        if !paths.is_empty() { {tab_strip(&s, &paths, &dirty, current.as_deref())} }
                         if let Some((menu_path, x, y)) = s.tab_menu.read().clone() { {tab_context_menu(&s, &menu_path, x, y)} }
                         if let Some(path) = current.as_deref().filter(|p| !settings_shown && !is_webview_tab(p)) {
                             {breadcrumbs(&s, path)}
+                            if !diff_shown && !conflict_shown && !compare_shown {
+                                {crate::ui::editor_debug::breakpoint_editor(&s, path)}
+                            }
                         }
                         {crate::ui::editor_states::view::banners(&s, current.as_deref())}
                         if *s.find.open.read() && active.is_some() && !diff_shown && !conflict_shown && !compare_shown { {find_bar(&s)} }
@@ -1548,9 +1932,9 @@ pub mod page {
                             else if let Some(pane) = current.as_deref().and_then(|p| webview_pane_for_tab(&s, p)) {
                                 {webview_pane_view(&s, &pane)}
                             }
-                            // FR-L31.27: the mockup's 8px above the first line (`editor.css:68`). The code editor has no
-                            // content padding, so the room is left above its box, in the panel's own `surface`.
-                            else if active.is_some() { WidgetView { app: editor_pane, style: "flex:1; min-width:0; height:calc(100% - {crate::ui::fonts::CODE_TOP_PADDING_CSS}); margin-top:{crate::ui::fonts::CODE_TOP_PADDING_CSS};" } }
+                            // FR-L31.27: the code editor fills the panel; the mockup's 8px padding (`editor.css:68`) is
+                            // its own `content_padding_dp`, which scrolls with the text.
+                            else if active.is_some() { WidgetView { app: editor_pane, style: "flex:1; min-width:0; height:100%;" } }
                             else if let Some(error) = current.as_ref().and_then(|p| open_error.clone().map(|e| (p.clone(), e))) {
                                 div { class: "ed-empty", role: "alert",
                                     b { "{crate::ui::editor::display_name(base_name(&error.0))} 파일을 열 수 없습니다" }
@@ -1583,13 +1967,9 @@ pub mod page {
                     {stripe_column(&s, sel, keymap, Strip::Right)}
                     if let Some(w) = sel.selected(Side::Bottom) {
                         {bottom_window(&s, w)}
-                    } else {
-                        div { class: "ed-none" }
                     }
-                    // FR-L31.26 (#874): the overlays are all `position:fixed`, but a closed one is a
-                    // placeholder (a comment node), which the HTML layout places as a grid item. Seven
-                    // of them made two implicit rows and 16 px of gaps under the status bar, so they sit
-                    // in one box that takes no room (`.ed-layers`); a fixed box is drawn from the root.
+                    // FR-L31.26 (#874): the overlays are all `position:fixed`, grouped in one box that
+                    // takes no room (`.ed-layers`); a fixed box is drawn from the root.
                     div { class: "ed-layers",
                         if em_shown { {menu(&s, keymap)} }
                         // FR-L31.29: the palette's scrim. A click outside the list closes it; the list
@@ -1599,9 +1979,12 @@ pub mod page {
                                 onclick: move |_| close_palette(&palette_scrim_s) }
                         }
                         if let Some(request) = s.close_confirm.read().clone() { {close_confirm_sheet(&s, &request)} }
+                        {crate::ui::editor_debug_tasks::prompt_sheet(&s)}
                         {crate::ui::workspace_trust::view::prompt(&s)}
                         {crate::ui::editor_notifications::view::layer(&s)}
                         {crate::ui::editor_language::view::overlay(&s)}
+                        {hover_card(&s)}
+                        {crate::ui::editor_debug_hover::view::card(&s)}
                     }
                     {status_bar(&s, &agent_state, &branch, current.as_deref().filter(|_| active.is_some()), line, col, active.as_ref().map_or(4, |d| d.tab_width))}
                 }
@@ -1641,7 +2024,7 @@ pub mod page {
         let find_hint = keymap.hint(Action::Find, Os::current());
         let find_s = s.clone();
         let git_s = s.clone();
-        let (runcfg_s, run_s, stop_s, ask_s) = (s.clone(), s.clone(), s.clone(), s.clone());
+        let ask_s = s.clone();
         let mut stripes = s.stripes;
         let project_tip = tooltip_text("프로젝트 창", &keymap.hint(Action::Project, Os::current()));
         // The traffic lights float over the top bar's left end under FullSize. `leading` is the
@@ -1654,21 +2037,16 @@ pub mod page {
                 button { class: "ed-pj", title: "브랜치", "aria-label": "브랜치", onclick: move |_| crate::ui::editor_scm::view::show_git(&git_s), {icon_tone("git", 16, "text")} "{branch}" {icon_tone("chev-dn", 12, "muted")} }
                 div { class: "spacer" }
                 // FR-L31.29: the pill and the quick open list it opens share one box, so the list is
-                // placed against the pill. The conditional child sits inside the box, where its
-                // placeholder takes no room (dioxus-compose#266: in the bar it would be a flex item).
+                // placed against the pill.
                 div { class: "ed-findbox",
                 button { class: "ed-find", title: "{find}", "aria-label": "{find}", onclick: move |_| run_action(&find_s, Action::Find),
                     {icon_tone("search", 16, "muted")}
                     span { class: "hide-md", "{crate::ui::editor::FIND_PILL_LABEL}" }
                     kbd { class: "ed-sc", "{find_hint}" }
                 }
-                    if *s.palette_open.read() { {palette_sheet(s, keymap)} } else { div { class: "ed-none" } }
+                    if *s.palette_open.read() { {palette_sheet(s, keymap)} }
                 }
-                div { class: "ed-runcfg",
-                    button { class: "ed-pj", title: "실행 구성", "aria-label": "실행 구성", onclick: move |_| crate::ui::editor_tasks::view::open(&runcfg_s), {icon_tone("play", 16, "text")} "실행 구성" {icon_tone("chev-dn", 12, "muted")} }
-                    button { class: "ed-ib run", title: "실행", "aria-label": "실행", onclick: move |_| { if let Some(blocked) = crate::ui::workspace_trust::view::blocked(&run_s, crate::ui::workspace_trust::Restricted::Run) { notice(blocked); } else { crate::ui::editor_tasks::view::run_default(&run_s); } }, {icon_tone("play", 16, "green")} }
-                    button { class: "ed-ib", title: "중지", "aria-label": "중지", onclick: move |_| crate::ui::editor_tasks::view::stop(&stop_s), {icon("pause")} }
-                }
+                {crate::ui::editor_debug::run_picker(s)}
                 // The mockup's order (`editor.js:75-76`): run configuration, run, stop, ask agent, theme.
                 // No ⋯ here: the tab strip's ⋯ opens the menu (owner placement rule 2026-11-13, rule 5).
                 button { class: "ed-ib", title: "에이전트에게 묻기", "aria-label": "에이전트에게 묻기", onclick: move |_| run_action(&ask_s, Action::Ask), {icon("spark")} }
@@ -1681,19 +2059,27 @@ pub mod page {
         }
     }
 
+    /// Entries shown in the ⋯ menu: the current tab's own context menu opens directly on right-click
+    /// or Shift+F10 / ContextMenu on the tab strip, so the redundant tab group is omitted here.
+    pub(super) fn main_menu_entries(has_tab: bool) -> Vec<crate::ui::editor_menu::Entry> {
+        use crate::ui::editor_menu::{Entry, Submenu};
+        crate::ui::editor_menu::entries(has_tab)
+            .into_iter()
+            .filter(|entry| *entry != Entry::Group(Submenu::Tab))
+            .collect()
+    }
+
     /// The ⋯ menu (FR-L31, #795): fixed under the top bar at the page level, its groups opened as
     /// submenus beside it (`editor_menu`), so it fits the window without scrolling.
     fn menu(s: &Shared, keymap: Keymap) -> Element {
         use crate::ui::editor_menu::{self as em, Submenu};
         let os = Os::current();
-        // The current tab's items (FR-L31.5) head the menu. A tab's right-click opens its own menu
-        // (`oncontextmenu`, compose-rust#417); this group is where Shift+F10 on the tab strip leads.
-        // TODO(#673): open the tab's own menu at the tab from the keyboard and drop this group.
         let current_tab = s.tabs.read().current_path().map(str::to_owned);
-        let tab_items = current_tab.as_deref().map(|p| crate::ui::editor::tab_menu_items(&s.tabs.read(), p)).unwrap_or_default();
-        let tab_label = current_tab.as_deref().map(|p| format!("탭: {}", crate::ui::editor::display_name(base_name(p)))).unwrap_or_default();
-        let rows = em::top_rows(current_tab.is_some());
-        let open = em::open_submenu().filter(|sub| *sub != Submenu::Tab || current_tab.is_some());
+        let rows: Vec<_> = em::top_rows(current_tab.is_some())
+            .into_iter()
+            .filter(|row| *row != em::TopRow::Group(Submenu::Tab))
+            .collect();
+        let open = em::open_submenu().filter(|sub| *sub != Submenu::Tab);
         let group = |sub: Submenu, label: String| {
             let mut revision = s.revision;
             let on = open == Some(sub);
@@ -1710,7 +2096,7 @@ pub mod page {
             None => rsx! {},
             Some(sub) => {
                 let size = match sub {
-                    Submenu::Tab => tab_items.len(),
+                    Submenu::Tab => 0,
                     Submenu::Code => 1 + crate::ui::editor_language::MENU.len(),
                     Submenu::AutoSave => crate::ui::editor_states::AutoSave::ALL.len(),
                     Submenu::Keymap => Keymap::ALL.len(),
@@ -1718,28 +2104,7 @@ pub mod page {
                 let top = em::submenu_top_fitted(&rows, sub, size).unwrap_or(em::TOP);
                 let style = em::submenu_style(top);
                 let body = match sub {
-                    Submenu::Tab => {
-                        let tab_path = current_tab.clone().unwrap_or_default();
-                        rsx! {
-                            for (item, enabled) in tab_items.into_iter() {
-                                {
-                                    let s = s.clone();
-                                    let path = tab_path.clone();
-                                    let mut menu_open = s.menu_open;
-                                    let aria_disabled = (!enabled).to_string();
-                                    rsx! {
-                                        button { role: "menuitem", disabled: !enabled, "aria-disabled": "{aria_disabled}",
-                                            onclick: move |_| {
-                                                menu_open.set(false);
-                                                if enabled { run_tab_menu_item(&s, item, &path); }
-                                            },
-                                            span { class: "spacer", "{item.label()}" }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    Submenu::Tab => rsx! {},
                     Submenu::Code => rsx! {
                         {
                             let s = s.clone();
@@ -1796,7 +2161,7 @@ pub mod page {
         };
         let menu_style = em::menu_style();
         // The mockup's items, a separator, then Ember's (owner placement rule 2026-11-13, rule 5).
-        let entries = em::entries(current_tab.is_some());
+        let entries = main_menu_entries(current_tab.is_some());
         let item = |top: em::TopItem| -> Element {
             use em::TopItem as T;
             let s = s.clone();
@@ -1842,7 +2207,7 @@ pub mod page {
                             em::Entry::Group(Submenu::Code) => group(Submenu::Code, "코드".to_string()),
                             em::Entry::Group(Submenu::Keymap) => group(Submenu::Keymap, "단축키 체계".to_string()),
                             em::Entry::Group(Submenu::AutoSave) => group(Submenu::AutoSave, "자동 저장".to_string()),
-                            em::Entry::Group(Submenu::Tab) => group(Submenu::Tab, tab_label.clone()),
+                            em::Entry::Group(Submenu::Tab) => rsx! {},
                             em::Entry::Sep => rsx! { div { class: "ed-msep" } },
                         }
                     }
@@ -1886,6 +2251,8 @@ pub mod page {
             ToolWindow::Run => "play",
             ToolWindow::Problems => "warn",
             ToolWindow::Output => "code",
+            ToolWindow::Debug => "play",
+            ToolWindow::DebugConsole => "code",
         }
     }
 
@@ -1977,7 +2344,8 @@ pub mod page {
                 crate::ui::editor::PromptSubmitOutcome::DeleteMany { items } => {
                     submit_host.send(HostCommand::DeleteMany { items });
                 }
-                crate::ui::editor::PromptSubmitOutcome::EmptyName => {}
+                crate::ui::editor::PromptSubmitOutcome::EmptyName
+                | crate::ui::editor::PromptSubmitOutcome::Unchanged => {}
             }
             let _ = &submit_root;
             prompt.set(None);
@@ -2345,6 +2713,7 @@ pub mod page {
                             event.stop_propagation();
                             match action {
                                 crate::ui::editor::TreeKeyOutcome::Select(p, is_dir) => {
+                                    focus_mount(&ROW_MOUNTS, &p);
                                     tree_multi_sel.set(vec![(p.clone(), is_dir)]);
                                     tree_sel.set(Some((p, is_dir)));
                                 }
@@ -2461,8 +2830,12 @@ pub mod page {
                             rsx! { div { key: "{row.path}", class, role: "treeitem", "aria-label": "{row_label}", "aria-selected": "{chosen}", tabindex: "{row_ti}", style: "{row_style}",
                                 "aria-expanded": if is_dir { "{row.open}" } else { "" },
                                 draggable: "true",
+                                onmounted: { let mount_path = row.path.clone(); move |event| remember_mount(&ROW_MOUNTS, mount_path.clone(), event.data()) },
                                 ondragstart: move |_| {
                                     tree_drag_src.set(Some(drag_path.clone()));
+                                },
+                                ondragend: move |_| {
+                                    tree_drag_src.set(None);
                                 },
                                 ondragover: move |event| {
                                     event.prevent_default();
@@ -2477,17 +2850,15 @@ pub mod page {
                                             crate::ui::editor::new_item_parent(Some((drop_path.as_str(), false)), &drop_root)
                                         };
                                         let multi = tree_multi_sel.read().clone();
-                                        let sources = if multi.iter().any(|(p, _)| p == &src) {
+                                        let raw_sources = if multi.iter().any(|(p, _)| p == &src) {
                                             crate::ui::editor::prune_redundant_selection(&multi)
                                                 .into_iter()
                                                 .map(|(p, _)| p)
-                                                .filter(|p| p != &dest_dir)
                                                 .collect()
-                                        } else if src != dest_dir {
-                                            vec![src]
                                         } else {
-                                            Vec::new()
+                                            vec![src]
                                         };
+                                        let sources = crate::ui::editor::filter_move_sources(raw_sources, &dest_dir);
                                         if !sources.is_empty() {
                                             expanded.write().insert(dest_dir.clone());
                                             drop_host.send(HostCommand::MovePaths { sources, dest_dir });
@@ -2545,8 +2916,7 @@ pub mod page {
                                 },
                                 ondoubleclick: move |_| {
                                     if !is_dir {
-                                        let mut tabs = keep_s.tabs;
-                                        tabs.write().keep_open(&keep_path);
+                                        open_tab_file(&keep_s, &keep_path);
                                     }
                                 },
                                 // Right-click selects the row (keeping a multi-selection it is part of)
@@ -2580,7 +2950,16 @@ pub mod page {
     /// Whether a modal is up: the trust prompt, the unsaved-changes sheet or an extension's modal
     /// message (#831). Code-OSS's modal dialogs block the workbench, so the ⋯ menu stays closed.
     fn modal_up(s: &Shared) -> bool {
-        crate::ui::workspace_trust::view::prompt_up(s) || s.close_confirm.peek().is_some() || s.notifications.borrow().modal().is_some()
+        crate::ui::workspace_trust::view::prompt_up(s) || s.close_confirm.peek().is_some() || s.notifications.borrow().modal().is_some() || s.debug.peek().task_prompt.is_some()
+    }
+
+    /// Where a keyboard-opened tab context menu (Shift+F10 / ContextMenu) anchors under the tab
+    /// strip: horizontally aligned with the current tab's slot and vertically right under the strip.
+    pub(super) fn keyboard_tab_menu_anchor(paths: &[String], current: &str) -> (f64, f64) {
+        let index = paths.iter().position(|p| p == current).unwrap_or(0);
+        let x = 56.0 + (index as f64) * 120.0;
+        let y = f64::from(crate::ui::editor_menu::TOP);
+        (x, y)
     }
 
     fn tab_strip(s: &Shared, paths: &[String], dirty: &[bool], current: Option<&str>) -> Element {
@@ -2608,8 +2987,8 @@ pub mod page {
                     }
                     let key_str = key_name(&event.key());
                     let m = event.modifiers();
-                    // Shift+F10 / ContextMenu opens the ⋯ menu, which holds the current tab's items; a
-                    // right-click opens the tab's own menu (compose-rust#417). TODO(#673): open that one here.
+                    // Shift+F10 / ContextMenu opens the current tab's own context menu directly,
+                    // matching right-click on a tab (FR-L31.5).
                     if crate::ui::editor::tab_menu_key(
                         &key_str,
                         m.contains(Modifiers::CONTROL),
@@ -2619,10 +2998,11 @@ pub mod page {
                     ) {
                         event.stop_propagation();
                         event.prevent_default();
-                        if current_owned.is_some() {
+                        if let Some(ref current_path) = current_owned {
+                            let (x, y) = keyboard_tab_menu_anchor(&paths_owned, current_path);
+                            menu_open.set(false);
                             let mut tab_menu = strip_s.tab_menu;
-                            tab_menu.set(None);
-                            menu_open.set(true);
+                            tab_menu.set(Some((current_path.clone(), x, y)));
                         }
                         return;
                     }
@@ -2651,6 +3031,9 @@ pub mod page {
                         event.stop_propagation();
                         match action {
                             crate::ui::editor::TabKeyOutcome::Activate(path) => {
+                                if let Some(i) = crate::ui::editor::tab_key_focus(&paths_owned, &crate::ui::editor::TabKeyOutcome::Activate(path.clone())) {
+                                    focus_mount(&TAB_MOUNTS, &i.to_string());
+                                }
                                 scm.close_diff();
                                 tabs.write().activate(&path);
                                 if let Some(handle) = webview_handle_from_tab(&path) {
@@ -2723,6 +3106,7 @@ pub mod page {
                             ondoubleclick: move |_| {
                                 tabs.write().keep_open(&keep_path);
                             },
+                            onmounted: move |event| remember_mount(&TAB_MOUNTS, i.to_string(), event.data()),
                             oncontextmenu: move |event| {
                                 event.prevent_default();
                                 event.stop_propagation();
@@ -2918,6 +3302,30 @@ pub mod page {
         } }
     }
 
+    /// Mounted elements by name, kept to move keyboard focus to one.
+    type Mounts = std::cell::RefCell<std::collections::HashMap<String, std::rc::Rc<dioxus_elements::MountedData>>>;
+
+    thread_local! {
+        /// The project tree's rows, by path: focus follows the arrow keys' selection (#302).
+        static ROW_MOUNTS: Mounts = std::cell::RefCell::new(Default::default());
+        /// The tab strip's tabs, by position in the strip.
+        static TAB_MOUNTS: Mounts = std::cell::RefCell::new(Default::default());
+    }
+
+    /// An element's `onmounted`: kept under `name` for [`focus_mount`].
+    fn remember_mount(mounts: &'static std::thread::LocalKey<Mounts>, name: String, data: std::rc::Rc<dioxus_elements::MountedData>) {
+        mounts.with(|m| { m.borrow_mut().insert(name, data); });
+    }
+
+    /// Asks for keyboard focus on the element kept under `name`. The request is applied after the
+    /// next render, which the selection change that goes with it asks for.
+    fn focus_mount(mounts: &'static std::thread::LocalKey<Mounts>, name: &str) {
+        use futures_util::FutureExt;
+        if let Some(data) = mounts.with(|m| m.borrow().get(name).cloned()) {
+            let _ = data.set_focus(true).now_or_never();
+        }
+    }
+
     thread_local! {
         /// The terminal panel element, to read its laid-out size (FR-L31.20).
         static TERM_MOUNT: std::cell::RefCell<Option<std::rc::Rc<dioxus_elements::MountedData>>> = const { std::cell::RefCell::new(None) };
@@ -2963,7 +3371,13 @@ pub mod page {
             let mut revision = revision;
             *revision.write() += 1;
         });
-        crate::ui::editor_terminals::ensure(&s.server_url, &s.computer, &s.folder, &s.project, on_change);
+        crate::ui::editor_terminals::ensure(
+            terminal_stream::TermReach::for_base(&s.server_url),
+            &s.computer,
+            &s.folder,
+            &s.project,
+            on_change,
+        );
         crate::ui::editor_terminals::active_handle()
     }
 
@@ -3102,9 +3516,13 @@ pub mod page {
         let key_handle = handle.clone();
         let ime_handle = handle.clone();
         let control_handle = handle.clone();
+        let paste_confirm_key = s.term_paste_confirm;
+        let pending_paste_text = s.term_paste_confirm.read().text().map(str::to_owned);
         let offer_control = offers_take_control(&handle.snapshot());
         let offer_reconnect = handle.snapshot().needs_reconnect();
         let revision = s.revision;
+        let paste_s = s.clone();
+        let term_key_s = s.clone();
         rsx! {
             {strip}
             div { class: "ed-term", role: "log", "aria-label": "터미널 출력", tabindex: "0", style: "outline:none;",
@@ -3123,21 +3541,53 @@ pub mod page {
                     if crate::terminal_input::is_paste_chord(&name, m.contains(Modifiers::CONTROL), m.contains(Modifiers::ALT), m.contains(Modifiers::SHIFT), m.contains(Modifiers::META)) {
                         event.stop_propagation();
                         event.prevent_default();
-                        // TODO(#673): `compose_rust::clipboard::read_text` (compose-rust#546) is in the pin
-                        // and answers on the HTML path (dioxus-compose's own Cmd+V uses it), but a
-                        // multi-line paste must first ask (`needs_multiline_warning`, Code-OSS's
-                        // dialog) and the window has no confirmation for it yet. Then read the
-                        // clipboard and send `paste_bytes(text, state.bracketed_paste)`; until then the
-                        // chord only says why nothing is pasted.
-                        notice(crate::terminal_input::PASTE_UNAVAILABLE);
+                        // Code-OSS `terminalInstance.paste`: read the clipboard, then send it or ask
+                        // first (`terminal.integrated.enableMultiLinePasteWarning`, old booleans
+                        // included).
+                        let setting = crate::terminal_input::MultiLinePasteWarning::from_setting(
+                            paste_s.host.state.lock().unwrap().settings.scopes
+                                .value("terminal.integrated.enableMultiLinePasteWarning", None).as_ref(),
+                        );
+                        let paste_handle = key_handle.clone();
+                        let mut paste_confirm = paste_confirm_key;
+                        compose_rust::clipboard::read_text(move |result| match result {
+                            Ok(Some(text)) => {
+                                let snap = paste_handle.snapshot();
+                                if !sends_input(&snap) {
+                                    return;
+                                }
+                                match crate::terminal_input::plan_paste(
+                                    &text,
+                                    setting,
+                                    snap.bracketed_paste,
+                                ) {
+                                    crate::terminal_input::PasteAction::Send(bytes) => {
+                                        paste_handle.send_input(&bytes);
+                                    }
+                                    crate::terminal_input::PasteAction::Confirm(pending) => {
+                                        paste_confirm.write().ask(pending);
+                                    }
+                                    crate::terminal_input::PasteAction::Empty => {}
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(_) => notice(crate::terminal_input::PASTE_TOO_LONG),
+                        });
                         return;
                     }
                     let bytes = terminal_input(&name, m.contains(Modifiers::CONTROL), m.contains(Modifiers::ALT), m.contains(Modifiers::SHIFT), m.contains(Modifiers::META));
-                    let Some(bytes) = bytes else { return };
+                    // #1133: Code-OSS's rule (`terminal.integrated.commandsToSkipShell`, keys the shell has
+                    // no bytes for go on); one place, `keymap::terminal_keeps_key`.
+                    let (keymap, chord, page) = terminal_page_key(&term_key_s, &name, m);
+                    if !crate::ui::keymap::terminal_keeps_key(keymap, &chord, &page, bytes.is_some()) {
+                        return;
+                    }
                     event.stop_propagation();
                     event.prevent_default();
-                    if sends_input(&key_handle.snapshot()) {
-                        key_handle.send_input(&bytes);
+                    if let Some(bytes) = bytes {
+                        if sends_input(&key_handle.snapshot()) {
+                            key_handle.send_input(&bytes);
+                        }
                     }
                 },
                 // TODO(dioxus-compose#205): the live renderer does not route paste and IME composition
@@ -3156,6 +3606,44 @@ pub mod page {
                         if offer_control {
                             button { class: "ed-pj", style: "background:var(--c-orange); color:var(--ink-text); height:24px;",
                                 onclick: move |_| control_handle.take_control(), "제어권 가져오기" }
+                        }
+                    }
+                }
+                if let Some(ref pending_text) = pending_paste_text {
+                    {
+                        let prompt_text = crate::terminal_input::multiline_warning_text(pending_text);
+                        let paste_h = handle.clone();
+                        let single_h = handle.clone();
+                        let mut confirm_paste = s.term_paste_confirm;
+                        let mut confirm_single = s.term_paste_confirm;
+                        let mut confirm_cancel = s.term_paste_confirm;
+                        rsx! {
+                            div { role: "alertdialog", "aria-label": "여러 줄 붙여넣기 확인",
+                                style: "display:flex; align-items:center; gap:var(--sp2); padding:var(--sp1) var(--sp3); margin-bottom:var(--sp2); background:var(--c-orange-soft); color:var(--text); border-radius:var(--r-sm);",
+                                div { style: "flex:1;", "{prompt_text}" }
+                                button { class: "ed-pj", style: "background:var(--c-orange); color:var(--ink-text); height:24px;",
+                                    onclick: move |_| {
+                                        let snap = paste_h.snapshot();
+                                        if let Some(bytes) = confirm_paste.write().decide(crate::terminal_input::PasteChoice::Paste, snap.bracketed_paste) {
+                                            if sends_input(&snap) {
+                                                paste_h.send_input(&bytes);
+                                            }
+                                        }
+                                    }, "{crate::terminal_input::WARN_PASTE}" }
+                                button { class: "ed-pj", style: "border:1px solid var(--line); height:24px;",
+                                    onclick: move |_| {
+                                        let snap = single_h.snapshot();
+                                        if let Some(bytes) = confirm_single.write().decide(crate::terminal_input::PasteChoice::SingleLine, snap.bracketed_paste) {
+                                            if sends_input(&snap) {
+                                                single_h.send_input(&bytes);
+                                            }
+                                        }
+                                    }, "{crate::terminal_input::WARN_SINGLE_LINE}" }
+                                button { class: "ed-pj", style: "border:1px solid var(--line); height:24px;",
+                                    onclick: move |_| {
+                                        let _ = confirm_cancel.write().decide(crate::terminal_input::PasteChoice::Cancel, false);
+                                    }, "{crate::terminal_input::WARN_CANCEL}" }
+                            }
                         }
                     }
                 }
@@ -3295,6 +3783,7 @@ pub mod page {
                             let cid = id.clone();
                             let mut sel = selected_sig;
                             let bridge = s.bridge.clone();
+                            let host = s.host.clone();
                             rsx! {
                                 button {
                                     key: "{id}",
@@ -3303,6 +3792,7 @@ pub mod page {
                                     onclick: move |_| {
                                         sel.set(cid.clone());
                                         bridge.borrow_mut().set_active_output_channel(cid.clone());
+                                        host.send(HostCommand::ActiveOutputChannel(Some(cid.clone())));
                                     },
                                     "{label}"
                                 }
@@ -3393,6 +3883,8 @@ pub mod page {
                     {output_body(s)}
                 } else if w == ToolWindow::Run {
                     {crate::ui::editor_tasks::view::body(s)}
+                } else if w == ToolWindow::DebugConsole {
+                    {crate::ui::editor_debug_view::console_body(s)}
                 } else {
                     div { class: "ed-note", role: "status", "{body}" }
                 }
@@ -3421,14 +3913,14 @@ pub mod page {
         let agent = agent_status_text(agent_state);
         let dot = crate::ui::editor::agent_dot_class(agent_state);
         let position = position_text(line, col);
-        let tab_w = crate::ui::editor::tab_width_text(tab_width);
+        let tab_w = active_indentation(s).map_or_else(|| crate::ui::editor::tab_width_text(tab_width), |(i, _)| crate::ui::editor_status::indentation_text(i));
         let branch = branch.to_string();
         let has_file = current.is_some();
         // EOL, encoding and language of the active document (FR-L31.7).
         let format = active_format(s).and_then(|(_, f, _)| f);
         let crate::ui::editor_status::StatusTexts { eol: eol_t, encoding: enc_t, language: lang_t } =
             crate::ui::editor_status::status_texts(format.as_ref());
-        let (eol_s, enc_s, lang_s) = (s.clone(), s.clone(), s.clone());
+        let (eol_s, enc_s, lang_s, tab_s) = (s.clone(), s.clone(), s.clone(), s.clone());
         let goto_s = s.clone();
         let git_s = s.clone();
         // FR-L31.8: the cursor line's blame, as Code-OSS's git.blame.statusBarItem.
@@ -3447,7 +3939,8 @@ pub mod page {
                         onclick: move |_| open_picker(&eol_s, crate::ui::palette::Mode::Eol), "{eol_t}" }
                     button { class: "ed-sbi hide-md", title: "인코딩 선택", "aria-label": "인코딩 선택: {enc_t}",
                         onclick: move |_| open_picker(&enc_s, crate::ui::palette::Mode::EncodingAction), "{enc_t}" }
-                    span { class: "ed-sbi hide-md", "{tab_w}" }
+                    button { class: "ed-sbi hide-md", title: "들여쓰기 선택", "aria-label": "들여쓰기 선택: {tab_w}",
+                        onclick: move |_| open_picker(&tab_s, crate::ui::palette::Mode::Indentation), "{tab_w}" }
                     button { class: "ed-sbi hide-md", title: "언어 모드 선택", "aria-label": "언어 모드 선택: {lang_t}",
                         onclick: move |_| open_picker(&lang_s, crate::ui::palette::Mode::Language), "{lang_t}" }
                 }
@@ -3520,4 +4013,44 @@ mod tests {
         assert!(page::sends_input(&state));
     }
     #[test] fn fr_l31_status_position() { assert_eq!(position_text(2, 3), "2행 3열"); }
+
+    #[test]
+    fn fr_l31_5_tab_strip_keyboard_menu_opens_tab_context_menu_and_main_menu_omits_tab_group() {
+        use crate::ui::editor_menu::{Entry, Submenu, TOP};
+        // The ⋯ menu drops the redundant current-tab group when a tab is open or closed.
+        for has_tab in [true, false] {
+            let entries = page::main_menu_entries(has_tab);
+            assert!(!entries.contains(&Entry::Group(Submenu::Tab)), "tab group must be omitted");
+            assert!(entries.contains(&Entry::Group(Submenu::Code)));
+        }
+        // Keyboard-opened tab context menu anchors below the tab strip, advancing per tab slot.
+        let paths = vec!["/w/a.rs".to_string(), "/w/b.rs".to_string(), "/w/c.rs".to_string()];
+        let (x0, y0) = page::keyboard_tab_menu_anchor(&paths, "/w/a.rs");
+        let (x1, y1) = page::keyboard_tab_menu_anchor(&paths, "/w/b.rs");
+        assert!(x1 > x0);
+        assert_eq!(y0, f64::from(TOP));
+        assert_eq!(y1, f64::from(TOP));
+        // Wiring check: tab_strip handles tab_menu_key by setting tab_menu instead of opening ⋯.
+        let src = include_str!("editor_workbench.rs");
+        let strip = &src[src.find("fn tab_strip(").expect("tab_strip")..src.find("fn tab_context_menu(").expect("tab_context_menu")];
+        let key_block = &strip[strip.find("tab_menu_key(").expect("tab_menu_key")..strip.find("tab_move_key(").expect("tab_move_key")];
+        assert!(key_block.contains("tab_menu.set(Some(("), "keyboard shortcut opens tab_menu directly");
+        assert!(key_block.contains("menu_open.set(false)"), "keyboard shortcut closes the ⋯ menu");
+        assert!(!key_block.contains("menu_open.set(true)"), "keyboard shortcut no longer opens ⋯");
+    }
+
+    #[test]
+    fn fr_l31_21_editor_terminal_paste_chord_reads_clipboard_and_confirms_multiline() {
+        let src = include_str!("editor_workbench.rs");
+        let term = &src[src.find("fn terminal_body(").expect("terminal_body")..src.find("fn problems_body(").expect("problems_body")];
+        assert!(term.contains("compose_rust::clipboard::read_text("), "paste chord reads the clipboard");
+        assert!(term.contains("crate::terminal_input::plan_paste("), "paste chord routes through plan_paste");
+        assert!(
+            term.contains("MultiLinePasteWarning::from_setting(") && term.contains("\"terminal.integrated.enableMultiLinePasteWarning\""),
+            "paste chord follows the multi-line warning setting"
+        );
+        assert!(term.contains("crate::terminal_input::multiline_warning_text("), "multi-line paste shows confirmation prompt");
+        assert!(term.contains("crate::terminal_input::WARN_PASTE") && term.contains("crate::terminal_input::WARN_CANCEL"));
+        assert!(!term.contains("PASTE_UNAVAILABLE"), "stub paste notice is gone");
+    }
 }

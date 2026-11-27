@@ -1987,13 +1987,21 @@ mod design_chrome {
     #[test]
     fn design_a14_top_bar_actions_follow_the_mockup_order_without_a_menu_button() {
         let top = &PAGE[PAGE.find("fn top_bar(").unwrap()..PAGE.find("fn menu(s: &Shared").unwrap()];
-        let at = |label: &str| top.find(&format!("title: \"{label}\"")).unwrap_or_else(|| panic!("{label} missing"));
-        let runcfg = at("실행 구성");
-        let run = at("실행");
-        let stop = at("중지");
+        let find = |src: &str, label: &str| src.find(&format!("title: \"{label}\"")).unwrap_or_else(|| panic!("{label} missing"));
+        let at = |label: &str| find(top, label);
+        // FR-L31.42: the run configuration pill, 실행, 디버깅 시작 and the stop button (or the debug
+        // toolbar) are drawn by `editor_debug::run_picker`, in the top bar's place for them.
+        let debug = include_str!("../src/ui/editor_debug.rs");
+        let picker = &debug[debug.find("fn RunPicker(").unwrap()..];
+        let runcfg = find(picker, "실행 구성");
+        let run = find(picker, "실행");
+        let start = find(picker, "디버깅 시작");
+        let stop = find(&picker[start..], "작업 중지") + start;
+        assert!(runcfg < run && run < start && start < stop, "order is not run config, run, debug, stop");
+        let picker_at = top.find("{crate::ui::editor_debug::run_picker(s)}").expect("the run picker");
         let ask = at("에이전트에게 묻기");
         let theme = at("{theme_title}");
-        assert!(runcfg < run && run < stop && stop < ask && ask < theme, "order is not run config, run, stop, ask, theme");
+        assert!(picker_at < ask && ask < theme, "order is not run config, run, stop, ask, theme");
         assert!(!top.contains("icon(\"more\")"), "the top bar still has a ⋯ button");
     }
 }
@@ -2056,7 +2064,7 @@ mod design_placement {
 // FR-L31.25 (#766): editor agent tool window and 에이전트에게 묻기 (Action::Ask)
 #[test]
 fn fr_l31_25_action_ask_attaches_file_and_selection_context() {
-    use ember_app::ui::editor_agent::{format_context, format_file_context, format_selection_context, AgentState};
+    use ember_app::ui::editor_agent::{format_context, format_file_context, format_selection_context, sample_sessions_for, AgentState};
 
     let file_ctx = format_file_context("/repo/src/lib.rs", "/repo");
     assert_eq!(file_ctx, "#file:src/lib.rs");
@@ -2070,7 +2078,7 @@ fn fr_l31_25_action_ask_attaches_file_and_selection_context() {
     let auto_ctx_sel = format_context("/repo/src/main.rs", "/repo", Some((1, 5)));
     assert_eq!(auto_ctx_sel, "#selection:src/main.rs:1-5");
 
-    let mut state = AgentState::new("proj-1", "/repo");
+    let mut state = AgentState::connected("proj-1", "/repo", sample_sessions_for("proj-1"));
     assert!(!state.sessions.is_empty());
     assert!(state.selected_session().is_some());
 
@@ -2088,3 +2096,15 @@ fn fr_l31_25_action_ask_attaches_file_and_selection_context() {
     assert!(last.text.contains("이 함수 리팩터링해줘"));
 }
 
+
+#[test]
+fn fr_l31_tree_and_tab_focus_follow_the_key_outcome() {
+    use ember_app::ui::editor::{tab_key_focus, tree_key_focus, TabKeyOutcome, TreeKeyOutcome};
+    assert_eq!(tree_key_focus(&TreeKeyOutcome::Select("/p/b.rs".into(), false)), Some("/p/b.rs"));
+    assert_eq!(tree_key_focus(&TreeKeyOutcome::Expand("/p/src".into())), None);
+    assert_eq!(tree_key_focus(&TreeKeyOutcome::OpenFile("/p/b.rs".into())), None);
+    let paths = vec!["/p/a.rs".to_string(), "/p/b.rs".to_string()];
+    assert_eq!(tab_key_focus(&paths, &TabKeyOutcome::Activate("/p/b.rs".into())), Some(1));
+    assert_eq!(tab_key_focus(&paths, &TabKeyOutcome::Activate("/p/z.rs".into())), None);
+    assert_eq!(tab_key_focus(&paths, &TabKeyOutcome::Close("/p/b.rs".into())), None);
+}

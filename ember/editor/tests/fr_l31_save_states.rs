@@ -57,7 +57,7 @@ fn save(c: &mut SessionCore, t0: Instant, u: &UriComponents, generation: u64) ->
 }
 
 /// The updates that change the buffer or its dirty state (not overlays).
-fn buffer_updates<'a>(effects: &'a [Effect]) -> Vec<&'a SessionUpdate> {
+fn buffer_updates(effects: &[Effect]) -> Vec<&SessionUpdate> {
     updates(effects).into_iter().filter(|u| matches!(u, SessionUpdate::Command { .. } | SessionUpdate::Dirty { .. })).collect()
 }
 
@@ -175,7 +175,7 @@ fn fr_l31_save_states_a_restored_buffer_opens_the_file_and_is_dirty_with_the_fil
     let (mut c, mut bridge) = (core(t0), WidgetBridge::new());
     let u = uri("/w/a.json");
     // After a reconnect the window restores its buffer of a file the new session has not opened.
-    let fx = c.handle(t0, Input::Restore { uri: u.clone(), text: "{\n  \"mine\": 1\n}\n".into() });
+    let fx = c.handle(t0, Input::Restore { uri: u.clone(), text: "{\n  \"mine\": 1\n}\n".into(), base: None });
     assert_eq!(fx, vec![Effect::ReadFile { uri: u.clone(), purpose: ReadPurpose::Open }]);
     let fx = c.handle(t0, Input::FileRead { uri: u.clone(), purpose: ReadPurpose::Open, result: Ok(b"{\r\n}\r\n".to_vec()) });
     let ups = updates(&fx);
@@ -202,7 +202,7 @@ fn fr_l31_hot_exit_a_restored_buffer_whose_file_is_gone_opens_as_a_deleted_unsav
     let t0 = Instant::now();
     let (mut c, mut bridge) = (core(t0), WidgetBridge::new());
     let u = uri("/w/gone.json");
-    let fx = c.handle(t0, Input::Restore { uri: u.clone(), text: "{\n  \"mine\": 1\n}\n".into() });
+    let fx = c.handle(t0, Input::Restore { uri: u.clone(), text: "{\n  \"mine\": 1\n}\n".into(), base: None });
     assert_eq!(fx, vec![Effect::ReadFile { uri: u.clone(), purpose: ReadPurpose::Open }]);
     let fx = c.handle(
         t0,
@@ -227,7 +227,7 @@ fn fr_l31_hot_exit_a_restore_that_fails_for_another_reason_is_an_open_failure() 
     let t0 = Instant::now();
     let mut c = core(t0);
     let u = uri("/w/secret.json");
-    c.handle(t0, Input::Restore { uri: u.clone(), text: "{}\n".into() });
+    c.handle(t0, Input::Restore { uri: u.clone(), text: "{}\n".into(), base: None });
     let fx = c.handle(t0, Input::FileRead { uri: u.clone(), purpose: ReadPurpose::Open, result: Err("NoPermissions (FileSystemError)".into()) });
     assert!(updates(&fx).iter().any(|u| matches!(u, SessionUpdate::OpenFailed { .. })), "{fx:#?}");
     // An open without a buffer to put back still fails on a missing file.
@@ -244,16 +244,16 @@ fn fr_l31_save_states_restoring_the_disk_text_leaves_the_document_clean() {
     let u = uri("/w/a.json");
     let g = open(&mut c, &mut bridge, t0, &u, "{}\n");
     // The same text: nothing happens.
-    let fx = c.handle(t0, Input::Restore { uri: u.clone(), text: "{}\n".into() });
+    let fx = c.handle(t0, Input::Restore { uri: u.clone(), text: "{}\n".into(), base: None });
     assert!(buffer_updates(&fx).is_empty(), "{fx:#?}");
     assert_eq!(bridge.document(&u).unwrap().generation, g);
     // Other text on an open document: a new generation, dirty.
-    let fx = c.handle(t0, Input::Restore { uri: u.clone(), text: "[]\n".into() });
+    let fx = c.handle(t0, Input::Restore { uri: u.clone(), text: "[]\n".into(), base: None });
     apply(&mut bridge, &fx);
     assert!(bridge.document(&u).unwrap().dirty);
     assert_ne!(bridge.document(&u).unwrap().generation, g);
     // Back to the disk text: clean again.
-    let fx = c.handle(t0, Input::Restore { uri: u.clone(), text: "{}\n".into() });
+    let fx = c.handle(t0, Input::Restore { uri: u.clone(), text: "{}\n".into(), base: None });
     assert!(updates(&fx).contains(&&SessionUpdate::Dirty { uri: u.clone(), dirty: false }));
     apply(&mut bridge, &fx);
     assert!(!bridge.document(&u).unwrap().dirty);

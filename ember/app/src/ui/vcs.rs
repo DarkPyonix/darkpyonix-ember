@@ -14,7 +14,6 @@
 //!
 //! What the pinned toolkit cannot do yet, with the workaround used (`GAPS-WORKLIST.md`):
 //! - no clickable Row or Column: a text Button is the hit target of a row or a diff line (v0.0.7: #372 fixed, container `on_click`; workaround kept until checked on a display, with the VCS screen's own migration under #673);
-//! - no sticky column: the line check sits in the row and scrolls with it (TODO(compose-rust#424, after v0.0.10));
 //! - no SVG graph: the history is a list first (TODO(compose-rust#308): draw the graph on a `Canvas`).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -28,7 +27,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 
 use crate::demo::GitError;
-use crate::services::{run, services};
+use crate::services::services;
 use crate::ui::project::{is_default_project, ProjectBox};
 
 /// What a view shows while the server does not provide its data.
@@ -2773,11 +2772,25 @@ pub fn delete_tap(armed: Option<(usize, i64)>, index: usize, now: i64) -> Delete
     }
 }
 
-/// Whether the armed label ("정말 삭제합니다") shows. Nothing re-renders on a timer, so the label
-/// may stay on screen until the next recomposition after the timeout; `delete_tap` is the
-/// authority for what a tap does.
+/// Whether the armed label ("정말 삭제합니다") shows. An auto-disarm timer clears the armed
+/// state after [`STASH_ARM_TIMEOUT_MS`], and `delete_tap` remains the authority for what a tap
+/// does.
 pub fn armed_label_visible(armed: Option<(usize, i64)>, index: usize, now: i64) -> bool {
     matches!(armed, Some((i, at)) if i == index && now - at < STASH_ARM_TIMEOUT_MS)
+}
+
+/// Clears an armed confirmation state when its one-shot timer fires, if and only if the exact
+/// same `(key, armed_at)` token is still armed (FR-L19). A newer re-arm on the same or another
+/// button is left untouched.
+pub fn disarm_if_matches(
+    current: Option<(usize, i64)>,
+    token: (usize, i64),
+) -> Option<(usize, i64)> {
+    if current == Some(token) {
+        None
+    } else {
+        current
+    }
 }
 
 /// The key of one button of one entry in the armed state: three buttons per entry.
@@ -4902,6 +4915,19 @@ rename to new.txt
     fn fr_g6_delete_on_another_row_rearms() {
         assert_eq!(delete_tap(Some((1, 10_000)), 2, 10_900), DeleteTap::Arm);
         assert!(!armed_label_visible(Some((1, 10_000)), 2, 10_900));
+    }
+
+    #[test]
+    fn fr_l19_disarm_if_matches_clears_only_matching_token() {
+        let token = (1, 10_000);
+        // Matching token disarms to None.
+        assert_eq!(disarm_if_matches(Some(token), token), None);
+        // Newer re-arm on the same key is not cleared by an older timer.
+        assert_eq!(disarm_if_matches(Some((1, 12_500)), token), Some((1, 12_500)));
+        // Re-arm on a different key is not cleared by an older timer.
+        assert_eq!(disarm_if_matches(Some((2, 10_000)), token), Some((2, 10_000)));
+        // Already disarmed stays None.
+        assert_eq!(disarm_if_matches(None, token), None);
     }
 
     #[test]

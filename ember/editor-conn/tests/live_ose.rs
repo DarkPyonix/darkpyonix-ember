@@ -1,5 +1,5 @@
 //! End-to-end test against a real OSE server (Code-OSS [`PINNED_VERSION`], the build CI makes from
-//! `ember/ose/VERSION`). Ignored by default and gated on `EMBER_OSE_SERVER`:
+//! `.github/scripts/ose/VERSION`). Ignored by default and gated on `EMBER_OSE_SERVER`:
 //!
 //! ```sh
 //! export EMBER_OSE_SERVER="$(ember/editor-conn/scripts/fetch-ose-artifact.sh)"   # .../bin/dpx-ose-server
@@ -16,7 +16,7 @@
 //! 0. Start `dpx-ose-server` with the flags `ember/proxy/dpx` uses (`--host 127.0.0.1 --port P
 //!    --without-connection-token --accept-server-license-terms --server-data-dir D
 //!    --telemetry-level off`) on a free port, with `extensions.verifySignature: false` in
-//!    `D/data/Machine/settings.json` like `ember/ose/smoke.sh`, in its own process group; wait for the
+//!    `D/data/Machine/settings.json` like `.github/scripts/ose/smoke.sh`, in its own process group; wait for the
 //!    port.
 //! 1. `verify_server` (`GET /version`) → commit must equal [`PINNED_COMMIT`].
 //! 2. Management connection over plain TCP (`skipWebSocketFrames`): handshake, IPC client,
@@ -51,9 +51,10 @@ use serde_json::{json, Value};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
+use ember_editor_conn::actors::generated::main_thread_diagnostics::ChangeManyArgs;
 use ember_editor_conn::document::{DocumentBridge, EditorChange, TextEdit};
 use ember_editor_conn::exthost::{
-    self, InitDataParams, MainThreadCall, MarkerData, Range, WorkspaceData, WorkspaceFolder,
+    self, InitDataParams, MarkerData, Range, WorkspaceData, WorkspaceFolder,
 };
 use ember_editor_conn::handshake::{self, ConnectOptions, ConnectionType, ExtensionHostStartParams};
 use ember_editor_conn::ipc::IpcClient;
@@ -169,7 +170,7 @@ struct Server {
 impl Server {
     fn start(bin: &Path, root: &Path) -> Self {
         let data = root.join("data");
-        // ember/ose/smoke.sh and ember/proxy/dpx/vscode/runtime.py: Code-OSS has no Marketplace signature
+        // .github/scripts/ose/smoke.sh and ember/proxy/dpx/vscode/runtime.py: Code-OSS has no Marketplace signature
         // verifier, so OSE runs with signature verification off.
         let machine = data.join("data").join("Machine");
         std::fs::create_dir_all(&machine).unwrap();
@@ -292,12 +293,24 @@ enum DiagEvent {
 ///   would throw in callers that iterate it).
 /// * `MainThreadOutputService.$register` → the channel id string (`window.createOutputChannel`,
 ///   used by every language client for its log).
-fn live_reply(proxy: Option<&str>, method: &str, seq: u64) -> Reply {
+fn live_reply(proxy: Option<&str>, method: &str, seq: u64) -> exthost::ReplyResult {
     match (proxy, method) {
-        (Some("MainThreadLanguages"), "$getLanguages") => Reply::Json(json!(["plaintext", "json", "jsonc"])),
-        (Some("MainThreadOutputService"), "$register") => Reply::Json(json!(format!("ember-live-output-{seq}"))),
+        (Some("MainThreadLanguages"), "$getLanguages") => Ok(Reply::Json(json!(["plaintext", "json", "jsonc"]))),
+        (Some("MainThreadOutputService"), "$register") => Ok(Reply::Json(json!(format!("ember-live-output-{seq}")))),
         _ => exthost::default_reply(proxy, method),
     }
+}
+
+/// What the extension host said about its output channels: the `$register` calls (label, log file)
+/// and the `$update` calls (channel id, mode, till). The text itself never crosses RPC; it is in
+/// the log file.
+#[derive(Default)]
+struct OutputLog {
+    registers: Vec<(String, UriComponents)>,
+    /// `MainThreadLogger.$registerLogger` calls: (name or id, resource). A log output channel
+    /// (`createOutputChannel(name, { log: true })`) arrives this way.
+    loggers: Vec<(String, UriComponents)>,
+    updates: Vec<(String, Value, Value)>,
 }
 
 fn args_preview(args: &[Arg]) -> String {
@@ -316,6 +329,7 @@ async fn respond_loop(
     mut events: mpsc::UnboundedReceiver<RpcEvent>,
     diag: mpsc::UnboundedSender<DiagEvent>,
     seen: Arc<Mutex<BTreeMap<String, u32>>>,
+    outputs: Arc<Mutex<OutputLog>>,
     verbose: bool,
 ) {
     let mut seq = 0u64;
@@ -334,23 +348,83 @@ async fn respond_loop(
                     _ if verbose => println!("[live-ose]   EH→ {name} {}", args_preview(&r.args)),
                     _ => {}
                 }
-                match MainThreadCall::parse(&r) {
-                    Ok(MainThreadCall::DiagnosticsChangeMany { owner, entries }) => {
-                        let _ = diag.send(DiagEvent::Changed { owner, entries });
+                if r.proxy == Some("MainThreadOutputService") {
+                    let json = |i: usize| r.args.get(i).and_then(Arg::as_json).cloned().unwrap_or(Value::Null);
+                    let mut log = outputs.lock().unwrap_or_else(|e| e.into_inner());
+                    match r.method.as_str() {
+                        "$register" => match serde_json::from_value::<UriComponents>(json(1)) {
+                            Ok(file) => log.registers.push((json(0).as_str().unwrap_or_default().to_owned(), file)),
+                            Err(e) => eprintln!("[live-ose] cannot parse the file of {name}: {e}; args {}", args_preview(&r.args)),
+                        },
+                        "$update" => {
+                            let channel = json(0).as_str().unwrap_or_default().to_owned();
+                            log.updates.push((channel, json(1), json(2)));
+                        }
+                        _ => {}
                     }
-                    Ok(_) => {}
-                    Err(e) => eprintln!("[live-ose] cannot parse {name}: {e}; args {}", args_preview(&r.args)),
                 }
-                peer.respond(r.req, Ok(live_reply(r.proxy, &r.method, seq)));
+                if r.proxy == Some(ember_editor_conn::actors::generated::main_thread_storage::PROXY) {
+                    use ember_editor_conn::actors::generated::main_thread_storage::{InitializeExtensionStorageArgs, SetValueArgs};
+                    match r.method.as_str() {
+                        "$initializeExtensionStorage" => {
+                            if let Err(e) = InitializeExtensionStorageArgs::decode(&r.args) {
+                                eprintln!("[live-ose] cannot parse {name}: {e}; args {}", args_preview(&r.args));
+                            }
+                        }
+                        "$setValue" => {
+                            if let Err(e) = SetValueArgs::decode(&r.args) {
+                                eprintln!("[live-ose] cannot parse {name}: {e}; args {}", args_preview(&r.args));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if r.proxy == Some("MainThreadLogger") && r.method == "$registerLogger" {
+                    let logger = r.args.first().and_then(Arg::as_json).cloned().unwrap_or(Value::Null);
+                    let label = ["name", "id"].iter().find_map(|k| logger.get(*k).and_then(Value::as_str)).unwrap_or_default().to_owned();
+                    match logger.get("resource").cloned().map(serde_json::from_value::<UriComponents>) {
+                        Some(Ok(file)) => outputs.lock().unwrap_or_else(|e| e.into_inner()).loggers.push((label, file)),
+                        _ => eprintln!("[live-ose] cannot parse the resource of {name}; args {}", args_preview(&r.args)),
+                    }
+                }
+                if r.proxy == Some(ember_editor_conn::actors::generated::main_thread_diagnostics::PROXY) && r.method == "$changeMany" {
+                    match ChangeManyArgs::decode(&r.args)
+                        .and_then(|a| Ok((a.owner, serde_json::from_value(Value::Array(a.entries))?)))
+                    {
+                        Ok((owner, entries)) => {
+                            let _ = diag.send(DiagEvent::Changed { owner, entries });
+                        }
+                        Err(e) => eprintln!("[live-ose] cannot parse {name}: {e}; args {}", args_preview(&r.args)),
+                    }
+                }
+                peer.respond(r.req, live_reply(r.proxy, &r.method, seq));
             }
             RpcEvent::Cancel(_) => {}
             RpcEvent::Lost(reason) => {
+                eprintln!("[live-ose] ext-host connection lost: {reason:?}");
                 let _ = diag.send(DiagEvent::Gone(format!("lost ({reason:?})")));
             }
             RpcEvent::Disconnected => {
+                eprintln!("[live-ose] ext-host connection disconnected");
                 let _ = diag.send(DiagEvent::Gone("disconnected".into()));
                 break;
             }
+        }
+    }
+}
+
+/// Prints every extension host to Ember request seen, `proxy.method count`, most frequent first.
+/// It prints when dropped, so a failed run shows it too. Nothing asserts on it.
+struct Census(Arc<Mutex<BTreeMap<String, u32>>>);
+
+impl Drop for Census {
+    fn drop(&mut self) {
+        let seen = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut rows: Vec<(&String, &u32)> = seen.iter().collect();
+        rows.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        println!("[live-ose] ---- extension host -> Ember requests ({} distinct) ----", rows.len());
+        for (name, n) in rows {
+            println!("[live-ose] {name} {n}");
         }
     }
 }
@@ -579,7 +653,9 @@ async fn live_ose_end_to_end() {
 
     let (diag_tx, mut diag_rx) = mpsc::unbounded_channel();
     let seen = Arc::new(Mutex::new(BTreeMap::new()));
-    let responder = tokio::spawn(respond_loop(peer.clone(), rpc_events, diag_tx, Arc::clone(&seen), verbose));
+    let _census = Census(Arc::clone(&seen));
+    let outputs = Arc::new(Mutex::new(OutputLog::default()));
+    let responder = tokio::spawn(respond_loop(peer.clone(), rpc_events, diag_tx, Arc::clone(&seen), Arc::clone(&outputs), verbose));
 
     let defaults = exthost::contributed_configuration_defaults(&extensions);
     let configuration = exthost::configuration_init_data(&defaults, &[]);
@@ -673,6 +749,81 @@ async fn live_ose_end_to_end() {
     }
     assert!(markers.iter().any(|m| m.severity == 8), "expected an Error marker: {markers:?}");
     steps.done("4. MainThreadDiagnostics.$changeMany (JSON errors)");
+    let storage_inits = seen
+        .lock()
+        .unwrap()
+        .get("MainThreadStorage.$initializeExtensionStorage")
+        .copied()
+        .unwrap_or(0);
+    assert!(
+        storage_inits > 0,
+        "expected at least one MainThreadStorage.$initializeExtensionStorage call during activation"
+    );
+    steps.done("4. MainThreadStorage.$initializeExtensionStorage observed");
+
+    // The JSON language client's log is a log output channel (`createOutputChannel(name, { log: true })`):
+    // the extension host's logger service writes the file and registers it with
+    // `MainThreadLogger.$registerLogger`. A plain channel would arrive as `MainThreadOutputService.$register`
+    // instead, and both are accepted. The text of a channel is never sent over RPC; it is in the file.
+    let channel_file = |outputs: &Mutex<OutputLog>| -> Result<(String, UriComponents), String> {
+        let log = outputs.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((l, f)) = log.loggers.iter().find(|(l, _)| l == "JSON Language Server") {
+            return Ok((format!("MainThreadLogger.$registerLogger {l}"), f.clone()));
+        }
+        if let Some((l, f)) = log.registers.iter().find(|(l, _)| l == "JSON Language Server") {
+            return Ok((format!("MainThreadOutputService.$register {l}"), f.clone()));
+        }
+        let loggers: Vec<&str> = log.loggers.iter().map(|(l, _)| l.as_str()).collect();
+        let labels: Vec<&str> = log.registers.iter().map(|(l, _)| l.as_str()).collect();
+        Err(format!("no output channel named \"JSON Language Server\" arrived; registered loggers: {loggers:?}; registered channels: {labels:?}"))
+    };
+    // The extension host registers the logger when the client starts, so wait for it as for the file.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let (via, file) = loop {
+        match channel_file(&outputs) {
+            Ok(found) => break found,
+            Err(why) if tokio::time::Instant::now() >= deadline => panic!("timed out after 30 s: {why}"),
+            Err(_) => tokio::time::sleep(Duration::from_millis(250)).await,
+        }
+    };
+    let update_calls = outputs.lock().unwrap_or_else(|e| e.into_inner()).updates.len();
+    println!("[live-ose]   JSON Language Server arrived as {via}: file {} ({update_calls} $update calls seen)", file.key());
+    for (id, mode, till) in outputs.lock().unwrap_or_else(|e| e.into_inner()).updates.iter() {
+        println!("[live-ose]   $update {id} mode={mode} till={till}");
+    }
+    // The URI transformer normally hands us `vscode-remote://`; a `file:` one is a path on the server.
+    let log_file = if file.scheme == "file" { UriComponents::remote(&authority, &file.path) } else { file.clone() };
+    // The JSON client logs nothing at the default log level, so its file is created and stays empty
+    // (0 bytes at 1.139.1). It has to be readable through the file channel; and some registered
+    // logger's file, read the same way, has to have text, or reading a log file would be untested.
+    let json_log = within("the JSON Language Server log file to be readable", 30, async {
+        loop {
+            match fs.read_file(&log_file).await {
+                Ok(bytes) => return bytes,
+                Err(e) => println!("[live-ose]   log file not readable yet: {e}"),
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    })
+    .await;
+    println!("[live-ose]   JSON Language Server log file: {} bytes", json_log.len());
+    let (with_text, log_bytes) = within("a registered logger's file to have text", 30, async {
+        loop {
+            let files: Vec<(String, UriComponents)> = outputs.lock().unwrap_or_else(|e| e.into_inner()).loggers.clone();
+            for (name, f) in files {
+                let f = if f.scheme == "file" { UriComponents::remote(&authority, &f.path) } else { f };
+                if let Ok(bytes) = fs.read_file(&f).await {
+                    if !bytes.is_empty() {
+                        return (name, bytes);
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    })
+    .await;
+    println!("[live-ose]   logger {with_text:?} file has {} bytes: {:?}", log_bytes.len(), String::from_utf8_lossy(&log_bytes).lines().next());
+    steps.done("4. output channel log file is readable, and a logger file has text");
 
     // ---- 5. shutdown ----------------------------------------------------------------------------
     exthost::terminate(peer.connection());
@@ -685,13 +836,6 @@ async fn live_ose_end_to_end() {
     println!("[live-ose]   server exit: {status:?}");
     steps.done("5. server stopped (SIGTERM to process group)");
 
-    {
-        let seen = seen.lock().unwrap();
-        println!("[live-ose] ---- extension host → Ember calls ({} distinct) ----", seen.len());
-        for (name, n) in seen.iter() {
-            println!("[live-ose] {n:>5}  {name}");
-        }
-    }
     steps.summary();
     drop(server); // removes the temp dir unless EMBER_OSE_KEEP is set
 }

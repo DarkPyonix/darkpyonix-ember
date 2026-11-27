@@ -12,9 +12,6 @@
 
 #![allow(non_snake_case)]
 
-use std::cell::RefCell;
-use std::rc::Rc;
-
 use compose_rust::runtime::{mutable_state_of, remember, MutableState};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
@@ -27,18 +24,14 @@ pub use crate::ui::files::{
     path_label, percent, progress_line, send_blocker, sendable_devices, transfer_service,
     offer_card_shown, user_actions, visible_offers, Answer, Device, DeviceKind, Direction, FilesKpi, FilesModel,
     HistoryEntry, HistoryResult, Offer, PathKind, Presence, ReceivedFile, SendDraft, SendTarget,
-    Transfer, TransferAction, TransferService, TransferState, FILE_DIALOG_TITLE, FILE_PICKER_AVAILABLE, FILE_PICK_REASON, PickOutcome, pick_outcome,
+    Transfer, TransferAction, TransferService, action_button_name, TransferState, FILE_DIALOG_TITLE, FILE_PICKER_AVAILABLE, FILE_PICK_REASON, PickOutcome, pick_outcome,
     FILE_PICK_UNAVAILABLE, LOCK_LINE, UNAVAILABLE, clean_member_name, demo_files, is_demo,
 };
-/// Whether the share sheet picks files itself. It does not yet: its file card only says what is
-/// chosen, and the tray's 파일 고르기 opens the dialog.
-const SHARE_SHEET_PICKS_FILES: bool = false;
-
 use crate::ui::files::{choose_target, chip_avail, chip_label, chip_rows, chip_text_max_for, chip_width_est, files_line, fit_chip_text, send_state_at, server_status, share_tap_at, tile_tap_notice};
 use super::compat::Banner;
 use crate::model::Tone;
 use super::characters::{CharState, Character};
-use super::components::{EmberSheetSized, AppButton, ButtonKind, Clickable, EmberCard, EmberSheet, FilterChip, IconButton, InkIconButton, Label, Pill, PillTone};
+use super::components::{EmberSheetSized, AppButton, ButtonKind, Clickable, EmberCard, EmberSheet, FilterChip, InkIconButton, Label, NamedClickable, NamedDisabled, Pill, PillTone};
 use super::home::{fit_label, text_px, Cols, Part};
 use super::notice;
 use super::project::{HeaderGap, ThemeButton};
@@ -87,17 +80,6 @@ pub fn device_cols(width_dp: f32) -> usize {
     }
 }
 
-/// Narrowest an agent tile can be and still show its two buttons, "대화 열기" and "보내기"
-/// (24 dp padding, 2 dp border, about 98 + 4 + 90 dp of buttons, with some air).
-pub const AGENT_TILE_MIN_W: f32 = 232.0;
-
-/// Columns of the agent tiles (FR-L27): as many as keep every tile at least
-/// [`AGENT_TILE_MIN_W`] wide, at most four. `avail` is the card's inner width. At 768 dp four
-/// tiles were 142 dp and the "보내기" button was cut to a line.
-pub fn agent_cols(avail: f32, gap: f32) -> usize {
-    (((avail + gap) / (AGENT_TILE_MIN_W + gap)).floor() as usize).clamp(1, 4)
-}
-
 /// Width of one tile of a grid of `cols` columns in `avail` with `gap` between.
 pub fn tile_width(avail: f32, cols: usize, gap: f32) -> f32 {
     let cols = cols.max(1) as f32;
@@ -129,6 +111,8 @@ const ICON_VIDEO: &str = line_icon!("m15.75 10.5 4.72-4.72a.75.75 0 0 1 1.28.53v
 const ICON_AUDIO: &str = line_icon!("m9 9 10.5-3m0 6.553v3.75a2.25 2.25 0 0 1-1.632 2.163l-1.32.377a1.803 1.803 0 1 1-.99-3.467l2.31-.66a2.25 2.25 0 0 0 1.632-2.163Zm0 0V2.25L9 5.25v10.303m0 0v3.75a2.25 2.25 0 0 1-1.632 2.163l-1.32.377a1.803 1.803 0 0 1-.99-3.467l2.31-.66A2.25 2.25 0 0 0 9 15.553Z");
 const ICON_ZIP: &str = line_icon!("m20.25 7.5-.625 10.632a2.25 2.25 0 0 1-2.247 2.118H6.622a2.25 2.25 0 0 1-2.247-2.118L3.75 7.5m8.25 3v6.75m0 0-3-3m3 3 3-3M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125Z");
 const ICON_PAUSE: &str = line_icon!("M15.75 5.25v13.5m-7.5-13.5v13.5");
+/// `.fl-x`: the cancel button's cross (heroicons x-mark, as the mockup's `I("close")`).
+const ICON_CANCEL: &str = line_icon!("M6 18 18 6M6 6l12 12");
 const ICON_PLAY: &str = line_icon!("M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.347a1.125 1.125 0 0 1 0 1.972l-11.54 6.347a1.125 1.125 0 0 1-1.667-.986V5.653Z");
 
 /// What the device list shows beyond [`Device`]: the system line and when it was last seen. The
@@ -331,10 +315,11 @@ pub fn sample_model() -> (FilesModel, Vec<Offer>) {
         ReceivedFile { name: "screenshot-0925.png".into(), size: 2 << 20, from: "BREW의 iPhone".into() },
         ReceivedFile { name: "notes.pdf".into(), size: 640 << 10, from: "iPad Pro".into() },
     ];
+    let now = crate::demo::now_ms();
     let history = vec![
-        HistoryEntry { name: "release-notes.md".into(), device: "ws-linux-01".into(), direction: Direction::Send, size: 12 << 10, result: HistoryResult::Done, when: "오늘 09:41".into() },
-        HistoryEntry { name: "dump.sql".into(), device: "iPad Pro".into(), direction: Direction::Receive, size: 48 << 20, result: HistoryResult::Failed, when: "어제 22:10".into() },
-        HistoryEntry { name: "photo.heic".into(), device: "Pixel 10".into(), direction: Direction::Send, size: 4 << 20, result: HistoryResult::Declined, when: "어제 18:02".into() },
+        HistoryEntry { name: "release-notes.md".into(), device: "ws-linux-01".into(), direction: Direction::Send, size: 12 << 10, result: HistoryResult::Done, when: "오늘 09:41".into(), timestamp_ms: Some(now - 3 * 3_600_000) },
+        HistoryEntry { name: "dump.sql".into(), device: "iPad Pro".into(), direction: Direction::Receive, size: 48 << 20, result: HistoryResult::Failed, when: "어제 22:10".into(), timestamp_ms: Some(now - 86_400_000) },
+        HistoryEntry { name: "photo.heic".into(), device: "Pixel 10".into(), direction: Direction::Send, size: 4 << 20, result: HistoryResult::Declined, when: "어제 18:02".into(), timestamp_ms: Some(now - 86_400_000 - 4 * 3_600_000) },
     ];
     let offers = vec![Offer { id: "o1".into(), from: "BREW의 iPhone".into(), files: vec!["IMG_2042.heic".into(), "IMG_2043.heic".into()], total: 9 << 20 }];
     (FilesModel { devices, transfers, received, history, ready: true, lost: false }, offers)
@@ -423,30 +408,45 @@ pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<Cre
     let ready = live_model.ready;
     let skip = Skip::from_env(EST_HEAD + EST_DEVICES + EST_AGENTS + EST_TRAY + EST_TRANSFERS + EST_HISTORY, window.height_dp);
 
-    cu::Box().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
-        cu::ScrollColumn().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
-            cu::Column().spacing(SP[4]).modifier(Modifier::new().fill_max_width().padding(pad)).content(|| {
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().fill_max_height(), {
+        { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().fill_max_width().fill_max_height(), {
+            { use ::compose_rust::ui::Column; Column!(spacing = SP[4], modifier = Modifier::new().fill_max_width().padding(pad), {
                 if skip.show(EST_HEAD) {
-                    // On a phone the title sits below the menu button's row.
-                    if compact {
-                        cu::Spacer().modifier(Modifier::new().height(PHONE_MENU_ROW));
-                    }
-                    HeaderGap("파일", "연결된 모든 장비 사이에서 파일을 주고받습니다. 휴대폰과 태블릿도 포함됩니다.", compact, w <= 900.0, 6.0, compact, || {
-                        // The share button is named "공유 시트 열기" (compose-rust v0.0.7, #460).
+                    // On a phone the header keeps the menu button's room beside the title.
+                    let subtitle = "연결된 모든 장비 사이에서 파일을 주고받습니다. 휴대폰과 태블릿도 포함됩니다.";
+                    let secondary = || {
                         ShareButton(compact, {
                             let o = share_open.clone();
                             move || o.set(true)
                         });
                         ThemeButton(&ui);
+                    };
+                    let primary = || {
                         let s = st.sheet.clone();
                         let open = move || s.set(Some(SendDraft::default()));
                         if compact {
-                            // A round ink button, icon only (`.lbl{display:none}`).
                             InkIconButton(IconRole::Send, open);
                         } else {
                             AppButton("보내기", Some(IconRole::Send), ButtonKind::Primary, false, true, false, open);
                         }
-                    });
+                    };
+                    if compact || w > 900.0 {
+                        HeaderGap("파일", subtitle, compact, compact, 6.0, compact, || {
+                            secondary();
+                            primary();
+                        });
+                    } else {
+                        { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), {
+                            { use ::compose_rust::ui::Row; Row!(spacing = SP[1], alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
+                                { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().weight(1.0), {
+                                    Label("파일", Fs::Xl2, PAGE_TITLE_WEIGHT, None, Some(1));
+                                }) };
+                                secondary();
+                            }) };
+                            Label(subtitle, Fs::Xs, Weight::Regular, Some(paint(ember_theme().palette.muted)), Some(2));
+                            primary();
+                        }) };
+                    }
                     // The lost server, said on the screen and not only in the send sheet (FR-L27.9).
                     if let Some(line) = server_status(&live_model) {
                         Banner(&line, Tone::Error);
@@ -462,10 +462,10 @@ pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<Cre
                     let transfers = || TransfersCard(&live_model, &st, ready);
                     let received = || ReceivedCard(&live_model, extras, ready, w);
                     if side_by_side(w) {
-                        cu::Row().spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(|| {
-                            cu::Column().modifier(Modifier::new().weight(1.1)).content(transfers);
-                            cu::Column().modifier(Modifier::new().weight(1.0)).content(received);
-                        });
+                        { use ::compose_rust::ui::Row; Row!(spacing = SP[4], modifier = Modifier::new().fill_max_width(), {
+                            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.1), content = transfers) };
+                            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), content = received) };
+                        }) };
                     } else {
                         transfers();
                         received();
@@ -474,8 +474,8 @@ pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<Cre
                 if skip.show(EST_HISTORY) {
                     HistoryCard(&live_model, &st, ready, w);
                 }
-            });
-        });
+            }) };
+        }) };
         // The incoming offer floats over the page, at the top right (above the tab bar on a phone),
         // and waits while a sheet is open: drawn above the sheet's scrim it stayed bright (F8).
         let sheet_open = st.sheet.get().is_some();
@@ -488,7 +488,7 @@ pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<Cre
         let lost = live_model.lost;
         SendSheet(&st, &live_model.devices, &members, can_send, lost, w);
         ShareSheet(&share_open, &live_model.devices, &members, can_send, lost);
-    });
+    }) };
 }
 
 /// The page padding: 16 on a phone, 24 up to 1279, 32 above.
@@ -502,8 +502,6 @@ pub fn page_pad(width_dp: f32) -> f32 {
     }
 }
 
-/// The room of the shell's menu button row at the top of a phone.
-const PHONE_MENU_ROW: f32 = 19.0;
 
 /// `EMBER_CR_SCROLL=<dp|bottom|agents|tray|transfers|history>` for review captures: the toolkit
 /// could not scroll a column from code before v0.0.5 (v0.0.7: #385 fixed with
@@ -561,7 +559,12 @@ pub struct KpiCell {
 
 /// The four KPIs as the mockup draws them. What the service cannot say is "준비 중입니다".
 pub fn kpi_cells(m: &FilesModel) -> [KpiCell; 4] {
-    let base = kpis(m);
+    kpi_cells_at(m, crate::demo::now_ms())
+}
+
+/// [`kpi_cells`] evaluated at `now_ms`.
+pub fn kpi_cells_at(m: &FilesModel, now_ms: i64) -> [KpiCell; 4] {
+    let base = crate::ui::files::kpis_at(m, now_ms);
     let unavailable = |label| KpiCell { label, value: UNAVAILABLE.to_string(), unit: "", pill: None, meter: None, available: false };
     let running = m.transfers.iter().filter(|t| matches!(t.state, TransferState::Sending | TransferState::Queued)).count();
     let stopped = m.transfers.iter().filter(|t| matches!(t.state, TransferState::Paused | TransferState::Failed)).count();
@@ -577,6 +580,18 @@ pub fn kpi_cells(m: &FilesModel) -> [KpiCell; 4] {
     } else {
         unavailable("지금 전송 중")
     };
+    let sent_week = if base[2].available {
+        KpiCell {
+            label: "이번 주 보낸 용량",
+            value: base[2].value.clone(),
+            unit: "",
+            pill: None,
+            meter: None,
+            available: true,
+        }
+    } else {
+        unavailable("이번 주 보낸 용량")
+    };
     let direct = match base[3].value.strip_suffix('%').and_then(|v| v.parse::<u32>().ok()).filter(|_| base[3].available) {
         Some(p) => KpiCell { label: "직접 연결 비율", value: p.to_string(), unit: "%", pill: None, meter: Some(p), available: true },
         None => unavailable("직접 연결 비율"),
@@ -591,7 +606,7 @@ pub fn kpi_cells(m: &FilesModel) -> [KpiCell; 4] {
             available: true,
         },
         active,
-        unavailable("이번 주 보낸 용량"),
+        sent_week,
         direct,
     ]
 }
@@ -623,33 +638,33 @@ pub fn grid_weights(n: usize, cols: usize) -> Vec<Vec<f32>> {
 /// columns fill the row ([`equal_rows`]).
 fn TileGrid<'a>(cols: usize, gap: f32, avail: f32, span_last: bool, tiles: Vec<Part<'a>>) {
     // The rows measured 15 apart for a 12 gap: the toolkit's rows run about 3 dp taller.
-    cu::Column().spacing((gap - 3.0).max(0.0)).modifier(Modifier::new().fill_max_width()).content(|| {
+    { use ::compose_rust::ui::Column; Column!(spacing = (gap - 3.0).max(0.0), modifier = Modifier::new().fill_max_width(), {
         let mut it = tiles.into_iter();
         if span_last {
             for row in grid_widths(it.len(), cols, avail, gap) {
-                cu::Row().spacing(gap).modifier(Modifier::new().fill_max_width()).content(|| {
+                { use ::compose_rust::ui::Row; Row!(spacing = gap, modifier = Modifier::new().fill_max_width(), {
                     for wt in row {
                         if let Some(tile) = it.next() {
-                            cu::Column().modifier(Modifier::new().weight(wt)).content(tile);
+                            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(wt), content = tile) };
                         }
                     }
-                });
+                }) };
             }
         } else {
             for (k, empty) in equal_rows(it.len(), cols) {
-                cu::Row().spacing(gap).modifier(Modifier::new().fill_max_width()).content(|| {
+                { use ::compose_rust::ui::Row; Row!(spacing = gap, modifier = Modifier::new().fill_max_width(), {
                     for _ in 0..k {
                         if let Some(tile) = it.next() {
-                            cu::Column().modifier(Modifier::new().weight(1.0)).content(tile);
+                            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), content = tile) };
                         }
                     }
                     for _ in 0..empty {
-                        cu::Spacer().modifier(Modifier::new().weight(1.0));
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                     }
-                });
+                }) };
             }
         }
-    });
+    }) };
 }
 
 /// A KPI number's type step: 28 (`--fs-2xl`), 18 on a phone (`.kpi .v{font-size:var(--fs-xl)}`
@@ -661,31 +676,31 @@ pub fn kpi_value_fs(compact: bool) -> Fs {
 /// A KPI: the label, the number with its small unit and pill, and the green meter.
 fn KpiView(c: &KpiCell, compact: bool) {
     let p = ember_theme().palette;
-    cu::Column().spacing(0.0).modifier(Modifier::new().fill_max_width()).content(|| {
+    { use ::compose_rust::ui::Column; Column!(spacing = 0.0, modifier = Modifier::new().fill_max_width(), {
         Label(c.label, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
         if c.available {
-            cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
-                cu::Row().alignment(Alignment::CenterStart).content(|| {
+            { use ::compose_rust::ui::Row; Row!(spacing = SP[1], alignment = Alignment::CenterStart, {
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, {
                     Label(&c.value, kpi_value_fs(compact), Weight::Regular, None, Some(1));
                     if !c.unit.is_empty() {
                         Label(c.unit, Fs::Md, Weight::Medium, Some(paint(p.muted)), Some(1));
                     }
-                });
+                }) };
                 if let Some((text, tone)) = &c.pill {
                     Pill(text, *tone, true);
                 }
-            });
+            }) };
             if let Some(pct) = c.meter {
                 // `.fl-meter`: a 6 px track with the green fill.
-                cu::Row().modifier(Modifier::new().fill_max_width().height(6.0).background(paint(p.track)).shape_role(ShapeRole::Full)).content(|| {
-                    cu::Spacer().modifier(Modifier::new().weight((pct as f32).max(0.5)).height(6.0).background(paint(p.green.strong)).shape_role(ShapeRole::Full));
-                    cu::Spacer().modifier(Modifier::new().weight((100 - pct.min(100)) as f32 + 0.001));
-                });
+                { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width().height(6.0).background(paint(p.track)).shape_role(ShapeRole::Full), {
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight((pct as f32).max(0.5)).height(6.0).background(paint(p.green.strong)).shape_role(ShapeRole::Full)) };
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight((100 - pct.min(100)) as f32 + 0.001)) };
+                }) };
             }
         } else {
             Label(&c.value, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
         }
-    });
+    }) };
 }
 
 /// 장비: my devices, the agents and the tray, in one card (`.fl-stage`).
@@ -697,15 +712,26 @@ fn Stage(model: &FilesModel, members: &[CrewMember], extras: &Extras, st: &State
         return;
     }
     super::components::EmberCard(false, true, None, None, None, || {
-        cu::Column().spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(|| {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[3], modifier = Modifier::new().fill_max_width(), {
             let cols = device_cols(w);
             // The card's inner width, for the spanning tiles to line up with the columns.
             let avail = super::home::content_width(w, page_pad(w)) - 2.0 * PAD_CARD_H;
             if devices {
-                // The mockup's header (the sending device and its scan note) is 41 px high.
-                cu::Box().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width().height(41.0)).content(|| {
-                    super::home::CardHead(ICON_DESKTOP, "장비", || {});
-                });
+                let demo = is_demo();
+                let sender = if demo { "mac-mini".to_string() } else { crate::terminal_stream::device_name() };
+                { use ::compose_rust::ui::Row; Row!(spacing = SP[2], alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
+                    NavIcon(ICON_DESKTOP, p.text_2.to_argb(), 28.0);
+                    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), {
+                        Label("보내는 장비", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                        Label(&sender, Fs::Xl, Weight::Semibold, None, Some(1));
+                    }) };
+                    if model.lost {
+                        Pill("오프라인", PillTone::Red, true);
+                    } else if demo {
+                        super::home::Dot(p.green.strong);
+                        Label("근처 장비를 찾는 중입니다", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+                    }
+                }) };
                 if model.devices.is_empty() {
                     Label(empty_text(crate::ui::files::Section::Devices, ready), Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
                 }
@@ -724,8 +750,9 @@ fn Stage(model: &FilesModel, members: &[CrewMember], extras: &Extras, st: &State
                             let presence = d.presence;
                             let lost = model.lost;
                             let demo = is_demo();
+                            let tile_device = d.clone();
                             Box::new(move || {
-                                DeviceTile(d, extras.devices.get(&d.id), move |_| {
+                                DeviceTile(&tile_device, extras.devices.get(&tile_device.id), move |_| {
                                     if let Some(why) = tile_tap_notice(lost, presence, &d_name) {
                                         notice::post(why);
                                     } else {
@@ -747,19 +774,19 @@ fn Stage(model: &FilesModel, members: &[CrewMember], extras: &Extras, st: &State
             }
             if agents {
                 // The title and its hint share a line, the hint wrapping below on a phone.
-                cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                { use ::compose_rust::ui::Row; Row!(spacing = SP[2], alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
                     Label("에이전트에게 보내기", Fs::Lg, Weight::Semibold, None, Some(1));
                     if w > 900.0 {
                         Label("팀원이 일하는 컴퓨터의 작업 폴더로 보내고 그 대화에 첨부합니다", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                     }
-                });
+                }) };
                 if w <= 900.0 {
                     Label("팀원이 일하는 컴퓨터의 작업 폴더로 보내고 그 대화에 첨부합니다", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
                 }
                 if members.is_empty() {
                     Label(empty_text(crate::ui::files::Section::Agents, ready), Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
                 }
-                let a_cols = agent_cols(avail, SP[2]);
+                let a_cols = cols;
                 let text_w = tile_width(avail, a_cols, SP[2]) - 2.0 * SP[2] - 2.0;
                 TileGrid(
                     a_cols,
@@ -768,37 +795,21 @@ fn Stage(model: &FilesModel, members: &[CrewMember], extras: &Extras, st: &State
                     true,
                     members
                         .iter()
-                        .map(|m| -> Part {
-                            let s = st.sheet.clone();
-                            let demo = is_demo();
-                            Box::new(move || {
-                                AgentTile(m, ui, text_w, move |id| {
-                                    let initial_files = if demo {
-                                        vec![demo_files()[0].to_string()]
-                                    } else {
-                                        Vec::new()
-                                    };
-                                    s.set(Some(SendDraft {
-                                        target: Some(SendTarget::Agent(id)),
-                                        files: initial_files,
-                                    }))
-                                })
-                            })
-                        })
+                        .map(|m| -> Part { Box::new(move || AgentTile(m, ui, text_w)) })
                         .collect(),
                 );
             }
             if tray {
                 // `.fl-tray`: the files to send.
-                cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
-                cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().fill_max_width().height(1.0).background(paint(p.line))) };
+                { use ::compose_rust::ui::Row; Row!(spacing = SP[2], alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
                     Label("보낼 파일", Fs::Md, Weight::Semibold, None, Some(1));
                     Label(if w > 560.0 { "장비를 누르면 받는 곳을 고르고 파일을 보냅니다." } else { "장비를 누르면 보낼 파일을 고릅니다." }, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
-                });
+                }) };
                 let demo = is_demo();
                 let can_pick = FILE_PICKER_AVAILABLE || demo;
                 let s = st.sheet.clone();
-                cu::Column().spacing(SP[1]).content(|| {
+                { use ::compose_rust::ui::Column; Column!(spacing = SP[1], {
                     AppButton("파일 고르기", Some(IconRole::Add), ButtonKind::Default, true, can_pick, false, move || {
                         if demo {
                             s.set(Some(SendDraft {
@@ -806,29 +817,31 @@ fn Stage(model: &FilesModel, members: &[CrewMember], extras: &Extras, st: &State
                                 files: vec![demo_files()[0].to_string()],
                             }));
                         } else {
-                            // The platform's own dialog (compose-rust#483). Its one answer
-                            // arrives later on the UI thread and decides what the sheet does.
                             let s = s.clone();
-                            compose_rust::FileDialog::open_files().title(FILE_DIALOG_TITLE).show(move |result| {
-                                let outcome = match result {
-                                    compose_rust::FileDialogResult::Chosen { paths, .. } => pick_outcome(Some(paths), true),
-                                    compose_rust::FileDialogResult::Cancelled => pick_outcome(None, true),
-                                    compose_rust::FileDialogResult::Unavailable => pick_outcome(None, false),
-                                };
-                                match outcome {
-                                    PickOutcome::Draft(draft) => s.set(Some(draft)),
-                                    PickOutcome::Nothing => {}
-                                    PickOutcome::Say(why) => notice::post(why),
-                                }
-                            });
+                            pick_send_files(move |draft| s.set(Some(draft)));
                         }
                     });
                     if !can_pick {
                         Label(FILE_PICK_REASON, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(2));
                     }
-                });
+                }) };
             }
-        });
+        }) };
+    });
+}
+
+fn pick_send_files(on_pick: impl FnOnce(SendDraft) + 'static) {
+    compose_rust::FileDialog::open_files().title(FILE_DIALOG_TITLE).show(move |result| {
+        let outcome = match result {
+            compose_rust::FileDialogResult::Chosen { paths, .. } => pick_outcome(Some(paths), true),
+            compose_rust::FileDialogResult::Cancelled => pick_outcome(None, true),
+            compose_rust::FileDialogResult::Unavailable => pick_outcome(None, false),
+        };
+        match outcome {
+            PickOutcome::Draft(draft) => on_pick(draft),
+            PickOutcome::Nothing => {}
+            PickOutcome::Say(why) => notice::post(why),
+        }
     });
 }
 
@@ -853,27 +866,22 @@ fn DeviceTile(d: &Device, info: Option<&DeviceInfo>, on_send: impl FnMut(String)
     let offline = matches!(d.presence, Presence::Offline | Presence::Unknown);
     let sub = info.map(|i| i.os.clone()).filter(|s| !s.is_empty()).unwrap_or_else(|| d.kind.label().to_string());
     Clickable(if offline { m.alpha(0.62) } else { m }, Alignment::TopStart, move || on_send(id.clone()), || {
-        cu::Column().spacing(2.0).modifier(Modifier::new().fill_max_width()).content(|| {
-            cu::Box().modifier(Modifier::new().size(48.0, 48.0)).content(|| {
-                cu::Box()
-                    .alignment(Alignment::Center)
-                    .modifier(Modifier::new().size(48.0, 48.0).background(paint(p.surface_2)).border(1.0, paint(p.line)).shape_role(ShapeRole::Full))
-                    .content(|| NavIcon(kind_icon(d.kind), p.text.to_argb(), 24.0));
-                cu::Box().alignment(Alignment::BottomEnd).modifier(Modifier::new().size(48.0, 48.0)).content(|| {
-                    cu::Spacer().modifier(
-                        Modifier::new().size(12.0, 12.0).background(paint(presence_color(d.presence, p))).border(2.0, paint(p.surface)).shape_role(ShapeRole::Full),
-                    );
-                });
-            });
-            cu::Spacer().modifier(Modifier::new().height(SP[1]));
+        { use ::compose_rust::ui::Column; Column!(spacing = 2.0, modifier = Modifier::new().fill_max_width(), {
+            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().size(48.0, 48.0), {
+                { use ::compose_rust::ui::Box; Box!(alignment = Alignment::Center, modifier = Modifier::new().size(48.0, 48.0).background(paint(p.surface_2)).border(1.0, paint(p.line)).shape_role(ShapeRole::Full), content = || NavIcon(kind_icon(d.kind), p.text.to_argb(), 24.0)) };
+                { use ::compose_rust::ui::Box; Box!(alignment = Alignment::BottomEnd, modifier = Modifier::new().size(48.0, 48.0), {
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().size(12.0, 12.0).background(paint(presence_color(d.presence, p))).border(2.0, paint(p.surface)).shape_role(ShapeRole::Full)) };
+                }) };
+            }) };
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[1])) };
             Label(&fit_label(&d.name, 150.0, Fs::Md.size()), Fs::Md, Weight::Semibold, None, Some(1));
             // The system line wraps to a second line rather than losing the battery level.
             Label(&sub, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
-            cu::Spacer().modifier(Modifier::new().height(SP[1]));
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[1])) };
             // The foot: the path pill and the latency as plain text; sleeping, offline and
             // unknown devices show their state and when they were last seen.
             let seen = info.map(|i| i.seen.clone()).unwrap_or_default();
-            cu::Row().spacing(SP[0]).alignment(Alignment::CenterStart).content(|| match (d.presence, d.path) {
+            { use ::compose_rust::ui::Row; Row!(spacing = SP[0], alignment = Alignment::CenterStart, content = || match (d.presence, d.path) {
                 (Presence::Online, Some(path)) => {
                     Pill(path_name(path), path_tone(path), false);
                     if let Some(ms) = d.latency_ms {
@@ -886,10 +894,10 @@ fn DeviceTile(d: &Device, info: Option<&DeviceInfo>, on_send: impl FnMut(String)
                         Label(&seen, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                     }
                 }
-            });
+            }) };
             // The measured card is 167 px; the toolkit's line boxes leave it about 3 short.
-            cu::Spacer().modifier(Modifier::new().height(3.0));
-        });
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(3.0)) };
+        }) };
     });
 }
 
@@ -904,50 +912,34 @@ pub fn agent_host(project: &str) -> String {
 }
 
 /// An agent's tile: its character (48 px, as the mockup's `.fl-dev-ic.bot`), name, computer and
-/// task, its status, and actions to open its conversation (`ui.open_conversation`) or send files
-/// to the computer it works on. The tile is the container's `on_click` (compose-rust#372).
-fn AgentTile(m: &CrewMember, ui: &SharedUi, text_w: f32, on_send: impl FnMut(String) + 'static) {
+/// task, and its status. Clicking the tile opens its conversation (`ui.open_conversation`), as in
+/// the mockup; sending to an agent stays in the top "보내기" send sheet. The tile is the
+/// container's `on_click` (compose-rust#372).
+fn AgentTile(m: &CrewMember, ui: &SharedUi, text_w: f32) {
     let p = ember_theme().palette;
-    let send_id = m.id.clone();
     let open_id = m.id.clone();
     let ui_open = ui.clone();
     let name = clean_member_name(&m.project, &m.agent, &m.title);
     let state = if m.waiting { CharState::Wait } else { CharState::Run };
     let host = agent_host(&m.project);
-    let send = Rc::new(RefCell::new(on_send));
-    let send_card = send.clone();
-    let send_card_id = send_id.clone();
     Clickable(
         Modifier::new().fill_max_width().background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_LG).padding(SP[3]),
         Alignment::TopStart,
-        move || (send_card.borrow_mut())(send_card_id.clone()),
+        move || ui_open.open_conversation(&open_id),
         || {
-            cu::Column().spacing(2.0).modifier(Modifier::new().fill_max_width()).content(|| {
+            { use ::compose_rust::ui::Column; Column!(spacing = 2.0, modifier = Modifier::new().fill_max_width(), {
                 Character(&m.agent, false, 48.0, &name, &m.project, state, None);
-                cu::Spacer().modifier(Modifier::new().height(SP[1]));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[1])) };
                 Label(&fit_label(&name, text_w, Fs::Md.size()), Fs::Md, Weight::Semibold, None, Some(1));
                 Label(&fit_label(&host, text_w, Fs::Xs.size()), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 Label(&fit_label(&m.title, text_w, Fs::Xs.size()), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                cu::Spacer().modifier(Modifier::new().height(SP[1]));
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[1])) };
                 if m.waiting {
                     Pill("승인 대기", PillTone::Orange, false);
                 } else {
                     Pill("실행 중", PillTone::Blue, false);
                 }
-                cu::Spacer().modifier(Modifier::new().height(SP[1]));
-                cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
-                    let u = ui_open.clone();
-                    let oid = open_id.clone();
-                    AppButton("대화 열기", None, ButtonKind::Default, true, true, false, move || {
-                        u.open_conversation(&oid);
-                    });
-                    let send_btn = send.clone();
-                    let sid = send_id.clone();
-                    AppButton("보내기", None, ButtonKind::Default, true, true, false, move || {
-                        (send_btn.borrow_mut())(sid.clone());
-                    });
-                });
-            });
+            }) };
         },
     );
 }
@@ -969,40 +961,35 @@ fn OfferCard(offer: &Offer, pending: &[Offer], devices: &[Device], st: &State, w
     let card_w = (w - 2.0 * SP[3]).min(360.0);
     let route = sender.and_then(|d| d.path).map(path_name);
     let card = || {
-        cu::Box()
-            .modifier(Modifier::new().width(card_w).background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_LG).padding(SP[3]))
-            .content(|| {
-                cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
-                    cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                        cu::Box()
-                            .alignment(Alignment::Center)
-                            .modifier(Modifier::new().size(40.0, 40.0).background(paint(p.surface_2)).border(1.0, paint(p.line)).shape_role(ShapeRole::Full))
-                            .content(|| NavIcon(kind_icon(sender.map(|d| d.kind).unwrap_or(DeviceKind::Computer)), p.text.to_argb(), 20.0));
-                        cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+        { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().width(card_w).background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_LG).padding(SP[3]), {
+                { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), {
+                    { use ::compose_rust::ui::Row; Row!(spacing = SP[2], alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
+                        { use ::compose_rust::ui::Box; Box!(alignment = Alignment::Center, modifier = Modifier::new().size(40.0, 40.0).background(paint(p.surface_2)).border(1.0, paint(p.line)).shape_role(ShapeRole::Full), content = || NavIcon(kind_icon(sender.map(|d| d.kind).unwrap_or(DeviceKind::Computer)), p.text.to_argb(), 20.0)) };
+                        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), {
                             Label(&fit_label(&offer.from, card_w - 100.0, Fs::Md.size()), Fs::Md, Weight::Semibold, None, Some(1));
                             Label(&format!("파일 {}개, {}를 보내려고 합니다", offer.files.len(), format_bytes(offer.total)), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
-                        });
-                    });
-                    cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                        }) };
+                    }) };
+                    { use ::compose_rust::ui::Row; Row!(spacing = SP[1], alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
                         for _ in offer.files.iter().take(3) {
                             FileChip(ICON_DOC, PillTone::Blue);
                         }
                         Label(&fit_label(&offer.files.join(", "), card_w - 150.0, Fs::Xs.size()), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                    });
+                    }) };
                     Label(&format!("저장 위치 {}", inbox_label()), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                    if transfer_service().encrypted() { cu::Row().spacing(4.0).alignment(Alignment::CenterStart).content(|| {
+                    if transfer_service().encrypted() { { use ::compose_rust::ui::Row; Row!(spacing = 4.0, alignment = Alignment::CenterStart, {
                         NavIcon(ICON_LOCK, p.muted.to_argb(), 12.0);
                         let text = match route {
                             Some(r) => format!("종단 간 암호화 \u{b7} {r}"),
                             None => "종단 간 암호화".to_string(),
                         };
                         Label(&text, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
-                    }); }
-                    cu::Row().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                    }) }; }
+                    { use ::compose_rust::ui::Row; Row!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
                         for (text, kind, answer) in [("거절", ButtonKind::Default, Answer::Decline), ("받기", ButtonKind::Primary, Answer::Accept)] {
                             let (id, pending, answered) = (offer.id.clone(), pending.to_vec(), st.answered.clone());
                             let st_ver = st.version.clone();
-                            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), {
                                 AppButton(text, None, kind, false, true, true, move || {
                                     let mut list = answered.get_untracked();
                                     answer_offer(transfer_service(), &pending, &mut list, &id, answer);
@@ -1014,23 +1001,23 @@ fn OfferCard(offer: &Offer, pending: &[Offer], devices: &[Device], st: &State, w
                                     };
                                     notice::post(msg);
                                 });
-                            });
+                            }) };
                         }
-                    });
-                });
-            });
+                    }) };
+                }) };
+            }) };
     };
     if compact {
         // Above the tab bar, not over it: a column that pushes the card to the bottom
         // (`Alignment` is not relied on for a bottom placement).
-        cu::Column().alignment(Alignment::Center).modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
-            cu::Spacer().modifier(Modifier::new().weight(1.0));
+        { use ::compose_rust::ui::Column; Column!(alignment = Alignment::Center, modifier = Modifier::new().fill_max_width().fill_max_height(), {
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
             card();
             // The shell lays the tab bar out below the content, so only a small gap.
-            cu::Spacer().modifier(Modifier::new().height(SP[1]));
-        });
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[1])) };
+        }) };
     } else {
-        cu::Box().alignment(Alignment::TopEnd).modifier(Modifier::new().fill_max_width().fill_max_height().padding(SP[5])).content(card);
+        { use ::compose_rust::ui::Box; Box!(alignment = Alignment::TopEnd, modifier = Modifier::new().fill_max_width().fill_max_height().padding(SP[5]), content = card) };
     }
 }
 
@@ -1040,10 +1027,7 @@ fn OfferCard(offer: &Offer, pending: &[Offer], devices: &[Device], st: &State, w
 fn FileChip(icon: &'static str, tone: PillTone) {
     let p = ember_theme().palette;
     let (fg, bg) = super::components::pill_colors(tone, p);
-    cu::Box()
-        .alignment(Alignment::Center)
-        .modifier(Modifier::new().size(32.0, 32.0).background(paint(bg)).corner_radius(CORNER_SM))
-        .content(|| NavIcon(icon, fg.to_argb(), 16.0));
+    { use ::compose_rust::ui::Box; Box!(alignment = Alignment::Center, modifier = Modifier::new().size(32.0, 32.0).background(paint(bg)).corner_radius(CORNER_SM), content = || NavIcon(icon, fg.to_argb(), 16.0)) };
 }
 
 /// A 32 px round icon button with a line glyph (`.icon-btn.sm`), named by `label` for assistive
@@ -1071,7 +1055,7 @@ fn Bar(pct: u32, height: f32, fill: compose_rust::Color) {
 fn TransfersCard(model: &FilesModel, st: &State, ready: bool) {
     let p = ember_theme().palette;
     EmberCard(false, true, None, None, None, || {
-        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), {
             super::home::CardHead(ICON_SWAP, "전송 중", || {
                 Pill(&model.transfers.len().to_string(), PillTone::Grey, false);
             });
@@ -1080,11 +1064,11 @@ fn TransfersCard(model: &FilesModel, st: &State, ready: bool) {
             }
             for (i, t) in model.transfers.iter().enumerate() {
                 if i > 0 {
-                    cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().fill_max_width().height(1.0).background(paint(p.line))) };
                 }
                 TransferRow(t, &model.devices, st);
             }
-        });
+        }) };
     });
 }
 
@@ -1108,67 +1092,58 @@ fn TransferRow(t: &Transfer, devices: &[Device], st: &State) {
         TransferState::Failed => p.orange.strong,
         _ => p.grey.strong,
     };
-    cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
-        cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+    { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), {
+        { use ::compose_rust::ui::Row; Row!(spacing = SP[2], alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
             FileChip(FileKind::of(&t.name).icon(), FileKind::of(&t.name).tone());
-            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), {
                 Label(&fit_label(&t.name, 260.0, Fs::Md.size()), Fs::Md, Weight::Medium, None, Some(1));
-                cu::Row().spacing(4.0).alignment(Alignment::CenterStart).content(|| {
+                { use ::compose_rust::ui::Row; Row!(spacing = 4.0, alignment = Alignment::CenterStart, {
                     NavIcon(if t.direction == Direction::Send { ICON_UP } else { ICON_DOWN }, p.muted.to_argb(), 12.0);
                     Label(&format!("{dir} \u{b7} {}", t.device), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                });
-            });
-            cu::Row().alignment(Alignment::CenterStart).content(|| {
+                }) };
+            }) };
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, {
                 Label(&percent(t).to_string(), Fs::Xl2, Weight::Regular, None, Some(1));
                 Label("%", Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
-            });
-        });
+            }) };
+        }) };
         Bar(percent(t), 8.0, fill);
         // The foot: the amounts and the state at the left, the round buttons at the right.
-        cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+        { use ::compose_rust::ui::Row; Row!(spacing = SP[1], alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
+            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), {
                 Label(&format!("{} / {}", format_bytes(t.done), format_bytes(t.total)), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 Label(&fit_label(&progress_line(t), 230.0, Fs::Xs.size()), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-            });
+            }) };
             for action in user_actions(t.state).iter().copied() {
                 let id = t.id.clone();
                 let glyph = match action {
-                    TransferAction::Pause => Some(ICON_PAUSE),
-                    TransferAction::Resume | TransferAction::Retry | TransferAction::Start => Some(ICON_PLAY),
-                    _ => None,
+                    TransferAction::Pause => ICON_PAUSE,
+                    TransferAction::Resume | TransferAction::Retry | TransferAction::Start => ICON_PLAY,
+                    _ => ICON_CANCEL,
                 };
                 let st_ver = st.version.clone();
                 let on_act = move || {
                     svc.control(&id, action);
                     st_ver.set(st_ver.get_untracked() + 1);
                 };
-                let name = match action {
-                    TransferAction::Pause => "일시 정지",
-                    TransferAction::Resume => "재개",
-                    TransferAction::Retry => "다시 시도",
-                    _ => "시작",
-                };
-                match glyph {
-                    Some(g) => RoundGlyph(g, name, on_act),
-                    None => IconButton(IconRole::Close, true, on_act),
-                }
+                RoundGlyph(glyph, action_button_name(action), on_act);
             }
-        });
+        }) };
         // The claim is shown only where it is true (#487): plain HTTP is not end to end.
         if svc.encrypted() {
-            cu::Row().spacing(4.0).alignment(Alignment::CenterStart).content(|| {
+            { use ::compose_rust::ui::Row; Row!(spacing = 4.0, alignment = Alignment::CenterStart, {
                 NavIcon(ICON_LOCK, p.muted.to_argb(), 12.0);
                 Label(&route_line(path), Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
-            });
+            }) };
         }
-    });
+    }) };
 }
 
 fn ReceivedCard(model: &FilesModel, extras: &Extras, ready: bool, w: f32) {
     let p = ember_theme().palette;
     let cols = if w <= 560.0 || side_by_side(w) { 2 } else { 3 };
     EmberCard(false, true, None, None, None, || {
-        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), {
             super::home::CardHead(ICON_DOWN, "받은 파일", || {
                 Label(&inbox_label(), Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
             });
@@ -1185,7 +1160,7 @@ fn ReceivedCard(model: &FilesModel, extras: &Extras, ready: bool, w: f32) {
                     .map(|(i, f)| -> Part { Box::new(move || ReceivedTile(f, extras.received_at.get(i).map(String::as_str))) })
                     .collect(),
             );
-        });
+        }) };
     });
 }
 
@@ -1195,29 +1170,26 @@ fn ReceivedTile(f: &ReceivedFile, at: Option<&str>) {
     let p = ember_theme().palette;
     let kind = FileKind::of(&f.name);
     let (fg, bg) = super::components::pill_colors(kind.tone(), p);
-    cu::Column().spacing(2.0).modifier(Modifier::new().fill_max_width()).content(|| {
-        cu::Box()
-            .alignment(Alignment::Center)
-            .modifier(Modifier::new().fill_max_width().height(84.0).background(paint(bg)).corner_radius(CORNER_MD))
-            .content(|| {
+    { use ::compose_rust::ui::Column; Column!(spacing = 2.0, modifier = Modifier::new().fill_max_width(), {
+        { use ::compose_rust::ui::Box; Box!(alignment = Alignment::Center, modifier = Modifier::new().fill_max_width().height(84.0).background(paint(bg)).corner_radius(CORNER_MD), {
                 NavIcon(kind.icon(), fg.to_argb(), 28.0);
-                cu::Box().alignment(Alignment::TopStart).modifier(Modifier::new().fill_max_width().height(84.0).padding(SP[1])).content(|| {
+                { use ::compose_rust::ui::Box; Box!(alignment = Alignment::TopStart, modifier = Modifier::new().fill_max_width().height(84.0).padding(SP[1]), {
                     Label(kind.label(), Fs::Xs2, Weight::Medium, Some(paint(fg)), Some(1));
-                });
-            });
-        cu::Spacer().modifier(Modifier::new().height(SP[0]));
+                }) };
+            }) };
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[0])) };
         Label(&fit_label(&f.name, 150.0, Fs::Sm.size()), Fs::Sm, Weight::Medium, None, Some(1));
         Label(&fit_label(&format!("{} \u{b7} {}", format_bytes(f.size), f.from), 150.0, Fs::Xs.size()), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
         if let Some(at) = at {
             Label(at, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
         }
         Label(&inbox_label(), Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
-        cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
+        { use ::compose_rust::ui::Row; Row!(spacing = SP[1], alignment = Alignment::CenterStart, {
             // TODO(FR-F8): opening and revealing a received file need the transfer client.
             AppButton("열기", None, ButtonKind::Default, true, true, false, || notice::post(UNAVAILABLE));
             RoundGlyph(ICON_FOLDER, "폴더에서 보기", || notice::post(UNAVAILABLE));
-        });
-    });
+        }) };
+    }) };
 }
 
 fn HistoryCard(model: &FilesModel, st: &State, ready: bool, w: f32) {
@@ -1235,31 +1207,31 @@ fn HistoryCard(model: &FilesModel, st: &State, ready: bool, w: f32) {
     let mut options = vec!["모든 장비".to_string()];
     options.extend(peers.iter().cloned());
     EmberCard(false, true, None, None, None, || {
-        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), {
             super::home::CardHead(ICON_CLOCK, "전송 기록", || {});
             // `.fl-hfilter`: the direction filter and the device filter.
-            cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                cu::ScrollRow().modifier(Modifier::new().weight(1.0).height(H_CTL + SP[0])).content(|| {
+            { use ::compose_rust::ui::Row; Row!(spacing = SP[2], alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
+                { use ::compose_rust::ui::ScrollRow; ScrollRow!(modifier = Modifier::new().weight(1.0).height(H_CTL + SP[0]), {
                     for f in HistoryFilter::ALL {
                         let s = st.filter.clone();
                         FilterChip(f.label(), f == filter, move || s.set(f));
-                        cu::Spacer().modifier(Modifier::new().width(SP[0]));
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[0])) };
                     }
-                });
+                }) };
                 if w > 560.0 {
                     let s = st.peer.clone();
-                    cu::Column().modifier(Modifier::new().width(200.0)).content(|| {
+                    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().width(200.0), {
                         super::components::Select(&options[peer], &options, peer, 200.0, move |i| s.set(i));
-                    });
+                    }) };
                 }
-            });
+            }) };
             if rows.is_empty() {
                 let text = if model.history.is_empty() { empty_text(crate::ui::files::Section::History, ready) } else { "조건에 맞는 전송 기록이 없습니다" };
                 Label(text, Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
             }
             for (i, (day, entries)) in days.iter().enumerate() {
                 if i > 0 {
-                    cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().fill_max_width().height(1.0).background(paint(p.line))) };
                 }
                 // `.fl-day`: the day label at the left (96 px; above the rows on a phone).
                 let label = || Label(day, Fs::Sm, Weight::Medium, Some(paint(p.text_2)), Some(1));
@@ -1271,18 +1243,18 @@ fn HistoryCard(model: &FilesModel, st: &State, ready: bool, w: f32) {
                     )
                 };
                 if w > 560.0 {
-                    cu::Row().spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(|| {
-                        cu::Column().modifier(Modifier::new().width(96.0)).content(label);
-                        cu::Column().modifier(Modifier::new().weight(1.0)).content(list);
-                    });
+                    { use ::compose_rust::ui::Row; Row!(spacing = SP[4], modifier = Modifier::new().fill_max_width(), {
+                        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().width(96.0), content = label) };
+                        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), content = list) };
+                    }) };
                 } else {
-                    cu::Column().spacing(SP[0]).modifier(Modifier::new().fill_max_width()).content(|| {
+                    { use ::compose_rust::ui::Column; Column!(spacing = SP[0], modifier = Modifier::new().fill_max_width(), {
                         label();
                         list();
-                    });
+                    }) };
                 }
             }
-        });
+        }) };
     });
 }
 
@@ -1293,24 +1265,24 @@ fn HistoryRow(h: &HistoryEntry) {
     let (label, pill) = match (h.result, h.direction) {
         (HistoryResult::Done, Direction::Send) => ("보냄", PillTone::Green),
         (HistoryResult::Done, Direction::Receive) => ("받음", PillTone::Blue),
-        (HistoryResult::Declined, _) | (HistoryResult::Cancelled, _) => (h.result.label(), PillTone::Orange),
+        (HistoryResult::Declined | HistoryResult::Expired | HistoryResult::Cancelled, _) => (h.result.label(), PillTone::Orange),
         (HistoryResult::Failed, _) => (h.result.label(), PillTone::Red),
     };
     let who = crate::ui::files::history_peer_label(h.direction);
     let time = split_when(&h.when).1;
-    cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+    { use ::compose_rust::ui::Row; Row!(spacing = SP[2], alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
         FileChip(if h.direction == Direction::Send { ICON_UP } else { ICON_DOWN }, tone);
         // The lines measured 14.5 apart for the mockup's 18.
-        cu::Column().spacing(3.5).modifier(Modifier::new().weight(1.0)).content(|| {
+        { use ::compose_rust::ui::Column; Column!(spacing = 3.5, modifier = Modifier::new().weight(1.0), {
             Label(&fit_label(&h.name, 220.0, Fs::Sm.size()), Fs::Sm, Weight::Medium, None, Some(1));
             Label(&format!("{who} {}", h.device), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
             Label(time, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-        });
-        cu::Column().alignment(Alignment::CenterEnd).spacing(2.0).content(|| {
+        }) };
+        { use ::compose_rust::ui::Column; Column!(alignment = Alignment::CenterEnd, spacing = 2.0, {
             Label(&format_bytes(h.size), Fs::Md, Weight::Regular, None, Some(1));
             Pill(label, pill, true);
-        });
-    });
+        }) };
+    }) };
 }
 
 // --- the send sheet ---------------------------------------------------------------------------
@@ -1318,22 +1290,19 @@ fn HistoryRow(h: &HistoryEntry) {
 /// A receiver chip of the send sheet (`.fl-tg`): an outlined pill with the device glyph or the
 /// agent's character; the selected one takes the `ink` border, an offline one is dimmed. It is
 /// the container's `on_click` (compose-rust#372) and says whether it is selected (v0.0.7, #429).
-fn TargetChip(label: &str, icon: TargetIcon, selected: bool, disabled: bool, on_click: impl FnMut() + 'static) {
+fn TargetChip(label: &str, name: &str, icon: TargetIcon, selected: bool, disabled: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let fill = if selected { p.sel } else { p.surface };
     let border = if selected { p.ink } else { p.line };
-    let mut m = Modifier::new()
+    let m = Modifier::new()
         .height(H_CTL)
         .background(paint(fill))
         .border(1.0, paint(border))
         .shape_role(ShapeRole::Full)
         .selected(selected);
-    if disabled {
-        m = m.alpha(0.5).disabled(true);
-    }
-    Clickable(m, Alignment::CenterStart, on_click, || {
-        cu::Row().alignment(Alignment::CenterStart).content(|| {
-            cu::Spacer().modifier(Modifier::new().width(12.0));
+    let content = || {
+        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, {
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(12.0)) };
             match &icon {
                 TargetIcon::Kind(k) => NavIcon(kind_icon(*k), (if disabled { p.muted } else { p.text_2 }).to_argb(), 16.0),
                 TargetIcon::Agent(m) => {
@@ -1341,7 +1310,7 @@ fn TargetChip(label: &str, icon: TargetIcon, selected: bool, disabled: bool, on_
                     Character(&m.agent, false, 22.0, &name, &m.project, if m.waiting { CharState::Wait } else { CharState::Run }, None);
                 }
             }
-            cu::Spacer().modifier(Modifier::new().width(SP[1]));
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[1])) };
             let text_color = if disabled {
                 p.muted
             } else if selected {
@@ -1350,9 +1319,15 @@ fn TargetChip(label: &str, icon: TargetIcon, selected: bool, disabled: bool, on_
                 p.text_2
             };
             Label(label, Fs::Sm, Weight::Regular, Some(paint(text_color)), Some(1));
-            cu::Spacer().modifier(Modifier::new().width(12.0));
-        });
-    });
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(12.0)) };
+        }) };
+    };
+    if disabled {
+        let name = format!("{name} {}", crate::ui::files::OFFLINE_TAG);
+        NamedDisabled(&name, m.alpha(0.5), Alignment::CenterStart, content);
+    } else {
+        NamedClickable(name, m, Alignment::CenterStart, on_click, content);
+    }
 }
 
 /// The chip text: the name cut to fit, with the offline tag for an offline device.
@@ -1418,7 +1393,7 @@ pub(super) fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], 
         .collect();
     let lines = chip_rows(&widths, SP[1], inner);
     EmberSheet("파일 보내기", open, close.clone(), None, || {
-        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width().padding(SP[4]), {
             Label("받는 곳", Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
             // The full name below the chips, only when the chosen chip had to cut it.
             if let Some(name) = chosen_name.as_ref().filter(|n| fit_chip_text(n, chip_text_max_for(inner, 22.0)) != **n) {
@@ -1428,7 +1403,7 @@ pub(super) fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], 
                 Label("보낼 수 있는 장비가 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
             }
             for line in lines.iter() {
-                cu::Row().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                { use ::compose_rust::ui::Row; Row!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
                     for &i in line {
                         let (label, icon, sel, dim, target) = &chips[i];
                         let (s, base) = (st.sheet.clone(), d.clone());
@@ -1441,19 +1416,31 @@ pub(super) fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], 
                             TargetIcon::Kind(k) => TargetIcon::Kind(*k),
                             TargetIcon::Agent(m) => TargetIcon::Agent(m.clone()),
                         };
-                        TargetChip(&shown, icon, *sel, is_disabled, move || {
+                        TargetChip(&shown, label, icon, *sel, is_disabled, move || {
                             match choose_target(&base, &devs, target.clone()) {
                                 Ok(next) => s.set(Some(next)),
                                 Err(note) => notice::post(note),
                             }
                         });
                     }
-                });
+                }) };
             }
             Label("파일", Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
             Label(&files_line(d.files.len(), FILE_PICKER_AVAILABLE || demo), Fs::Sm, Weight::Regular, None, Some(2));
+            if FILE_PICKER_AVAILABLE && !demo {
+                let sheet = st.sheet.clone();
+                AppButton("파일 고르기", Some(IconRole::Add), ButtonKind::Default, true, !lost, false, move || {
+                    let sheet = sheet.clone();
+                    pick_send_files(move |picked| {
+                        if let Some(mut draft) = sheet.get_untracked() {
+                            draft.files = picked.files;
+                            sheet.set(Some(draft));
+                        }
+                    });
+                });
+            }
             if demo {
-                cu::ScrollRow().modifier(Modifier::new().fill_max_width().height(H_CTL)).content(|| {
+                { use ::compose_rust::ui::ScrollRow; ScrollRow!(modifier = Modifier::new().fill_max_width().height(H_CTL), {
                     for fname in demo_files() {
                         let fname_str = fname.to_string();
                         let is_file_sel = d.files.iter().any(|f| f == fname);
@@ -1468,21 +1455,21 @@ pub(super) fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], 
                             }
                             s.set(Some(next));
                         });
-                        cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[1])) };
                     }
-                });
+                }) };
             }
             if let Some(text) = blocker {
                 Label(text, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(2));
             }
-        });
+        }) };
         // The footer: the encryption note at the left, the send button at the right.
-        cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
+        { use ::compose_rust::ui::Row; Row!(spacing = SP[2], alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width().padding(SP[4]), {
             if transfer_service().encrypted() {
                 NavIcon(ICON_LOCK, p.muted.to_argb(), 12.0);
                 Label("종단 간 암호화", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
             }
-            cu::Spacer().modifier(Modifier::new().weight(1.0));
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
             let (files, s) = (d.files.clone(), st.sheet.clone());
             let target = target_device.clone();
             let st_ver = st.version.clone();
@@ -1499,7 +1486,7 @@ pub(super) fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], 
                     }
                 }
             });
-        });
+        }) };
     });
 }
 
@@ -1513,12 +1500,12 @@ fn ShareButton(compact: bool, on_click: impl FnMut() + 'static) {
     let m = Modifier::new().height(H_CTL).background(paint(p.surface)).border(1.0, paint(p.line)).shape_role(ShapeRole::Full);
     let m = if compact { m.width(H_CTL) } else { m };
     super::components::NamedClickable(super::a11y::SHARE, m, Alignment::Center, on_click, || {
-        cu::Row().spacing(SP[1]).alignment(Alignment::Center).content(|| {
+        { use ::compose_rust::ui::Row; Row!(spacing = SP[1], alignment = Alignment::Center, {
             NavIcon(ICON_SHARE, p.text_2.to_argb(), 16.0);
             if !compact {
                 Label("공유 시트", Fs::Sm, Weight::Medium, Some(paint(p.text_2)), Some(1));
             }
-        });
+        }) };
     });
 }
 
@@ -1549,33 +1536,28 @@ fn ShareTile(
     let p = ember_theme().palette;
     let m = Modifier::new().width(72.0);
     Clickable(if dim { m.alpha(0.5) } else { m }, Alignment::TopCenter, on_click, || {
-        cu::Column().spacing(2.0).alignment(Alignment::Center).modifier(Modifier::new().width(72.0)).content(|| {
-            cu::Box().modifier(Modifier::new().size(60.0, 60.0)).alignment(Alignment::BottomEnd).content(|| {
+        { use ::compose_rust::ui::Column; Column!(spacing = 2.0, alignment = Alignment::Center, modifier = Modifier::new().width(72.0), {
+            { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().size(60.0, 60.0), alignment = Alignment::BottomEnd, {
                 let avatar = Modifier::new().size(60.0, 60.0).background(paint(p.surface)).shape_role(ShapeRole::Full);
-                cu::Box()
-                    .modifier(if bordered { avatar.border(1.0, paint(p.line)) } else { avatar })
-                    .alignment(Alignment::Center)
-                    .content(glyph);
+                { use ::compose_rust::ui::Box; Box!(modifier = if bordered { avatar.border(1.0, paint(p.line)) } else { avatar }, alignment = Alignment::Center, content = glyph) };
                 if let Some(d) = dot {
-                    cu::Row().content(|| {
-                        cu::Column().content(|| {
-                            cu::Spacer().modifier(
-                                Modifier::new()
+                    { use ::compose_rust::ui::Row; Row!({
+                        { use ::compose_rust::ui::Column; Column!({
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new()
                                     .size(12.0, 12.0)
                                     .background(paint(share_dot_color(d, p)))
                                     .border(2.0, paint(p.surface_2))
-                                    .shape_role(ShapeRole::Full),
-                            );
-                            cu::Spacer().modifier(Modifier::new().height(2.0));
-                        });
-                        cu::Spacer().modifier(Modifier::new().width(2.0));
-                    });
+                                    .shape_role(ShapeRole::Full)) };
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(2.0)) };
+                        }) };
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(2.0)) };
+                    }) };
                 }
-            });
+            }) };
             // One line, cut with an ellipsis to the 72 px tile (`.fl-sh-dev .ellipsis`).
             super::components::CentredLabel(&fit_label(name, 72.0, Fs::Xs2.size()), Fs::Xs2, Weight::Regular, None, Some(SHARE_NAME_LINES));
             Label(&fit_label(caption, 72.0, Fs::Xs2.size()), Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
-        });
+        }) };
     });
 }
 
@@ -1597,21 +1579,24 @@ pub(super) fn ShareSheet(open: &MutableState<bool>, devices: &[Device], members:
     };
     let window = crate::ui::window_size::current_window_size();
     let bottom = super::components::sheet_wraps_content(window.width_dp);
-    // FR-L32.1 (#878): with no title bar the room is the whole sheet. The body takes its content
-    // height when that fits, and always in the bottom sheet, which scrolls taller content itself.
-    // TODO(compose-rust#778, after v0.0.10): cap instead of estimate.
+    // FR-L32.1 (#878, compose-rust#778, v0.0.11): with no title bar the room is the whole sheet.
+    // The body is capped at the room (`Modifier::max_height`), so it takes its content height
+    // when that fits and scrolls inside the cap when it does not.
     let room = super::components::sheet_body_max_height(window.width_dp, window.height_dp, false, 0.0);
     let rows = share_devices(devices);
     let agents = share_agents(members);
-    // The share sheet has no file step of its own (TODO(#673): open the file dialog from its file
-    // card), so it reads as it did before the tray's 파일 고르기 took the dialog.
-    let (file_title, file_why) = share_file_card(&[], SHARE_SHEET_PICKS_FILES);
+    let picked = remember(|| mutable_state_of(Vec::<String>::new()));
+    let files = picked.get();
+    let (file_title, file_why) = share_file_card(&files, FILE_PICKER_AVAILABLE);
     let tap = {
-        let (devices, o) = (devices.to_vec(), open.clone());
-        move |target: SendTarget| match share_tap_at(&target, &devices, &[], SHARE_SHEET_PICKS_FILES, ready, lost) {
+        let (devices, o, files, picked_clear) = (devices.to_vec(), open.clone(), files.clone(), picked.clone());
+        move |target: SendTarget| match share_tap_at(&target, &devices, &files, FILE_PICKER_AVAILABLE, ready, lost) {
             ShareTap::Blocked(why) => notice::post(why),
-            ShareTap::Send(SendTarget::Device(id)) => match transfer_service().send(&id, Vec::new()) {
-                Ok(()) => o.set(false),
+            ShareTap::Send(SendTarget::Device(id)) => match transfer_service().send(&id, files.clone()) {
+                Ok(()) => {
+                    picked_clear.set(Vec::new());
+                    o.set(false);
+                }
                 Err(why) => notice::post(why),
             },
             // The service has no send to an agent's computer yet.
@@ -1620,40 +1605,62 @@ pub(super) fn ShareSheet(open: &MutableState<bool>, devices: &[Device], members:
     };
     // The dialog draws the mockup's grab bar; the bottom sheet has the toolkit's own.
     let grab = !bottom;
-    let plain = bottom || share_body_estimate(!rows.is_empty(), !agents.is_empty(), grab) <= room;
     // An empty title: `.fl-share` has no header. Escape and the scrim still close it.
     EmberSheetSized("", is_open, SHARE_SHEET_WIDTH, false, close.clone(), None, || {
         let body = || {
             // `.fl-share` padding `--sp3 --sp4 --sp5`: 12 above, 16 at the sides, 20 below.
-            cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
-                cu::Spacer().modifier(Modifier::new().height(SP[2]));
-                cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
-                    cu::Spacer().modifier(Modifier::new().width(SP[3]));
-                    cu::Column().spacing(SP[2]).modifier(Modifier::new().weight(1.0)).content(|| {
+            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[2])) };
+                { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width(), {
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[3])) };
+                    { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().weight(1.0), {
                         if grab {
                             // `.fl-share-grab`: 36 x 5, `--c-grey`, centred.
-                            cu::Box().alignment(Alignment::Center).modifier(Modifier::new().fill_max_width()).content(|| {
-                                cu::Spacer().modifier(Modifier::new().size(36.0, 5.0).background(paint(p.grey.strong)).shape_role(ShapeRole::Full));
-                            });
+                            { use ::compose_rust::ui::Box; Box!(alignment = Alignment::Center, modifier = Modifier::new().fill_max_width(), {
+                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().size(36.0, 5.0).background(paint(p.grey.strong)).shape_role(ShapeRole::Full)) };
+                            }) };
                         }
                         // The file being shared, with the sheet's close button (`.fl-share-file`).
-                        cu::Row()
-                            .spacing(SP[2])
-                            .alignment(Alignment::CenterStart)
-                            .modifier(Modifier::new().fill_max_width().background(paint(p.surface)).corner_radius(CORNER_MD).padding(SP[2]))
-                            .content(|| {
-                                cu::Box()
-                                    .modifier(Modifier::new().size(44.0, 44.0).background(paint(p.surface_2)).corner_radius(CORNER_LG))
-                                    .alignment(Alignment::Center)
-                                    .content(|| NavIcon(ICON_DOC, p.text_2.to_argb(), 22.0));
-                                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                                    Label(&file_title, Fs::Md, Weight::Semibold, None, Some(1));
-                                    if let Some(why) = file_why {
-                                        Label(why, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                                    }
-                                });
+                        { use ::compose_rust::ui::Row; Row!(spacing = SP[2], alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width().background(paint(p.surface)).corner_radius(CORNER_MD).padding(SP[2]), {
+                                let pick_content = || {
+                                    { use ::compose_rust::ui::Row; Row!(spacing = SP[2], alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
+                                        { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().size(44.0, 44.0).background(paint(p.surface_2)).corner_radius(CORNER_LG), alignment = Alignment::Center, content = || NavIcon(ICON_DOC, p.text_2.to_argb(), 22.0)) };
+                                        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), {
+                                            Label(&file_title, Fs::Md, Weight::Semibold, None, Some(1));
+                                            if let Some(why) = file_why {
+                                                Label(why, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                                            }
+                                        }) };
+                                    }) };
+                                };
+                                if FILE_PICKER_AVAILABLE {
+                                    let picked = picked.clone();
+                                    NamedClickable(
+                                        "파일 고르기",
+                                        Modifier::new().weight(1.0).corner_radius(CORNER_SM),
+                                        Alignment::CenterStart,
+                                        move || {
+                                            let picked = picked.clone();
+                                            compose_rust::FileDialog::open_files().title(FILE_DIALOG_TITLE).show(move |result| {
+                                                let outcome = match result {
+                                                    compose_rust::FileDialogResult::Chosen { paths, .. } => pick_outcome(Some(paths), true),
+                                                    compose_rust::FileDialogResult::Cancelled => pick_outcome(None, true),
+                                                    compose_rust::FileDialogResult::Unavailable => pick_outcome(None, false),
+                                                };
+                                                match outcome {
+                                                    PickOutcome::Draft(draft) => picked.set(draft.files),
+                                                    PickOutcome::Nothing => {}
+                                                    PickOutcome::Say(why) => notice::post(why),
+                                                }
+                                            });
+                                        },
+                                        pick_content,
+                                    );
+                                } else {
+                                    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().weight(1.0), alignment = Alignment::CenterStart, content = pick_content) };
+                                }
                                 super::components::CloseButton(close.clone());
-                            });
+                            }) };
                         ShareSectionLabel("Ember로 보내기");
                         if rows.is_empty() {
                             Label("보낼 수 있는 장비가 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
@@ -1685,83 +1692,53 @@ pub(super) fn ShareSheet(open: &MutableState<bool>, devices: &[Device], members:
                         }
                         // The sheet's own actions (`.fl-share-acts`, rows `--pad-row` 12 16): not
                         // built, so each says so.
-                        cu::Column()
-                            .modifier(Modifier::new().fill_max_width().background(paint(p.surface)).corner_radius(CORNER_MD))
-                            .content(|| {
+                        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width().background(paint(p.surface)).corner_radius(CORNER_MD), {
                                 for (i, label) in SHARE_ACTIONS.iter().enumerate() {
                                     if i > 0 {
-                                        cu::Separator(Some(paint(p.line)));
+                                        { use ::compose_rust::ui::Separator; Separator!(Some(paint(p.line))) };
                                     }
-                                    cu::Row()
-                                        .spacing(SP[2])
-                                        .alignment(Alignment::CenterStart)
-                                        .modifier(Modifier::new().fill_max_width().padding(SP[2]).alpha(0.6))
-                                        .content(|| {
-                                            cu::Spacer().modifier(Modifier::new().width(SP[0]));
+                                    { use ::compose_rust::ui::Row; Row!(spacing = SP[2], alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width().padding(SP[2]).alpha(0.6), {
+                                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[0])) };
                                             NavIcon([ICON_DOC, ICON_CHAT, ICON_FOLDER][i], p.text_2.to_argb(), 18.0);
                                             Label(label, Fs::Md, Weight::Regular, None, Some(1));
-                                            cu::Spacer().modifier(Modifier::new().weight(1.0));
+                                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                                             Label(UNAVAILABLE, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                                            cu::Spacer().modifier(Modifier::new().width(SP[0]));
-                                        });
+                                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[0])) };
+                                        }) };
                                 }
-                            });
-                        cu::Row().spacing(SP[1]).alignment(Alignment::TopStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                            }) };
+                        { use ::compose_rust::ui::Row; Row!(spacing = SP[1], alignment = Alignment::TopStart, modifier = Modifier::new().fill_max_width(), {
                             NavIcon(ICON_LOCK, p.muted.to_argb(), 14.0);
-                            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                            { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), {
                                 Label(SHARE_NOTE, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(3));
-                            });
-                        });
-                    });
-                    cu::Spacer().modifier(Modifier::new().width(SP[3]));
-                });
-                cu::Spacer().modifier(Modifier::new().height(SP[4]));
-            });
+                            }) };
+                        }) };
+                    }) };
+                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[3])) };
+                }) };
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[4])) };
+            }) };
         };
         let surface = Modifier::new().fill_max_width().background(paint(p.surface_2));
-        if plain {
-            cu::Column().modifier(surface).content(body);
-        } else {
-            cu::ScrollColumn().modifier(surface.height(room)).content(body);
-        }
+        { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = surface.max_height(room), content = body) };
     });
 }
 
 /// A share section's label (`.fl-share-l small muted`, padding 0 4).
 fn ShareSectionLabel(text: &str) {
     let p = ember_theme().palette;
-    cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
-        cu::Spacer().modifier(Modifier::new().width(SP[0]));
+    { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width(), {
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[0])) };
         Label(text, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-    });
+    }) };
 }
 
 /// One section's receivers in a row that scrolls sideways (`.fl-share-row`: 12 apart, the
 /// tiles `flex:none`), so a long list does not make the sheet taller.
 fn ShareRow(tiles: impl FnOnce()) {
-    cu::ScrollRow().modifier(Modifier::new().fill_max_width()).content(|| {
-        cu::Row().spacing(SP[2]).alignment(Alignment::TopStart).content(tiles);
-    });
-}
-
-/// How tall the share sheet's body is (FR-L32.1): 12 above and 20 below, the dialog's 5 px grab
-/// bar when `grab`, the 68 px file card, the two 18 px section labels, each section's one row of
-/// 112 px tiles (a 20 px line when it has none), the three 46 px action rows with their
-/// separators and the three-line note, with 12 px between rows.
-pub(crate) fn share_body_estimate(devices: bool, agents: bool, grab: bool) -> f32 {
-    let tiles = |any: bool| if any { 112.0 } else { 20.0 };
-    let rows = [
-        if grab { Some(5.0) } else { None },
-        Some(68.0),
-        Some(18.0),
-        Some(tiles(devices)),
-        Some(18.0),
-        Some(tiles(agents)),
-        Some(3.0 * 46.0 + 2.0),
-        Some(54.0),
-    ];
-    let rows: Vec<f32> = rows.into_iter().flatten().collect();
-    SP[2] + rows.iter().sum::<f32>() + (rows.len() - 1) as f32 * SP[2] + SP[4]
+    { use ::compose_rust::ui::ScrollRow; ScrollRow!(modifier = Modifier::new().fill_max_width(), {
+        { use ::compose_rust::ui::Row; Row!(spacing = SP[2], alignment = Alignment::TopStart, content = tiles) };
+    }) };
 }
 
 /// The share sheet's width: the mockup's `min(400px, 100%)`.
@@ -1769,29 +1746,31 @@ pub const SHARE_SHEET_WIDTH: f32 = 400.0;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fr_l27_10_the_phone_title_has_no_extra_row_above_it() {
+        let src = include_str!("files.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap()];
+        let head = &production[production.find("if skip.show(EST_HEAD) {").unwrap()..];
+        let head = &head[..head.find("HeaderGap(").unwrap()];
+        assert!(!head.contains("Spacer()"), "no row of the screen's own above the header");
+        assert!(production.contains("HeaderGap(\"파일\""));
+    }
+
     use super::*;
 
     #[test]
-    fn fr_l32_1_share_sheet_estimate_and_plain_body() {
-        // #878: the 채널에 올리기 row was cut at 390 and 1440 by a body fixed at 640; review r5
-        // found the last row and the note below the window edge at 390.
-        // 12 + 5 + 68 + 18 + 112 + 18 + 112 + 140 + 54 + 7 x 12 + 20 (the agents hint line is
-        // gone, review r6).
-        assert_eq!(share_body_estimate(true, true, true), 643.0);
-        assert_eq!(share_body_estimate(true, true, false), 643.0 - 5.0 - 12.0);
-        assert_eq!(share_body_estimate(false, false, true), 643.0 - 2.0 * 92.0);
-        // With no title bar the whole sheet is the room: the dialog at 1440 x 900 and the bottom
-        // sheet at 390 x 844 both hold the body at its content height.
-        let room = |w: f32, h: f32| super::super::components::sheet_body_max_height(w, h, false, 0.0);
-        assert!(share_body_estimate(true, true, true) <= room(1440.0, 900.0), "{}", room(1440.0, 900.0));
-        assert!(share_body_estimate(true, true, false) <= room(390.0, 844.0), "{}", room(390.0, 844.0));
+    fn fr_l32_1_share_sheet_caps_its_scroll_body() {
+        // #878, compose-rust#778 (v0.0.11): the body takes Modifier::max_height(room) instead of
+        // share_body_estimate or a fixed 640 height.
         let src = include_str!("files.rs");
         let production = &src[..src.find("#[cfg(test)]").unwrap()];
+        assert!(!production.contains(&["share_body", "_estimate"].concat()));
+        assert!(!production.contains(concat!("TODO(compose-rust#", "778")));
         let sheet = &production[production.find("fn ShareSheet(").unwrap()..];
         let sheet = &sheet[..sheet.find("\n}\n").unwrap()];
         assert!(!sheet.contains(".min(640.0)"), "{sheet}");
-        assert!(sheet.contains("let plain = bottom || share_body_estimate(!rows.is_empty(), !agents.is_empty(), grab) <= room;"));
-        assert!(sheet.contains("if plain {\n            cu::Column().modifier(surface).content(body);"));
+        assert!(!sheet.contains(".height(room)"), "{sheet}");
+        assert!(sheet.contains("ScrollColumn!(modifier = surface.max_height(room), content = body)"), "{sheet}");
         assert!(!sheet.contains("wrap_lines"), "the receivers no longer wrap into lines");
     }
 
@@ -1841,8 +1820,11 @@ mod tests {
             assert_eq!(nodes.iter().filter(|n| n.0 == "Divider").count(), 2, "{size:?}");
             // One sideways row for the devices; no agents, so their line says so.
             assert_eq!(nodes.iter().filter(|n| n.0 == "ScrollRow").count(), 1, "{size:?}");
-            // The content fits: no fixed-height scrolling body.
-            assert_eq!(nodes.iter().filter(|n| n.0 == "ScrollColumn").count(), 0, "{size:?}");
+            // The body is a capped ScrollColumn (`SizeIn` with `max_h`), not a fixed-height one.
+            let scrolls: Vec<_> = nodes.iter().filter(|n| n.0 == "ScrollColumn").collect();
+            assert_eq!(scrolls.len(), 1, "{size:?}");
+            assert!(scrolls[0].2.iter().any(|m| m.starts_with("SizeIn") && m.contains("max_height:")), "{size:?}: {:?}", scrolls[0].2);
+            assert!(!scrolls[0].2.iter().any(|m| m.starts_with("Height(")), "{size:?}: {:?}", scrolls[0].2);
             // The sheet's close button (32 px, clickable) is still there, in the file card.
             let close = nodes.iter().any(|n| n.1.iter().any(|p| p.starts_with("OnClick=")) && n.2.windows(2).any(|w| w[0] == "Width(32.0)" && w[1] == "Height(32.0)"));
             assert!(close, "{size:?}: close button");
@@ -1910,24 +1892,9 @@ mod tests {
     }
 
     #[test]
-    fn fr_l27_agent_tiles_keep_room_for_both_buttons_at_every_width() {
-        let gap = SP[2];
-        // 1440: 4 across; 1024: 3; 768: 2; 390: one full-width row.
-        assert_eq!(stage_avail(1440.0), 1102.0);
-        assert_eq!(stage_avail(1024.0), 864.0);
-        assert_eq!(stage_avail(768.0), 608.0);
-        assert_eq!(stage_avail(390.0), 318.0);
-        let cols: Vec<usize> = [1440.0, 1024.0, 768.0, 390.0].iter().map(|w| agent_cols(stage_avail(*w), gap)).collect();
-        assert_eq!(cols, vec![4, 3, 2, 1]);
-        for w in [390.0, 560.0, 640.0, 768.0, 900.0, 1024.0, 1100.0, 1280.0, 1440.0, 1920.0] {
-            let avail = stage_avail(w);
-            let c = agent_cols(avail, gap);
-            assert!((1..=4).contains(&c), "{w}");
-            assert!(tile_width(avail, c, gap) >= AGENT_TILE_MIN_W || c == 1, "{w}: tile {}", tile_width(avail, c, gap));
-        }
-        // Where the old four columns left 142 dp, the tile is now wide enough for both buttons.
-        assert!(tile_width(stage_avail(768.0), 4, gap) < AGENT_TILE_MIN_W);
-        assert!(tile_width(stage_avail(768.0), 2, gap) >= 292.0);
+    fn fr_l27_the_agent_grid_uses_the_mockup_device_columns() {
+        let cols: Vec<_> = [1440.0, 1024.0, 768.0, 390.0].into_iter().map(device_cols).collect();
+        assert_eq!(cols, vec![4, 4, 4, 2]);
     }
 
     #[test]
@@ -1954,12 +1921,29 @@ mod tests {
         let k = kpi_cells(&m);
         assert_eq!((k[0].value.as_str(), k[0].pill.clone()), ("4", Some(("전체 7".to_string(), PillTone::Green))));
         assert_eq!(k[1].pill.as_ref().map(|p| p.0.as_str()), Some("멈춤 1"));
-        assert!(!k[2].available);
+        assert!(k[2].available);
+        assert_eq!(k[2].value, "12 KB");
         assert_eq!((k[3].unit, k[3].meter), ("%", Some(75)));
         // No service data: only the connected count is known.
         let none = FilesModel { ready: false, ..m };
         let k = kpi_cells(&none);
-        assert!(k[0].available && !k[1].available && !k[3].available);
+        assert!(k[0].available && !k[1].available && !k[2].available && !k[3].available);
+        assert_eq!(k[2].value, UNAVAILABLE);
+    }
+
+    #[test]
+    fn fr_l27_kpi_cells_sent_week_shows_zero_bytes_when_ready_and_unavailable_when_not() {
+        const NOW: i64 = 1_800_000_000_000;
+        let (mut m, _) = sample_model();
+        m.history.clear();
+        let k_ready = kpi_cells_at(&m, NOW);
+        assert!(k_ready[2].available);
+        assert_eq!(k_ready[2].value, "0 B");
+
+        m.ready = false;
+        let k_not_ready = kpi_cells_at(&m, NOW);
+        assert!(!k_not_ready[2].available);
+        assert_eq!(k_not_ready[2].value, UNAVAILABLE);
     }
 
     #[test]
@@ -2001,6 +1985,31 @@ mod tests {
     }
 
     #[test]
+    fn fr_l27_5_a_phone_chip_keeps_a_name_that_fits_the_mockup_cap() {
+        let inner = chip_avail(390.0);
+        assert_eq!(shown_label("win-desktop", true, 16.0, inner), "win-desktop 오프라인");
+        assert_eq!(shown_label("studio-workstation", false, 16.0, inner), "studio-workstation");
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn fr_l27_5_a_real_send_sheet_offers_the_native_picker() {
+        let _guard = crate::services::test_guard();
+        let mut host = Host::new(|| {
+            Box::new(Recomposer::new(|| {
+                let st = remember(|| State {
+                    sheet: mutable_state_of(Some(SendDraft::default())),
+                    ..State::new()
+                });
+                SendSheet(&st, &[], &[], true, false, 768.0);
+            }))
+        });
+        let raw = host.rebuild().expect("rebuild");
+        let all = texts(&decode_batch(raw).expect("decode"));
+        assert!(all.iter().any(|value| value == "파일 고르기"), "picker missing: {all:?}");
+    }
+
+    #[test]
     fn fr_l27_the_sample_fills_every_section() {
         let (m, offers) = sample_model();
         assert!(m.ready && !m.devices.is_empty() && !m.transfers.is_empty() && !m.received.is_empty());
@@ -2025,10 +2034,7 @@ mod tests {
         compose_rust::window::reset_window_size();
         let mut host = Host::new(|| Box::new(Recomposer::new(FilesScreen)));
         let mut all = texts(&decode_batch(host.rebuild().expect("rebuild")).expect("decode"));
-        let event = HostEvent {
-            node_id: 0,
-            handler_id: 0,
-            payload: EventPayload::WindowSizeChanged {
+        let event = HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
                 width_dp: 1440.0,
                 height_dp: 900.0,
                 class: WindowSizeClass::Expanded,
@@ -2036,8 +2042,8 @@ mod tests {
                 safe_area_top: 0.0,
                 safe_area_leading: 0.0,
                 safe_area_trailing: 0.0,
-            },
-        };
+                safe_area_bottom: 0.0,
+            });
         let (bytes, _) = host.dispatch(event).expect("dispatch");
         all.extend(texts(&decode_batch(bytes).expect("decode")));
         let has = |want: &str| all.iter().any(|t| t.contains(want));
@@ -2048,17 +2054,13 @@ mod tests {
     }
 
     #[test]
-    fn fr_l27_agent_tile_renders_open_conversation_and_send_buttons_and_opens_conversation() {
+    fn fr_l27_agent_tile_opens_conversation_on_card_click_without_buttons() {
         use compose_rust::{EventPayload, PropertyKind};
-        use std::sync::{Arc, Mutex};
         let _guard = crate::services::test_guard();
         let ui = shared_ui();
         ui.go(crate::ui::Route::Projects);
-        let sent_to: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-        let sent_cb = sent_to.clone();
-        let mut host = Host::new(move || {
-            let sent_cb = sent_cb.clone();
-            Box::new(Recomposer::new(move || {
+        let mut host = Host::new(|| {
+            Box::new(Recomposer::new(|| {
                 let member = CrewMember {
                     id: "demo-s1".into(),
                     title: "프록시 리팩토링".into(),
@@ -2066,82 +2068,35 @@ mod tests {
                     agent: "claude".into(),
                     waiting: false,
                 };
-                let sent_cb = sent_cb.clone();
-                AgentTile(&member, shared_ui(), 200.0, move |id| {
-                    *sent_cb.lock().expect("lock") = Some(id);
-                });
+                AgentTile(&member, shared_ui(), 200.0);
             }))
         });
         let raw = host.rebuild().expect("rebuild").to_vec();
         let batch = decode_batch(&raw).expect("decode");
         let all = texts(&batch);
-        assert!(all.iter().any(|t| t == "대화 열기"), "missing 대화 열기: {all:?}");
-        assert!(all.iter().any(|t| t == "보내기"), "missing 보내기: {all:?}");
+        assert!(!all.iter().any(|t| t == "대화 열기"), "unexpected 대화 열기 button: {all:?}");
+        assert!(!all.iter().any(|t| t == "보내기"), "unexpected 보내기 button: {all:?}");
 
-        // Find the Button node labeled "대화 열기" and its OnClick handler_id, then click it.
-        let open_node = batch
+        // The card itself is the sole OnClick target and opens the conversation.
+        let click_targets: Vec<(u32, u64)> = batch
             .iter()
-            .find_map(|m| match m {
-                Mutation::SetProp {
-                    node_id,
-                    property: PropertyKind::Text,
-                    value: PropertyValue::String("대화 열기"),
-                } => Some(*node_id),
-                _ => None,
-            })
-            .expect("대화 열기 button node");
-        let open_handler = batch
-            .iter()
-            .find_map(|m| match m {
+            .filter_map(|m| match m {
                 Mutation::SetProp {
                     node_id,
                     property: PropertyKind::OnClick,
                     value: PropertyValue::Integer(h),
-                } if *node_id == open_node => Some(*h as u64),
+                } => Some((*node_id, *h as u64)),
                 _ => None,
             })
-            .expect("대화 열기 OnClick handler");
-        host.dispatch(HostEvent {
-            node_id: open_node,
-            handler_id: open_handler,
-            payload: EventPayload::Clicked,
-        })
-        .expect("dispatch click");
+            .collect();
+        assert_eq!(click_targets.len(), 1, "expected only the card click handler: {click_targets:?}");
+        let (card_node, card_handler) = click_targets[0];
+        host.dispatch(HostEvent::new(card_node, card_handler, EventPayload::Clicked))
+            .expect("dispatch card click");
         assert_eq!(
             ui.route.get_untracked(),
             crate::ui::Route::Conversation("demo-s1".into())
         );
-
-        // Find the Button node labeled "보내기" and click it.
-        let send_node = batch
-            .iter()
-            .find_map(|m| match m {
-                Mutation::SetProp {
-                    node_id,
-                    property: PropertyKind::Text,
-                    value: PropertyValue::String("보내기"),
-                } => Some(*node_id),
-                _ => None,
-            })
-            .expect("보내기 button node");
-        let send_handler = batch
-            .iter()
-            .find_map(|m| match m {
-                Mutation::SetProp {
-                    node_id,
-                    property: PropertyKind::OnClick,
-                    value: PropertyValue::Integer(h),
-                } if *node_id == send_node => Some(*h as u64),
-                _ => None,
-            })
-            .expect("보내기 OnClick handler");
-        host.dispatch(HostEvent {
-            node_id: send_node,
-            handler_id: send_handler,
-            payload: EventPayload::Clicked,
-        })
-        .expect("dispatch send click");
-        assert_eq!(sent_to.lock().expect("lock").as_deref(), Some("demo-s1"));
     }
 
     /// The screen's texts for a model, rendered once at the default window size.
@@ -2153,6 +2108,16 @@ mod tests {
             }))
         });
         texts(&decode_batch(host.rebuild().expect("rebuild")).expect("decode"))
+    }
+
+    #[test]
+    fn fr_l27_2_the_devices_card_names_the_sending_device() {
+        let _guard = crate::services::test_guard();
+        let (model, _) = sample_model();
+        let sender = if is_demo() { "mac-mini".to_string() } else { crate::terminal_stream::device_name() };
+        let all = screen_texts(model);
+        assert!(all.iter().any(|t| t == "보내는 장비"), "sending-device label: {all:?}");
+        assert!(all.contains(&sender), "missing sending device {sender}: {all:?}");
     }
 
     // FR-L27.9 (#786)
@@ -2189,18 +2154,37 @@ mod tests {
         // compose-rust#483 (#673): outside the demo 파일 고르기 asks for the platform's dialog and
         // its one answer goes through `pick_outcome` (tested in `ui/files.rs`).
         let production = include_str!("files.rs").split("#[cfg(test)]").next().unwrap();
-        assert!(production.contains("compose_rust::FileDialog::open_files().title(FILE_DIALOG_TITLE).show(move |result| {"));
+        let (stage, rest) = production.split_once("\nfn pick_send_files(").unwrap();
+        let stage = stage.split_once("\nfn Stage(").unwrap().1;
+        let picker = rest.split_once("\n}\n").unwrap().0;
+        assert!(stage.contains("pick_send_files(move |draft| s.set(Some(draft)));"));
+        assert!(picker.contains("compose_rust::FileDialog::open_files().title(FILE_DIALOG_TITLE).show(move |result| {"));
         for arm in [
             "compose_rust::FileDialogResult::Chosen { paths, .. } => pick_outcome(Some(paths), true),",
             "compose_rust::FileDialogResult::Cancelled => pick_outcome(None, true),",
             "compose_rust::FileDialogResult::Unavailable => pick_outcome(None, false),",
-            "PickOutcome::Draft(draft) => s.set(Some(draft)),",
+            "PickOutcome::Draft(draft) => on_pick(draft),",
             "PickOutcome::Say(why) => notice::post(why),",
         ] {
-            assert!(production.contains(arm), "{arm}");
+            assert!(picker.contains(arm), "{arm}");
         }
-        assert!(production.contains("let can_pick = FILE_PICKER_AVAILABLE || demo;"), "the button is off where there is no dialog");
-        assert!(!SHARE_SHEET_PICKS_FILES);
+        assert!(stage.contains("let can_pick = FILE_PICKER_AVAILABLE || demo;"), "the button is off where there is no dialog");
+    }
+
+    #[test]
+    fn fr_l27_7_share_sheet_file_card_opens_file_dialog_when_available() {
+        let _guard = crate::services::test_guard();
+        let production = include_str!("files.rs").split("#[cfg(test)]").next().unwrap();
+        let sheet = &production[production.find("fn ShareSheet(").unwrap()..];
+        assert!(sheet.contains("share_file_card(&files, FILE_PICKER_AVAILABLE)"));
+        assert!(sheet.contains("compose_rust::FileDialog::open_files().title(FILE_DIALOG_TITLE).show("));
+        let nodes = share_nodes((1440.0, 900.0));
+        let has_picker = nodes.iter().any(|n| {
+            n.0 == "Box"
+                && n.1.iter().any(|p| p == "AccessibleName=String(\"파일 고르기\")")
+                && n.1.iter().any(|p| p.starts_with("OnClick="))
+        });
+        assert_eq!(has_picker, FILE_PICKER_AVAILABLE);
     }
 
     #[test]
@@ -2342,5 +2326,21 @@ mod tests {
         let screen = src.split("pub fn FilesScreenWith(").nth(1).unwrap().split("\n}\n").next().unwrap();
         assert!(screen.contains("offers.first().filter(|_| offer_card_shown(true, sheet_open, share_open.get()))"));
         assert!(!screen.contains("if let Some(offer) = offers.first() {"));
+    }
+
+    /// #487 / #786: devices card uses "보내는 장비" with scanning/offline pill, 768 header puts
+    /// actions beside the title, and a lost server marks device tiles offline while keeping lists.
+    #[test]
+    fn fr_l27_lost_server_marks_device_tiles_offline_and_keeps_lists() {
+        let (model, _) = sample_model();
+        let lost = FilesModel { lost: true, ..model };
+        let all = screen_texts(lost);
+        assert!(all.iter().any(|t| t == "보내는 장비"), "devices card header: {all:?}");
+        assert!(all.iter().any(|t| t == "오프라인"), "offline status shown when server is lost: {all:?}");
+        assert!(all.iter().any(|t| t == "전송 중"), "transfer list kept when server is lost");
+        assert!(all.iter().any(|t| t == "전송 기록"), "history list kept when server is lost");
+        let src = include_str!("files.rs");
+        assert!(src.contains("HeaderGap(\"파일\""), "header exists");
+        assert!(src.contains("if compact || w > 900.0"), "768 uses the tablet header");
     }
 }

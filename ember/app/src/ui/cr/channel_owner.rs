@@ -9,7 +9,7 @@
 
 #![allow(non_snake_case)]
 
-use compose_rust::runtime::{disposable_effect, launched_effect, on_dispose, mutable_state_of, remember_with_key, MutableState};
+use compose_rust::runtime::{key, launched_effect, mutable_state_of, remember_with_key, MutableState};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
 use compose_rust::{Alignment, SpaceRole};
@@ -46,7 +46,13 @@ pub struct OwnerState {
     /// The hours the next allowance gets: a preset, or the valid custom value.
     hours: MutableState<u32>,
     custom: MutableState<String>,
-    /// Bumped to draw a fresh custom field.
+    /// The custom field's identity. compose-rust's `TextField` is uncontrolled up to the pinned
+    /// rev (e52fbd3): the Renderer reads `Text` once per node (`HostTextField.kt`
+    /// `remember(nodeId)`), and an empty text is not written at all, so clearing `custom` alone
+    /// leaves the typed value on screen. Bumping this draws a fresh field that starts from
+    /// `custom`, the way the toolkit says to show other text (`TextFieldScope::text`).
+    /// TODO(compose-rust#1075): drop this and the `key` around the field once a live field takes
+    /// a new `text` (and `""`) from composition.
     custom_gen: MutableState<u64>,
     /// An action is in flight: the buttons wait, so one tap is one request.
     busy: MutableState<bool>,
@@ -185,7 +191,7 @@ impl OwnerState {
     }
 
     /// Drops what must not outlive the sheet: the link, the confirm, the armed create, the
-    /// custom hours text (the field is redrawn empty).
+    /// custom hours text (the field is drawn again, empty).
     fn reset(&self) {
         if self.sample {
             return;
@@ -196,7 +202,7 @@ impl OwnerState {
         self.armed_at.set(0);
         self.create_armed.set(false);
         self.custom.set(String::new());
-        self.custom_gen.set(self.custom_gen.get_untracked() + 1);
+        self.custom_gen.set(self.custom_gen.get_untracked().wrapping_add(1));
     }
 
     /// Reads invites and guests; a failure keeps what is shown and says so.
@@ -334,7 +340,9 @@ pub fn MembersSheet(channel: &str, channel_name: &str, st: &OwnerState, live: bo
     // Review sample data stands in for a server; it is never fetched over.
     let live = live || st.sample;
     let fetch = live && !st.sample;
-    // Entering a room starts with the sheet shut and nothing left from an earlier visit.
+    // Entering a room starts with the sheet shut and nothing left from an earlier visit. When the
+    // room or the channels screen leaves the composition, `OwnerState`'s `remember_with_key` slot
+    // releases its `MutableState`s automatically.
     {
         let st2 = st.clone();
         launched_effect(format!("enter:{channel}"), move || async move {
@@ -342,19 +350,6 @@ pub fn MembersSheet(channel: &str, channel_name: &str, st: &OwnerState, live: bo
                 st2.open.set(false);
                 st2.reset();
             }
-        });
-    }
-    // Leaving the room (back, or another room) drops the link and the confirm too: the cleanup
-    // runs when this call site leaves the composition or the room changes.
-    {
-        let st2 = st.clone();
-        disposable_effect(channel.to_string(), move || {
-            on_dispose(move || {
-                if !st2.sample {
-                    st2.open.set(false);
-                    st2.reset();
-                }
-            })
         });
     }
     // Fetch when the sheet opens (the key changes with the open flag).
@@ -374,13 +369,10 @@ pub fn MembersSheet(channel: &str, channel_name: &str, st: &OwnerState, live: bo
         let st = st.clone();
         move || st.close()
     };
-    // FR-L32.1 (#878): the sheet is as tall as its content. A weighted body asked the dialog for
-    // the whole window, so the one-line body without a server filled it. Without a server, and in
-    // the bottom sheet (which scrolls taller content itself), the body is a plain column; with a
-    // server the dialog's body scrolls at the room left by the header and footer.
-    // TODO(compose-rust#778, after v0.0.10): cap that body instead of fixing it.
+    // FR-L32.1 (#878, compose-rust#778, v0.0.11): the sheet body is capped at the room left by
+    // the header and footer (`Modifier::max_height`), so the one-line body without a server is
+    // only as tall as its line and a longer list scrolls inside the cap.
     let w = crate::ui::window_size::current_window_size();
-    let plain = !live || super::components::sheet_wraps_content(w.width_dp);
     let body_h = super::components::sheet_body_max_height(
         w.width_dp,
         w.height_dp,
@@ -389,22 +381,17 @@ pub fn MembersSheet(channel: &str, channel_name: &str, st: &OwnerState, live: bo
     )
     .min(900.0);
     EmberSheet(&format!("{channel_name} 멤버/게스트"), st.open.get(), close.clone(), None, || {
-        let body = || {
-            cu::Column().spacing(SP[3]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
-                if !live {
-                    Label("서버에 연결되어 있지 않아 초대와 게스트를 관리할 수 없습니다", Fs::Sm, Weight::Regular, Some(paint(ember_theme().palette.muted)), None);
-                    return;
-                }
-                InviteSection(channel, st);
-                InviteList(channel, st);
-                GuestList(channel, st);
-            });
-        };
-        if plain {
-            cu::Column().modifier(Modifier::new().fill_max_width()).content(body);
-        } else {
-            cu::ScrollColumn().modifier(Modifier::new().fill_max_width().height(body_h)).content(body);
-        }
+        { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().fill_max_width().max_height(body_h), {
+                { use ::compose_rust::ui::Column; Column!(spacing = SP[3], modifier = Modifier::new().fill_max_width().padding(SP[4]), {
+                    if !live {
+                        Label("서버에 연결되어 있지 않아 초대와 게스트를 관리할 수 없습니다", Fs::Sm, Weight::Regular, Some(paint(ember_theme().palette.muted)), None);
+                        return;
+                    }
+                    InviteSection(channel, st);
+                    InviteList(channel, st);
+                    GuestList(channel, st);
+                }) };
+            }) };
         SheetFooter(|| {
             AppButton("닫기", None, ButtonKind::Default, true, true, false, close.clone());
         });
@@ -463,11 +450,10 @@ fn InviteSection(channel: &str, st: &OwnerState) {
         Label("127.0.0.1 같은 내 컴퓨터 주소나 0.0.0.0 주소는 밖에서 닿지 않습니다", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
     }
     if let Some(c) = created.filter(|_| status.can_copy()) {
-        // A read-only look: the field starts with the link, enabled so it can be selected and
-        // copied with Cmd+C / Ctrl+C. TODO(compose-rust, unfiled: TextField has no read-only flag):
-        // typing into it changes only what is drawn, never the link. 복사 puts the link on the clipboard through the
-        // toolkit (compose-rust v0.0.7, #471); the link is never logged.
-        EmberField(FieldOptions { fill_max_width: true, text: Some(c.link.clone()), ..Default::default() });
+        // The field starts with the link and is read-only (compose-rust#826): the link can be
+        // selected and copied with Cmd+C / Ctrl+C but not edited. 복사 puts the link on the
+        // clipboard through the toolkit (compose-rust v0.0.7, #471); the link is never logged.
+        EmberField(FieldOptions { fill_max_width: true, text: Some(c.link.clone()), read_only: true, ..Default::default() });
         let link = c.link.clone();
         AppButton(COPY_LABEL, None, ButtonKind::Default, true, true, false, move || {
             notice::post(copy_notice(compose_rust::clipboard::set_text(&link).is_ok()));
@@ -495,7 +481,7 @@ fn InviteList(channel: &str, st: &OwnerState) {
         Label("초대가 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
     }
     for r in rows {
-        cu::Row().space_role(SpaceRole::Sm).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+        { use ::compose_rust::ui::Row; Row!(space_role = SpaceRole::Sm, alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
             let tone = match r.state {
                 InviteState::Pending => PillTone::Green,
                 InviteState::Used => PillTone::Blue,
@@ -508,7 +494,7 @@ fn InviteList(channel: &str, st: &OwnerState) {
                 (None, None) => String::new(),
             };
             Label(&text, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
-            cu::Spacer().modifier(Modifier::new().weight(1.0));
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
             if r.can_revoke {
                 let (s, c, id) = (st.clone(), channel.to_string(), r.id.clone());
                 let sure = st.confirm.get().is_revoke(&r.id);
@@ -530,7 +516,7 @@ fn InviteList(channel: &str, st: &OwnerState) {
                     }
                 });
             }
-        });
+        }) };
     }
 }
 
@@ -546,31 +532,30 @@ fn GuestList(channel: &str, st: &OwnerState) {
     let hours = st.hours.clone();
     let st_c = st.clone();
     HourChips(&ALLOW_PRESETS, current, move |h| {
-        // A preset replaces a typed value: the field is redrawn empty (generation bump).
+        // A preset replaces a typed value: `custom` is cleared and the field drawn again from it.
         st_c.confirm.set(Confirm::None);
         st_c.custom.set(String::new());
-        st_c.custom_gen.set(st_c.custom_gen.get_untracked() + 1);
+        st_c.custom_gen.set(st_c.custom_gen.get_untracked().wrapping_add(1));
         hours.set(h)
     });
     let custom = st.custom.get();
-    cu::Row().space_role(SpaceRole::Sm).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-        // Read here so a generation bump redraws the field empty.
-        let _gen = st.custom_gen.get();
-        // v0.0.7: #374 fixed (`TextField::text`); workaround kept until checked on a display (a
-        // controlled value must not move the caret), so the field is uncontrolled.
+    { use ::compose_rust::ui::Row; Row!(space_role = SpaceRole::Sm, alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
         let (text, hours) = (st.custom.clone(), st.hours.clone());
-        EmberField(FieldOptions {
-            weight: Some(1.0),
-            placeholder: format!("직접 입력 ({MIN_HOURS}~{MAX_HOURS}시간)"),
-            on_value_change: Some(Box::new(move |v| {
-                if let Some((h, _)) = clamp_hours(&v) {
-                    hours.set(h);
-                }
-                text.set(v);
-            })),
-            ..Default::default()
+        key(st.custom_gen.get(), || {
+            EmberField(FieldOptions {
+                weight: Some(1.0),
+                text: Some(custom.clone()),
+                placeholder: format!("직접 입력 ({MIN_HOURS}~{MAX_HOURS}시간)"),
+                on_value_change: Some(Box::new(move |v| {
+                    if let Some((h, _)) = clamp_hours(&v) {
+                        hours.set(h);
+                    }
+                    text.set(v);
+                })),
+                ..Default::default()
+            })
         });
-    });
+    }) };
     match clamp_hours(&custom) {
         None if !custom.trim().is_empty() => {
             Label(error_message(Some("invalid_hours")), Fs::Sm, Weight::Regular, Some(paint(p.red.strong)), None);
@@ -588,17 +573,17 @@ fn GuestList(channel: &str, st: &OwnerState) {
     }
     let custom_ok = custom.trim().is_empty() || clamp_hours(&custom).is_some();
     for g in rows {
-        cu::Column().spacing(SP[0]).modifier(Modifier::new().fill_max_width()).content(|| {
-            cu::Row().space_role(SpaceRole::Sm).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[0], modifier = Modifier::new().fill_max_width(), {
+            { use ::compose_rust::ui::Row; Row!(space_role = SpaceRole::Sm, alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
                 Label(&g.name, Fs::Md, Weight::Medium, None, Some(1));
                 Pill("게스트", PillTone::Grey, true);
                 // Hidden unless an allowance is in force now.
                 if let Some(b) = &g.badge {
                     Pill(b, PillTone::Green, true);
                 }
-                cu::Spacer().modifier(Modifier::new().weight(1.0));
-            });
-            cu::Row().space_role(SpaceRole::Sm).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
+            }) };
+            { use ::compose_rust::ui::Row; Row!(space_role = SpaceRole::Sm, alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
                 let (s, c, id) = (st.clone(), channel.to_string(), g.id.clone());
                 AppButton(&format!("{hours}시간 허용"), None, ButtonKind::Default, true, !st.busy.get() && custom_ok, false, move || {
                     s.confirm.set(Confirm::None);
@@ -611,10 +596,10 @@ fn GuestList(channel: &str, st: &OwnerState) {
                         s.clear(&c, &id)
                     });
                 }
-            });
+            }) };
             // Remove sits on its own row, away from the allowance buttons.
-            cu::Row().space_role(SpaceRole::Sm).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                cu::Spacer().modifier(Modifier::new().weight(1.0));
+            { use ::compose_rust::ui::Row; Row!(space_role = SpaceRole::Sm, alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                 let sure = st.confirm.get().is_remove(&g.id);
                 if sure {
                     let s2 = st.clone();
@@ -634,8 +619,8 @@ fn GuestList(channel: &str, st: &OwnerState) {
                         s.remove(&c, &id);
                     }
                 });
-            });
-        });
+            }) };
+        }) };
     }
 }
 
@@ -645,17 +630,18 @@ mod tests {
     use compose_rust::{Host, Recomposer};
 
     #[test]
-    fn fr_l32_1_members_sheet_body_is_content_height() {
-        // #878: the one-line body without a server filled the 1440 window (y 0..900), because
-        // the scrolling body took the dialog's remaining height by weight.
+    fn fr_l32_1_members_sheet_body_is_capped_at_the_room() {
+        // #878, compose-rust#778 (v0.0.11): the body takes Modifier::max_height(body_h) instead
+        // of a weight or a fixed height, so the one-line body without a server is only as tall
+        // as its line and a longer list scrolls inside the cap.
         let src = include_str!("channel_owner.rs");
         let production = &src[..src.find("#[cfg(test)]").unwrap()];
+        assert!(!production.contains(concat!("TODO(compose-rust#", "778")));
         let sheet = &production[production.find("pub fn MembersSheet(").unwrap()..];
         let sheet = &sheet[..sheet.find("\n}\n").unwrap()];
         assert!(!sheet.contains(".weight(1.0)"), "{sheet}");
-        assert!(sheet.contains("let plain = !live || super::components::sheet_wraps_content(w.width_dp);"));
-        assert!(sheet.contains("if plain {\n            cu::Column().modifier(Modifier::new().fill_max_width()).content(body);"));
-        assert!(sheet.contains("cu::ScrollColumn().modifier(Modifier::new().fill_max_width().height(body_h)).content(body);"));
+        assert!(!sheet.contains(".height(body_h)"), "{sheet}");
+        assert!(sheet.contains(".max_height(body_h)"), "{sheet}");
         assert!(sheet.contains("super::components::SHEET_HEADER_CHROME_H + super::components::SHEET_FOOTER_H"));
     }
 
@@ -705,10 +691,100 @@ mod tests {
     }
 
     #[test]
+    fn fr_t14_the_invite_link_field_is_read_only() {
+        // compose-rust#826: the link can be selected and copied but not edited, so what is
+        // drawn is always the link 복사 copies.
+        let src = include_str!("channel_owner.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap()];
+        assert!(production.contains("text: Some(c.link.clone()), read_only: true,"));
+        assert!(!production.contains(concat!("TODO(compose-rust#", "826")));
+    }
+
+    #[test]
     fn fr_t14_an_open_sheet_without_a_server_says_so_and_invents_nothing() {
         let text = text_of(open_sheet);
         assert!(text.contains("멤버/게스트") && text.contains("서버에 연결되어 있지 않아"), "{text}");
         assert!(!text.contains("허용 중"));
+    }
+
+    #[test]
+    fn fr_t14_custom_hours_field_emits_controlled_text() {
+        use compose_rust::protocol::{decode_batch, HostEvent, Mutation, PropertyValue};
+        use compose_rust::runtime::remember;
+        use compose_rust::{EventPayload, PropertyKind, WidgetKind};
+
+        let mut host = Host::new(|| {
+            Box::new(Recomposer::new(|| {
+                let st = OwnerState::new("c1");
+                remember(|| {
+                    st.load.set(OwnerLoad::Ready);
+                    st.custom.set("12".to_string());
+                });
+                GuestList("c1", &st);
+            }))
+        });
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let text_fields: Vec<u32> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::Create { node_id, widget: WidgetKind::TextField } => Some(*node_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text_fields.len(), 1, "expected one custom-hours TextField");
+        let field_id = text_fields[0];
+        let field_texts: Vec<&str> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) }
+                    if *node_id == field_id =>
+                {
+                    Some(*s)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(field_texts, vec!["12"], "custom-hours TextField must emit controlled PropertyKind::Text");
+
+        // Picking a preset clears the field: the field is drawn again from the emptied `custom`.
+        let (preset_node, preset_handler) = batch
+            .iter()
+            .find_map(|m| match m {
+                Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
+                    Some((*node_id, *h as u64))
+                }
+                _ => None,
+            })
+            .expect("expected a preset hour button with OnClick");
+        let (bytes, _) = host
+            .dispatch(HostEvent::new(preset_node, preset_handler, EventPayload::Clicked))
+            .expect("dispatch preset click");
+        let after = decode_batch(bytes).expect("decode after click");
+        // The Renderer applies `Text` only when a field node is created (compose-rust e52fbd3
+        // `HostTextField.kt`), so clearing means a fresh field node whose text is empty (an
+        // empty text is not written), with the old one taken away.
+        let fresh: Vec<u32> = after
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::Create { node_id, widget: WidgetKind::TextField } => Some(*node_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fresh.len(), 1, "preset click must draw the custom-hours TextField again: {after:?}");
+        assert_ne!(fresh[0], field_id, "the cleared field is a new node, not the one showing 12");
+        let fresh_texts: Vec<&str> = after
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) }
+                    if *node_id == fresh[0] =>
+                {
+                    Some(*s)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(fresh_texts.iter().all(|s| s.is_empty()), "preset click must clear the controlled custom-hours TextField: {fresh_texts:?}");
+        assert!(after.iter().any(|m| matches!(m, Mutation::Remove { .. })), "the field showing 12 is taken away: {after:?}");
     }
 }
 

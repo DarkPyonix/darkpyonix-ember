@@ -93,11 +93,16 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           mkdir -p dist
+          # install-ose.sh and OSE_VERSION name and fetch the OSE release that matches this
+          # build (SPEC FR-W4 acceptance step 6, #83): both programs start OSE for the editor.
+          ose_release="ose-v$(tr -d '[:space:]' < .github/scripts/ose/VERSION)"
           pack() { # crate, program...
             crate="$1"; shift
             name="ember-${crate}-${TAG}-${TARGET}"
             mkdir -p "stage/$name"
             for p in "$@"; do cp "ember/$crate/target/release/$p" "stage/$name/"; done
+            cp ember/server/scripts/install-ose.sh "stage/$name/"
+            echo "$ose_release" > "stage/$name/OSE_VERSION"
             tar -C stage -czf "dist/$name.tar.gz" "$name"
             (cd dist && if command -v sha256sum >/dev/null; then sha256sum "$name.tar.gz"; else shasum -a 256 "$name.tar.gz"; fi > "$name.tar.gz.sha256")
           }
@@ -155,12 +160,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: ember/app
+          workspaces: |
+            ember/app
+            ember/ide-webview
       - name: Renderer system libraries
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libx11-dev libxext-dev libgl1-mesa-dev libfontconfig1-dev libfreetype-dev
+        run: sudo apt-get update && sudo apt-get install -y libx11-dev libxext-dev libgl1-mesa-dev libfontconfig1-dev libfreetype-dev libwebkit2gtk-4.1-dev libgtk-3-dev
       - name: Build ember-app
         run: cd ember/app && cargo build --release --locked
+      - name: Build ember-ide-webview
+        run: cd ember/ide-webview && cargo build --release --locked
       # Windows' default main-thread stack is 1 MiB and the renderer overflowed it in v0.1.0 (#880).
       - name: The main thread stack is 64 MiB (Windows)
         if: runner.os == 'Windows'
@@ -178,6 +187,9 @@ jobs:
           python3 compose-rust/scripts/packager-macos/package-macos app \
             --manifest-dir ember/app --executable ember/app/target/release/ember-app \
             --out stage
+          for app in stage/*.app; do
+            cp ember/ide-webview/target/release/ember-ide-webview "$app/Contents/MacOS/ember-ide-webview"
+          done
           codesign --force --deep -s - stage/*.app
           codesign --verify --deep --verbose stage/*.app
           python3 compose-rust/scripts/packager-macos/package-macos dmg --app stage/*.app --out "dist/ember-app-${{ needs.version.outputs.tag }}-${{ matrix.target }}.dmg"
@@ -187,7 +199,8 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Compress-Archive ember/app/target/release/ember-app.exe "dist/ember-app-${{ needs.version.outputs.tag }}-${{ matrix.target }}.zip"
+          Copy-Item ember/ide-webview/target/release/ember-ide-webview.exe ember/app/target/release/ember-ide-webview.exe -Force
+          Compress-Archive -Path ember/app/target/release/ember-app.exe, ember/app/target/release/ember-ide-webview.exe -DestinationPath "dist/ember-app-${{ needs.version.outputs.tag }}-${{ matrix.target }}.zip"
           # The .msix is the Store channel (P2): the packager needs the identity Partner Center
           # assigns ([windows.msix] identity_name and publisher in Dioxus.toml). Until that exists
           # the release has no .msix; Setup.exe from the Velopack step is the Windows installer.
@@ -203,10 +216,12 @@ jobs:
         env:
           TAG: ${{ needs.version.outputs.tag }}
         run: |
-          mkdir -p dist
+          mkdir -p dist stage/linux-payload
+          cp ember/app/target/release/ember-app stage/linux-payload/ember-app
+          cp ember/ide-webview/target/release/ember-ide-webview stage/linux-payload/ember-ide-webview
           compose-rust/scripts/packager-linux/appimage.sh \
             --dioxus-toml ember/app/Dioxus.toml --exec ember-app \
-            --payload ember/app/target/release/ember-app \
+            --payload stage/linux-payload \
             --icon ember/app/assets/brand/app-icon.svg \
             --version "${TAG#v}" --out-dir dist
       # Velopack (NFR-R2, #880). vpk is a .NET tool; package-velopack.py needs Python 3.11+.
@@ -416,6 +431,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      # .github/scripts/ose/VERSION names the OSE release in the notes (#83).
+      - uses: actions/checkout@v5
+        with:
+          sparse-checkout: .github/scripts/ose/VERSION
+          sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@v5
         with:
           pattern: dpx-ember-*
@@ -441,11 +461,12 @@ jobs:
             debug) android="The Android APK (arm64-v8a) is debug-signed: it cannot be upgraded by a later release signed with another key; uninstall first (this deletes the app's data and device key)." ;;
             *) android="" ;;
           esac
+          ose_release="ose-v$(tr -d '[:space:]' < .github/scripts/ose/VERSION)"
           gh release create "$TAG" "${files[@]}" \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --title "Ember ${TAG#v}" \
-            --notes "ember-server and ember-node for macOS arm64, Linux x86_64 and Linux aarch64, and the client app when built, by run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}. macOS builds are ad hoc signed, not notarized: clear quarantine with xattr -dr com.apple.quarantine. Setup.exe is unsigned. ${android} Installed with Setup.exe, the Velopack .dmg or the Velopack .AppImage, the app updates itself from this feed. See the install guide."
+            --notes "ember-server and ember-node for macOS arm64, Linux x86_64 and Linux aarch64, and the client app when built, by run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}. macOS builds are ad hoc signed, not notarized: clear quarantine with xattr -dr com.apple.quarantine. Setup.exe is unsigned. ${android} Installed with Setup.exe, the Velopack .dmg or the Velopack .AppImage, the app updates itself from this feed. The editor needs DarkPyonix OSE ${ose_release}: run ./install-ose.sh from the ember-server or ember-node folder (https://github.com/${GITHUB_REPOSITORY}/releases/tag/${ose_release}). See the install guide."
 
   dry-run:
     # Lists every packed file with size and sha256 and fails when a target or channel lacks one a

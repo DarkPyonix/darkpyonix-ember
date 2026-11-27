@@ -666,8 +666,8 @@ dependencies = [
 
 [[package]]
 name = "compose-rust"
-version = "0.0.11"
-source = "git+https://github.com/DarkPyonix/compose-rust?tag=v0.0.11#732f69a536ea8b4c9fa0e6239233718aa41d3d1b"
+version = "0.0.12"
+source = "git+https://github.com/DarkPyonix/compose-rust?rev=8a5c5f11f8bfa0acccbb18fbcb91f39e2692fe71#8a5c5f11f8bfa0acccbb18fbcb91f39e2692fe71"
 dependencies = [
  "compose-rust-macros",
  "jni",
@@ -675,8 +675,8 @@ dependencies = [
 
 [[package]]
 name = "compose-rust-macros"
-version = "0.0.11"
-source = "git+https://github.com/DarkPyonix/compose-rust?tag=v0.0.11#732f69a536ea8b4c9fa0e6239233718aa41d3d1b"
+version = "0.0.12"
+source = "git+https://github.com/DarkPyonix/compose-rust?rev=8a5c5f11f8bfa0acccbb18fbcb91f39e2692fe71#8a5c5f11f8bfa0acccbb18fbcb91f39e2692fe71"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1121,7 +1121,7 @@ dependencies = [
 [[package]]
 name = "dioxus-compose"
 version = "0.0.1"
-source = "git+https://github.com/DarkPyonix/dioxus-compose?rev=94ade333480b4a8a5cb3427f38b23dc5ac055f84#94ade333480b4a8a5cb3427f38b23dc5ac055f84"
+source = "git+https://github.com/DarkPyonix/dioxus-compose?rev=d6e451673ce397772f3047e410d6d52af47afdd8#d6e451673ce397772f3047e410d6d52af47afdd8"
 dependencies = [
  "blitz-dom",
  "blitz-html",
@@ -1277,7 +1277,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1380,15 +1380,22 @@ dependencies = [
  "alacritty_terminal",
  "axum",
  "base64 0.22.1",
+ "chrono",
+ "chrono-tz",
  "compose-rust",
+ "croner",
  "dioxus-compose",
  "dirs",
  "ember-client",
  "ember-editor",
  "ember-editor-conn",
+ "ember-gateway",
+ "ember-hub",
+ "ember-node",
  "ember-server",
  "ember-transport",
  "futures-util",
+ "getrandom 0.3.4",
  "reqwest",
  "rustls",
  "serde",
@@ -1399,6 +1406,7 @@ dependencies = [
  "tokio-tungstenite 0.28.0",
  "tracing",
  "tracing-subscriber",
+ "trybuild",
  "velopack",
 ]
 
@@ -1419,8 +1427,10 @@ dependencies = [
  "sha2 0.11.0",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-rustls",
  "tokio-tungstenite 0.28.0",
  "tracing",
+ "webpki-roots 1.0.12",
 ]
 
 [[package]]
@@ -1428,6 +1438,7 @@ name = "ember-editor"
 version = "0.1.0"
 dependencies = [
  "ember-editor-conn",
+ "keyring",
  "onig",
  "serde",
  "serde_json",
@@ -1450,9 +1461,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ember-gateway"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "getrandom 0.3.4",
+ "rustls",
+ "tokio",
+ "tokio-tungstenite 0.28.0",
+ "tracing",
+]
+
+[[package]]
 name = "ember-hub"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "base64 0.22.1",
  "ember-transport",
  "hex",
@@ -1498,10 +1522,13 @@ dependencies = [
  "sysinfo",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-rustls",
  "tokio-tungstenite 0.29.0",
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "webpki-roots 1.0.12",
+ "windows-sys 0.61.2",
  "x25519-dalek",
  "zeroize",
 ]
@@ -2724,9 +2751,11 @@ checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
 name = "letify-link"
-version = "2.10.3"
-source = "git+https://github.com/DarkPyonix/letify?rev=c66d017a8fdbebe8fe502df65d71e45d182b7379#c66d017a8fdbebe8fe502df65d71e45d182b7379"
+version = "3.0.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "49387a89b6b74725a1ac99fab4f077479507941d72a608654645a39771dc4389"
 dependencies = [
+ "base64 0.22.1",
  "ed25519-dalek 2.2.0",
  "getrandom 0.2.17",
  "libc",
@@ -2734,9 +2763,12 @@ dependencies = [
  "rcgen",
  "rustls",
  "serde_json",
+ "sha2 0.10.9",
  "snow",
  "socket2 0.5.10",
  "tokio",
+ "tokio-rustls",
+ "webpki-roots 1.0.12",
 ]
 
 [[package]]
@@ -3049,7 +3081,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4215,6 +4247,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_spanned"
+version = "1.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c187e0a369471c550af028cba56d4f4fa2a489ad28151ae95a4d340a2a8b782"
+dependencies = [
+ "serde_core",
+]
+
+[[package]]
 name = "serde_urlencoded"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4827,13 +4868,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "target-tuple"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "876fef147edbcbddc8ac5cbbba92c7b86519e314e86638596c09673b2ed01e7f"
+
+[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.52.0",
@@ -4848,6 +4895,15 @@ dependencies = [
  "futf",
  "mac",
  "utf-8",
+]
+
+[[package]]
+name = "termcolor"
+version = "1.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06794f8f6c5c898b3275aebefa6b8a1cb24cd2c6c79397ab15774837a0bc5755"
+dependencies = [
+ "winapi-util",
 ]
 
 [[package]]
@@ -5071,6 +5127,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "toml"
+version = "1.2.1+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d5755c51863cdac711f1956baf8eb9588e060755f7d3c4c979e70ea1e1f32cd7"
+dependencies = [
+ "indexmap",
+ "serde_core",
+ "serde_spanned",
+ "toml_datetime",
+ "toml_parser",
+ "toml_writer",
+ "winnow",
+]
+
+[[package]]
 name = "toml_datetime"
 version = "1.1.3+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5099,6 +5170,12 @@ checksum = "baa693a8032d7e1cada7d0041e96126df243179ff061456783ac7f12bda4744c"
 dependencies = [
  "winnow",
 ]
+
+[[package]]
+name = "toml_writer"
+version = "1.2.0+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "009dbb7700f11c55ef83aebbe4c0e9cf1f1ac0844bd8d6f00dc38f302026e13a"
 
 [[package]]
 name = "tower"
@@ -5213,6 +5290,21 @@ name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
+
+[[package]]
+name = "trybuild"
+version = "1.0.125"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9838b494ee14d28f1eeea490e8f4f10248fa6dd371d4bc874b635de499408245"
+dependencies = [
+ "glob",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "target-tuple",
+ "termcolor",
+ "toml",
+]
 
 [[package]]
 name = "ttf-parser"

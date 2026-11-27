@@ -212,9 +212,7 @@ impl HubConfig {
         if std::env::var_os(RELAY_URL_ENV).is_some() {
             return RelayConfig::from_env();
         }
-        let relays: Vec<String> = server
-            .map(|r| r.relay_urls.iter().filter(|u| u.starts_with("letify://")).cloned().collect())
-            .unwrap_or_default();
+        let relays: Vec<String> = server.map(AddressRecord::letify_relays).unwrap_or_default();
         if relays.is_empty() {
             self.relay_config()
         } else {

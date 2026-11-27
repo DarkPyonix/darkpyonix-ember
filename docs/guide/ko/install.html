@@ -81,6 +81,7 @@ shasum -a 256 -c --ignore-missing SHA256SUMS
 tar -xzf ember-server-v0.1.0-macos-arm64.tar.gz</code></pre>
     </figure>
     <p>각 압축 파일에는 아래에서 설명하는 프로그램(<code>ember-server</code>, <code>ember-exec</code>, <code>ember-a2a</code>와 <code>ember-node</code>, <code>ember-term</code>)이 들어 있습니다. 한 묶음은 한 디렉터리에 두십시오. macOS 바이너리와 앱은 임시(ad hoc) 서명만 되어 있고 공증은 하지 않으므로(Apple 계정 없음) Gatekeeper가 첫 실행을 막습니다. 풀어낸 파일에는 <code>xattr -d com.apple.quarantine</code>을, <code>.app</code>에는 <code>xattr -dr com.apple.quarantine Ember.app</code>을 실행해 격리 표시를 지우거나, 우클릭 후 열기를 고릅니다. Windows <code>.msix</code>는 서명되어 있지 않으므로 개발자 모드를 켜거나 신뢰하는 인증서로 다시 서명합니다.</p>
+    <p>에디터는 DarkPyonix OSE 위에서 돌아가며, OSE는 따로 릴리스됩니다(<code>ose-v</code>와 Code-OSS 버전). <code>ember-server</code>와 <code>ember-node</code> 압축 파일마다 맞는 OSE 릴리스가 <code>OSE_VERSION</code>에 적혀 있고 <code>install-ose.sh</code>가 들어 있습니다. 그 폴더에서 <code>./install-ose.sh</code>를 실행합니다. 이 스크립트는 이 컴퓨터용 OSE를 내려받아 릴리스의 <code>SHA256SUMS</code>로 확인한 뒤 Ember가 찾는 <code>~/.local/share</code>에 풉니다. 설치하지 않으면 에디터가 "OSE server binary is not installed"와 함께 이 단계를 알려 줍니다. 다른 곳의 OSE를 쓰려면 <code>EMBER_OSE_SERVER</code>에 그 <code>bin/dpx-ose-server</code>를 지정합니다.</p>
     <p>릴리스 워크플로의 클라이언트 작업은 활성화되면(<code>EMBER_CLIENT_RELEASE=true</code>) macOS <code>.app</code>과 <code>.dmg</code>, Windows <code>.zip</code>과 <code>.msix</code>, Linux <code>.AppImage</code>를 함께 묶습니다. 첫 태그 릴리스가 올라오기 전까지는 <a href="#client">클라이언트</a>에 나온 대로 소스에서 빌드하십시오.</p>
 
     <h3 id="client-update">클라이언트 설치와 업데이트</h3>
@@ -197,13 +198,12 @@ ember-server owner call POST /api/accounts <span class="s">'{"agent": "claude-co
         환경용입니다. 범위가 <code>full</code> 인 원격 장치는 전송 경로에서 승인에 대해 소유자로
         취급됩니다. 장치 목록 자체는 서버가 있는 컴퓨터에서만 관리합니다. Windows의 서버는 이름 있는 파이프로
         요청을 받고(<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/815">#815</a>),
-        <code>EMBER_OWNER_PRESENCE</code> 도 같은 방식으로 따릅니다. 기본값은 <code>warn</code> 이고,
-        <code>enforce</code> 로 하면 토큰만으로는 소유자 경로를 쓸 수 없습니다.
+        <code>EMBER_OWNER_PRESENCE</code> 도 같은 방식으로 따릅니다. 기본값은 <code>enforce</code> 이고,
+        <code>warn</code> 으로 설정하면 거부하지 않고 로그만 남깁니다.
       </p>
       <p>
-        <strong>막지 못하는 것.</strong> 기본값인 <code>warn</code> 에서는 아무것도 거부하지 않습니다.
-        <code>server-token</code> 을 읽은 프로세스는 이 경로를 그대로 호출할 수 있고, 서버는 로그만 남깁니다.
-        닫으려면 <code>EMBER_OWNER_PRESENCE=enforce</code> 를 설정하세요. 그렇게 해도, 내 계정으로 임의 코드를
+        <strong>막지 못하는 것.</strong> <code>EMBER_OWNER_PRESENCE=warn</code> 을 설정하면 거부하지 않고
+        로그만 남깁니다. 기본값인 <code>enforce</code> 를 쓰더라도, 내 계정으로 임의 코드를
         실행하고 샌드박스에 들어 있지 않은
         프로세스는 여전히 데이터 폴더의 Ember 데이터베이스와 키를 직접 읽거나 바꿀 수 있고, 앱에 붙거나,
         에이전트의 프로세스 트리를 벗어나 키를 요청해서 앱을 흉내 낼 수 있습니다. 콘솔 코드는 그 프로세스가
@@ -214,6 +214,32 @@ ember-server owner call POST /api/accounts <span class="s">'{"agent": "claude-co
         자체 샌드박스가 있는 하네스나 별도의 컴퓨터에서 실행하세요.
       </p>
     </div>
+
+    <h3 id="server-wsl">WSL의 서버와 Windows의 앱</h3>
+    <p>
+      <span class="pill partial">부분</span> (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/982">#982</a>, Windows 컴퓨터에서는 아직 확인하지 않았습니다)
+      WSL에서 시작한 서버는 토큰을 Linux 안의 <code>~/.ember/server-token</code> 에 씁니다.
+      Windows 앱은 그곳을 보지 않습니다. WSL은 8740 포트를 Windows의 <code>127.0.0.1</code> 로
+      전달하므로, 앱은 기본 주소로 서버에 닿고 토큰만 있으면 됩니다. PowerShell에서 토큰을 앱의
+      데이터 폴더인 <code>%APPDATA%\ember</code> (<code>device.key</code> 와 <code>prefs.json</code> 이
+      있는 곳)에 복사합니다.
+    </p>
+    <figure class="codeblock" data-copy="복사" data-copied="복사됨">
+      <figcaption>PowerShell</figcaption>
+<pre><code>New-Item -ItemType Directory -Force "$env:APPDATA\ember" | Out-Null
+wsl sh -c 'cat ~/.ember/server-token' | Set-Content -Encoding ascii "$env:APPDATA\ember\server-token"</code></pre>
+    </figure>
+    <p>
+      그다음 앱을 다시 시작합니다. 앱은 다음 순서로 토큰을 찾고 처음 찾은 것을 씁니다.
+      <code>EMBER_SERVER_TOKEN</code>, <code>EMBER_DATA_DIR</code> 이 설정되어 있으면
+      <code>$EMBER_DATA_DIR/server-token</code> (이때는 다른 곳을 보지 않습니다), 아니면
+      <code>~/.ember/server-token</code> (<code>~</code> 는 <code>HOME</code>, <code>HOME</code> 이
+      없으면 <code>%USERPROFILE%</code>), 그다음 <code>%APPDATA%\ember\server-token</code> 입니다.
+      서버를 <code>EMBER_DATA_DIR</code> 로 시작했다면 토큰은 <code>~/.ember</code> 가 아니라 그
+      폴더에 있습니다. 서버가 토큰을 바꾸면 파일을 다시 복사합니다. 서버가 토큰을 거부하면 배너가
+      그 사실과 앱이 찾아본 곳을 보여 주고, 30초마다 다시 시도하지 않습니다. 같은 토큰은 다시
+      거부되기 때문입니다.
+    </p>
 
     <h3 id="mount-build">프로젝트 마운트를 넣어 빌드하기</h3>
     <p>

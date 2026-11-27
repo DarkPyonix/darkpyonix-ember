@@ -88,14 +88,14 @@ fn segments(path: &str) -> Option<Vec<&str>> {
 /// Routes no narrow scope reaches, whatever the method: tokens, device management, shells,
 /// the IDE (a code-running editor), the browser's view, input and CDP, ChatGPT sign-in.
 fn never_narrow(segs: &[&str]) -> bool {
-    match segs {
-        ["server-token", ..] | ["devices", ..] | ["chatgpt", ..] => true,
-        ["computers", _, "terms", ..] | ["a2a", "terminal", ..] => true,
-        ["computers", _, "ide", ..] | ["computers", _, "fs", ..] | ["sessions", _, "ide"] => true,
-        ["browsers", _, "view" | "input" | "cdp" | "agent-config", ..] => true,
-        ["agents", "antigravity", "hook"] => true,
-        _ => false,
-    }
+    matches!(
+        segs,
+        ["server-token", ..] | ["devices", ..] | ["chatgpt", ..]
+            | ["computers", _, "terms", ..] | ["a2a", "terminal", ..]
+            | ["computers", _, "ide", ..] | ["computers", _, "fs", ..] | ["sessions", _, "ide", ..]
+            | ["browsers", _, "view" | "input" | "cdp" | "agent-config", ..]
+            | ["agents", "antigravity", "hook"]
+    )
 }
 
 /// Route families `read_only` may `GET`.
@@ -211,6 +211,10 @@ mod tests {
         assert!(!r.allows(&Method::POST, "/api/sessions"));
         assert!(!r.allows(&Method::GET, "/api/computers/local/terms/t1/attach"));
         assert!(!r.allows(&Method::GET, "/api/sessions/s1/ide"));
+        // FR-W4c (1c): the VS Code pick starts an OSE, so no narrow scope reaches it.
+        assert!(!r.allows(&Method::POST, "/api/sessions/s1/ide/vscode"));
+        assert!(!Scope::ChatOnly.allows(&Method::POST, "/api/sessions/s1/ide/vscode"));
+        assert!(Scope::Full.allows(&Method::POST, "/api/sessions/s1/ide/vscode"));
         assert!(!r.allows(&Method::GET, "/api/server-token"));
         assert!(!r.allows(&Method::GET, "/api/devices"));
         assert!(!r.allows(&Method::GET, "/api/sessions/../devices"));
@@ -226,7 +230,7 @@ mod tests {
                 continue;
             }
             let method = Method::from_bytes(m.as_bytes()).unwrap();
-            let path = template.replace('{', "").replace('}', "");
+            let path = template.replace(['{', '}'], "");
             assert!(crate::owner::owner_route(&method, &path), "{m} {path}");
             assert!(Scope::Full.allows(&method, &path), "{m} {path}");
             for s in [Scope::ReadOnly, Scope::ChatOnly] {

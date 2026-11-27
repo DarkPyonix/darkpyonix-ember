@@ -14,8 +14,8 @@
 //! | GET    | `/api/projects` | → `[Project]` (`{name, created_at, computers, repository, default_branch, member_defaults, character_style, archived}`) |
 //! | POST   | `/api/projects` | `{name}` → 201 `Project` (200 when it existed) |
 //! | GET    | `/api/projects/{name}` | → `Project` |
-//! | PATCH  | `/api/projects/{name}` | `{name?, repository?, default_branch?, member_defaults?, character_style?, profile_overrides?, character_overrides?, archived?}` → `Project` (FR-L26); errors `{error, code}` |
-//! | DELETE | `/api/projects/{name}` | → 204; 409 `project_not_empty` `{sessions, channels, schedules, teams}` while it holds records, 403 for 기본 프로젝트 (FR-L26) |
+//! | PATCH  | `/api/projects/{name}` | `{name?, repository?, default_branch?, member_defaults?, character_style?, profile_overrides?, character_overrides?, leader_session?, archived?}` → `Project` (FR-L26); errors `{error, code}` |
+//! | DELETE | `/api/projects/{name}` | → 204; 409 `project_not_archived` if not archived, 409 `sessions_running` `{running}` while sessions run, 403 for 기본 프로젝트 (FR-L26) |
 //! | PUT    | `/api/projects/{name}/computers/{computer_id}` | → `Project` (assign; idempotent) |
 //! | DELETE | `/api/projects/{name}/computers/{computer_id}` | → `Project` (unassign; idempotent) |
 //! | PATCH  | `/api/sessions/{id}` | `{title?, pinned?, archived?}` → `SessionRecord` |
@@ -138,7 +138,9 @@ impl From<ProjectError> for ApiError {
             ProjectError::NotFound(_) | ProjectError::ComputerNotFound(_) => StatusCode::NOT_FOUND,
             ProjectError::BadRequest(_) => StatusCode::BAD_REQUEST,
             ProjectError::Protected(_) => StatusCode::FORBIDDEN,
-            ProjectError::NameTaken(_) | ProjectError::NotEmpty { .. } => StatusCode::CONFLICT,
+            ProjectError::NameTaken(_)
+            | ProjectError::SessionsRunning { .. }
+            | ProjectError::NotArchived { .. } => StatusCode::CONFLICT,
             ProjectError::Other(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         ApiError(code, format!("{e:#}"))
@@ -513,27 +515,28 @@ fn project_error(e: ProjectError) -> Response {
         ProjectError::BadRequest(_) => "invalid_field",
         ProjectError::Protected(_) => "protected_project",
         ProjectError::NameTaken(_) => "name_taken",
-        ProjectError::NotEmpty { .. } => "project_not_empty",
+        ProjectError::SessionsRunning { .. } => "sessions_running",
+        ProjectError::NotArchived { .. } => "project_not_archived",
         ProjectError::Other(_) => "internal",
     };
     let message = format!("{e:#}");
-    if let ProjectError::NotEmpty { sessions, channels, schedules, teams, .. } = &e {
+    if let ProjectError::SessionsRunning { running, .. } = &e {
         let body = json!({
-            "error": message, "code": code,
-            "sessions": sessions, "channels": channels, "schedules": schedules, "teams": teams,
+            "error": message,
+            "code": code,
+            "running": running,
         });
         return (StatusCode::CONFLICT, Json(body)).into_response();
     }
     coded(ApiError::from(e).0, code, message)
 }
 
-/// Fields of the settings sheet whose server side is not built yet. They are refused by name so
-/// the client sees a clean error and not a silent no-op (leader: blocked on an owner decision,
-/// #384).
-const NOT_YET_PROJECT_FIELDS: [&str; 1] = ["leader_session"];
+fn draining_count(s: &Sessions, project: &str) -> Result<usize, anyhow::Error> {
+    Ok(s.store().sessions(Some(project))?.into_iter().filter(|rec| s.is_draining(&rec.id)).count())
+}
 
 /// FR-L26: change project settings. Body fields are optional; unknown fields are 400
-/// `unknown_field`, unbuilt ones 400 `not_yet`. Pushes `project_updated` with the new state.
+/// `unknown_field`. Pushes `project_updated` with the new state.
 async fn patch_project(
     State(s): State<Arc<Sessions>>,
     Path(name): Path<String>,
@@ -542,9 +545,6 @@ async fn patch_project(
     let Ok(serde_json::Value::Object(map)) = serde_json::from_slice::<serde_json::Value>(&body) else {
         return coded(StatusCode::BAD_REQUEST, "invalid_body", "the body must be a JSON object");
     };
-    if let Some(field) = NOT_YET_PROJECT_FIELDS.iter().find(|f| map.contains_key(**f)) {
-        return coded(StatusCode::BAD_REQUEST, "not_yet", format!("{field} cannot be changed yet"));
-    }
     let patch: crate::projects::ProjectPatch = match serde_json::from_value(serde_json::Value::Object(map)) {
         Ok(p) => p,
         Err(e) => {
@@ -553,6 +553,15 @@ async fn patch_project(
             return coded(StatusCode::BAD_REQUEST, code, msg);
         }
     };
+    if patch.archived == Some(true) && name != crate::projects::DEFAULT_PROJECT_NAME {
+        match draining_count(&s, &name) {
+            Ok(running) if running > 0 => {
+                return project_error(ProjectError::SessionsRunning { name, running });
+            }
+            Ok(_) => {}
+            Err(e) => return project_error(ProjectError::Other(e)),
+        }
+    }
     match s.store().patch_project(&name, &patch) {
         Ok(project) => {
             s.publish(Push::ProjectUpdated { project: project.clone() });
@@ -562,12 +571,34 @@ async fn patch_project(
     }
 }
 
-/// FR-L26 (#384 PR 5): delete an empty project. 204 on success; 409 `project_not_empty` with
-/// the counts when it still holds sessions, channels, schedules or teams; 403
-/// `protected_project` for 기본 프로젝트; 404 `not_found`. Pushes `project_deleted`.
+/// FR-L26 (D52 Q2/Q4, #327, #384): delete an archived project and cascade-remove all its records.
+/// 204 on success; 409 `project_not_archived` when not archived; 409 `sessions_running` with
+/// `{running}` when sessions are running or draining; 403 `protected_project` for 기본 프로젝트;
+/// 404 `not_found`. Releases any idle live agent processes and pushes `project_deleted`.
 async fn delete_project(State(s): State<Arc<Sessions>>, Path(name): Path<String>) -> Response {
+    match s.store().project(&name) {
+        Ok(None) => return project_error(ProjectError::NotFound(name)),
+        Ok(Some(_)) if name == crate::projects::DEFAULT_PROJECT_NAME => {
+            return project_error(ProjectError::Protected(name));
+        }
+        Ok(Some(p)) if !p.archived => return project_error(ProjectError::NotArchived { name }),
+        Ok(Some(_)) => {}
+        Err(e) => return project_error(ProjectError::Other(e)),
+    }
+    match draining_count(&s, &name) {
+        Ok(running) if running > 0 => {
+            return project_error(ProjectError::SessionsRunning { name, running });
+        }
+        Ok(_) => {}
+        Err(e) => return project_error(ProjectError::Other(e)),
+    }
     match s.store().delete_project(&name) {
-        Ok(()) => {
+        Ok(deleted_sessions) => {
+            for id in deleted_sessions {
+                if let Err(e) = s.release(&id).await {
+                    tracing::warn!(project = %name, session = %id, "failed to release deleted session: {e:#}");
+                }
+            }
             tracing::info!(project = %name, "project deleted");
             s.publish(Push::ProjectDeleted { name });
             StatusCode::NO_CONTENT.into_response()
@@ -705,7 +736,10 @@ async fn push(
     origin::check_origin(&headers)?;
     // Subscribe before the upgrade response goes out, so an event stored in between is not lost.
     let rx = s.subscribe();
-    Ok(ws.on_upgrade(move |socket| push_loop(socket, rx)))
+    Ok(ws.on_upgrade(move |socket| async move {
+        let _client = s.push_client_connected();
+        push_loop(socket, rx).await;
+    }))
 }
 
 /// Forwards pushes to one socket. It also reads the socket, so a close (or a dead connection)

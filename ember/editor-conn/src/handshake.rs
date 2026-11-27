@@ -50,16 +50,51 @@ pub struct ExtensionHostStartParams {
     pub env: Option<std::collections::BTreeMap<String, Option<String>>>,
 }
 
+/// The cookie the DarkPyonix manager authorises editor requests by (`FR-W4c` (1c), INTENT D55).
+pub const TICKET_COOKIE: &str = "dpx-editor";
+
+/// The manager's editor ticket (`ose.ticket` of the launch). It authorises every request under
+/// the editor server's path, so it never reaches a log: `Debug` prints `[REDACTED]`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Ticket(String);
+
+impl Ticket {
+    /// `None` for an empty ticket (the demo's direct OSE, or a launch without one).
+    pub fn new(ticket: impl Into<String>) -> Option<Ticket> {
+        let ticket = ticket.into();
+        (!ticket.is_empty()).then_some(Ticket(ticket))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// A ticket is one cookie value (RFC 6265 `cookie-octet`): visible ASCII without `"`, `,`,
+    /// `;` or `\`, so it cannot add a header line or a second cookie.
+    pub fn is_cookie_value(ticket: &str) -> bool {
+        !ticket.is_empty() && ticket.bytes().all(|b| (0x21..=0x7e).contains(&b) && !matches!(b, b'"' | b',' | b';' | b'\\'))
+    }
+}
+
+impl std::fmt::Debug for Ticket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Ticket([REDACTED])")
+    }
+}
+
 /// Everything needed to (re)open one logical connection.
 #[derive(Debug, Clone)]
 pub struct ConnectOptions {
     /// `Host` header value, e.g. `"127.0.0.1:8000"`.
     pub host: String,
-    /// Request path; the server accepts any (`getServerRootPath()` is `/<quality>-<commit>` in the
-    /// workbench, but `handleUpgrade` ignores the path).
+    /// The editor server's base path, `/` for a server at the root. The DarkPyonix manager serves
+    /// it under `ose.path` (`/ide/ose/`, `--server-base-path`), so every request of this crate
+    /// (the upgrades and `GET /version`) goes below it (`FR-W4c` (1c), INTENT D55).
     pub path: String,
-    /// `--connection-token` of the server, if it has one. Sent in the `auth` message.
-    pub connection_token: Option<String>,
+    /// The manager's ticket, sent as `Cookie: dpx-editor=<ticket>` on every request. The editor
+    /// server itself has no connection token, so the `auth` message always carries
+    /// [`NO_CONNECTION_TOKEN`].
+    pub ticket: Option<Ticket>,
     /// Identifies this logical connection across reconnects. One per connection, never reused.
     pub reconnection_token: String,
     /// Our idea of the server commit. When both sides set it, the server refuses a mismatch
@@ -76,7 +111,7 @@ impl ConnectOptions {
         Self {
             host: host.into(),
             path: "/".into(),
-            connection_token: None,
+            ticket: None,
             reconnection_token: uuid::Uuid::new_v4().to_string(),
             commit: None,
             timeout: Duration::from_secs(30),
@@ -89,6 +124,33 @@ impl ConnectOptions {
             "reconnectionToken={}&reconnection={}&skipWebSocketFrames=true",
             self.reconnection_token, reconnection
         )
+    }
+
+    /// The base path with exactly one trailing `/` (`/ide/ose/`, or `/`).
+    fn base(&self) -> String {
+        format!("{}/", self.path.trim_end_matches('/'))
+    }
+
+    /// The `Cookie` header line for the ticket, or nothing.
+    fn cookie_line(&self) -> String {
+        match &self.ticket {
+            Some(t) => format!("Cookie: {TICKET_COOKIE}={}\r\n", t.as_str()),
+            None => String::new(),
+        }
+    }
+
+    /// Refuses a path or ticket that would break the request line or add a header line.
+    fn check(&self) -> Result<()> {
+        let path_ok = self.path.starts_with('/')
+            && !self.path.contains(['?', '#'])
+            && !self.path.chars().any(|c| c.is_whitespace() || c.is_control());
+        if !path_ok {
+            return Err(Error::Handshake(format!("not an editor server path: {:?}", self.path)));
+        }
+        if self.ticket.as_ref().is_some_and(|t| !Ticket::is_cookie_value(t.as_str())) {
+            return Err(Error::Handshake("the editor ticket is not a cookie value".into()));
+        }
+        Ok(())
     }
 }
 
@@ -121,17 +183,22 @@ pub enum HandshakeMessage {
     Ok,
 }
 
-/// The default `auth` value when there is no connection token (L260).
+/// The `auth` value when there is no connection token (L260), as the upstream web client sends
+/// it. The editor server behind the DarkPyonix manager has none (`FR-W4c` (1c), INTENT D55), so
+/// this is the only value the `auth` message carries.
 pub const NO_CONNECTION_TOKEN: &str = "00000000000000000000";
 
-/// Build the raw upgrade request (cf. `makeRawSocketHeaders`).
+/// Build the raw upgrade request (cf. `makeRawSocketHeaders`): `GET <path>?<query>` below the
+/// editor server's base path, with the ticket cookie when there is one. [`upgrade`] checks the
+/// path and the ticket before it writes this.
 pub fn upgrade_request(opts: &ConnectOptions, reconnection: bool) -> String {
     let key = base64_16(uuid::Uuid::new_v4().as_bytes());
     format!(
-        "GET {}?{} HTTP/1.1\r\nHost: {}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {}\r\n\r\n",
-        opts.path,
+        "GET {}?{} HTTP/1.1\r\nHost: {}\r\n{}Connection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {}\r\n\r\n",
+        opts.base(),
         opts.query(reconnection),
         opts.host,
+        opts.cookie_line(),
         key
     )
 }
@@ -142,6 +209,7 @@ pub async fn upgrade<S>(stream: &mut S, opts: &ConnectOptions, reconnection: boo
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    opts.check()?;
     stream.write_all(upgrade_request(opts, reconnection).as_bytes()).await?;
     stream.flush().await?;
 
@@ -194,11 +262,15 @@ fn parse_control(raw: &[u8]) -> Result<Value> {
     Ok(v)
 }
 
-/// The `GET /version` request. HTTP/1.0 so that Node answers with a plain body and closes the
-/// socket (no chunked encoding).
+/// The `GET /version` request, below the base path and with the ticket cookie. HTTP/1.0 so that
+/// Node answers with a plain body and closes the socket (no chunked encoding).
 pub fn version_request(opts: &ConnectOptions) -> String {
-    let base = opts.path.trim_end_matches('/');
-    format!("GET {base}/version HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n", opts.host)
+    format!(
+        "GET {}version HTTP/1.0\r\nHost: {}\r\n{}Connection: close\r\n\r\n",
+        opts.base(),
+        opts.host,
+        opts.cookie_line()
+    )
 }
 
 /// Read the server commit with `GET /version` over a fresh `stream` (consumed; the server closes
@@ -207,6 +279,7 @@ pub async fn server_commit<S>(mut stream: S, opts: &ConnectOptions) -> Result<St
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    opts.check()?;
     let fut = async {
         stream.write_all(version_request(opts).as_bytes()).await?;
         stream.flush().await?;
@@ -231,10 +304,17 @@ fn parse_version_response(raw: &[u8]) -> Result<String> {
     let end = find_header_end(raw).ok_or_else(|| Error::Handshake("GET /version: truncated response".into()))?;
     let head = String::from_utf8_lossy(&raw[..end]);
     let status = head.lines().next().unwrap_or_default();
-    if status.split_whitespace().nth(1) != Some("200") {
+    match status.split_whitespace().nth(1) {
+        Some("200") => {}
         // No `/version` route (not a Code-OSS agent server, or one too old/new to tell): the
         // commit is unknown, which the version gate treats like a mismatch.
-        return Err(Error::UnsupportedServerVersion { server: None });
+        Some("404") => return Err(Error::UnsupportedServerVersion { server: None }),
+        // A wrong or missing connection token (the agent server checks it before `/version`),
+        // or an auth gate in front of it. FR-E10: auth errors never switch targets.
+        Some(code @ ("401" | "403")) => return Err(Error::Refused(format!("GET /version: HTTP {code}"))),
+        // A relay or proxy that cannot reach the server (502, 503, 504), or a server error.
+        // FR-E10: network errors never switch targets.
+        code => return Err(Error::Handshake(format!("GET /version: HTTP {}", code.unwrap_or("status missing")))),
     }
     let body = &raw[end + 4..];
     let chunked = head.lines().skip(1).any(|l| {
@@ -282,10 +362,11 @@ where
 ///
 /// Signing: Code-OSS without the proprietary `vsda` module leaves `signService.sign` as the
 /// identity and skips validation (`abstractSignService.ts`), and a server without `vsda` accepts
-/// any `signedData` (agent server L362-364). A Microsoft build with `vsda` also accepts
-/// `signedData == connectionToken` ("web client", L363), so we send the connection token when we
-/// have one and echo the challenge otherwise. We never validate the server's signature (that
-/// needs `vsda`); authenticity of the server is the transport's job (TLS / ember-transport).
+/// any `signedData` (agent server L362-364), so we echo the challenge. The editor server runs
+/// without a connection token (`--without-connection-token`, `FR-W4a`, INTENT D55), whose
+/// `validate` accepts any `auth`; the request is authorised by the manager's ticket cookie
+/// instead. We never validate the server's signature (that needs `vsda`); authenticity of the
+/// server is the transport's job (TLS / ember-transport).
 pub async fn handshake(
     handle: &ConnectionHandle,
     opts: &ConnectOptions,
@@ -294,7 +375,7 @@ pub async fn handshake(
 ) -> Result<Value> {
     let fut = async {
         let auth = HandshakeMessage::Auth {
-            auth: opts.connection_token.clone().unwrap_or_else(|| NO_CONNECTION_TOKEN.to_owned()),
+            auth: NO_CONNECTION_TOKEN.to_owned(),
             data: uuid::Uuid::new_v4().to_string(),
         };
         handle.send_control(serde_json::to_vec(&auth)?);
@@ -310,7 +391,7 @@ pub async fn handshake(
 
         let conn_type = HandshakeMessage::ConnectionType {
             commit: opts.commit.clone(),
-            signed_data: opts.connection_token.clone().unwrap_or(challenge),
+            signed_data: challenge,
             desired_connection_type: ty as u8,
             args,
         };
@@ -474,6 +555,7 @@ mod tests {
             let head = String::from_utf8_lossy(&buf).to_string();
             assert!(head.starts_with("GET /?reconnectionToken="));
             assert!(head.contains("&reconnection=false&skipWebSocketFrames=true HTTP/1.1"));
+            assert!(!head.to_ascii_lowercase().contains("\r\ncookie:"), "no ticket, no cookie: {head}");
             let end = find_header_end(&buf).unwrap();
             let mut dec = FrameDecoder::new();
             dec.push(&buf[end + 4..]);
@@ -493,7 +575,7 @@ mod tests {
             assert_eq!(auth.ty, MessageType::Control);
             let auth: Value = serde_json::from_slice(&auth.data).unwrap();
             assert_eq!(auth["type"], "auth");
-            assert_eq!(auth["auth"], "tok");
+            assert_eq!(auth["auth"], NO_CONNECTION_TOKEN);
 
             let sign = br#"{"type":"sign","data":"challenge","signedData":"x"}"#.to_vec();
             server.write_all(&Frame::new(MessageType::Control, 0, 0, sign).encode()).await.unwrap();
@@ -509,18 +591,140 @@ mod tests {
             let ct: Value = serde_json::from_slice(&ct.data).unwrap();
             assert_eq!(ct["type"], "connectionType");
             assert_eq!(ct["desiredConnectionType"], 1);
-            assert_eq!(ct["signedData"], "tok");
+            assert_eq!(ct["signedData"], "challenge");
 
             let ok = Frame::new(MessageType::Control, 0, 0, br#"{"type":"ok"}"#.to_vec()).encode();
             server.write_all(&ok).await.unwrap();
             server
         });
 
-        let mut opts = ConnectOptions::new("localhost:8000");
-        opts.connection_token = Some("tok".into());
+        let opts = ConnectOptions::new("localhost:8000");
         let (_conn, first) = connect(client, &opts, ConnectionType::Management, None).await.unwrap();
         assert_eq!(first, serde_json::json!({"type":"ok"}));
         server_task.await.unwrap();
+    }
+
+    /// Reads one request head from the fake server's end of the pipe.
+    async fn read_head(server: &mut tokio::io::DuplexStream) -> String {
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 1024];
+        while find_header_end(&buf).is_none() {
+            let n = server.read(&mut chunk).await.unwrap();
+            assert!(n > 0, "the client closed before its request head ended");
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        String::from_utf8_lossy(&buf[..find_header_end(&buf).unwrap() + 4]).into_owned()
+    }
+
+    fn manager_opts() -> ConnectOptions {
+        let mut opts = ConnectOptions::new("localhost");
+        opts.path = "/ide/ose/".into();
+        opts.ticket = Ticket::new("tk-0123456789abcdef");
+        opts
+    }
+
+    /// SPEC FR-W4c (1c), INTENT D55: the editor server is served by the DarkPyonix manager under
+    /// `ose.path`, authorised by the ticket. The first bytes of an upgrade (and of `GET /version`)
+    /// ask for the path below `/ide/ose/` and carry `Cookie: dpx-editor=<ticket>`.
+    #[tokio::test]
+    async fn fr_w4c_editor_connects_under_the_manager_path_with_the_ticket_cookie() {
+        let (client, mut server) = tokio::io::duplex(64 * 1024);
+        let opts = manager_opts();
+        let task = tokio::spawn(async move {
+            let head = read_head(&mut server).await;
+            server.write_all(b"HTTP/1.1 403 Forbidden\r\n\r\n").await.unwrap();
+            head
+        });
+        let err = connect(client, &opts, ConnectionType::Management, None).await.err().unwrap();
+        assert!(matches!(err, Error::Handshake(ref m) if m.contains("403")), "{err}");
+        let head = task.await.unwrap();
+        let request_line = head.lines().next().unwrap();
+        assert!(request_line.starts_with("GET /ide/ose/?reconnectionToken="), "{request_line}");
+        assert!(request_line.ends_with("&reconnection=false&skipWebSocketFrames=true HTTP/1.1"), "{request_line}");
+        assert!(head.contains("\r\nCookie: dpx-editor=tk-0123456789abcdef\r\n"), "{head}");
+        assert_eq!(head.matches("Cookie:").count(), 1, "{head}");
+
+        // A path without its trailing slash is the same path.
+        let mut bare = manager_opts();
+        bare.path = "/ide/ose".into();
+        assert!(upgrade_request(&bare, true).starts_with("GET /ide/ose/?reconnectionToken="));
+
+        // `GET /version` goes below the same path with the same cookie.
+        assert_eq!(
+            version_request(&opts),
+            "GET /ide/ose/version HTTP/1.0\r\nHost: localhost\r\nCookie: dpx-editor=tk-0123456789abcdef\r\nConnection: close\r\n\r\n"
+        );
+
+        // The ticket never reaches a log.
+        assert!(!format!("{opts:?}").contains("tk-0123456789abcdef"));
+        assert_eq!(Ticket::new(""), None);
+    }
+
+    /// SPEC FR-W4c (1c), INTENT D55: a ticket or path that would add a header line or break the
+    /// request line is refused before anything is written.
+    #[tokio::test]
+    async fn fr_w4c_a_bad_ticket_or_path_is_refused_before_writing() {
+        for (path, ticket) in [("/ide/ose/", "a\r\nX-Evil: 1"), ("/ide/ose/", "a;b"), ("/ide/ose/", "a b"), ("/ide ose/", "t"), ("ide/ose/", "t"), ("/ide/ose/?x=1", "t")] {
+            let (client, mut server) = tokio::io::duplex(1024);
+            let mut opts = manager_opts();
+            opts.path = path.into();
+            opts.ticket = Ticket::new(ticket);
+            let err = connect(client, &opts, ConnectionType::Management, None).await.err().unwrap();
+            assert!(matches!(err, Error::Handshake(_)), "{path:?} {ticket:?}: {err}");
+            let (c2, _s2) = tokio::io::duplex(1024);
+            assert!(server_commit(c2, &opts).await.is_err(), "{path:?} {ticket:?}");
+            let mut rest = Vec::new();
+            let _ = server.read_to_end(&mut rest).await;
+            assert!(rest.is_empty(), "nothing was written for {path:?} {ticket:?}");
+        }
+    }
+
+    /// SPEC FR-W4c (1c), INTENT D55: the editor server has no connection token, so the `auth`
+    /// message carries the upstream "no token" value and `signedData` echoes the challenge, with
+    /// or without a ticket.
+    #[tokio::test]
+    async fn fr_w4c_editor_auth_has_no_connection_token() {
+        let (client, mut server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while find_header_end(&buf).is_none() {
+                let n = server.read(&mut chunk).await.unwrap();
+                buf.extend_from_slice(&chunk[..n]);
+            }
+            let end = find_header_end(&buf).unwrap();
+            let mut dec = FrameDecoder::new();
+            dec.push(&buf[end + 4..]);
+            server.write_all(b"HTTP/1.1 101 Switching Protocols\r\n\r\n").await.unwrap();
+            let auth = loop {
+                if let Some(f) = dec.next_frame().unwrap() {
+                    break f;
+                }
+                let n = server.read(&mut chunk).await.unwrap();
+                dec.push(&chunk[..n]);
+            };
+            let auth: Value = serde_json::from_slice(&auth.data).unwrap();
+            let sign = br#"{"type":"sign","data":"the-challenge","signedData":"x"}"#.to_vec();
+            server.write_all(&Frame::new(MessageType::Control, 0, 0, sign).encode()).await.unwrap();
+            let ct = loop {
+                if let Some(f) = dec.next_frame().unwrap() {
+                    break f;
+                }
+                let n = server.read(&mut chunk).await.unwrap();
+                dec.push(&chunk[..n]);
+            };
+            let ct: Value = serde_json::from_slice(&ct.data).unwrap();
+            server.write_all(&Frame::new(MessageType::Control, 0, 0, br#"{"type":"ok"}"#.to_vec()).encode()).await.unwrap();
+            (auth, ct, server)
+        });
+        let (_conn, first) = connect(client, &manager_opts(), ConnectionType::Management, None).await.unwrap();
+        assert_eq!(first, serde_json::json!({"type":"ok"}));
+        let (auth, ct, _server) = task.await.unwrap();
+        assert_eq!(auth["type"], "auth");
+        assert_eq!(auth["auth"], NO_CONNECTION_TOKEN);
+        assert_eq!(NO_CONNECTION_TOKEN, "00000000000000000000");
+        assert!(!auth.to_string().contains("tk-0123456789abcdef"), "the ticket is a cookie, never the auth: {auth}");
+        assert_eq!(ct["signedData"], "the-challenge");
     }
 
     #[test]
@@ -541,13 +745,28 @@ mod tests {
             parse_version_response(b"HTTP/1.1 404 Not Found\r\n\r\n"),
             Err(Error::UnsupportedServerVersion { server: None })
         ));
-        assert!(matches!(
-            parse_version_response(b"HTTP/1.1 500 Internal Server Error\r\n\r\n"),
-            Err(Error::UnsupportedServerVersion { server: None })
-        ));
         // empty body: dev build without a commit
         let empty = parse_version_response(b"HTTP/1.1 200 OK\r\n\r\n").unwrap();
         assert!(matches!(crate::check_server_commit(&empty), Err(Error::UnsupportedServerVersion { .. })));
+    }
+
+    #[test]
+    fn fr_e10_network_and_auth_errors_on_version_do_not_fall_back() {
+        for (raw, auth) in [
+            (&b"HTTP/1.1 401 Unauthorized\r\n\r\n"[..], true),
+            (b"HTTP/1.1 403 Forbidden\r\n\r\nForbidden.", true),
+            (b"HTTP/1.1 500 Internal Server Error\r\n\r\n", false),
+            (b"HTTP/1.1 502 Bad Gateway\r\n\r\n", false),
+            (b"HTTP/1.1 503 Service Unavailable\r\n\r\n", false),
+            (b"HTTP/1.1 504 Gateway Timeout\r\n\r\n", false),
+            (b"garbage\r\n\r\n", false),
+        ] {
+            let err = parse_version_response(raw).unwrap_err();
+            let line = String::from_utf8_lossy(raw).lines().next().unwrap_or_default().to_owned();
+            assert!(!matches!(err, Error::UnsupportedServerVersion { .. }), "{line}: {err}");
+            assert_eq!(matches!(err, Error::Refused(_)), auth, "{line}: {err}");
+            assert!(!is_permanent(&err) || auth, "{line}: a network error must stay retryable: {err}");
+        }
     }
 
     #[tokio::test]

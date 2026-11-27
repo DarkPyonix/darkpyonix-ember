@@ -36,7 +36,7 @@ before any provider request made at version *n*, because both are effects of the
 | ---- | ------- |
 | `EditorSession::connect(config, dial)` / `connect_tcp(config)` | version gate (`GET /version` = `PINNED_COMMIT`), management (`getEnvironmentData`, `scanExtensions`, `fileChange` subscription), extension host (init data, `$initializeConfiguration`, `$initializeWorkspace`); returns the session and a `UnboundedReceiver<SessionUpdate>` |
 | `EditorSession` methods (all non-blocking sends) | `uri(path)`, `open(uri)`, `close(uri)`, `focus(uri)`, `widget_event(uri, generation, WidgetEvent)`, `trigger_inline_completion(uri, generation, pos)`, `resync(uri)`, `shutdown().await` |
-| `SessionConfig` | `host`, `remote_authority`, `connection_token`, `workspace_path`, `workspace_name`, `app_language`, `user_settings`, `core: CoreOptions` |
+| `SessionConfig` | `host`, `remote_authority`, `path` and `ticket` (the manager's `/ide/ose/` path and launch ticket, D55, #1064; formerly `connection_token`), `workspace_path`, `workspace_name`, `app_language`, `user_settings`, `core: CoreOptions` |
 | `CoreOptions` | `tab_width` (4), `insert_spaces`, `codelens_debounce` (250 ms), `codelens_resolve_cap` (100), `inline_completions` |
 | `SessionUpdate` | `Opened{uri, generation, text, language_id, tab_width}`, `OpenFailed`, `Command{uri, WidgetCommand}`, `Decorations{uri, generation, Vec<Decoration>}`, `Hover(HoverPopup)`, `HoverHidden`, `Dirty`, `Saved`, `SaveFailed`, `ExternalChange{ChangedWhileDirty \| Deleted}`, `RunCommand{CommandDto}`, `Desync`, `Closed`, `ConnectionLost` |
 | `WidgetEvent` | `CodeChanged{version, range, text}`, `CodeEditRejected{…}`, `CodeHovered{decoration, pos, phase}`, `CodeSaveRequested{version}`, `DecorationActivated{decoration}`, `SelectionChanged{version, anchor, active}`, `VisibleRangeChanged{version, first_line, last_line}` |
@@ -177,7 +177,8 @@ Registration: `$registerInlineCompletionsSupport` (17 args; Ember reads `support
 
 ## 5. The extension host's other requests
 
-Answered by `replies::session_reply` = `exthost::default_reply` plus what `live_ose.rs` learned:
+Answered by `replies::session_reply` = `exthost::default_reply` (the answer the coverage ledger gives
+the method, `FR-E9`) plus what `live_ose.rs` learned:
 `MainThreadLanguages.$getLanguages` → every contributed language id; `MainThreadOutputService.$register`
 → a channel id string. With state, in the core:
 
@@ -185,8 +186,14 @@ Answered by `replies::session_reply` = `exthost::default_reply` plus what `live_
   to the extension host as a document without an editor, reply with the URI. If the user opens it
   later it is removed and re-added at the next version.
 - `MainThreadCommands.$executeCommand(id, args)`: the extension host runs its own commands locally,
-  so what arrives is a workbench command → `RunCommand` to the UI (except `setContext`, a no-op),
+  so what arrives is a workbench command → `RunCommand` to the UI (except `setContext` and `_setContext`, no-ops),
   reply `undefined`.
+- `MainThreadCommands.$getCommands()`: every command id the main thread knows, as Code-OSS answers
+  with its `CommandsRegistry`: `_setContext` and the extension host's `$registerCommand` ids, sorted.
+- `MainThreadWorkspace.$checkExists(folders, includes)` (`workspaceContains:` activation): an `exists`
+  file search through the extension host's file search provider (`$registerFileSearchProvider`), as
+  Code-OSS's `checkGlobFileExists`; `true` when the reply says `limitHit`, `false` without a provider
+  or when cancelled, rejected on any other failure.
 - `$registerCommand` / `$unregisterCommand`, `$register…Provider` / `$unregister`: tracked in
   `registry.rs`, with selector matching ported from `languageSelector.ts` `score()` (scheme,
   language, `*` → 5, glob or relative patterns, notebook filters never match text).
@@ -240,8 +247,11 @@ Answered by `replies::session_reply` = `exthost::default_reply` plus what `live_
 
 ## 8. Not yet
 
-Reconnect (a lost connection ends the session with `ConnectionLost`; `handshake::reconnect_loop`
-is the building block), several workspace folders, runtime configuration changes
-(`$acceptConfigurationChanged`), `$acceptEditorPropertiesChanged` (selections), save participants
-(`$participateInSave`, format on save), `$tryApplyWorkspaceEdit` (rename, code actions), encodings
-other than UTF-8, first-line language detection, semantic tokens / syntax spans.
+Reconnect that resumes the session (a lost connection ends the session with `ConnectionLost`;
+`handshake::reconnect_loop` is the building block, SPEC FR-E11), several workspace folders,
+`$acceptEditorPropertiesChanged` (selections), save participants (`$participateInSave`, format on
+save), first-line language detection (`firstLine`).
+
+Built since this list was written: runtime configuration changes (`$acceptConfigurationChanged`,
+`session.rs` `apply_settings`), `$tryApplyWorkspaceEdit` (`engine/language.rs`), encodings other
+than UTF-8 (`text_format.rs`), semantic tokens (`semantic.rs`).

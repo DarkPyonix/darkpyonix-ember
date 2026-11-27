@@ -1,5 +1,5 @@
 # DarkPyonix OSE: Code-OSS (MIT) VS Code web server, renamed and pointed at Open VSX.
-# See ember/ose/README.md. Builds run here, never on a developer machine.
+# See .github/scripts/ose/README.md. Builds run here, never on a developer machine.
 #
 #   called by ci.yml (the leader dispatches it) -> product + 5-target build matrix + smoke test,
 #                       artifacts uploaded, then the live checks on each target's own runner type
@@ -41,7 +41,7 @@ jobs:
       - id: version
         name: Resolve Code-OSS tag and its Node version
         run: |
-          tag="$(tr -d '[:space:]' < ember/ose/VERSION)"
+          tag="$(tr -d '[:space:]' < .github/scripts/ose/VERSION)"
           node="$(curl -fsSL "https://raw.githubusercontent.com/microsoft/vscode/$tag/.nvmrc" | tr -d '[:space:]v')"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "node=$node" >> "$GITHUB_OUTPUT"
@@ -69,18 +69,18 @@ jobs:
           echo "live_matrix=$(jq -c '{include: [.[] | select(.target | startswith("windows") | not)]}' <<< "$picked")" >> "$GITHUB_OUTPUT"
           echo "windows=$(jq -r 'any(.[]; .target == "windows-x64")' <<< "$picked")" >> "$GITHUB_OUTPUT"
       - name: Apply overrides and check (Open VSX, telemetry off, no MS marketplace)
-        run: ember/ose/build.sh --product-only
+        run: .github/scripts/ose/build.sh --product-only
       - name: Check default extensions are staged (FR-W6)
-        run: ember/ose/check-extensions.sh
+        run: .github/scripts/ose/check-extensions.sh
       - name: Extension regression harness self-test (NFR-W1)
-        run: ember/ose/regress.sh --self-test
-      - name: Tag matches ember/ose/VERSION
+        run: .github/scripts/ose/regress.sh --self-test
+      - name: Tag matches .github/scripts/ose/VERSION
         if: startsWith(github.ref, 'refs/tags/ose-v')
         run: |
           want="${{ steps.version.outputs.tag }}"
           got="${GITHUB_REF_NAME#ose-v}"
           # ose-v1.139.1 or ose-v1.139.1-dpx.2 (a rebuild of the same upstream tag)
-          case "$got" in "$want"|"$want"-*) ;; *) echo "tag $GITHUB_REF_NAME does not match ember/ose/VERSION ($want)"; exit 1 ;; esac
+          case "$got" in "$want"|"$want"-*) ;; *) echo "tag $GITHUB_REF_NAME does not match .github/scripts/ose/VERSION ($want)"; exit 1 ;; esac
 
   build:
     name: Build (${{ matrix.target }})
@@ -97,8 +97,8 @@ jobs:
         shell: bash
     env:
       CI: "true"
-      OSE_WORK_DIR: ${{ github.workspace }}/ember/ose/.work
-      OSE_OUT_DIR: ${{ github.workspace }}/ember/ose/dist
+      OSE_WORK_DIR: ${{ github.workspace }}/.github/scripts/ose/.work
+      OSE_OUT_DIR: ${{ github.workspace }}/.github/scripts/ose/dist
     steps:
       - name: Allow long paths (Windows)
         if: runner.os == 'Windows'
@@ -141,8 +141,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            ember/ose/.work/vscode/.build/node
-            ember/ose/.work/vscode/.build/builtInExtensions
+            .github/scripts/ose/.work/vscode/.build/node
+            .github/scripts/ose/.work/vscode/.build/builtInExtensions
           key: ose-dl-${{ matrix.target }}-${{ needs.product.outputs.tag }}
 
       - name: Build, package and smoke-test
@@ -151,14 +151,14 @@ jobs:
           # Read-only token: upstream's build fetches built-in extensions and npm packages from
           # GitHub and is rate-limited without one (upstream passes GITHUB_TOKEN the same way).
           GITHUB_TOKEN: ${{ github.token }}
-        run: ember/ose/build.sh --target ${{ matrix.target }} --smoke
+        run: .github/scripts/ose/build.sh --target ${{ matrix.target }} --smoke
 
       - uses: actions/upload-artifact@v4
         with:
           name: dpx-ose-${{ matrix.target }}
           path: |
-            ember/ose/dist/*.tar.gz
-            ember/ose/dist/*.sha256
+            .github/scripts/ose/dist/*.tar.gz
+            .github/scripts/ose/dist/*.sha256
           if-no-files-found: error
           retention-days: 14
 
@@ -208,10 +208,44 @@ jobs:
         run: cargo test --locked --manifest-path ember/editor-conn/Cargo.toml --test live_ose -- --ignored --nocapture
 
       - name: Live session tests (diagnostics, save, external change, explorer)
-        run: cargo test --locked --manifest-path ember/editor/Cargo.toml --test live_session -- --ignored --nocapture --test-threads 1
+        run: cargo test --locked --manifest-path ember/editor/Cargo.toml --test live_session -- --ignored --nocapture --test-threads 1 --skip live_session_probe_hover_codelens_inline
+
+      - name: Editor bridges and window flow, live (FR-E12)
+        # #32 phase A steps 2 and 3: hover, CodeLens and inline completion from the probe extension,
+        # and the window flow with redhat.vscode-yaml from Open VSX. Not a gate until its first green
+        # run (gates change in their own PR).
+        continue-on-error: true
+        run: |
+          cargo test --locked --manifest-path ember/editor/Cargo.toml --test live_session -- --ignored --nocapture --test-threads 1 live_session_probe_hover_codelens_inline
+          cargo test --locked --manifest-path ember/editor/Cargo.toml --test live_window_flow -- --ignored --nocapture --test-threads 1
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Live debugging with ms-python.debugpy (FR-L31.42)
+        # #445: a Python file stops at a breakpoint through the unmodified debugpy extension from
+        # Open VSX, a variable is read and the run continues. Not a gate until its first green run
+        # (gates change in their own PR); the leader flips it after that run.
+        continue-on-error: true
+        run: cargo test --locked --manifest-path ember/editor/Cargo.toml --test fr_l31_42_live_debug -- --ignored --nocapture
 
       - name: Live extension scan (FR-L31.14)
         run: cargo test --locked --manifest-path ember/editor/Cargo.toml --test fr_l31_14_live_extensions -- --ignored --nocapture
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ needs.product.outputs.node }}
+
+      - name: Live tab detach and NFR-B1 timing (CDP)
+        # Verifies VS Code Web tab reorder, detach payload URL, dirty refusal, and detached window
+        # load timing against real dpx-ose-server + ember/proxy rewrite. Not a gate until its first
+        # green run (gates change in their own PR).
+        continue-on-error: true
+        # A pass takes about 20 s; the limit keeps a hang from eating the job's hour (run
+        # 45501476287 hung here after a pass because child processes kept the script alive).
+        timeout-minutes: 5
+        run: node ember/proxy/tests/live_detach_cdp.mjs
 
       - name: Extension regression (NFR-W1)
         # Not yet a release gate: expected.json holds unverified entries until the first real run,
@@ -220,7 +254,7 @@ jobs:
         env:
           OSE_REGRESS_OUT: ${{ runner.temp }}/regress-out
           OSE_REGRESS_CLIENT: cargo test --locked --manifest-path ember/editor/Cargo.toml --test nfr_w1_extension_regression -- --ignored --nocapture
-        run: ember/ose/regress.sh "${{ steps.ose.outputs.dir }}"
+        run: .github/scripts/ose/regress.sh "${{ steps.ose.outputs.dir }}"
 
       - name: Extension deep checks (NFR-W1)
         # The webview and debug checks of #929 through the same client. Not a gate until its first
@@ -230,7 +264,7 @@ jobs:
           OSE_REGRESS_MODE: deep
           OSE_REGRESS_OUT: ${{ runner.temp }}/regress-deep-out
           OSE_REGRESS_CLIENT: cargo test --locked --manifest-path ember/editor/Cargo.toml --test nfr_w1_extension_regression -- --ignored --nocapture
-        run: ember/ose/regress.sh "${{ steps.ose.outputs.dir }}"
+        run: .github/scripts/ose/regress.sh "${{ steps.ose.outputs.dir }}"
 
       - name: Keep the regression results
         if: ${{ !cancelled() }}
@@ -285,4 +319,4 @@ jobs:
           "dir=$($dir.FullName)" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
 
       - name: Smoke test (start, /version, Open VSX search and install)
-        run: ember/ose/smoke.sh "$(cygpath -u '${{ steps.ose.outputs.dir }}')"
+        run: .github/scripts/ose/smoke.sh "$(cygpath -u '${{ steps.ose.outputs.dir }}')"

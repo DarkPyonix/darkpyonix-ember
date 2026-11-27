@@ -442,6 +442,27 @@ pub fn discard_tap(armed: Option<(&str, u64)>, path: &str, now_ms: u64) -> Delet
     }
 }
 
+/// What the discard of a file does first: a clean file takes the two taps, a file open with unsaved
+/// edits asks in a dialog, because the discard reloads the buffer and drops those edits as well.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscardRoute {
+    Tap,
+    AskUnsaved,
+}
+
+pub fn discard_route(open_with_unsaved_edits: bool) -> DiscardRoute {
+    if open_with_unsaved_edits { DiscardRoute::AskUnsaved } else { DiscardRoute::Tap }
+}
+
+/// The question for a discard of a file with unsaved edits: the title names the file, the line under
+/// it says the unsaved edits are lost with the changes.
+pub fn dirty_discard_text(name: &str) -> (String, &'static str) {
+    (
+        format!("{name}에 저장하지 않은 편집이 있습니다. 변경 사항을 취소할까요?"),
+        "변경 사항을 취소하면 저장하지 않은 편집도 함께 사라지고, 되돌릴 수 없습니다.",
+    )
+}
+
 /// The longest diff the editor area draws, in lines; a longer one says it was cut.
 pub const DIFF_LINE_CAP: usize = 4000;
 
@@ -872,6 +893,9 @@ pub struct ScmState {
     pub amend: bool,
     pub new_branch: String,
     pub armed_discard: Option<(String, u64)>,
+    /// A discard waiting for an answer because the file is open with unsaved edits: the repository
+    /// path and the editor path. The discard reloads the buffer, so the edits go too.
+    pub dirty_discard: Option<(String, String)>,
     pub conflict: Option<(String, ConflictLoad, ConflictStep)>,
     pub side_by_side: bool,
     /// How far the editable diff's editor is scrolled, which the base side follows by pixels.
@@ -894,6 +918,7 @@ impl ScmState {
             amend: false,
             new_branch: String::new(),
             armed_discard: None,
+            dirty_discard: None,
             conflict: None,
             side_by_side: false,
             diff_scroll: DiffScroll::default(),
@@ -1400,7 +1425,17 @@ impl Scm {
         );
     }
 
-    pub fn discard_file(&self, path: &str, abs_path: &str, host: &crate::editor_host::EditorHost) {
+    /// `unsaved` is whether the file is open with unsaved edits; the discard then asks first instead
+    /// of arming, and nothing is discarded until the dialog is answered.
+    pub fn discard_file(&self, path: &str, abs_path: &str, host: &crate::editor_host::EditorHost, unsaved: bool) {
+        if discard_route(unsaved) == DiscardRoute::AskUnsaved {
+            self.with(|s| {
+                s.armed_discard = None;
+                s.dirty_discard = Some((path.to_string(), abs_path.to_string()));
+            });
+            Self::redraw(self.revision);
+            return;
+        }
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -1426,7 +1461,19 @@ impl Scm {
         if tap != DeleteTap::Confirm {
             return;
         }
+        self.run_discard(path, abs_path, host);
+    }
 
+    /// The dialog's answer for a file with unsaved edits: discard (the edits go too) or keep everything.
+    pub fn answer_dirty_discard(&self, discard: bool, host: &crate::editor_host::EditorHost) {
+        let pending = self.with(|s| s.dirty_discard.take());
+        Self::redraw(self.revision);
+        if let (true, Some((path, abs))) = (discard, pending) {
+            self.run_discard(&path, &abs, host);
+        }
+    }
+
+    fn run_discard(&self, path: &str, abs_path: &str, host: &crate::editor_host::EditorHost) {
         let (this, project, path_str, abs_str, host_clone) =
             (self.clone(), self.project.clone(), path.to_string(), abs_path.to_string(), host.clone());
         crate::services::run_shared(
@@ -1855,6 +1902,36 @@ pub mod view {
                         }
                     }
                 }
+                if let Some((_, abs)) = st.dirty_discard.clone() { {dirty_discard_sheet(s, &abs)} }
+            }
+        }
+    }
+
+    /// The question for a discard of a file with unsaved edits. 취소 is the default and Escape answers it.
+    fn dirty_discard_sheet(s: &Shared, abs: &str) -> Element {
+        let name = crate::ui::editor::display_name(base_name(abs));
+        let (title, detail) = super::dirty_discard_text(&name);
+        let (yes_s, no_s, scrim_s, key_s) = (s.clone(), s.clone(), s.clone(), s.clone());
+        rsx! {
+            div { class: "modal", role: "presentation",
+                onclick: move |_| scrim_s.scm.answer_dirty_discard(false, &scrim_s.host),
+                onkeydown: move |event| {
+                    if event.key() == Key::Escape {
+                        event.stop_propagation();
+                        key_s.scm.answer_dirty_discard(false, &key_s.host);
+                    }
+                },
+                div { class: "card ed-confirm", role: "alertdialog", "aria-modal": "true", "aria-label": "{title}",
+                    onclick: move |event| event.stop_propagation(),
+                    div { class: "card-b",
+                        b { "{title}" }
+                        p { class: "muted", "{detail}" }
+                        div { class: "ed-confirm-acts",
+                            button { class: "btn sm", onclick: move |_| yes_s.scm.answer_dirty_discard(true, &yes_s.host), "변경 사항 취소" }
+                            button { class: "btn primary sm", autofocus: true, onclick: move |_| no_s.scm.answer_dirty_discard(false, &no_s.host), "취소" }
+                        }
+                    }
+                }
             }
         }
     }
@@ -1965,7 +2042,10 @@ pub mod view {
                         onclick: move |event| {
                             event.stop_propagation();
                             let abs = discard_s.scm.editor_path(&discard_s.folder, &discard_path);
-                            discard_s.scm.discard_file(&discard_path, &abs, &discard_s.host);
+                            let unsaved = discard_s.uris.borrow().get(&abs)
+                                .and_then(|u| discard_s.bridge.borrow().document(u).map(|d| d.dirty))
+                                .unwrap_or(false);
+                            discard_s.scm.discard_file(&discard_path, &abs, &discard_s.host, unsaved);
                         }, {icon_px("close", 13)} }
                 }
                 if group != Group::Conflicts {
@@ -2313,7 +2393,10 @@ pub mod diff_editor_view {
     use ember_editor::{WidgetPos, WidgetRange};
 
     use crate::editor_host::HostCommand;
-    use crate::ui::editor_workbench::{shared, Shared};
+    use crate::ui::editor_workbench::{forget_view_mount, report_view_mount, shared, MountGuard, Shared};
+
+    /// This view's name in the mount record it shares with the tab's pane.
+    const DIFF_VIEW: &str = "diff";
 
     fn pos(p: compose_rust::code::Position) -> WidgetPos {
         WidgetPos::new(p.line, p.column)
@@ -2329,23 +2412,29 @@ pub mod diff_editor_view {
         let s = shared();
         let (box_w, box_h) = dioxus_compose::use_widget_box();
         let handle = dioxus_compose::use_code_editor();
+        let _mounts = use_hook(|| std::rc::Rc::new(MountGuard(DIFF_VIEW)));
         if box_w <= 0.0 || box_h <= 0.0 {
+            forget_view_mount(DIFF_VIEW);
             return rsx! {};
         }
         let _ = *s.revision.read();
-        let Some(rel) = s.scm.working_diff_path() else { return rsx! {} };
+        let Some(rel) = s.scm.working_diff_path() else { forget_view_mount(DIFF_VIEW); return rsx! {} };
         let abs = s.scm.editor_path(&s.folder, &rel);
         let uri = s.uris.borrow().get(&abs).cloned();
-        let Some(uri) = uri else { return rsx! {} };
+        let Some(uri) = uri else { forget_view_mount(DIFF_VIEW); return rsx! {} };
+        let generation = s.bridge.borrow().document(&uri).map(|d| d.generation);
+        let Some(generation) = generation else { forget_view_mount(DIFF_VIEW); return rsx! {} };
+        // This editor is a widget of its own: it counts versions from 0, so the bridge hears of each mount.
+        report_view_mount(&s, &uri, generation, DIFF_VIEW);
+        // After the mount is reported, so the copy carries the widget's numbering.
         let doc = s.bridge.borrow().document(&uri).cloned();
         let Some(doc) = doc else { return rsx! {} };
-        let generation = doc.generation;
-        // The tab and the diff share the document, so they share its widget version too.
+        // The tab and the diff share the document and its session version; the widget gets it in its own numbering.
         let version = {
             let mut map = s.editor_versions.borrow_mut();
             let current = map.entry(generation).or_insert(doc.version);
             *current = (*current).max(doc.version);
-            *current
+            doc.widget_version_of(*current)
         };
         // compose-rust#542: the added and changed lines are tinted with `Decoration::line_background`
         // beside their gutter bars.
@@ -2363,6 +2452,8 @@ pub mod diff_editor_view {
         } else {
             crate::ui::editor::diff_gutter_decorations(version, &markers)
         };
+        // Before `doc.decoration_bytes` and `doc.text` move out of `doc`.
+        let syntax_spans = crate::ui::editor::syntax_spans_at(&doc.syntax, doc.widget_version_of(doc.syntax.version));
         let decorations = crate::ui::editor::with_diff_line_tints(compose_rust::code::Decorations::from_bytes(doc.decoration_bytes), version, &markers);
         let change_s = s.clone();
         let change_uri = uri.clone();
@@ -2378,15 +2469,18 @@ pub mod diff_editor_view {
         let metrics_s = s.clone();
         rsx! { CodeEditor {
             key: "diff-{generation}", width: Some(box_w), height: Some(box_h), handle,
-            text: doc.text, decorations, syntax_spans: crate::ui::editor::syntax_spans(&doc.syntax), tab_width: Some(doc.tab_width),
+            text: doc.text, decorations, syntax_spans, tab_width: Some(doc.tab_width),
             gutter_decorations, view_zones,
             // FR-L31.27: the same code type, row pitch and line number column as the file's editor.
             font_size: Some(crate::ui::fonts::CODE_FONT_SIZE), line_height: Some(crate::ui::fonts::CODE_LINE_HEIGHT),
             gutter_min_width: Some(crate::ui::fonts::CODE_GUTTER_MIN_WIDTH), gutter_padding: Some(crate::ui::fonts::CODE_GUTTER_PADDING), text_inset: Some(crate::ui::fonts::CODE_TEXT_INSET),
             colors: crate::ui::fonts::CODE_EDITOR_COLORS,
             on_change: move |e: compose_rust::code::CodeChange| {
-                change_s.editor_versions.borrow_mut().insert(generation, e.version);
                 let event = change_s.bridge.borrow_mut().on_code_changed(&change_uri, e.version, WidgetRange::new(pos(e.range.start), pos(e.range.end)), e.text);
+                // The map keeps session versions, as the pane does.
+                if let Some((_, _, ember_editor::WidgetEvent::CodeChanged { version, .. })) = &event {
+                    change_s.editor_versions.borrow_mut().insert(generation, *version);
+                }
                 send(&change_s, event);
             },
             on_save: move |e: compose_rust::code::SaveRequest| {
@@ -2691,6 +2785,25 @@ mod tests {
         assert_eq!(commit_gate_with_amend(&unstaged, "msg", true, true).unwrap_err(), BUSY);
         let conflicted = ScmLoad::Ready(status(vec![file("a.rs", 'U', 'U')]));
         assert_eq!(commit_gate_with_amend(&conflicted, "msg", true, false).unwrap_err(), CONFLICTS_LEFT);
+    }
+
+    #[test]
+    fn fr_l31_6_b5_discard_of_a_file_with_unsaved_edits_asks_and_cancel_keeps_the_buffer() {
+        // A clean file keeps the two taps; a file open with unsaved edits asks first.
+        assert_eq!(discard_route(false), DiscardRoute::Tap);
+        assert_eq!(discard_route(true), DiscardRoute::AskUnsaved);
+        let (title, detail) = dirty_discard_text("lib.rs");
+        assert!(title.contains("lib.rs"), "the question names the file: {title}");
+        assert!(detail.contains("저장하지 않은 편집"), "the question says the unsaved edits go too: {detail}");
+        // The dialog's pending state holds the file until it is answered; taking it (either answer)
+        // leaves nothing pending, and only the discard answer runs the discard (`answer_dirty_discard`).
+        let mut st = ScmState::new(true);
+        assert!(st.dirty_discard.is_none());
+        st.dirty_discard = Some(("src/lib.rs".into(), "/w/src/lib.rs".into()));
+        assert!(st.armed_discard.is_none(), "asking does not arm the two taps");
+        let src = include_str!("editor_scm.rs");
+        let body = &src[src.find("pub fn answer_dirty_discard").unwrap()..src.find("fn run_discard").unwrap()];
+        assert!(body.contains("(true, Some((path, abs)))"), "only the discard answer runs the discard");
     }
 
     #[test]

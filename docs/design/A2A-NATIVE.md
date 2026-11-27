@@ -1,6 +1,8 @@
 # A2A that each agent reaches for first
 
-> **Status: designed, not implemented (#102).** Research 2026-10-04, no model turns run. Tags:
+> **Status: designed (#102); the direction (B) adapter, the `ember` MCP server (`ember-a2a mcp
+> ember`) loaded for every agent Ember starts, is written, not yet compiled or run (#1045, SPEC
+> FR-T2); the measurement below is not run.** Research 2026-10-04, no model turns run. Tags:
 > [V] verified from documentation or source, [B] read from the installed Claude Code 2.1.288 binary
 > (not a published spec), [U] unverified. Installed CLIs: claude 2.1.288, codex-cli 0.155.1, agy
 > 1.2.16. Gemini CLI and OMP are not installed, so their rows come from docs and source only.

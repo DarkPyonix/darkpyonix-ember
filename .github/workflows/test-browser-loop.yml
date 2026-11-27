@@ -1,0 +1,81 @@
+# Browser loop (#344): runs ember/server tests/browser.rs across a 5-shard matrix (10 runs per
+# shard by default, 50 total in one run) on the CI runner, where those tests used to fail now and
+# then. Dispatch only (or called via ci.yml): it runs no check on push or pull request and is not a
+# required check. Its own concurrency group, so it never replaces a queued CI run.
+name: Browser loop
+
+on:
+  workflow_dispatch:
+    inputs:
+      runs_per_shard:
+        description: How many times to run tests/browser.rs per shard (5 shards x 10 = 50)
+        type: string
+        required: false
+        default: "10"
+  workflow_call:
+    inputs:
+      runs_per_shard:
+        description: How many times to run tests/browser.rs per shard (5 shards x 10 = 50)
+        type: string
+        required: false
+        default: "10"
+
+concurrency:
+  group: browser-loop
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  browser-loop:
+    name: Browser tests repeat (shard ${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5]
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+      RUNS_PER_SHARD: ${{ inputs.runs_per_shard }}
+      SHARD: ${{ matrix.shard }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ember/server
+      - name: Build tests/browser.rs once
+        working-directory: ember/server
+        run: cargo test --locked --test browser --no-run
+      - name: Run tests/browser.rs in a loop
+        working-directory: ember/server
+        run: |
+          set -u
+          case "$RUNS_PER_SHARD" in
+            ''|*[!0-9]*) echo "::error::runs_per_shard must be a whole number, got '$RUNS_PER_SHARD'"; exit 1 ;;
+          esac
+          if [ "$RUNS_PER_SHARD" -lt 1 ]; then
+            echo "::error::runs_per_shard must be at least 1, got '$RUNS_PER_SHARD'"
+            exit 1
+          fi
+          pass=0
+          fail=0
+          i=1
+          while [ "$i" -le "$RUNS_PER_SHARD" ]; do
+            echo "::group::shard $SHARD: run $i of $RUNS_PER_SHARD"
+            if cargo test --locked --test browser; then
+              pass=$((pass + 1))
+            else
+              fail=$((fail + 1))
+              echo "::error::shard $SHARD: tests/browser.rs failed in run $i of $RUNS_PER_SHARD"
+            fi
+            echo "::endgroup::"
+            i=$((i + 1))
+          done
+          echo "shard $SHARD: tests/browser.rs: $pass of $RUNS_PER_SHARD runs passed, $fail failed"
+          echo "### Browser loop (shard $SHARD): $pass of $RUNS_PER_SHARD runs of tests/browser.rs passed, $fail failed" >> "$GITHUB_STEP_SUMMARY"
+          [ "$fail" -eq 0 ]

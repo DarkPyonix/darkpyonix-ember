@@ -70,8 +70,8 @@ async fn fr_a11_os_sandbox_hides_the_data_dir() {
     );
     let (prog, args) = sandbox::wrap_with(
         &tool,
-        &[data.clone()],
-        &[acct.clone()],
+        std::slice::from_ref(&data),
+        std::slice::from_ref(&acct),
         std::path::Path::new("/bin/sh"),
         &["-c".into(), script],
     );

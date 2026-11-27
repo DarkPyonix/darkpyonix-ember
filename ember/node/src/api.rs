@@ -42,7 +42,7 @@
 //! | POST | `/git/conflict`, `/git/resolve` | conflict blocks and resolution (FR-G7) |
 //! | POST | `/git/conflicts` | [`GitRepoRequest`] → [`GitConflicts`] |
 //! | GET (WS) | `/exec` | send [`ExecRequest`], then [`ExecInput`]s; receive [`ExecEvent`]s |
-//! | GET (WS) | `/exec-server` | raw byte relay to `codex exec-server --listen stdio` ([`crate::exec_server`]) |
+//! | GET (WS) | `/exec-server` | relay to `codex exec-server --listen stdio`; client requests screened against the path policy, 503 `codex_not_installed` without codex ([`crate::exec_server`]) |
 //! | GET (WS) | `/egress` | one proxied TCP connection as a raw SOCKS5 byte stream ([`crate::egress`]; 403 when disabled) |
 //! | POST | `/jobs` | [`JobRequest`] → [`JobInfo`] |
 //! | GET  | `/jobs` | → `[JobInfo]` |
@@ -59,8 +59,10 @@
 //! | POST | `/terms/{id}/control` | [`TermControlRequest`] → 204 |
 //! | POST | `/terms/{id}/kill` | [`KillRequest`] → 204 (default SIGHUP, then SIGKILL) |
 //! | DELETE | `/terms/{id}` | → 204 (409 while running) |
-//! | POST | `/ide/ose` | [`crate::ose_api::OseLaunchRequest`] → [`crate::ose_api::OseLaunchResponse`] (FR-W4b: start or reuse the folder's OSE; the token in the answer is a placeholder; 403 outside the roots, 404 for a missing folder, 503 without an OSE binary) |
-//! | GET (WS) | `/ide/ose/{launch_id}/relay` | raw byte relay to the launch's loopback OSE, the placeholder replaced by the real token ([`crate::ose_api`]; 404 for an unknown launch, 429 at the relay limit) |
+//! | POST | `/ide/ose` | [`crate::ose_api::OseLaunchRequest`] → [`crate::ose_api::OseLaunchResponse`] (FR-W4b, D55: a launch ticket from the DarkPyonix manager, `{launch_id, path, ticket, ose_commit?}`; 403 outside the roots, 404 for a missing folder, 503 `manager_not_installed` or `ose_not_installed`, 502 `manager_unreachable` or `manager_error`) |
+//! | PUT | `/editor/settings` | [`crate::editor_settings::NodeEditorSettings`] → [`crate::editor_settings::ApplyReport`] (FR-W7a, D56: applied through the DarkPyonix manager; 400 for a bad body) |
+//! | GET | `/editor/settings` | → [`crate::editor_settings::EditorSettingsState`] `{settings, applied}` |
+//! | GET (WS) | `/ide/ose/{launch_id}/relay` | raw byte relay to the manager's endpoint, nothing replaced ([`crate::ose_api`]; 404 for an unknown launch, 429 at the relay limit) |
 //! | POST | `/ide/extensions` | `{id, version?}` → `{installed, id, output}` (FR-W4b: 400 for a bad id, 409 while another install runs, 502 for a failed run, 503 without an OSE binary) |
 //! | GET, POST | `/transfers`, `/transfers/offers`, `/transfers/offers/{id}/accept`, `/transfers/offers/{id}/decline`, `/transfers/{id}/chunks`, `/transfers/{id}/resume-offset/{file}`, `/transfers/{id}/complete`, `/pause`, `/resume`, `/cancel`, `/transfers/history` (GET, DELETE) | the file receiver ([`crate::transfers`], FR-F13): the server's `/api/transfers*` bodies; 507 `no_space` (FR-F16); 409 without a state folder |
 //!
@@ -98,7 +100,7 @@ use crate::git::git_merge;
 use crate::git::git_stash::{self, GitStashEntry, GitStashIndexRequest, GitStashOperation, GitStashPushRequest};
 use crate::git_conflict::{self, GitConflict, GitConflictRequest, GitResolveRequest};
 use crate::jobs::{Jobs, Removal};
-use crate::ose::OseManager;
+use crate::editor_manager::{EditorRelays, ManagerSource};
 use crate::policy::{PathPolicy, PolicyError};
 use crate::proto::*;
 use crate::term::Terms;
@@ -111,9 +113,11 @@ struct Inner {
     egress: Arc<crate::egress::EgressPolicy>,
     /// The file receiver (`FR-F13`).
     transfers: Arc<crate::transfers::Receiver>,
-    /// The OSE of this computer's projects (`FR-W4a`); [`OseManager::disabled`] unless the
-    /// node was built with [`Node::with_ose`].
-    ose: Arc<OseManager>,
+    /// The editor launches and relays of this computer's projects, through the DarkPyonix
+    /// manager (`FR-W4b`, D55).
+    editor: Arc<EditorRelays>,
+    /// The editor settings the server sent and the last apply (`FR-W7a`, D56).
+    editor_settings: Arc<crate::editor_settings::EditorSettingsHost>,
     /// Serialises writes so a hash precondition and the rename that follows it are atomic with
     /// respect to other writes through this daemon.
     write_lock: tokio::sync::Mutex<()>,
@@ -128,15 +132,15 @@ struct Inner {
 pub struct Node(Arc<Inner>);
 
 impl Node {
-    /// A node without an OSE: its `/ide` routes answer 503 (the server's in-process local node,
-    /// whose OSE the server manages itself, and tests).
+    /// A node whose `/ide` routes ask the DarkPyonix manager named by `<state dir>/manager.json`,
+    /// else by `DARKPYONIX_MANAGER_URL` and `DARKPYONIX_TOKEN` (SPEC FR-W4b, D55).
     pub fn new(config: NodeConfig) -> anyhow::Result<Self> {
-        Self::with_ose(config, Arc::new(OseManager::disabled()))
+        let source = ManagerSource::discover(config.state_dir.clone());
+        Self::with_editor(config, Arc::new(EditorRelays::new(source)))
     }
 
-    /// A node that runs the OSE of its projects through `ose` (SPEC FR-W4a): what the `ember-node`
-    /// daemon builds, with [`OseManager::for_node`].
-    pub fn with_ose(config: NodeConfig, ose: Arc<OseManager>) -> anyhow::Result<Self> {
+    /// A node whose `/ide` routes use `editor` (tests: a fixed or absent manager, other limits).
+    pub fn with_editor(config: NodeConfig, editor: Arc<EditorRelays>) -> anyhow::Result<Self> {
         anyhow::ensure!(!config.token.is_empty(), "token must not be empty");
         let jobs = Jobs::new();
         let terms = Terms::new(config.state_dir.as_deref(), config.pty_keeper.clone(), jobs.clone());
@@ -145,6 +149,10 @@ impl Node {
             config.received_dir.as_deref(),
             config.receive,
         )?);
+        let editor_settings = Arc::new(crate::editor_settings::EditorSettingsHost::new(
+            config.state_dir.clone(),
+            crate::editor_settings::Cli::from_env(),
+        ));
         Ok(Self(Arc::new(Inner {
             token: config.token,
             policy: PathPolicy::with_denied(config.roots, config.denied)?,
@@ -152,16 +160,32 @@ impl Node {
             terms,
             egress: Arc::new(config.egress),
             transfers,
-            ose,
+            editor,
+            editor_settings,
             write_lock: tokio::sync::Mutex::new(()),
             watch_limits: crate::fs_watch::WatchLimits::default(),
             watch_total: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         })))
     }
 
-    /// The OSE manager of this node (`FR-W4a`).
-    pub fn ose(&self) -> &Arc<OseManager> {
-        &self.0.ose
+    /// The editor launches and relays of this node (`FR-W4b`, D55).
+    pub fn editor(&self) -> &Arc<EditorRelays> {
+        &self.0.editor
+    }
+
+    /// The editor settings of this node (`FR-W7a`, D56).
+    pub fn editor_settings(&self) -> &Arc<crate::editor_settings::EditorSettingsHost> {
+        &self.0.editor_settings
+    }
+
+    /// The same node running `bin` as the DarkPyonix CLI instead of [`crate::editor_settings::ENV_BIN`]
+    /// or `darkpyonix` on `PATH` (tests). Call it before the node is cloned.
+    pub fn with_darkpyonix_bin(mut self, bin: impl Into<std::path::PathBuf>) -> Self {
+        let inner = Arc::get_mut(&mut self.0).expect("with_darkpyonix_bin before the node is shared");
+        let state_dir = inner.editor_settings.state_dir().map(std::path::Path::to_path_buf);
+        let cli = crate::editor_settings::Cli::new(bin);
+        inner.editor_settings = Arc::new(crate::editor_settings::EditorSettingsHost::new(state_dir, cli));
+        self
     }
 
     pub fn jobs(&self) -> &Arc<Jobs> {
@@ -287,6 +311,8 @@ pub fn router(node: Node) -> Router {
         .merge(transfer_routes())
         // FR-W4b: the OSE of this computer's projects.
         .merge(crate::ose_api::routes())
+        // FR-W7a: the editor settings the server sends, applied through the manager.
+        .merge(crate::editor_settings::routes())
         .route_layer(middleware::from_fn_with_state(node.clone(), auth));
     Router::new()
         .route("/health", get(health))
@@ -428,6 +454,7 @@ impl From<crate::transfers::RecvError> for ApiError {
         use crate::transfers::RecvError as E;
         let (status, code) = match &e {
             E::NotFound(_) => (StatusCode::NOT_FOUND, ErrorCode::NotFound),
+            E::Expired(_) => (StatusCode::GONE, ErrorCode::Expired),
             E::BadRequest(_) => (StatusCode::BAD_REQUEST, ErrorCode::BadRequest),
             E::Forbidden(_) => (StatusCode::FORBIDDEN, ErrorCode::Forbidden),
             E::TooLarge(_) => (StatusCode::PAYLOAD_TOO_LARGE, ErrorCode::TooLarge),

@@ -23,7 +23,8 @@ use compose_rust::runtime::{
 // Ember's reading: a desktop window that has not reported its size yet reads its opened size
 // (FR-L10.3).
 use crate::ui::window_size::current_window_size;
-use compose_rust::ui::{self as cu, Modifier};
+use compose_rust::ui as cu;
+use compose_rust::ui::Modifier;
 use compose_rust::{
     Alignment, ColorRole, IconRole, Paint, ShapeRole, SpaceRole, TextAlign, TextOverflow, TypeRole,
 };
@@ -34,6 +35,10 @@ use compose_rust::runtime::delay;
 use std::time::Duration;
 use ember_client::wire::{ApprovalDecision, MentionCandidate, Question, SessionPatch, TurnOutcome};
 use ember_client::LauncherStatus;
+
+use crate::ui::conversation::{
+    ConversationDisplayItem, group_shell_calls, shell_group_key, shell_group_label,
+};
 
 pub fn item_key(item: &TranscriptItem) -> String {
     crate::ui::conversation::item_key(item)
@@ -50,8 +55,9 @@ use crate::ui::Route;
 
 use super::compat::{Badge, Banner, CodeText, MessageText, Spinner, StatusIndicator};
 use super::components::{
-    AppButton, BackButton, ButtonKind, Clickable, EmberCard, EmberField, FieldOptions, IconButton, Label, NameThenPill,
-    OptionSheet, Pill, PillTone, Txt,
+    AppButton, BackButton, ButtonKind, Clickable, EmberCard, EmberField, FieldOptions, IconButton,
+    Label, NameThenPill, NamedClickable, Pill, PillTone, PopKind, PopMenu, PopRow, PopoverMenu,
+    Txt,
 };
 use super::ko;
 use super::launcher::{ConnectionBanner, export, patch_session};
@@ -62,8 +68,49 @@ use super::theme::*;
 pub const ICON_SHIELD_SVG: &str = include_str!("../../../assets/nav/shield.svg");
 pub const ICON_TERMINAL_SVG: &str = include_str!("../../../assets/nav/terminal.svg");
 pub const ICON_SEND_SVG: &str = include_str!("../../../assets/nav/send.svg");
+/// The More menu's row icons, from the mockup's icon set (`icons.js` `star`, `arrow-up-tray`,
+/// `zap`; the fork row uses the nav `git` icon).
+const ICON_STAR_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11.48 3.499a.562.562 0 0 1 1.04 0l2.125 5.111a.563.563 0 0 0 .475.345l5.518.442c.499.04.701.663.321.988l-4.204 3.602a.563.563 0 0 0-.182.557l1.285 5.385a.562.562 0 0 1-.84.61l-4.725-2.885a.563.563 0 0 0-.586 0L6.982 20.54a.562.562 0 0 1-.84-.61l1.285-5.386a.562.562 0 0 0-.182-.557l-4.204-3.602a.562.562 0 0 1 .321-.988l5.518-.442a.563.563 0 0 0 .475-.345L11.48 3.5Z"/></svg>"#;
+const ICON_EXPORT_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5"/></svg>"#;
+const ICON_ZAP_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m3.75 13.5 10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75Z"/></svg>"#;
+const ICON_FORK_SVG: &str = include_str!("../../../assets/nav/git.svg");
 
-const POPUP_W: f32 = 280.0;
+/// The rows of the conversation's More menu (대화 메뉴, #888): each has an icon and a line that
+/// says what it does, as the computer and IDE menus' rows do, so the rows are the menu's 55 dp
+/// drop rows with the title and description centred in them.
+pub(crate) fn more_pop_rows(pinned: bool, approve_all: bool) -> Vec<PopRow> {
+    vec![
+        PopRow {
+            icon: Some(ICON_STAR_SVG),
+            title: if pinned { "고정 해제" } else { "고정" }.into(),
+            description: Some(if pinned { "고정 목록에서 이 대화를 뺍니다" } else { "이 대화를 고정 목록에 둡니다" }.into()),
+            chosen: pinned,
+            ..Default::default()
+        },
+        PopRow {
+            icon: Some(ICON_EXPORT_SVG),
+            title: "내보내기".into(),
+            description: Some("대화를 JSON 파일로 데이터 폴더에 저장합니다".into()),
+            ..Default::default()
+        },
+        PopRow {
+            icon: Some(ICON_FORK_SVG),
+            title: ko::FORK_MENU_LABEL.into(),
+            description: Some("마지막으로 끝난 턴까지를 새 세션으로 엽니다".into()),
+            ..Default::default()
+        },
+        PopRow {
+            icon: Some(ICON_ZAP_SVG),
+            title: ko::approve_all_menu_label(approve_all).into(),
+            description: Some(
+                if approve_all { "도구를 실행하기 전에 다시 확인을 받습니다" } else { "이 세션의 도구 실행을 묻지 않고 승인합니다" }.into(),
+            ),
+            chosen: approve_all,
+            danger: !approve_all,
+            ..Default::default()
+        },
+    ]
+}
 
 /// The height of a transcript summary row (mockup `.cmd`: `padding:3px 0` around a 24 dp pill).
 pub const CMD_ROW_H: f32 = 30.0;
@@ -100,11 +147,11 @@ fn DiffLines(d: &tool_card::FileDiff, cap: usize) {
         })
         .collect();
     let more = changed.len().saturating_sub(cap);
-    cu::Row().modifier(Modifier::new().fill_max_width()).content(move || {
-        cu::Spacer().modifier(Modifier::new().width(OUT_INSET));
+    { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width(), content = move || {
+        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(OUT_INSET)) };
         // Zero wide and weighted, so a long line is cut at the card's edge and does not widen it.
-        cu::Column().modifier(Modifier::new().width(0.0).weight(1.0)).content(move || {
-            cu::Spacer().modifier(Modifier::new().height(OUT_PAD_V));
+        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().width(0.0).weight(1.0), content = move || {
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(OUT_PAD_V)) };
             for (text, col) in shown.iter() {
                 Txt(
                     text,
@@ -119,9 +166,9 @@ fn DiffLines(d: &tool_card::FileDiff, cap: usize) {
             if more > 0 {
                 Label(&format!("{more}줄 더"), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
             }
-            cu::Spacer().modifier(Modifier::new().height(OUT_PAD_V));
-        });
-    });
+            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(OUT_PAD_V)) };
+        }) };
+    }) };
 }
 
 /// The height the transcript counts for a file-change card: its summary row, and, unless it is
@@ -151,7 +198,7 @@ fn FileChangeCard(
     let p = ember_theme().palette;
     let (plus, minus) = tool_card::count_pills(d.added, d.removed);
     let failed = error.is_some();
-    cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
+    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), content = move || {
         Clickable(
             Modifier::new()
                 .fill_max_width()
@@ -162,11 +209,7 @@ fn FileChangeCard(
             Alignment::CenterStart,
             on_toggle,
             || {
-                cu::Row()
-                    .alignment(Alignment::CenterStart)
-                    .spacing(CMD_ROW_GAP)
-                    .modifier(Modifier::new().fill_max_width())
-                    .content(|| {
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = CMD_ROW_GAP, modifier = Modifier::new().fill_max_width(), {
                         if running {
                             Spinner(12.0);
                         } else {
@@ -192,13 +235,13 @@ fn FileChangeCard(
                         }
                         // `.cmd .chev{margin-left:auto}`: the chevron sits at the row's end and
                         // points down while the lines are shown.
-                        cu::Spacer().modifier(Modifier::new().weight(1.0));
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                         NavIcon(
                             if folded { super::session::ICON_CHEVRON_RIGHT_SVG } else { super::shell::ICON_CHEVRON_DOWN_SVG },
                             p.muted.to_argb(),
                             16.0,
                         );
-                    });
+                    }) };
             },
         );
         if !folded {
@@ -207,7 +250,7 @@ fn FileChangeCard(
                 CodeText(e, None, true);
             }
         }
-    });
+    }) };
 }
 
 /// A resolved approval (#536, mockup `session.js`: a `.cmd` row, not a card): the shield, what
@@ -215,18 +258,14 @@ fn FileChangeCard(
 fn ResolvedApprovalRow(body: &str, decision: ApprovalDecision) {
     let p = ember_theme().palette;
     let (txt, ok) = tool_card::resolved_label(decision);
-    cu::Row()
-        .alignment(Alignment::CenterStart)
-        .spacing(CMD_ROW_GAP)
-        .modifier(Modifier::new().fill_max_width().height(CMD_ROW_H))
-        .content(|| {
+    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = CMD_ROW_GAP, modifier = Modifier::new().fill_max_width().height(CMD_ROW_H), {
             NavIcon(ICON_SHIELD_SVG, p.text_2.to_argb(), 16.0);
             // The pill right after the command (review st B, mockup `.cmd`); a long command is
             // cut and the pill keeps its own width.
             super::components::NameThenPillFace(body, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), true, CMD_ROW_GAP, || {
                 Pill(txt, if ok { PillTone::Green } else { PillTone::Red }, false);
             });
-        });
+        }) };
 }
 
 /// One button of the pending approval card (mockup `.btn.sm`: 32 high, 12 at the sides, 13 px
@@ -243,11 +282,11 @@ fn ApprovalButton(text: &'static str, primary: bool, danger: bool, on_click: imp
         Alignment::Center,
         on_click,
         move || {
-            cu::Row().alignment(Alignment::Center).content(move || {
-                cu::Spacer().modifier(Modifier::new().width(SP[2]));
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::Center, content = move || {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
                 Label(text, Fs::Sm, Weight::Medium, Some(paint(fg)), Some(1));
-                cu::Spacer().modifier(Modifier::new().width(SP[2]));
-            });
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
+            }) };
         },
     );
 }
@@ -313,6 +352,64 @@ pub fn tail_start_index(
     start
 }
 
+/// Estimate the rendered height (dp) of a [`ConversationDisplayItem`] (FR-L5, #1075).
+pub fn estimate_display_item_height(
+    item: &ConversationDisplayItem,
+    expanded: &HashSet<String>,
+) -> f32 {
+    match item {
+        ConversationDisplayItem::Single(inner) => {
+            let open = match inner {
+                TranscriptItem::ToolCall { call_id, .. } => expanded.contains(call_id),
+                _ => false,
+            };
+            estimate_item_height(inner, open)
+        }
+        ConversationDisplayItem::ShellGroup(calls) => {
+            let key = shell_group_key(calls);
+            if !expanded.contains(&key) {
+                CMD_ROW_H
+            } else {
+                let inner_h: f32 = calls
+                    .iter()
+                    .map(|c| {
+                        let open = match c {
+                            TranscriptItem::ToolCall { call_id, .. } => expanded.contains(call_id),
+                            _ => false,
+                        };
+                        estimate_item_height(c, open) + SP[1]
+                    })
+                    .sum();
+                CMD_ROW_H + SP[0] + inner_h
+            }
+        }
+    }
+}
+
+/// Return the starting index of grouped `items` so the tail slice fits within `avail_h` dp
+/// (FR-L5, #1075).
+pub fn tail_display_start_index(
+    items: &[ConversationDisplayItem],
+    expanded: &HashSet<String>,
+    avail_h: f32,
+) -> usize {
+    if items.len() <= 1 || avail_h <= 0.0 {
+        return 0;
+    }
+    let budget = (avail_h - 16.0).max(160.0);
+    let mut used = 0.0;
+    let mut start = items.len();
+    for (idx, item) in items.iter().enumerate().rev() {
+        let h = estimate_display_item_height(item, expanded) + 8.0;
+        if used + h > budget && start < items.len() {
+            break;
+        }
+        used += h;
+        start = idx;
+    }
+    start
+}
+
 fn demo_blocked_cr() -> bool {
     match crate::demo::unavailable(services().demo.is_some()) {
         Some(m) => {
@@ -342,6 +439,264 @@ pub fn fork_from(ui: &SharedUi, id: String, seq: Option<i64>) {
             Ok(rec) => ui.open_conversation(&rec.id),
             Err(e) => notice::post(format!("포크하지 못했습니다: {e}")),
         },
+    );
+}
+
+/// Anchored popover menu for session actions (pin, export, fork, approve-all).
+/// Used in the visible single-session topbar and in standalone conversation headers.
+pub fn ConversationActionsMenu(id: &str) {
+    let p = ember_theme().palette;
+    let ui = shared_ui().clone();
+    let s = services();
+    let sid = id.to_string();
+    let actions_menu = remember_with_key(format!("{sid}:actions_menu"), || {
+        mutable_state_of(std::env::var("EMBER_CR_SESSION_MENU").as_deref() == Ok("more"))
+    });
+
+    let info = {
+        let _ = ui.live.launcher.get();
+        s.client.read(|st| {
+            st.session(&sid)
+                .map(|v| (v.record.title.clone(), v.record.pinned, st.approve_all(&sid)))
+        })
+    };
+    let Some((title, pinned, approve_all)) = info else {
+        return;
+    };
+
+    let more_rows = more_pop_rows(pinned, approve_all);
+    let open = actions_menu.get();
+    let dismiss = actions_menu;
+    let toggle = actions_menu;
+    let sid_pick = sid.clone();
+    let title_pick = title;
+    let ui_pick = ui;
+    PopoverMenu(
+        open,
+        PopMenu {
+            name: super::a11y::MORE,
+            kind: PopKind::Drop,
+            head: "대화 메뉴",
+            sub: None,
+            rows: &more_rows,
+            align: compose_rust::PopoverAlign::End,
+        },
+        move || dismiss.set(false),
+        move |idx| match idx {
+            0 => patch_session(
+                sid_pick.clone(),
+                SessionPatch {
+                    pinned: Some(!pinned),
+                    ..Default::default()
+                },
+            ),
+            1 => export(sid_pick.clone(), title_pick.clone()),
+            2 => fork_from(&ui_pick, sid_pick.clone(), None),
+            3 => {
+                let id_ap = sid_pick.clone();
+                let enable = !approve_all;
+                run_shared(
+                    async move { services().set_approve_all(&id_ap, enable).await },
+                    |r| {
+                        if let Err(e) = r {
+                            notice::post(format!("모드를 바꾸지 못했습니다: {e}"));
+                        }
+                    },
+                );
+            }
+            _ => {}
+        },
+        move || {
+            NamedClickable(
+                super::a11y::MORE,
+                Modifier::new()
+                    .size(H_CTL, H_CTL)
+                    .background(paint(p.surface))
+                    .border(1.0, paint(p.line))
+                    .shape_role(ShapeRole::Full)
+                    .expanded(open),
+                Alignment::Center,
+                move || toggle.set(!toggle.get_untracked()),
+                move || NavIcon(super::session::ICON_MORE_H_SVG, p.text_2.to_argb(), 15.0),
+            );
+        },
+        None,
+    );
+}
+
+/// The computer menu's rows. The session's current computer is checked, as the IDE menu checks
+/// its current IDE. Before the session's computer is known (and in the demo, which never asks),
+/// the current one is the local computer, the same fallback the trigger label uses.
+pub(crate) fn computer_pop_rows(computers: &[ember_client::state::Computer], current_id: Option<&str>) -> Vec<PopRow> {
+    if computers.is_empty() {
+        return vec![PopRow { title: "등록된 컴퓨터가 없습니다".into(), ..Default::default() }];
+    }
+    let current = current_id.unwrap_or("local");
+    computers
+        .iter()
+        .map(|c| PopRow {
+            title: c.name.clone(),
+            description: Some(ko::reachability_label(c.reachability).to_string()),
+            chosen: c.id == current,
+            ..Default::default()
+        })
+        .collect()
+}
+
+/// Anchored popover menu for switching the session's computer.
+/// Uses a compact 32 dp icon trigger in the single-session topbar and a labelled button in
+/// standalone conversation headers.
+pub fn SessionComputerMenu(id: &str, compact_trigger: bool) {
+    let p = ember_theme().palette;
+    let ui = shared_ui().clone();
+    let s = services();
+    let sid = id.to_string();
+    let computer = remember_with_key(format!("{sid}:comp_cur"), || {
+        mutable_state_of(None::<CurrentComputer>)
+    });
+    let computer_menu = remember_with_key(format!("{sid}:comp_menu"), || {
+        mutable_state_of(std::env::var("EMBER_CR_SESSION_MENU").as_deref() == Ok("computer"))
+    });
+
+    {
+        let sid_load = sid.clone();
+        let comp_load = computer;
+        launched_effect(sid.clone(), move || async move {
+            if services().demo.is_some() {
+                return;
+            }
+            let a = sid_load.clone();
+            let comp = comp_load;
+            run_shared(
+                async move {
+                    services()
+                        .server
+                        .session_computer(&a)
+                        .await
+                        .map_err(|e| e.to_string())
+                },
+                move |r| match r {
+                    Ok(c) => comp.set(Some(c)),
+                    Err(e) => tracing::debug!("current computer: {e}"),
+                },
+            );
+        });
+    }
+
+    let (busy, computers) = {
+        let _ = ui.live.launcher.get();
+        s.client.read(|st| {
+            let busy = st
+                .session(&sid)
+                .is_some_and(|v| model::is_busy(v.status));
+            (busy, st.computers().to_vec())
+        })
+    };
+    let current = computer.get();
+    let current_computer_id = current.as_ref().map(|c| c.computer.id.clone());
+    let computer_name = current
+        .as_ref()
+        .map(|c| c.computer.name.clone())
+        .unwrap_or_else(|| "이 컴퓨터".into());
+
+    let comp_rows = computer_pop_rows(&computers, current_computer_id.as_deref());
+
+    let open = computer_menu.get();
+    let dismiss = computer_menu;
+    let toggle = computer_menu;
+    let comp_state = computer;
+    let comps_for_pick = computers;
+    let sid_comp = sid;
+    PopoverMenu(
+        open,
+        PopMenu {
+            name: super::a11y::COMPUTER_PICKER,
+            kind: PopKind::Mode,
+            head: "컴퓨터",
+            sub: None,
+            rows: &comp_rows,
+            align: if compact_trigger {
+                compose_rust::PopoverAlign::End
+            } else {
+                compose_rust::PopoverAlign::Start
+            },
+        },
+        move || dismiss.set(false),
+        move |idx| {
+            let Some(c) = comps_for_pick.get(idx) else {
+                return;
+            };
+            if demo_blocked_cr() {
+                return;
+            }
+            let cid = c.id.clone();
+            let s_id = sid_comp.clone();
+            let comp_out = comp_state;
+            run_shared(
+                async move {
+                    services()
+                        .server
+                        .switch_computer(&s_id, &cid)
+                        .await
+                        .map_err(|e| e.to_string())
+                },
+                move |r| match r {
+                    Ok(out) => {
+                        let name = out.computer.name.clone();
+                        let designated = comp_out
+                            .get_untracked()
+                            .and_then(|c| c.designated_computer_id);
+                        comp_out.set(Some(CurrentComputer {
+                            session_id: out.session_id,
+                            computer: out.computer,
+                            implicit: false,
+                            notice_pending: false,
+                            designated_computer_id: designated,
+                        }));
+                        notice::post(format!("{name} 컴퓨터로 전환했습니다"));
+                    }
+                    Err(e) => {
+                        notice::post(format!("컴퓨터를 전환하지 못했습니다: {e}"))
+                    }
+                },
+            );
+        },
+        move || {
+            if compact_trigger {
+                let tint = if busy {
+                    p.muted.to_argb()
+                } else {
+                    p.text_2.to_argb()
+                };
+                NamedClickable(
+                    super::a11y::COMPUTER_PICKER,
+                    Modifier::new()
+                        .size(H_CTL, H_CTL)
+                        .background(paint(p.surface))
+                        .border(1.0, paint(p.line))
+                        .shape_role(ShapeRole::Full)
+                        .expanded(open),
+                    Alignment::Center,
+                    move || {
+                        if !busy {
+                            toggle.set(!toggle.get_untracked());
+                        }
+                    },
+                    move || NavIcon(super::session::ICON_PC_SVG, tint, 15.0),
+                );
+            } else {
+                AppButton(
+                    &computer_name,
+                    None,
+                    ButtonKind::Default,
+                    true,
+                    !busy,
+                    false,
+                    move || toggle.set(!toggle.get_untracked()),
+                );
+            }
+        },
+        None,
     );
 }
 
@@ -513,8 +868,6 @@ pub fn ConversationView(id: &str, embedded: bool) {
     let expanded = remember_with_key(sid.clone(), || mutable_state_of(HashSet::<String>::new()));
     let answering = remember_with_key(sid.clone(), || mutable_state_of(HashSet::<String>::new()));
     let ide_menu = remember_with_key(sid.clone(), || mutable_state_of(false));
-    let computer_menu = remember_with_key(sid.clone(), || mutable_state_of(false));
-    let more_menu = remember_with_key(sid.clone(), || mutable_state_of(false));
 
     let send = {
         let sid = sid.clone();
@@ -538,16 +891,10 @@ pub fn ConversationView(id: &str, embedded: bool) {
     };
 
     let Some((record, status)) = header else {
-        cu::Column()
-            .alignment(Alignment::Center)
-            .space_role(SpaceRole::Md)
-            .modifier(
-                Modifier::new()
+        { use ::compose_rust::ui::Column; Column!(alignment = Alignment::Center, space_role = SpaceRole::Md, modifier = Modifier::new()
                     .fill_max_width()
                     .fill_max_height()
-                    .padding_role(SpaceRole::Md),
-            )
-            .content(|| {
+                    .padding_role(SpaceRole::Md), {
                 Txt(
                     "이 세션을 찾을 수 없습니다.",
                     TypeRole::Title,
@@ -576,7 +923,7 @@ pub fn ConversationView(id: &str, embedded: bool) {
                     false,
                     move || u.go(Route::Projects),
                 );
-            });
+            }) };
         return;
     };
 
@@ -593,15 +940,6 @@ pub fn ConversationView(id: &str, embedded: bool) {
         meta.push(m.clone());
     }
     let meta = meta.join(" \u{00b7} ");
-    let computer_name = computer
-        .get()
-        .as_ref()
-        .map(|c| c.computer.name.clone())
-        .unwrap_or_else(|| "이 컴퓨터".into());
-    let computers = {
-        let _ = ui.live.launcher.get();
-        s.client.read(|st| st.computers().to_vec())
-    };
     let approve_all = {
         let _ = ui.live.launcher.get();
         s.client.read(|st| st.approve_all(&sid))
@@ -629,7 +967,7 @@ pub fn ConversationView(id: &str, embedded: bool) {
         })
     };
     // Review captures: `EMBER_CR_QUESTION=single|multi|secret|answered` adds a sample question.
-    let (items, keys) = match qv::debug_sample(
+    let (items, _keys) = match qv::debug_sample(
         std::env::var("EMBER_CR_QUESTION").ok().as_deref(),
         cfg!(debug_assertions),
         s.client.read(|st| st.transcript(&sid).map_or(0, |t| t.last_seq)) + 1_000_000,
@@ -683,37 +1021,22 @@ pub fn ConversationView(id: &str, embedded: bool) {
     };
 
     // ---- IDE entries ---------------------------------------------------------------------------
-    let remembered = ui
-        .prefs
-        .get()
-        .ide_target
-        .as_deref()
-        .and_then(IdeKind::from_key);
-    let mut ide_order: Vec<IdeKind> = IdeKind::ALL.to_vec();
-    if let Some(k) = remembered {
-        ide_order.retain(|x| *x != k);
-        ide_order.insert(0, k);
-    }
+    // The session's project's pick, else its computer's default (FR-W7b, D56).
+    let ide_project = super::session::session_project(&sid);
+    let ide_prefs = ui.prefs.get();
     let ide_now = ide.get();
-    let ide_entries: Vec<(IdeKind, String)> = ide_order
-        .iter()
-        .map(|k| {
-            let mut label = k.label().to_string();
-            if Some(*k) == remembered {
-                label.push_str(" (최근 사용)");
-            }
-            if let Some(Ok(l)) = &ide_now {
-                if let Some(t) = l.target(k.key()) {
-                    if !t.available {
-                        if let Some(r) = &t.reason {
-                            label = format!("{label}: {r}");
-                        }
-                    }
-                }
-            }
-            (*k, label)
-        })
-        .collect();
+    let remembered = ide_prefs.ide_for(&ide_project, crate::ide::effective_default_ide(ide_now.as_ref()));
+    let ide_choices = crate::ui::session::ide_choices(remembered);
+    let ide_rows = super::session::with_ember_notice(
+        super::session::ide_pop_rows(&ide_choices, remembered),
+        &ide_choices,
+        ide_now.as_ref(),
+    );
+    let current_computer = computer.get();
+    let ide_sub = crate::ui::session::ide_menu_subtitle(
+        current_computer.as_ref().map(|c| c.computer.name.as_str()),
+        &record.cwd,
+    );
 
     // ---- mentions (FR-T6) ----------------------------------------------------------------------
     let cur_draft = draft.get();
@@ -744,37 +1067,23 @@ pub fn ConversationView(id: &str, embedded: bool) {
         }
     };
 
-    let pinned = record.pinned;
     let agent = record.agent.clone();
 
     // `.detail{background:var(--surface)}`: the conversation sits on `surface`, not the window
     // `bg` (review SE9), so its cards and composer do not float on grey.
-    cu::Box()
-        .modifier(Modifier::new().fill_max_width().fill_max_height().background(paint(p.surface)))
-        .content(|| {
-            cu::Column()
-                .space_role(SpaceRole::Sm)
-                .modifier(
-                    Modifier::new()
+    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().fill_max_height().background(paint(p.surface)), {
+            { use ::compose_rust::ui::Column; Column!(space_role = SpaceRole::Sm, modifier = Modifier::new()
                         .fill_max_width()
                         .fill_max_height()
-                        .padding(if embedded { SP[2] } else { SP[3] }),
-                )
-                .content(|| {
+                        .padding(if embedded { SP[2] } else { SP[3] }), {
                     // ---- header (hidden when embedded in SessionScreen SingleView, which has its own compact topbar) ----
                     if !embedded {
-                        cu::Row()
-                            .alignment(Alignment::CenterStart)
-                            .space_role(SpaceRole::Sm)
-                            .modifier(Modifier::new().fill_max_width())
-                            .content(|| {
+                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, space_role = SpaceRole::Sm, modifier = Modifier::new().fill_max_width(), {
                                 if compact {
                                     let u = ui.clone();
                                     BackButton(move || u.go(Route::Projects));
                                 }
-                                cu::Column()
-                                    .modifier(Modifier::new().weight(1.0))
-                                    .content(|| {
+                                { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), {
                                         Label(
                                             &title,
                                             Fs::Lg,
@@ -789,11 +1098,10 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                             Some(paint(p.muted)),
                                             Some(1),
                                         );
-                                    });
+                                    }) };
                                 StatusIndicator(status);
-                                let more = more_menu.clone();
-                                IconButton(IconRole::More, true, move || more.set(true));
-                            });
+                                ConversationActionsMenu(&sid);
+                            }) };
                     }
 
                     if let Some(text) = ko::approve_all_banner(approve_all) {
@@ -801,11 +1109,7 @@ pub fn ConversationView(id: &str, embedded: bool) {
                     }
 
                     if let Some(text) = fork_label.clone() {
-                        cu::Row()
-                            .alignment(Alignment::CenterStart)
-                            .space_role(SpaceRole::Sm)
-                            .modifier(Modifier::new().fill_max_width())
-                            .content(|| {
+                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, space_role = SpaceRole::Sm, modifier = Modifier::new().fill_max_width(), {
                                 Label(
                                     &text,
                                     Fs::Xs,
@@ -824,16 +1128,12 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                     false,
                                     move || u.open_conversation(&pid),
                                 );
-                            });
+                            }) };
                     }
 
                     if !embedded {
                         // Computer and IDE row
-                        cu::Row()
-                            .alignment(Alignment::CenterStart)
-                            .space_role(SpaceRole::Sm)
-                            .modifier(Modifier::new().fill_max_width())
-                            .content(|| {
+                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, space_role = SpaceRole::Sm, modifier = Modifier::new().fill_max_width(), {
                                 Label(
                                     "컴퓨터",
                                     Fs::Xs,
@@ -841,66 +1141,78 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                     Some(paint(p.muted)),
                                     Some(1),
                                 );
-                                let cm = computer_menu.clone();
-                                AppButton(
-                                    &computer_name,
-                                    None,
-                                    ButtonKind::Default,
-                                    true,
-                                    !busy,
-                                    false,
-                                    move || cm.set(true),
-                                );
-                                cu::Spacer().modifier(Modifier::new().weight(1.0));
+                                SessionComputerMenu(&sid, false);
+                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                                 if let Some(label) = qv::needs_you_label(pending) {
                                     Badge(&label, Tone::Warning);
                                 }
-                                let im = ide_menu.clone();
+                                let ide_dismiss = ide_menu;
+                                let ide_choices_pick = ide_choices.clone();
+                                let ui_ide = ui.clone();
+                                let pick_project = ide_project.clone();
+                                let launch_res = ide_now.clone();
+                                let im = ide_menu;
                                 let ui_ide_btn = ui.clone();
-                                let launch_btn = ide.get();
-                                let chev = ide_menu.clone();
-                                AppButton(
-                                    "IDE 열기",
-                                    Some(IconRole::Forward),
-                                    ButtonKind::Default,
-                                    true,
-                                    true,
-                                    false,
-                                    move || {
-                                        super::session::ide_main_click(remembered, &im, |kind| {
-                                            super::session::launch_ide_shared(
-                                                &ui_ide_btn,
-                                                kind,
-                                                launch_btn.clone(),
-                                            )
-                                        })
+                                let launch_btn = ide_now.clone();
+                                let chev = ide_menu;
+                                PopoverMenu(
+                                    ide_menu.get(),
+                                    PopMenu {
+                                        name: super::a11y::IDE_PICKER,
+                                        kind: PopKind::Drop,
+                                        head: crate::ui::session::IDE_MENU_HEAD,
+                                        sub: ide_sub.as_deref(),
+                                        rows: &ide_rows,
+                                        align: compose_rust::PopoverAlign::End,
                                     },
+                                    move || ide_dismiss.set(false),
+                                    move |idx| {
+                                        let Some(choice) = ide_choices_pick.get(idx) else {
+                                            return;
+                                        };
+                                        let kind = choice.kind;
+                                        super::session::record_ide_pick(&ui_ide, &pick_project, kind);
+                                        super::session::launch_ide_shared(&ui_ide, kind, launch_res.clone());
+                                    },
+                                    move || {
+                                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, space_role = SpaceRole::Sm, content = move || {
+                                            AppButton(
+                                                "IDE 열기",
+                                                Some(IconRole::Forward),
+                                                ButtonKind::Default,
+                                                true,
+                                                true,
+                                                false,
+                                                move || {
+                                                    super::session::ide_main_click(remembered, &im, |kind| {
+                                                        super::session::launch_ide_shared(
+                                                            &ui_ide_btn,
+                                                            kind,
+                                                            launch_btn.clone(),
+                                                        )
+                                                    })
+                                                },
+                                            );
+                                            super::session::IdeChevron(chev, false);
+                                        }) };
+                                    },
+                                    None,
                                 );
-                                super::session::IdeChevron(chev, false);
-                            });
+                            }) };
                     }
 
                     ConnectionBanner();
 
                     if busy && !embedded {
-                        cu::IndeterminateProgressIndicator()
-                            .circular(false)
-                            .modifier(Modifier::new().fill_max_width());
+                        { use ::compose_rust::ui::IndeterminateProgressIndicator; IndeterminateProgressIndicator!(circular = false, modifier = Modifier::new().fill_max_width()) };
                     }
 
                     TeamPanel(&sid);
 
                     // ---- transcript ------------------------------------------------------------
-                    cu::Box()
-                        .modifier(Modifier::new().fill_max_width().weight(1.0))
-                        .content(|| {
+                    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().fill_max_width().weight(1.0), {
                             if count == 0 {
-                                cu::Box()
-                                    .alignment(Alignment::Center)
-                                    .modifier(
-                                        Modifier::new().fill_max_width().fill_max_height(),
-                                    )
-                                    .content(|| {
+                                { use ::compose_rust::ui::Box; Box!(alignment = Alignment::Center, modifier = Modifier::new().fill_max_width().fill_max_height(), {
                                         let empty_msg =
                                             empty_transcript_text(status, last_seq);
                                         Label(
@@ -910,7 +1222,7 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                             Some(paint(p.muted)),
                                             None,
                                         );
-                                    });
+                                    }) };
                             } else {
                                 let avail_h = window.height_dp
                                     - (if embedded {
@@ -920,30 +1232,21 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                     })
                                     - (if window.width_dp <= 560.0 { 112.0 } else { 0.0 });
                                 let exp_set = expanded.get();
-                                let start_idx = tail_start_index(&items, &exp_set, avail_h);
-                                let items_row = items[start_idx..].to_vec();
-                                let _keys_row = keys[start_idx..].to_vec();
+                                let display_items = group_shell_calls(&items);
+                                let start_idx = tail_display_start_index(&display_items, &exp_set, avail_h);
+                                let items_row = display_items[start_idx..].to_vec();
                                 let sid_row = sid.clone();
                                 let agent_row = agent.clone();
                                 let exp_row = expanded.clone();
                                 let ans_row = answering.clone();
                                 let computer_row: Option<String> =
                                     computer.get().map(|c| c.computer.name.clone());
-                                cu::ScrollColumn()
-                                    .modifier(
-                                        Modifier::new().fill_max_width().fill_max_height(),
-                                    )
-                                    .content(move || {
-                                        cu::Column()
-                                            .spacing(SP[1])
-                                            .modifier(
-                                                Modifier::new()
+                                { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().fill_max_width().fill_max_height(), content = move || {
+                                        { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new()
                                                     .fill_max_width()
-                                                    .padding(SP[1]),
-                                            )
-                                            .content(move || {
+                                                    .padding(SP[1]), content = move || {
                                                 for item in items_row.iter() {
-                                                    TranscriptRow(
+                                                    TranscriptDisplayRow(
                                                         &sid_row,
                                                         &agent_row,
                                                         item,
@@ -953,21 +1256,17 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                                         false,
                                                     );
                                                 }
-                                                cu::Spacer().modifier(Modifier::new().height(12.0));
-                                            });
-                                    });
+                                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(12.0)) };
+                                            }) };
+                                    }) };
                             }
-                        });
+                        }) };
 
                     // ---- queue (FR-L6) ---------------------------------------------------------
                     if !queued.is_empty() {
-                        cu::Row()
-                            .alignment(Alignment::CenterStart)
-                            .space_role(SpaceRole::Sm)
-                            .modifier(Modifier::new().fill_max_width())
-                            .content(|| {
+                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, space_role = SpaceRole::Sm, modifier = Modifier::new().fill_max_width(), {
                                 Badge(&format!("{}개 대기 중", queued.len()), Tone::Accent);
-                                cu::Box().modifier(Modifier::new().weight(1.0)).content(|| {
+                                { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().weight(1.0), {
                                     Label(
                                         &format!(
                                             "이번 턴이 끝나면 순서대로 전송합니다. 다음: {}",
@@ -978,7 +1277,7 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                         Some(paint(p.muted)),
                                         Some(1),
                                     );
-                                });
+                                }) };
                                 let sid_clear = sid.clone();
                                 AppButton(
                                     "비우기",
@@ -992,20 +1291,16 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                         services().bump_outbox();
                                     },
                                 );
-                            });
+                            }) };
                     }
                     if !queue_error.is_empty() {
-                        cu::Row()
-                            .alignment(Alignment::CenterStart)
-                            .space_role(SpaceRole::Sm)
-                            .modifier(Modifier::new().fill_max_width())
-                            .content(|| {
-                                cu::Box().modifier(Modifier::new().weight(1.0)).content(|| {
+                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, space_role = SpaceRole::Sm, modifier = Modifier::new().fill_max_width(), {
+                                { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().weight(1.0), {
                                     Banner(
                                         &format!("전송하지 못했습니다: {queue_error}"),
                                         Tone::Error,
                                     );
-                                });
+                                }) };
                                 let sid_retry = sid.clone();
                                 AppButton(
                                     "다시 시도",
@@ -1016,16 +1311,13 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                     false,
                                     move || services().drive_outbox(&sid_retry),
                                 );
-                            });
+                            }) };
                     }
 
                     // ---- mention suggestions (FR-T6) -------------------------------------------
                     if !suggestions.is_empty() {
                         EmberCard(false, true, None, Some(SP[1]), None, || {
-                            cu::Column()
-                                .space_role(SpaceRole::Xs)
-                                .modifier(Modifier::new().fill_max_width())
-                                .content(|| {
+                            { use ::compose_rust::ui::Column; Column!(space_role = SpaceRole::Xs, modifier = Modifier::new().fill_max_width(), {
                                     Label(
                                         "세션 멘션",
                                         Fs::Xs,
@@ -1053,16 +1345,12 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                             },
                                         );
                                     }
-                                });
+                                }) };
                         });
                     }
                     if !picked.is_empty() {
-                        cu::Row()
-                            .alignment(Alignment::CenterStart)
-                            .space_role(SpaceRole::Sm)
-                            .modifier(Modifier::new().fill_max_width())
-                            .content(|| {
-                                cu::Box().modifier(Modifier::new().weight(1.0)).content(|| {
+                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, space_role = SpaceRole::Sm, modifier = Modifier::new().fill_max_width(), {
+                                { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().weight(1.0), {
                                     Label(
                                         &format!("멘션 대상: {}", picked.join(", ")),
                                         Fs::Xs,
@@ -1070,7 +1358,7 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                         Some(paint(p.muted)),
                                         Some(1),
                                     );
-                                });
+                                }) };
                                 let picks_clear = picks.clone();
                                 AppButton(
                                     "지우기",
@@ -1081,7 +1369,7 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                     false,
                                     move || picks_clear.set(Vec::new()),
                                 );
-                            });
+                            }) };
                     }
 
                     // ---- composer --------------------------------------------------------------
@@ -1111,21 +1399,13 @@ pub fn ConversationView(id: &str, embedded: bool) {
                         let comp_w = avail_w.min(740.0);
                         let is_phone = window.width_dp <= 560.0;
 
-                        cu::Box()
-                            .alignment(Alignment::Center)
-                            .modifier(Modifier::new().fill_max_width())
-                            .content(|| {
-                                cu::Column()
-                                    .spacing(SP[0])
-                                    .modifier(
-                                        Modifier::new()
+                        { use ::compose_rust::ui::Box; Box!(alignment = Alignment::Center, modifier = Modifier::new().fill_max_width(), {
+                                { use ::compose_rust::ui::Column; Column!(spacing = SP[0], modifier = Modifier::new()
                                             .width(comp_w)
                                             .background(paint(p.surface))
                                             .border(1.0, paint(p.line))
                                             .corner_radius(CORNER_XL)
-                                            .padding(SP[2]),
-                                    )
-                                    .content(|| {
+                                            .padding(SP[2]), {
                                         let send_sub = send.clone();
                                         EmberField(FieldOptions {
                                             bare: true,
@@ -1147,11 +1427,7 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                             on_submit: Some(Box::new(move |v| send_sub(v))),
                                             ..Default::default()
                                         });
-                                        cu::Row()
-                                            .alignment(Alignment::CenterStart)
-                                            .spacing(6.0)
-                                            .modifier(Modifier::new().fill_max_width())
-                                            .content(|| {
+                                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = 6.0, modifier = Modifier::new().fill_max_width(), {
                                                 Clickable(
                                                     Modifier::new()
                                                         .size(30.0, 30.0)
@@ -1171,14 +1447,8 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                                 // attach and send buttons and shorten their labels
                                                 // (ellipsis) in it, so the send or stop button keeps
                                                 // its size at 360 dp (FR-L28.3, Flip 4 review 3.5).
-                                                cu::Box()
-                                                    .alignment(Alignment::CenterStart)
-                                                    .modifier(Modifier::new().weight(1.0))
-                                                    .content(|| super::session::ModeChip(&sid, is_phone));
-                                                cu::Box()
-                                                    .alignment(Alignment::CenterEnd)
-                                                    .modifier(Modifier::new().weight(1.0))
-                                                    .content(|| super::session::ModelChip(&sid, is_phone));
+                                                { use ::compose_rust::ui::Box; Box!(alignment = Alignment::CenterStart, modifier = Modifier::new().weight(1.0), content = || super::session::ModeChip(&sid, is_phone)) };
+                                                { use ::compose_rust::ui::Box; Box!(alignment = Alignment::CenterEnd, modifier = Modifier::new().weight(1.0), content = || super::session::ModelChip(&sid, is_phone)) };
                                                 if busy {
                                                     let sid_int = sid.clone();
                                                     super::session::StopCircleButton(move || {
@@ -1203,32 +1473,25 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                                             },
                                                         );
                                                     });
-                                                } else {
-                                                    let send_btn = send.clone();
-                                                    let draft_btn = draft.clone();
-                                                    super::session::SendCircleButton(
-                                                        32.0,
-                                                        move || {
-                                                            send_btn(draft_btn.get_untracked());
-                                                        },
-                                                    );
                                                 }
-                                            });
-                                    });
-                            });
+                                                let send_btn = send.clone();
+                                                let draft_btn = draft.clone();
+                                                super::session::SendCircleButton(
+                                                    32.0,
+                                                    move || {
+                                                        send_btn(draft_btn.get_untracked());
+                                                    },
+                                                );
+                                            }) };
+                                    }) };
+                            }) };
                     } else {
-                        cu::Row()
-                            .alignment(Alignment::CenterStart)
-                            .space_role(SpaceRole::Xs)
-                            .modifier(
-                                Modifier::new()
+                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, space_role = SpaceRole::Xs, modifier = Modifier::new()
                                     .fill_max_width()
                                     .background(paint(p.surface))
                                     .border(1.0, paint(p.line))
                                     .corner_radius(CORNER_XL)
-                                    .padding(SP[1]),
-                            )
-                            .content(|| {
+                                    .padding(SP[1]), {
                                 let send_sub = send.clone();
                                 EmberField(FieldOptions {
                                     bare: true,
@@ -1282,140 +1545,10 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                 IconButton(IconRole::Send, true, move || {
                                     send_btn(draft_btn.get_untracked());
                                 });
-                            });
+                            }) };
                     }
-                });
-
-            // ---- Popups (outside spaced Column) ------------------------------------------------
-            // 1. More menu OptionSheet
-            let more_labels = vec![
-                if pinned {
-                    "고정 해제".to_string()
-                } else {
-                    "고정".to_string()
-                },
-                "내보내기".to_string(),
-                ko::FORK_MENU_LABEL.to_string(),
-                ko::approve_all_menu_label(approve_all).to_string(),
-            ];
-            let more_dismiss = more_menu.clone();
-            let sid_more = sid.clone();
-            let title_more = title.clone();
-            let ui_more = ui.clone();
-            OptionSheet(
-                more_menu.get(),
-                &more_labels,
-                None,
-                POPUP_W,
-                move || more_dismiss.set(false),
-                move |idx| match idx {
-                    0 => patch_session(
-                        sid_more.clone(),
-                        SessionPatch {
-                            pinned: Some(!pinned),
-                            ..Default::default()
-                        },
-                    ),
-                    1 => export(sid_more.clone(), title_more.clone()),
-                    2 => fork_from(&ui_more, sid_more.clone(), None),
-                    3 => {
-                        let id_ap = sid_more.clone();
-                        let enable = !approve_all;
-                        run_shared(
-                            async move { services().set_approve_all(&id_ap, enable).await },
-                            |r| {
-                                if let Err(e) = r {
-                                    notice::post(format!("모드를 바꾸지 못했습니다: {e}"));
-                                }
-                            },
-                        );
-                    }
-                    _ => {}
-                },
-            );
-
-            // 2. Computer menu OptionSheet
-            let comp_labels: Vec<String> = if computers.is_empty() {
-                vec!["등록된 컴퓨터가 없습니다".to_string()]
-            } else {
-                computers
-                    .iter()
-                    .map(|c| {
-                        format!(
-                            "{} ({})",
-                            c.name,
-                            ko::reachability_label(c.reachability)
-                        )
-                    })
-                    .collect()
-            };
-            let comp_dismiss = computer_menu.clone();
-            let comps_for_pick = computers.clone();
-            let sid_comp = sid.clone();
-            let reload_comp = load.clone();
-            OptionSheet(
-                computer_menu.get(),
-                &comp_labels,
-                None,
-                POPUP_W,
-                move || comp_dismiss.set(false),
-                move |idx| {
-                    let Some(c) = comps_for_pick.get(idx) else {
-                        return;
-                    };
-                    if demo_blocked_cr() {
-                        return;
-                    }
-                    let cid = c.id.clone();
-                    let s_id = sid_comp.clone();
-                    let reload = reload_comp.clone();
-                    run_shared(
-                        async move {
-                            services()
-                                .server
-                                .switch_computer(&s_id, &cid)
-                                .await
-                                .map_err(|e| e.to_string())
-                        },
-                        move |r| match r {
-                            Ok(out) => {
-                                reload();
-                                notice::post(format!(
-                                    "{} 컴퓨터로 전환했습니다",
-                                    out.computer.name
-                                ));
-                            }
-                            Err(e) => {
-                                notice::post(format!("컴퓨터를 전환하지 못했습니다: {e}"))
-                            }
-                        },
-                    );
-                },
-            );
-
-            // 3. IDE menu OptionSheet (when not embedded)
-            if !embedded {
-                let ide_labels: Vec<String> =
-                    ide_entries.iter().map(|(_, l)| l.clone()).collect();
-                let ide_kinds: Vec<IdeKind> = ide_entries.iter().map(|(k, _)| *k).collect();
-                let ide_dismiss = ide_menu.clone();
-                let ui_ide = ui.clone();
-                let launch_res = ide.get();
-                OptionSheet(
-                    ide_menu.get(),
-                    &ide_labels,
-                    remembered.map(|_| 0),
-                    POPUP_W,
-                    move || ide_dismiss.set(false),
-                    move |idx| {
-                        let Some(&kind) = ide_kinds.get(idx) else {
-                            return;
-                        };
-                        super::session::launch_ide_shared(&ui_ide, kind, launch_res.clone());
-                    },
-                );
-            }
-        });
+                }) };
+        }) };
 }
 
 /// A radio or check row of one option (single or multi select), with its description.
@@ -1444,19 +1577,15 @@ fn OptionRow(label: &str, description: Option<&str>, chosen: bool, multi: bool, 
             }
         },
         move || {
-            cu::Row()
-                .alignment(Alignment::CenterStart)
-                .spacing(SP[1])
-                .modifier(Modifier::new().fill_max_width())
-                .content(move || {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width(), content = move || {
                     Label(mark, Fs::Md, Weight::Regular, Some(paint(if enabled { p.text } else { p.muted })), Some(1));
-                    cu::Column().spacing(2.0).modifier(Modifier::new().weight(1.0)).content(move || {
+                    { use ::compose_rust::ui::Column; Column!(spacing = 2.0, modifier = Modifier::new().weight(1.0), content = move || {
                         Label(&label, Fs::Sm, Weight::Medium, Some(paint(if enabled { p.text } else { p.muted })), Some(3));
                         if let Some(d) = &description {
                             Label(d, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(3));
                         }
-                    });
-                });
+                    }) };
+                }) };
         },
     );
 }
@@ -1480,11 +1609,11 @@ fn QuestionButton(text: &str, primary: bool, enabled: bool, on_click: impl FnMut
             }
         },
         move || {
-            cu::Row().alignment(Alignment::Center).content(move || {
-                cu::Spacer().modifier(Modifier::new().width(14.0));
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::Center, content = move || {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(14.0)) };
                 Label(&text, Fs::Sm, Weight::Medium, Some(paint(fg)), Some(1));
-                cu::Spacer().modifier(Modifier::new().width(14.0));
-            });
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(14.0)) };
+            }) };
         },
     );
 }
@@ -1587,22 +1716,15 @@ pub fn QuestionCard(
 
     let border = if pending { Some(p.orange.strong) } else { None };
     EmberCard(false, true, None, Some(SP[2]), border, move || {
-        cu::Column()
-            .spacing(SP[1])
-            .modifier(Modifier::new().fill_max_width())
-            .content(move || {
-                cu::Row()
-                    .alignment(Alignment::CenterStart)
-                    .spacing(SP[1])
-                    .modifier(Modifier::new().fill_max_width())
-                    .content(move || {
+        { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().fill_max_width(), content = move || {
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width(), content = move || {
                         NavIcon(ICON_SHIELD_SVG, p.orange.strong.to_argb(), 16.0);
                         Label(qv::CARD_TITLE, Fs::Md, Weight::Semibold, None, Some(1));
-                        cu::Spacer().modifier(Modifier::new().weight(1.0));
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
                         if pending {
                             Pill(qv::NEEDS_ANSWER, PillTone::Orange, true);
                         }
-                    });
+                    }) };
                 if sample {
                     Label(qv::SAMPLE_NOTE, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
                 }
@@ -1611,10 +1733,7 @@ pub fn QuestionCard(
                         for q in questions.iter().cloned() {
                             let d = draft.clone();
                             let ss = skip_step.clone();
-                            cu::Column()
-                                .spacing(6.0)
-                                .modifier(Modifier::new().fill_max_width())
-                                .content(move || {
+                            { use ::compose_rust::ui::Column; Column!(spacing = 6.0, modifier = Modifier::new().fill_max_width(), content = move || {
                                     if let Some(h) = q.header.as_deref().map(qv::shown_header).filter(|h| !h.is_empty()) {
                                         Label(&h, Fs::Xs, Weight::Semibold, Some(paint(p.muted)), Some(1));
                                     }
@@ -1654,13 +1773,9 @@ pub fn QuestionCard(
                                             ..Default::default()
                                         });
                                     }
-                                });
+                                }) };
                         }
-                        cu::Row()
-                            .alignment(Alignment::CenterStart)
-                            .spacing(6.0)
-                            .modifier(Modifier::new().fill_max_width())
-                            .content(move || {
+                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = 6.0, modifier = Modifier::new().fill_max_width(), content = move || {
                                 // Same text step as the options (Fs::Sm), not the toolkit button's.
                                 if !secret {
                                     QuestionButton(qv::SEND_LABEL, true, can_send, move || send_ok(false));
@@ -1669,7 +1784,7 @@ pub fn QuestionCard(
                                 if in_flight {
                                     Spinner(14.0);
                                 }
-                            });
+                            }) };
                         if confirming {
                             Label(qv::SKIP_CONFIRM_NOTE, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(3));
                         }
@@ -1695,8 +1810,129 @@ pub fn QuestionCard(
                         Label(qv::WITHDRAWN_LINE, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
                     }
                 }
-            });
+            }) };
     });
+}
+
+/// A collapsible summary row for 2 or more consecutive shell tool calls (FR-L5, #1075).
+///
+/// Collapsed by default (`명령 N개 실행`); pressing the row toggles expansion and renders each
+/// individual shell tool call inside.
+pub fn ShellGroupRow(
+    session: &str,
+    agent: &str,
+    calls: &[TranscriptItem],
+    expanded: &MutableState<HashSet<String>>,
+    answering: &MutableState<HashSet<String>>,
+    computer: Option<&str>,
+    pane: bool,
+) {
+    let p = ember_theme().palette;
+    let group_key = shell_group_key(calls);
+    let open = expanded.get().contains(&group_key);
+    let label = shell_group_label(calls.len());
+    let any_running = calls
+        .iter()
+        .any(|c| matches!(c, TranscriptItem::ToolCall { result: None, .. }));
+    let any_error = calls.iter().any(|c| {
+        matches!(c, TranscriptItem::ToolCall { result: Some(r), .. } if r.is_error)
+    });
+    let exp_toggle = expanded.clone();
+    let key_toggle = group_key.clone();
+    let calls_owned = calls.to_vec();
+    let sid = session.to_string();
+    let agent_name = agent.to_string();
+    let exp_children = expanded.clone();
+    let ans_children = answering.clone();
+    let computer_owned = computer.map(str::to_string);
+
+    { use ::compose_rust::ui::Column; Column!(spacing = SP[0], modifier = Modifier::new().fill_max_width(), content = move || {
+        let label_row = label.clone();
+        Clickable(
+            Modifier::new()
+                .fill_max_width()
+                .height(CMD_ROW_H)
+                .role(cu::Role::Button)
+                .expanded(open)
+                .click_action(true),
+            Alignment::CenterStart,
+            move || {
+                exp_toggle.update(|set| {
+                    if !set.remove(&key_toggle) {
+                        set.insert(key_toggle.clone());
+                    }
+                });
+            },
+            move || {
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = CMD_ROW_GAP, modifier = Modifier::new().fill_max_width(), content = move || {
+                        if any_running {
+                            Spinner(12.0);
+                        } else {
+                            NavIcon(ICON_TERMINAL_SVG, p.text_2.to_argb(), 16.0);
+                        }
+                        Label(
+                            &label_row,
+                            Fs::Sm,
+                            Weight::Medium,
+                            Some(paint(p.text_2)),
+                            Some(1),
+                        );
+                        if any_error {
+                            Pill("오류", PillTone::Red, false);
+                        }
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().weight(1.0)) };
+                        NavIcon(
+                            if open {
+                                super::shell::ICON_CHEVRON_DOWN_SVG
+                            } else {
+                                super::session::ICON_CHEVRON_RIGHT_SVG
+                            },
+                            p.muted.to_argb(),
+                            16.0,
+                        );
+                    }) };
+            },
+        );
+        if open {
+            { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width(), content = move || {
+                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
+                { use ::compose_rust::ui::Column; Column!(spacing = SP[1], modifier = Modifier::new().width(0.0).weight(1.0), content = move || {
+                    for call in calls_owned.iter() {
+                        TranscriptRow(
+                            &sid,
+                            &agent_name,
+                            call,
+                            &exp_children,
+                            &ans_children,
+                            computer_owned.as_deref(),
+                            pane,
+                        );
+                    }
+                }) };
+            }) };
+        }
+    }) };
+}
+
+/// Render one [`ConversationDisplayItem`]: either a single transcript row or a collapsible
+/// group of consecutive shell calls (FR-L5, #1075).
+pub fn TranscriptDisplayRow(
+    session: &str,
+    agent: &str,
+    item: &ConversationDisplayItem,
+    expanded: &MutableState<HashSet<String>>,
+    answering: &MutableState<HashSet<String>>,
+    computer: Option<&str>,
+    pane: bool,
+) {
+    match item {
+        ConversationDisplayItem::Single(inner) => {
+            TranscriptRow(session, agent, inner, expanded, answering, computer, pane);
+        }
+        ConversationDisplayItem::ShellGroup(calls) => {
+            ShellGroupRow(session, agent, calls, expanded, answering, computer, pane);
+        }
+    }
 }
 
 /// One transcript entry (FR-L5..FR-L7, FR-S5).
@@ -1715,33 +1951,20 @@ pub fn TranscriptRow(
 
     match item.clone() {
         TranscriptItem::User { text, .. } => {
-            cu::Box()
-                .alignment(Alignment::CenterEnd)
-                .modifier(Modifier::new().fill_max_width())
-                .content(move || {
-                    cu::Box()
-                        .modifier(
-                            Modifier::new()
+            { use ::compose_rust::ui::Box; Box!(alignment = Alignment::CenterEnd, modifier = Modifier::new().fill_max_width(), content = move || {
+                    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new()
                                 .background(paint(p.hover))
                                 .corner_radius(CORNER_BUBBLE)
-                                .padding(10.0),
-                        )
-                        .content(move || {
+                                .padding(10.0), content = move || {
                             MessageText(&text, None);
-                        });
-                });
+                        }) };
+                }) };
         }
         TranscriptItem::Assistant {
             text, streaming, ..
         } => {
-            cu::Box()
-                .alignment(Alignment::CenterStart)
-                .modifier(Modifier::new().fill_max_width().padding(2.0))
-                .content(move || {
-                    cu::Row()
-                        .alignment(Alignment::CenterStart)
-                        .spacing(SP[1])
-                        .content(move || {
+            { use ::compose_rust::ui::Box; Box!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width().padding(2.0), content = move || {
+                    { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], content = move || {
                             let shown = if streaming {
                                 format!("{text}\u{2589}")
                             } else {
@@ -1751,8 +1974,8 @@ pub fn TranscriptRow(
                             if streaming {
                                 Spinner(10.0);
                             }
-                        });
-                });
+                        }) };
+                }) };
         }
         TranscriptItem::ToolCall {
             call_id,
@@ -1798,23 +2021,15 @@ pub fn TranscriptRow(
             }
 
             EmberCard(false, true, None, Some(SP[1]), None, move || {
-                cu::Column()
-                    .spacing(SP[0])
-                    .modifier(Modifier::new().fill_max_width())
-                    .content(move || {
-                        cu::Row()
-                            .alignment(Alignment::CenterStart)
-                            .spacing(SP[1])
-                            .modifier(Modifier::new().fill_max_width())
-                            .content(move || {
+                { use ::compose_rust::ui::Column; Column!(spacing = SP[0], modifier = Modifier::new().fill_max_width(), content = move || {
+                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width(), content = move || {
                                 if !has_result {
                                     Spinner(12.0);
                                 } else {
                                     NavIcon(ICON_TERMINAL_SVG, p.muted.to_argb(), 15.0);
                                 }
                                 Label(&tool_name, Fs::Sm, Weight::Semibold, None, Some(1));
-                                cu::Box().modifier(Modifier::new().weight(1.0)).content(
-                                    move || {
+                                { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().weight(1.0), content = move || {
                                         Label(
                                             &summary,
                                             Fs::Xs,
@@ -1822,8 +2037,7 @@ pub fn TranscriptRow(
                                             Some(paint(p.muted)),
                                             Some(1),
                                         );
-                                    },
-                                );
+                                    }) };
                                 Badge(state_text, tone);
                                 Clickable(
                                     Modifier::new()
@@ -1840,10 +2054,8 @@ pub fn TranscriptRow(
                                         });
                                     },
                                     move || {
-                                        cu::Row()
-                                            .alignment(Alignment::Center)
-                                            .content(|| {
-                                                cu::Spacer().modifier(Modifier::new().width(8.0));
+                                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::Center, {
+                                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(8.0)) };
                                                 Label(
                                                     if open { "접기" } else { "자세히" },
                                                     Fs::Xs,
@@ -1851,11 +2063,11 @@ pub fn TranscriptRow(
                                                     Some(paint(p.text_2)),
                                                     Some(1),
                                                 );
-                                                cu::Spacer().modifier(Modifier::new().width(8.0));
-                                            });
+                                                { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(8.0)) };
+                                            }) };
                                     },
                                 );
-                            });
+                            }) };
                         if open {
                             Label("입력", Fs::Sm, Weight::Medium, None, Some(1));
                             CodeText(&model::json_pretty(&input), None, false);
@@ -1872,7 +2084,7 @@ pub fn TranscriptRow(
                         } else if show_tail {
                             CodeText(&out_text, Some(2), out_err);
                         }
-                    });
+                    }) };
             });
         }
         TranscriptItem::Approval {
@@ -1921,38 +2133,30 @@ pub fn TranscriptRow(
             // `.approve`: `surface`, a 1 px `line` border (review SE6: it was orange), the
             // `--r` radius, the small shadow, 14/16 padding (10/12 in a pane).
             let (pad_v, pad_h) = approve_pad(pane);
-            cu::Box()
-                .modifier(
-                    with_shadows(Modifier::new(), theme.shadow_sm())
+            { use ::compose_rust::ui::Box; Box!(modifier = with_shadows(Modifier::new(), theme.shadow_sm())
                         .fill_max_width()
                         .background(paint(p.surface))
                         .border(1.0, paint(p.line))
                         .corner_radius(CORNER_MD)
-                        .padding(pad_v),
-                )
-                .content(move || {
-                    cu::Row().modifier(Modifier::new().fill_max_width()).content(move || {
+                        .padding(pad_v), content = move || {
+                    { use ::compose_rust::ui::Row; Row!(modifier = Modifier::new().fill_max_width(), content = move || {
                         // No asymmetric padding in the toolkit: spacers raise the sides.
-                        cu::Spacer().modifier(Modifier::new().width(pad_h - pad_v));
-                        cu::Column().modifier(Modifier::new().width(0.0).weight(1.0)).content(move || {
-                            cu::Row()
-                                .alignment(Alignment::CenterStart)
-                                .spacing(SP[1])
-                                .modifier(Modifier::new().fill_max_width())
-                                .content(|| {
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(pad_h - pad_v)) };
+                        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().width(0.0).weight(1.0), content = move || {
+                            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, spacing = SP[1], modifier = Modifier::new().fill_max_width(), {
                                     NavIcon(ICON_SHIELD_SVG, p.text.to_argb(), 16.0);
-                                    cu::Box().alignment(Alignment::CenterStart).modifier(Modifier::new().width(0.0).weight(1.0)).content(|| {
+                                    { use ::compose_rust::ui::Box; Box!(alignment = Alignment::CenterStart, modifier = Modifier::new().width(0.0).weight(1.0), {
                                         Label(&title, Fs::Md, Weight::Semibold, None, Some(1));
-                                    });
+                                    }) };
                                     if state == ApprovalState::Pending {
                                         Pill("대기 중", PillTone::Orange, false);
                                     }
-                                });
+                                }) };
                             match state {
                                 ApprovalState::Pending => {
                                     // `.out` with `padding-left:0`: the command in mono, 8
                                     // above and below, no box.
-                                    cu::Spacer().modifier(Modifier::new().height(OUT_PAD_V));
+                                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(OUT_PAD_V)) };
                                     if !body.is_empty() {
                                         Txt(
                                             &body,
@@ -1963,15 +2167,11 @@ pub fn TranscriptRow(
                                             None,
                                             None,
                                         );
-                                        cu::Spacer().modifier(Modifier::new().height(OUT_PAD_V));
+                                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(OUT_PAD_V)) };
                                     }
                                     // `.flex.wrap`: the buttons go to a second line when the
                                     // card is too narrow for the three.
-                                    cu::FlowRow()
-                                        .horizontal_spacing(SP[1])
-                                        .vertical_spacing(SP[1])
-                                        .modifier(Modifier::new().fill_max_width())
-                                        .content(move || {
+                                    { use ::compose_rust::ui::FlowRow; FlowRow!(horizontal_spacing = SP[1], vertical_spacing = SP[1], modifier = Modifier::new().fill_max_width(), content = move || {
                                             ApprovalButton(tool_card::ALLOW_ONCE, true, false, move || {
                                                 if !in_flight {
                                                     a1(ApprovalDecision::AllowOnce);
@@ -1994,10 +2194,10 @@ pub fn TranscriptRow(
                                             if in_flight {
                                                 Spinner(14.0);
                                             }
-                                        });
+                                        }) };
                                 }
                                 ApprovalState::Withdrawn => {
-                                    cu::Spacer().modifier(Modifier::new().height(SP[1]));
+                                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[1])) };
                                     Label(
                                         "에이전트가 이 요청을 거두었습니다",
                                         Fs::Xs,
@@ -2007,7 +2207,7 @@ pub fn TranscriptRow(
                                     );
                                 }
                                 ApprovalState::Abandoned => {
-                                    cu::Spacer().modifier(Modifier::new().height(SP[1]));
+                                    { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().height(SP[1])) };
                                     Label(
                                         "턴이 끝나기 전에 응답하지 않았습니다",
                                         Fs::Xs,
@@ -2018,10 +2218,10 @@ pub fn TranscriptRow(
                                 }
                                 ApprovalState::Resolved(_) => {}
                             }
-                        });
-                        cu::Spacer().modifier(Modifier::new().width(pad_h - pad_v));
-                    });
-                });
+                        }) };
+                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(pad_h - pad_v)) };
+                    }) };
+                }) };
         }
         TranscriptItem::Question { question_id, questions, state, .. } => {
             QuestionCard(&sid, question_id, questions, state, answering);
@@ -2039,17 +2239,11 @@ pub fn TranscriptRow(
                 TurnOutcome::Interrupted => ("중단됨", p.muted),
                 TurnOutcome::Failed => ("턴 실패", p.red.strong),
             };
-            cu::Row()
-                .alignment(Alignment::Center)
-                .space_role(SpaceRole::Sm)
-                .modifier(Modifier::new().fill_max_width().padding_role(SpaceRole::Xs))
-                .content(move || {
-                    cu::Box()
-                        .modifier(Modifier::new().weight(1.0))
-                        .content(|| {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::Center, space_role = SpaceRole::Sm, modifier = Modifier::new().fill_max_width().padding_role(SpaceRole::Xs), content = move || {
+                    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().weight(1.0), {
                             // Token line: the toolkit divider is white in the dark scheme (#510).
-                            cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(ember_theme().palette.line)));
-                        });
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().fill_max_width().height(1.0).background(paint(ember_theme().palette.line))) };
+                        }) };
                     Label(text, Fs::Xs, Weight::Regular, Some(paint(col)), Some(1));
                     if outcome == TurnOutcome::Completed {
                         let u_fork = ui.clone();
@@ -2068,10 +2262,8 @@ pub fn TranscriptRow(
                                 }
                             },
                             move || {
-                                cu::Row()
-                                    .alignment(Alignment::Center)
-                                    .content(|| {
-                                        cu::Spacer().modifier(Modifier::new().width(8.0));
+                                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::Center, {
+                                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(8.0)) };
                                         Label(
                                             ko::FORK_TURN_LABEL,
                                             Fs::Xs,
@@ -2079,27 +2271,22 @@ pub fn TranscriptRow(
                                             Some(paint(fg_fork)),
                                             Some(1),
                                         );
-                                        cu::Spacer().modifier(Modifier::new().width(8.0));
-                                    });
+                                        { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(8.0)) };
+                                    }) };
                             },
                         );
                     }
-                    cu::Box()
-                        .modifier(Modifier::new().weight(1.0))
-                        .content(|| {
+                    { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().weight(1.0), {
                             // Token line: the toolkit divider is white in the dark scheme (#510).
-                            cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(ember_theme().palette.line)));
-                        });
-                });
+                            { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().fill_max_width().height(1.0).background(paint(ember_theme().palette.line))) };
+                        }) };
+                }) };
         }
         TranscriptItem::Error { message, .. } => {
             Banner(&message, Tone::Error);
         }
         TranscriptItem::Notice { text, .. } => {
-            cu::Row()
-                .alignment(Alignment::Center)
-                .modifier(Modifier::new().fill_max_width().padding_role(SpaceRole::Xs))
-                .content(move || {
+            { use ::compose_rust::ui::Row; Row!(alignment = Alignment::Center, modifier = Modifier::new().fill_max_width().padding_role(SpaceRole::Xs), content = move || {
                     Txt(
                         &text,
                         TypeRole::Caption,
@@ -2109,7 +2296,7 @@ pub fn TranscriptRow(
                         None,
                         Some(TextAlign::Center),
                     );
-                });
+                }) };
         }
     }
 }
@@ -2148,17 +2335,10 @@ pub fn TeamPanel(session: &str) {
         .count();
 
     EmberCard(false, true, None, Some(SP[2]), None, move || {
-        cu::Column()
-            .space_role(SpaceRole::Xs)
-            .modifier(Modifier::new().fill_max_width())
-            .content(|| {
+        { use ::compose_rust::ui::Column; Column!(space_role = SpaceRole::Xs, modifier = Modifier::new().fill_max_width(), {
                 let is_open = expanded.get();
-                cu::Row()
-                    .alignment(Alignment::CenterStart)
-                    .space_role(SpaceRole::Sm)
-                    .modifier(Modifier::new().fill_max_width())
-                    .content(|| {
-                        cu::Box().modifier(Modifier::new().weight(1.0)).content(|| {
+                { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, space_role = SpaceRole::Sm, modifier = Modifier::new().fill_max_width(), {
+                        { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().weight(1.0), {
                             Label(
                                 &format!("팀 \u{00b7} 팀원 {active}명 \u{00b7} 열린 작업 {open}개"),
                                 Fs::Md,
@@ -2166,7 +2346,7 @@ pub fn TeamPanel(session: &str) {
                                 None,
                                 Some(1),
                             );
-                        });
+                        }) };
                         let exp = expanded.clone();
                         AppButton(
                             if is_open { "접기" } else { "펼치기" },
@@ -2181,16 +2361,12 @@ pub fn TeamPanel(session: &str) {
                             false,
                             move || exp.set(!is_open),
                         );
-                    });
+                    }) };
                 if is_open {
                     for r in rows.iter().cloned() {
                         let u = ui.clone();
                         let tid = team_id.clone();
-                        cu::Row()
-                            .alignment(Alignment::CenterStart)
-                            .space_role(SpaceRole::Sm)
-                            .modifier(Modifier::new().fill_max_width())
-                            .content(move || {
+                        { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, space_role = SpaceRole::Sm, modifier = Modifier::new().fill_max_width(), content = move || {
                                 let name_label = if r.leader {
                                     format!("{} (리더)", r.name)
                                 } else {
@@ -2278,7 +2454,7 @@ pub fn TeamPanel(session: &str) {
                                         },
                                     );
                                 }
-                            });
+                            }) };
                     }
                     if tasks.is_empty() {
                         Label(
@@ -2301,7 +2477,7 @@ pub fn TeamPanel(session: &str) {
                         );
                     }
                 }
-            });
+            }) };
     });
 }
 
@@ -2376,9 +2552,10 @@ mod tests {
             .nth(1)
             .and_then(|r| r.split("StopCircleButton(").next())
             .expect("the composer row");
-        let shares = row.matches(".modifier(Modifier::new().weight(1.0))").count();
+        let shares = row.matches("modifier = Modifier::new().weight(1.0)").count();
         assert_eq!(shares, 2, "one weighted share per chip, no weighted spacer");
-        assert!(!row.contains("cu::Spacer()"), "no spacer pushes the send button");
+        assert!(!row.contains("Spacer!("), "no spacer pushes the send button");
+
         let mode = row.find("ModeChip(&sid, is_phone)").expect("the mode chip is in the row");
         let model = row.find("ModelChip(&sid, is_phone)").expect("the model chip is in the row");
         let first = row.find(".weight(1.0)").unwrap();
@@ -2393,10 +2570,7 @@ mod tests {
         compose_rust::window::reset_window_size();
         let mut host = Host::new(|| Box::new(Recomposer::new(host_conversation_s1)));
         let mut all = texts(&decode_batch(host.rebuild().expect("rebuild")).expect("decode"));
-        let event = HostEvent {
-            node_id: 0,
-            handler_id: 0,
-            payload: EventPayload::WindowSizeChanged {
+        let event = HostEvent::new(0, 0, EventPayload::WindowSizeChanged {
                 width_dp: 1440.0,
                 height_dp: 900.0,
                 class: WindowSizeClass::Expanded,
@@ -2404,8 +2578,8 @@ mod tests {
                 safe_area_top: 0.0,
                 safe_area_leading: 0.0,
                 safe_area_trailing: 0.0,
-            },
-        };
+                safe_area_bottom: 0.0,
+            });
         let (bytes, _) = host.dispatch(event).expect("dispatch");
         all.extend(texts(&decode_batch(bytes).expect("decode")));
         for want in ["포트 설정 추가", "한 번 허용", "항상 허용", "거부", "IDE 열기"] {
@@ -2725,6 +2899,235 @@ mod tests {
             let surface = format!("{:?}", compose_rust::schema::Modifier::Background(paint(ember_theme().palette.surface)));
             assert!(mods.contains(&surface), "root box {mods:?} lacks {surface}");
             assert!(mods.iter().any(|m| m == "FillMaxWidth") && mods.iter().any(|m| m == "FillMaxHeight"), "{mods:?}");
+        }
+    }
+
+    #[test]
+    fn fr_l10_4_computer_menu_checks_only_the_current_computer() {
+        let cs = crate::demo::computers();
+        let chosen = |rows: &[PopRow]| rows.iter().map(|r| r.chosen).collect::<Vec<_>>();
+        assert_eq!(chosen(&computer_pop_rows(&cs, Some("studio"))), [false, true]);
+        assert_eq!(chosen(&computer_pop_rows(&cs, Some("local"))), [true, false]);
+        assert_eq!(chosen(&computer_pop_rows(&cs, None)), [true, false], "unknown falls back to the local computer");
+    }
+
+    /// #888: the More menu's rows carry an icon and a description like the other header menus,
+    /// so a row is not a lone title at the top of a 55 dp row.
+    #[test]
+    fn fr_l10_4_more_menu_rows_have_icon_and_description() {
+        for (pinned, approve_all) in [(false, false), (true, true)] {
+            let rows = more_pop_rows(pinned, approve_all);
+            assert_eq!(rows.len(), 4);
+            for r in &rows {
+                assert!(r.icon.is_some(), "{:?} has no icon", r.title);
+                assert!(r.description.as_deref().is_some_and(|d| !d.trim().is_empty()), "{:?} has no description", r.title);
+            }
+            assert_eq!(rows[0].chosen, pinned);
+            assert_eq!(rows[3].chosen, approve_all);
+            assert_eq!(rows[3].danger, !approve_all);
+        }
+    }
+
+    #[test]
+    fn fr_l10_4_conversation_menus_are_anchored_popovers_not_option_sheets() {
+        let _guard = crate::services::test_guard();
+        crate::ui::window_size::set_opened_for_test(Some((1440.0, 900.0)));
+        services().open_session("demo-s1");
+        let mut host = Host::new(|| Box::new(Recomposer::new(host_conversation_s1)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        crate::ui::window_size::set_opened_for_test(None);
+
+        let popover_ids: Vec<u32> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::Create { node_id, widget } if format!("{widget:?}") == "Popover" => Some(*node_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(popover_ids.len(), 3, "More, Computer, and IDE menus should each be an anchored Popover");
+
+        let has_dialog_or_sheet = batch.iter().any(|m| {
+            matches!(m, Mutation::Create { widget, .. } if matches!(format!("{widget:?}").as_str(), "Dialog" | "Sheet"))
+        });
+        assert!(!has_dialog_or_sheet, "conversation header menus must not emit a centred OptionSheet Dialog or Sheet");
+
+        let popover_mods: Vec<String> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetModifier { node_id, modifier, .. } if popover_ids.contains(node_id) => {
+                    Some(format!("{modifier:?}"))
+                }
+                _ => None,
+            })
+            .collect();
+        let menu_role_count = popover_mods.iter().filter(|m| m.contains("Semantics") && m.contains("Menu")).count();
+        assert_eq!(menu_role_count, 3, "all 3 popovers must declare Role::Menu, got {popover_mods:?}");
+
+        let popover_props: Vec<String> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetProp { node_id, property, value } if popover_ids.contains(node_id) => {
+                    Some(format!("{property:?}={value:?}"))
+                }
+                _ => None,
+            })
+            .collect();
+        for name in [super::super::a11y::MORE, super::super::a11y::COMPUTER_PICKER, super::super::a11y::IDE_PICKER] {
+            assert!(
+                popover_props.iter().any(|p| p.contains(name)),
+                "expected a Popover prop named '{name}', got {popover_props:?}"
+            );
+        }
+
+        let prod = include_str!("conversation.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(!prod.contains("OptionSheet("), "no centred OptionSheet remains in conversation.rs");
+    }
+
+    #[Composable]
+    fn host_conversation_s2_embedded() {
+        ConversationView("demo-s2", true);
+    }
+
+    #[Composable]
+    fn host_conversation_s3_embedded() {
+        ConversationView("demo-s3", true);
+    }
+
+    #[test]
+    fn fr_l6_embedded_composer_shows_send_beside_stop_when_busy() {
+        // FR-L6: while the agent is busy, the embedded composer renders both StopCircleButton and
+        // SendCircleButton in the same row so the user can queue a follow-up by tap as well as Enter.
+        let _guard = crate::services::test_guard();
+        let p = ember_theme().palette;
+        let stop_bg = format!("{:?}", compose_rust::schema::Modifier::Background(paint(p.red.strong)));
+        let send_bg = format!("{:?}", compose_rust::schema::Modifier::Background(paint(p.ink)));
+        let is_stop = |n: &Emitted| {
+            n.mods.contains(&stop_bg)
+                && n.mods.iter().any(|m| m == "Width(30.0)")
+                && n.mods.iter().any(|m| m == "Height(30.0)")
+                && n.props.iter().any(|prop| prop.starts_with("OnClick="))
+        };
+        let is_send = |n: &Emitted| {
+            n.mods.contains(&send_bg)
+                && n.mods.iter().any(|m| m == "Width(32.0)")
+                && n.mods.iter().any(|m| m == "Height(32.0)")
+                && n.props.iter().any(|prop| prop.starts_with("OnClick="))
+                && (n.mods.iter().any(|m| m.contains(crate::ui::cr::a11y::SEND))
+                    || n.props.iter().any(|prop| prop.contains(crate::ui::cr::a11y::SEND)))
+        };
+
+        // Busy session (SessionStatus::Running): both stop and send sit in the composer row.
+        services().open_session("demo-s3");
+        let busy_nodes = emitted(host_conversation_s3_embedded);
+        let stop = busy_nodes.iter().find(|n| is_stop(n)).expect("StopCircleButton while busy");
+        let send = busy_nodes.iter().find(|n| is_send(n)).expect("SendCircleButton while busy");
+        assert!(stop.parent.is_some() && stop.parent == send.parent, "stop and send share the composer row");
+
+        // Idle/finished session: send is shown and stop is not.
+        services().open_session("demo-s2");
+        let idle_nodes = emitted(host_conversation_s2_embedded);
+        assert!(idle_nodes.iter().any(is_send), "SendCircleButton when idle");
+        assert!(!idle_nodes.iter().any(is_stop), "no StopCircleButton when idle");
+    }
+
+    fn shell_call_item(seq: i64, call_id: &str, cmd: &str) -> TranscriptItem {
+        TranscriptItem::ToolCall {
+            seq,
+            call_id: call_id.into(),
+            name: "Bash".into(),
+            input: serde_json::json!({ "command": cmd }),
+            result: Some(ember_client::transcript::ToolOutput {
+                output: String::new(),
+                is_error: false,
+            }),
+        }
+    }
+
+    fn consecutive_shell_rows() {
+        let expanded = remember(|| mutable_state_of(HashSet::<String>::new()));
+        let answering = remember(|| mutable_state_of(HashSet::<String>::new()));
+        let items = vec![
+            shell_call_item(1, "s1", "cargo fmt --check"),
+            shell_call_item(2, "s2", "cargo clippy"),
+            shell_call_item(3, "s3", "cargo test --locked"),
+        ];
+        let grouped = group_shell_calls(&items);
+        { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().fill_max_width(), content = move || {
+            for item in grouped.iter() {
+                TranscriptDisplayRow("demo-s1", "claude", item, &expanded, &answering, None, false);
+            }
+        }) };
+    }
+
+    #[test]
+    fn fr_l5_consecutive_shell_calls_fold_into_collapsible_group_row() {
+        use compose_rust::PropertyKind;
+        use std::collections::HashMap;
+
+        let _guard = crate::services::test_guard();
+        let mut host = Host::new(|| Box::new(Recomposer::new(consecutive_shell_rows)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let initial_texts = texts(&batch);
+        assert!(
+            initial_texts.iter().any(|t| t == "명령 3개 실행"),
+            "missing grouped header in initial render: {initial_texts:?}"
+        );
+        for cmd in ["cargo fmt --check", "cargo clippy", "cargo test --locked"] {
+            assert!(
+                !initial_texts.iter().any(|t| t.contains(cmd)),
+                "individual command {cmd:?} should be hidden while collapsed: {initial_texts:?}"
+            );
+        }
+
+        // Locate the clickable ancestor of the "명령 3개 실행" label and click it.
+        let mut parents: HashMap<u32, u32> = HashMap::new();
+        let mut handlers: HashMap<u32, u64> = HashMap::new();
+        let mut label_node: Option<u32> = None;
+        for m in &batch {
+            match m {
+                Mutation::Insert { parent_id, node_id, .. } => {
+                    parents.insert(*node_id, *parent_id);
+                }
+                Mutation::SetProp {
+                    node_id,
+                    property: PropertyKind::OnClick,
+                    value: PropertyValue::Integer(h),
+                } => {
+                    handlers.insert(*node_id, *h as u64);
+                }
+                Mutation::SetProp {
+                    node_id,
+                    property: PropertyKind::Text,
+                    value: PropertyValue::String(s),
+                } if *s == "명령 3개 실행" => {
+                    label_node = Some(*node_id);
+                }
+                _ => {}
+            }
+        }
+        let mut cursor = label_node.expect("group label node");
+        let (click_node, handler_id) = loop {
+            if let Some(&h) = handlers.get(&cursor) {
+                break (cursor, h);
+            }
+            cursor = *parents
+                .get(&cursor)
+                .expect("group label has a clickable ancestor");
+        };
+
+        let (bytes, _) = host
+            .dispatch(HostEvent::new(
+                click_node,
+                handler_id,
+                EventPayload::Clicked,
+            ))
+            .expect("click group row");
+        let expanded_texts = texts(&decode_batch(bytes).expect("decode expanded"));
+        for cmd in ["cargo fmt --check", "cargo clippy", "cargo test --locked"] {
+            assert!(
+                expanded_texts.iter().any(|t| t.contains(cmd)),
+                "missing expanded command {cmd:?}: {expanded_texts:?}"
+            );
         }
     }
 }

@@ -97,11 +97,10 @@ fn fr_l31_commands_the_editor_cannot_do_yet_are_marked_and_listed_after_the_work
     assert!(enabled(Action::Save) && enabled(Action::MaximizeTool) && enabled(Action::ReopenClosed) && enabled(Action::FindInFiles) && enabled(Action::NewTerminal));
     // FR-L31 (#766): the ask action opens the 에이전트 tool window.
     assert!(enabled(Action::Ask));
-    for a in [Action::RunConfig, Action::Stop] {
-        assert!(!enabled(a), "{a:?} is not implemented");
-    }
+    // FR-L31.42: F5 starts debugging, Shift+F5 stops and Ctrl+F5 runs without debugging.
+    assert!(enabled(Action::Debug) && enabled(Action::Stop) && enabled(Action::RunConfig));
     let ranked = rank("", &list);
-    let first_disabled = ranked.iter().position(|r| !list[r.index].enabled).unwrap();
+    let first_disabled = ranked.iter().position(|r| !list[r.index].enabled).unwrap_or(ranked.len());
     assert!(ranked[..first_disabled].iter().all(|r| list[r.index].enabled));
     assert!(ranked[first_disabled..].iter().all(|r| !list[r.index].enabled), "the working commands come first");
     // A query ranks a working command above a not-ready one with the same score.

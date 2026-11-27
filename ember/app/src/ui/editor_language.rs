@@ -754,6 +754,8 @@ pub mod view {
     /// focus can stay in the code editor; otherwise Escape closes the parameter hint and language
     /// chords run their features. Any other key goes on to the editor.
     pub fn code_key(s: &Shared, event: &compose_rust::KeyEvent) {
+        // FR-L31.42: Alt switches the debug hover to this hover, another key hides it.
+        crate::ui::editor_debug_hover::view::code_key(s, event);
         let open_list = {
             let state = s.host.state.lock().unwrap();
             state
@@ -819,6 +821,8 @@ pub mod view {
     /// The code editor's `on_code_pointer` (compose-rust#555): Cmd or Ctrl and a click on a name asks
     /// for its definition there, and the press does not move the caret.
     pub fn code_pointer(s: &Shared, pointer: &compose_rust::code::CodePointer) {
+        // FR-L31.42: a press in the editor hides the debug hover (Code-OSS `onEditorMouseDown`).
+        crate::ui::editor_debug_hover::view::hide(s);
         let mac = crate::ui::keymap::Os::current() == crate::ui::keymap::Os::Mac;
         let Some(pos) = super::pointer_definition(pointer, mac) else { return };
         let Some(uri) = current(s) else { return };

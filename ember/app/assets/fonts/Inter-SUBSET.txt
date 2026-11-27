@@ -1,0 +1,31 @@
+Inter-Regular.otf, Inter-Medium.otf and Inter-SemiBold.otf in this folder are a
+Modified Version of Inter 4.1 (rsms/inter release v4.1, extras/otf) under the SIL Open Font License 1.1,
+which permits modification and redistribution. The license is Inter-OFL.txt beside this note.
+Inter declares no Reserved Font Name, so the modified faces keep the name Inter.
+
+What changed (Ember NFR-L1, issue #1082): the faces are subset with fontTools pyftsubset. Every
+glyph outline, metric, kerning pair and OpenType feature that remains is the original's. Only
+code points that Pretendard 1.3.9, the family Ember sets behind Inter, already draws are removed,
+outside these ranges, which Inter always keeps:
+
+  U+0020-036F  Basic Latin, Latin-1, Latin Extended A and B, IPA, modifiers, combining marks
+  U+1AB0-1AFF  Combining Diacritical Marks Extended
+  U+1DC0-1EFF  Combining Diacritical Marks Supplement, Latin Extended Additional
+  U+2000-206F  General Punctuation
+  U+20A0-20FF  Currency Symbols, Combining Marks for Symbols
+  U+FE20-FE2F  Combining Half Marks
+
+What left Inter is mainly Greek, Cyrillic and symbols; Pretendard draws them in the same stack.
+Sizes (bytes): Regular 609,600 -> 408,000, Medium 627,988 -> 413,916, SemiBold 629,912 -> 414,584.
+
+How (fontTools 4.68.0, run with uv):
+
+  1. keep = every code point in Inter-Regular.otf's cmap, minus those Pretendard-Regular.otf also
+     maps that lie outside the ranges above, written as a U+XXXX list to inter-keep.txt.
+  2. For each weight:
+     uv run --with fonttools pyftsubset Inter-<Weight>.otf --unicodes-file=inter-keep.txt \
+       --layout-features='*' --name-IDs='*' --name-legacy --name-languages='*' \
+       --notdef-outline --output-file=Inter-<Weight>.otf
+
+ember/app/tests/fonts.rs checks that Inter still draws the Latin it drew and that Inter with
+Pretendard still draws every code point the unmodified stack drew in the ranges it tests.

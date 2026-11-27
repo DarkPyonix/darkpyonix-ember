@@ -6,7 +6,19 @@
 //! redistributed. Only the three weights `ui::theme::Weight` can name (400, 500, 600) are
 //! included for the prose faces, because a face no text asks for is only download size. Code
 //! uses 400, 500 (types, `editor.css` `.t-ty`) and 400 italic (comments, `.t-com`).
+//!
+//! The launcher registers only Inter and Pretendard at start (NFR-L1, #1082). JetBrains Mono
+//! (824,600 bytes) is registered the first time a text asks for the `Mono` role
+//! ([`text_role`]), and the running theme gains it in the same batch, because most launcher
+//! screens draw no code. The editor window is a code view and registers it with its theme
+//! ([`editor_theme`]).
+//!
+//! The Inter faces are subset to the code points Pretendard does not already draw (NFR-L1,
+//! #1082): Greek, Cyrillic and the symbols both families carry come from Pretendard, whose
+//! Latin is drawn from Inter. That keeps 1,236,500 of the release's 1,867,500 bytes. The
+//! modification is recorded beside the license in `assets/fonts/Inter-SUBSET.txt`.
 
+use std::cell::Cell;
 use std::sync::OnceLock;
 
 use compose_rust::schema::OverlayTokens;
@@ -61,14 +73,51 @@ pub fn app_font() -> u32 {
     })
 }
 
+thread_local! {
+    /// The `Mono` stack's font id, once something on this thread has asked for it. Kept per
+    /// thread because compose-rust's asset registry is: an id names a font only on the thread
+    /// that registered it.
+    static MONO: Cell<Option<u32>> = const { Cell::new(None) };
+}
+
 /// Registers JetBrains Mono, with Pretendard behind it for Hangul in comments and strings,
-/// once, and returns the stack's font id for the `Mono` role.
+/// once per thread, and returns the stack's font id for the `Mono` role.
+///
+/// Only a code view calls this directly ([`editor_theme`]); launcher text reaches it through
+/// [`text_role`], so the launcher does not register the faces until a text needs them
+/// (NFR-L1, #1082).
 pub fn mono_font() -> u32 {
-    static STACK: OnceLock<u32> = OnceLock::new();
-    *STACK.get_or_init(|| {
-        let _ = app_font();
-        FontStack::new().family(register(&JETBRAINS_MONO)).family(register(&PRETENDARD)).register()
-    })
+    if let Some(id) = MONO.get() {
+        return id;
+    }
+    let _ = app_font();
+    let id = FontStack::new().family(register(&JETBRAINS_MONO)).family(register(&PRETENDARD)).register();
+    MONO.set(Some(id));
+    id
+}
+
+/// Whether the `Mono` stack has been registered on this thread (NFR-L1, #1082).
+pub fn mono_registered() -> bool {
+    MONO.get().is_some()
+}
+
+/// The role a text is set in, with its font ready: the first `Mono` text registers JetBrains
+/// Mono and gives the running theme its `Mono` font (NFR-L1, #1082).
+///
+/// Every launcher text in the `Mono` role names its role through this. The registration and the
+/// new theme ride the batch of the render that asked, and the Renderer applies a whole batch
+/// before it draws any of it, so the first mono text is drawn in JetBrains Mono. The check
+/// reads the running theme, not [`mono_registered`], so a theme set after the first call
+/// without `Mono` gets it back on the next mono text.
+///
+/// TODO(compose-rust#1086): once a theme role can name a lazily registered font, set it in
+/// `app_theme` and remove this helper and its call-site test.
+pub fn text_role(role: TypeRole) -> TypeRole {
+    if role == TypeRole::Mono && compose_rust::theme::current_theme().font(TypeRole::Mono).is_none() {
+        let id = mono_font();
+        compose_rust::theme::set_theme(compose_rust::theme::current_theme().with_font(TypeRole::Mono, id));
+    }
+    role
 }
 
 // Overlay surfaces and ink follow the same tokens as Ember's own components.
@@ -178,20 +227,25 @@ pub const APP_OVERLAY: OverlayTokens = OverlayTokens::new()
     .toast_padding(16, 10)
     .toast_type(13, 18);
 
-/// The toolkit theme the app launches with: the prose roles in Inter and Pretendard, `Mono`
-/// in JetBrains Mono.
+/// The toolkit theme the app launches with: the prose roles in Inter and Pretendard. `Mono`
+/// is JetBrains Mono once a text has asked for it ([`text_role`]); until then the launcher
+/// has not registered it and the theme leaves the role unset (NFR-L1, #1082).
 pub fn app_theme(scheme: ColorScheme) -> Theme {
-    Theme::unified(DesignSystem::Cupertino)
+    let theme = Theme::unified(DesignSystem::Cupertino)
         .with_palette(&APP_PALETTE)
         .with_overlay_tokens(&APP_OVERLAY)
         .with_color_scheme(scheme)
-        .with_default_font(app_font())
-        .with_font(TypeRole::Mono, mono_font())
+        .with_default_font(app_font());
+    match MONO.get() {
+        Some(id) => theme.with_font(TypeRole::Mono, id),
+        None => theme,
+    }
 }
 
-/// The theme of the separate editor window: [`app_theme`] with the editor palette.
+/// The theme of the separate editor window: [`app_theme`] with the editor palette and `Mono`
+/// in JetBrains Mono from the start, because the window is a code view.
 pub fn editor_theme(scheme: ColorScheme) -> Theme {
-    app_theme(scheme).with_palette(&EDITOR_PALETTE)
+    app_theme(scheme).with_palette(&EDITOR_PALETTE).with_font(TypeRole::Mono, mono_font())
 }
 
 #[cfg(test)]
@@ -379,15 +433,79 @@ mod tests {
         }
     }
 
-    /// Design review 2026-11-13 C6: `Mono` is the bundled JetBrains Mono stack, not a system face.
+    /// Runs `f` on a thread of its own, so the thread-local `Mono` registration starts unset.
+    fn on_fresh_thread(f: impl FnOnce() + Send + 'static) {
+        std::thread::spawn(f).join().expect("the test thread");
+    }
+
+    /// Design review 2026-11-13 C6: `Mono` is the bundled JetBrains Mono stack, not a system face,
+    /// in the editor window from the start and in the launcher once a mono text has asked.
     #[test]
     fn design_c6_mono_role_is_the_bundled_jetbrains_mono() {
-        for theme in [app_theme(ColorScheme::Light), editor_theme(ColorScheme::Dark)] {
-            let mono = theme.font(TypeRole::Mono).expect("Mono has a font");
+        on_fresh_thread(|| {
+            let editor = editor_theme(ColorScheme::Dark);
+            let mono = editor.font(TypeRole::Mono).expect("Mono has a font");
             assert_ne!(mono, 0);
             assert_eq!(mono, mono_font());
-            assert_ne!(Some(mono), theme.font(TypeRole::Body));
+            assert_ne!(Some(mono), editor.font(TypeRole::Body));
+            // Registered now, so a launcher theme built afterwards carries it too.
+            assert_eq!(app_theme(ColorScheme::Light).font(TypeRole::Mono), Some(mono));
+        });
+    }
+
+    /// NFR-L1 (#1082): the launcher starts without JetBrains Mono; its theme leaves `Mono`
+    /// unset and nothing has registered the faces.
+    #[test]
+    fn nfr_l1_startup_theme_leaves_mono_unregistered() {
+        on_fresh_thread(|| {
+            let theme = app_theme(ColorScheme::Light);
+            assert!(!mono_registered(), "building the launcher theme registers no mono face");
+            assert_eq!(theme.font(TypeRole::Mono), None);
+            assert_eq!(theme.font(TypeRole::Body), Some(app_font()));
+            assert_eq!(theme.font(TypeRole::Title), Some(app_font()));
+            // Prose roles never ask for mono.
+            for role in [TypeRole::Body, TypeRole::Title, TypeRole::Label, TypeRole::Caption] {
+                assert_eq!(text_role(role), role);
+            }
+            assert!(!mono_registered());
+        });
+    }
+
+    /// NFR-L1 (#1082): the first `Mono` text registers the stack and gives the running theme its
+    /// `Mono` font; the prose font is untouched and a second call changes nothing.
+    #[test]
+    fn nfr_l1_mono_registers_on_first_need() {
+        on_fresh_thread(|| {
+            compose_rust::theme::set_theme(app_theme(ColorScheme::Light));
+            assert_eq!(compose_rust::theme::current_theme().font(TypeRole::Mono), None);
+            assert_eq!(text_role(TypeRole::Mono), TypeRole::Mono);
+            assert!(mono_registered());
+            let running = compose_rust::theme::current_theme();
+            assert_eq!(running.font(TypeRole::Mono), Some(mono_font()));
+            assert_eq!(running.font(TypeRole::Body), Some(app_font()));
+            assert_eq!(running.palette.and_then(|p| p.get(ColorRole::Surface, ColorScheme::Light)), Some(LIGHT.surface));
+            text_role(TypeRole::Mono);
+            assert_eq!(compose_rust::theme::current_theme(), running);
+        });
+    }
+
+    /// NFR-L1 (#1082): every launcher text in the `Mono` role names it through `text_role`, so
+    /// none is drawn before the stack is registered.
+    #[test]
+    fn nfr_l1_launcher_mono_text_goes_through_text_role() {
+        let sources = [
+            ("components.rs", include_str!("cr/components.rs")),
+            ("vcs.rs", include_str!("cr/vcs.rs")),
+        ];
+        for (file, source) in sources {
+            let production = source.split("#[cfg(test)]").next().unwrap();
+            assert!(!production.contains("type_role = TypeRole::Mono"), "{file} names Mono without text_role");
+            assert!(!production.contains("Some(TypeRole::Mono) } else"), "{file} names Mono without text_role");
         }
+        let components = include_str!("cr/components.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(components.contains("type_role = o.type_role.map(crate::ui::fonts::text_role)"), "fields resolve their role");
+        assert_eq!(components.matches("Some(crate::ui::fonts::text_role(TypeRole::Mono))").count(), 2, "Txt and the name measure");
+        assert_eq!(components.matches("type_role = crate::ui::fonts::text_role(TypeRole::Mono)").count(), 2, "MonoLabel and MonoLine");
     }
 
     /// #873: the toast is the mockup's inverted ink pill (dark on light theme, light on dark),

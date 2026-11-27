@@ -278,9 +278,13 @@ while IFS=$'\t' read -r name route envs murl mstore mact <&3; do
 done 3< "$TABLE"
 
 # 3. Join: app on the left, mockup on the right.
+join_rc=0
 if [[ -s "$JOIN_JOBS" ]]; then
     run_helper pillow "$OUT_DIR/logs/join.log" join --jobs "$JOIN_JOBS" --scale "$PAIR_SCALE" \
-        || echo "join: reported failures, see $OUT_DIR/logs/join.log" >&2
+        || join_rc=$?
+    if [[ $join_rc -ne 0 ]]; then
+        echo "join: reported failures (status $join_rc), see $OUT_DIR/logs/join.log" >&2
+    fi
 fi
 
 # 4. index.md
@@ -337,5 +341,5 @@ done < "$ROWS"
 echo "pairs: $pairs, missing: $missing, app only: $app_only, app captures failed: $no_window"
 echo "index: $INDEX"
 if [[ $no_window -gt 0 ]]; then exit 3; fi
-if [[ $missing -gt 0 || $mock_rc -ne 0 ]]; then exit 1; fi
+if [[ $missing -gt 0 || $mock_rc -ne 0 || $join_rc -ne 0 ]]; then exit 1; fi
 exit 0

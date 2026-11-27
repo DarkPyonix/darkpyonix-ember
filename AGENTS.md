@@ -1,7 +1,7 @@
 # AGENTS.md
 
 Working agreements for every agent (Claude Code, Codex, Antigravity, sub-agents) in this
-repository. `CLAUDE.md` only imports this file.
+repository.
 
 ## Project
 
@@ -48,7 +48,7 @@ directory beside this checkout, not the home directory. Large files in a worktre
 copied. If a task seems to need a path outside the repository, ask first.
 
 **The repository root is fixed.** The root holds one product folder, `ember/`, like core: `.github/`,
-`.gitignore`, `.vscode/`, `AGENTS.md`, `CLAUDE.md`, `LICENSE`, `PROJECT.md`, `README.md`, `docs/`,
+`.gitignore`, `.vscode/`, `AGENTS.md`, `LICENSE`, `PROJECT.md`, `README.md`, `docs/`,
 `ember/` and `extensions/`, plus the ignored `.claude/` and `.scratch/`. [user, 2026-10-04: the
 root holds one product folder like core; the previous root set was never approved.] A new root
 entry is added only after the user approves it, and the approval is recorded beside it with the

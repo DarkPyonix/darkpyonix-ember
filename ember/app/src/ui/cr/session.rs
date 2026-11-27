@@ -5931,9 +5931,10 @@ mod tests {
         assert!(!src.contains(concat!("TODO(compose-rust#", "472")));
     }
 
-    /// What a composed screen sends: each node's parent, string props and modifiers.
+    /// What a composed screen sends: each node's parent, position, string props and modifiers.
     struct Tree {
         parents: std::collections::HashMap<u32, u32>,
+        indexes: std::collections::HashMap<u32, u32>,
         strings: Vec<(u32, String)>,
         modifiers: Vec<(u32, String)>,
     }
@@ -5942,11 +5943,12 @@ mod tests {
         fn of(content: fn()) -> Self {
             let mut host = Host::new(move || Box::new(Recomposer::new(content)));
             let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
-            let mut t = Tree { parents: Default::default(), strings: Vec::new(), modifiers: Vec::new() };
+            let mut t = Tree { parents: Default::default(), indexes: Default::default(), strings: Vec::new(), modifiers: Vec::new() };
             for m in batch.iter() {
                 match m {
-                    Mutation::Insert { parent_id, node_id, .. } => {
+                    Mutation::Insert { parent_id, node_id, index } => {
                         t.parents.insert(*node_id, *parent_id);
+                        t.indexes.insert(*node_id, *index);
                     }
                     Mutation::SetProp { node_id, value: PropertyValue::String(v), .. } => t.strings.push((*node_id, v.to_string())),
                     Mutation::SetModifier { node_id, modifier, .. } => t.modifiers.push((*node_id, format!("{modifier:?}"))),
@@ -6008,6 +6010,14 @@ mod tests {
             let t = Tree::of(host);
             crate::ui::window_size::set_opened_for_test(None);
             let first_row = t.common(super::super::a11y::MENU, "새 팀원");
+            let title = t.modifiers.iter().find(|(id, modifier)| {
+                t.parents.get(id) == Some(&first_row)
+                    && modifier.starts_with("SizeIn") && modifier.contains("max_width: 210.0")
+            }).map(|(id, _)| *id).expect("the project title has a 210 dp width cap at 360");
+            let plus = t.nodes_with("새 팀원").into_iter()
+                .find(|id| t.parents.get(id) == Some(&first_row))
+                .expect("the add button is a direct child of the title row");
+            assert_eq!(t.indexes[&plus], t.indexes[&title] + 1, "{view}: + immediately follows the project title");
             for later in ["버전 관리", "웹 페이지"] {
                 for n in t.nodes_with(later) {
                     assert!(!t.ancestors(n).contains(&first_row), "{view}: {later} must leave the title row at 360");

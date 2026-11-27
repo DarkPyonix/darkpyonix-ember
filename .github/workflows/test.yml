@@ -25,6 +25,7 @@
 #   oniguruma            the editor core links Oniguruma (a C library) on Windows and macOS too
 #   windows-node-server  ember-node and ember-server binaries build on Windows (#200), and the
 #                        owner presence tests run against the named-pipe door (FR-S12, #815)
+#   android              build the release-profile arm64 Android APK (FR-L36, #770)
 name: Test
 
 on:
@@ -329,3 +330,78 @@ jobs:
         if: steps.present.outputs.yes == 'true' && matrix.crate == 'transport'
         working-directory: ember/transport
         run: cargo test --locked --features iroh
+
+  android:
+    name: Build Android APK (arm64-v8a)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+      DX_VERSION: "0.7.10"
+      NDK_VERSION: "27.1.12297006"
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check the Android build workflow
+        run: bash .github/scripts/tests/android-dev-ci.test.sh
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ember/app
+          key: android-dev
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Install the NDK
+        run: |
+          set -euo pipefail
+          sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:?the runner image has no Android SDK}}"
+          "$sdk/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$NDK_VERSION" >/dev/null
+          echo "ANDROID_HOME=$sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$sdk/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          ls "$sdk/ndk/$NDK_VERSION/toolchains/llvm/prebuilt"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-android-ember-${{ hashFiles('ember/app/Cargo.lock') }}
+          restore-keys: gradle-android-ember-
+      - name: Install the Dioxus CLI
+        run: |
+          if ! dx --version 2>/dev/null | grep -q "^dioxus $DX_VERSION "; then
+            cargo install dioxus-cli --version "$DX_VERSION" --locked --force
+          fi
+          dx --version
+      # Train branches are new each run, so the Gradle cache above never restores there and every
+      # run downloads the Android Gradle plugin's dependencies from Maven Central, which sometimes
+      # answers 429 Too Many Requests (em-train-24). Only that failure is retried, after a pause;
+      # any other failure ends the step at once.
+      - name: Build the APK
+        run: |
+          set -o pipefail
+          cd ember/app
+          log="$RUNNER_TEMP/build-android.log"
+          for attempt in 1 2 3; do
+            if ./scripts/build-android.sh --release --cargo-args=--locked 2>&1 | tee "$log"; then
+              exit 0
+            fi
+            if ! grep -q 'Received status code 429' "$log"; then
+              exit 1
+            fi
+            echo "::warning::Maven Central rate-limited the Gradle build (attempt $attempt of 3)"
+            sleep $((attempt * 60))
+          done
+          exit 1
+      - name: Verify APK output
+        # The release Rust profile produces a debug-signed APK when no keystore is configured.
+        run: |
+          set -euo pipefail
+          apk=ember/app/target/dx/ember-app/release/android/app/app/build/outputs/apk/debug/app-debug.apk
+          test -s "$apk"
+          unzip -Z1 "$apk" | grep -x 'lib/arm64-v8a/libmain.so'
+          ls -lh "$apk"

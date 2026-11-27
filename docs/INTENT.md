@@ -1198,3 +1198,24 @@ What trust does not protect. Under D37 agents and terminals run with the full au
 **Rejected.** Forking Gateway or JetBrains Client (closed licences, above). Keeping the Gateway command (Gateway is being deprecated).
 
 **Status.** Draft. Not built. SPEC `FR-L7`.
+
+### D58: Ember is rebuilt as units, drivers and extensions; the node receives work *[user, 2026-11-27]*
+
+The owner reviewed the Ember tree on 2026-11-27 and found it built against the intent. This decision records the target structure. Code is not changed yet; each change goes INTENT, then SPEC, then code.
+
+**Units** (`ember-units/`; a unit never references another unit):
+
+- **ember-client**: the interface only. A CLI endpoint and a GUI endpoint: the Ember agent console (compose-rust) and the Ember editor (dioxus-compose).
+- **ember-server**: the main server. It runs every agent CLI. It has a **Tools** section: integrations (GitHub, calendar and others), MCP servers, and CLIs registered on the server. Access to each tool is set per project and per agent.
+- **ember-node**: receives work from the server and carries it out. *[user]* "지금 구현은 Intent와 반대로 구현됨 >> 지금은 노드의 자원을 http로 공개하여 ember-server가 쓰도록 하는데 그건 보안상 미친 구현이고, 내가 의도한건 작업을 노드로 보내는 것." The node does not expose its resources over HTTP; the wire is a schema-defined binary protocol (protobuf or the like), not HTTP. Kinds: Common Agent, Computer Use Agent, Mobile Use Agent, Browser Use Agent. A tool CLI registered on the server is found on the node through the terminal abstraction (environment first). Open question for Mobile Use: terminal emulation, OSE on Node, Python only (the DarkPyonix kernel on python-multiplatform), or accessibility only (adb and the like).
+
+Agent CLIs never run on a phone; they run on ember-server. *[user, 2026-11-27, correcting the leader]*
+
+**Drivers** (`drivers/`, each with its own design pattern):
+
+- **ember-network**: OSI-like layers (transport, security, session to application), injected into each unit. letify covers transport, security and session; where a presentation-level protocol such as file transfer belongs is open and needs a plan.
+- **ember-platform**: the OS abstraction each unit takes as a driver.
+
+**Extensions** (`extensions/`): `intellij-darkpyonix` (with the DarkPyonix theme), `vscode-darkpyonix`, `vscode-darkpyonix-theme`.
+
+**Client screens** *[user, 2026-11-27]*: the integration parts of the main page's dashboard move to the Tools section. The dashboard opens by pulling the main page down (overscroll at the top; pulled all the way it pours out) and by pressing the DarkPyonix logo, not by scrolling down. The app bar logo is a simplified mark; the full DarkPyonix logo is used only at the Ember editor's top left and as the app's taskbar/dock icon.

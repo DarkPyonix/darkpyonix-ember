@@ -31,6 +31,8 @@ use ember_editor_conn::uri::UriComponents;
 const HOVER_EVAL_BASE: u64 = 1 << 41;
 /// Code-OSS's `editor.hover.hidingDelay` default: how long a card waits after the pointer left
 /// its expression before it goes, so the pointer can reach it.
+// TODO(compose-rust#1091): keep Code-OSS's safe triangle once the hover reports the pointer's
+// window position; this fixed grace stands in for it.
 pub(crate) const HIDING_DELAY: Duration = Duration::from_millis(300);
 /// Separates the parts of a tree row's path.
 const SEP: char = '\u{1f}';
@@ -377,6 +379,8 @@ impl DebugHover {
     }
 }
 
+// TODO(compose-rust#1089): hold the language hover until Alt is released once the hover event
+// carries modifier keys (or the editor reports key release).
 /// Whether a key is Alt alone, as the focused code editor offers it (`on_key_preview`).
 pub(crate) fn is_alt_alone(key: compose_rust::Key, text: &str, alt: bool) -> bool {
     alt && key == compose_rust::Key::Other && text.is_empty()
@@ -475,6 +479,7 @@ pub(crate) mod view {
 
     /// Code-OSS's `editor.hoverHighlightBackground` has no colour role of its own in compose-rust
     /// yet, so the expression is marked with the quiet fill of the primary accent.
+    // TODO(compose-rust#1090): Code-OSS's translucent `editor.hoverHighlightBackground`.
     const HIGHLIGHT: ColorRole = ColorRole::PrimaryContainer;
 
     thread_local! {

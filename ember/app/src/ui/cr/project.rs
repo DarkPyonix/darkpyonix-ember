@@ -3297,7 +3297,7 @@ mod design_review_tests {
         // Only the files screen on a phone asks for it; `Header` keeps the left.
         assert!(src.contains("HeaderGap(title, sub, compact, compact, 0.0, false, trailing)"));
         let files = include_str!("files.rs");
-        assert!(files.contains("compact, w < 700.0, 6.0, compact, || {"));
+        assert!(files.contains("HeaderGap(\"파일\", subtitle, compact, compact, 6.0, compact, || {"));
     }
 
     /// The right-aligned form composes and sends the same texts as the left one. Where the

@@ -167,20 +167,48 @@ fn fr_l31_42_the_waiting_card_offers_code_oss_buttons() {
 }
 
 // "Remember my choice in user settings": the warning's checkbox goes with the button, and the
-// answer writes `debug.onTaskErrors` as Code-OSS does; the error dialog has no such box here.
+// answer writes `debug.onTaskErrors` as Code-OSS does; the error dialog's box is "Remember my
+// choice for this task".
 #[test]
 fn fr_l31_42_remember_my_choice_goes_with_the_answer_and_names_the_setting() {
     let mut dom = HtmlDom::new(sheet);
     dom.layout(1000.0, 800.0, 1.0);
+    let label = dom.element_by_id("debug-task-remember").and_then(|n| dom.document().get_node(n).map(|node| node.text_content())).unwrap_or_default();
+    assert!(label.contains(REMEMBER_LABEL), "{label}");
     click(&mut dom, "debug-task-remember");
     click(&mut dom, "debug-task-choice-2");
     assert_eq!(CHOSEN.with_borrow_mut(std::mem::take), [(TaskChoice::Abort, true)]);
 
     let mut dom = HtmlDom::new(error_sheet);
     dom.layout(1000.0, 800.0, 1.0);
-    assert!(dom.element_by_id("debug-task-remember").is_none());
+    let label = dom.element_by_id("debug-task-remember").and_then(|n| dom.document().get_node(n).map(|node| node.text_content())).unwrap_or_default();
+    assert!(label.contains(REMEMBER_TASK_LABEL), "{label}");
+    click(&mut dom, "debug-task-remember");
+    click(&mut dom, "debug-task-choice-1");
+    assert_eq!(CHOSEN.with_borrow_mut(std::mem::take), [(TaskChoice::ConfigureTask, true)]);
 
     assert_eq!(remembered_setting(TaskChoice::DebugAnyway), ("debug.onTaskErrors", "debugAnyway"));
     assert_eq!(remembered_setting(TaskChoice::ShowErrors), ("debug.onTaskErrors", "showErrors"));
     assert_eq!(remembered_setting(TaskChoice::Abort), ("debug.onTaskErrors", "abort"));
+}
+
+// "Remember my choice for this task": the error dialog's answers are kept by message as
+// `debugTaskRunner`'s `DebugChoice` numbers, and a remembered one answers the same message again.
+#[test]
+fn fr_l31_42_remember_my_choice_for_this_task_keeps_the_answer_by_message() {
+    assert_eq!(task_choice_code(TaskChoice::DebugAnyway), Some(0));
+    assert_eq!(task_choice_code(TaskChoice::ConfigureTask), Some(1));
+    assert_eq!(task_choice_code(TaskChoice::Cancel), Some(2));
+    assert_eq!(task_choice_code(TaskChoice::Abort), None, "the warning's answers go to the setting instead");
+    assert_eq!(task_choice_code(TaskChoice::ShowErrors), None);
+    let mut kept = BTreeMap::new();
+    let message = "Could not find the task 'build'.";
+    assert_eq!(remembered_task_choice(&kept, message), None);
+    for choice in [TaskChoice::DebugAnyway, TaskChoice::ConfigureTask, TaskChoice::Cancel] {
+        kept.insert(message.to_owned(), task_choice_code(choice).unwrap());
+        assert_eq!(remembered_task_choice(&kept, message), Some(choice));
+    }
+    assert_eq!(remembered_task_choice(&kept, "Could not find the task 'other'."), None, "per message");
+    kept.insert(message.to_owned(), 9);
+    assert_eq!(remembered_task_choice(&kept, message), None, "an unknown number asks again");
 }

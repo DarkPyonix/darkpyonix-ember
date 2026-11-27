@@ -2154,17 +2154,21 @@ mod tests {
         // compose-rust#483 (#673): outside the demo 파일 고르기 asks for the platform's dialog and
         // its one answer goes through `pick_outcome` (tested in `ui/files.rs`).
         let production = include_str!("files.rs").split("#[cfg(test)]").next().unwrap();
-        assert!(production.contains("compose_rust::FileDialog::open_files().title(FILE_DIALOG_TITLE).show(move |result| {"));
+        let (stage, rest) = production.split_once("\nfn pick_send_files(").unwrap();
+        let stage = stage.split_once("\nfn Stage(").unwrap().1;
+        let picker = rest.split_once("\n}\n").unwrap().0;
+        assert!(stage.contains("pick_send_files(move |draft| s.set(Some(draft)));"));
+        assert!(picker.contains("compose_rust::FileDialog::open_files().title(FILE_DIALOG_TITLE).show(move |result| {"));
         for arm in [
             "compose_rust::FileDialogResult::Chosen { paths, .. } => pick_outcome(Some(paths), true),",
             "compose_rust::FileDialogResult::Cancelled => pick_outcome(None, true),",
             "compose_rust::FileDialogResult::Unavailable => pick_outcome(None, false),",
-            "PickOutcome::Draft(draft) => s.set(Some(draft)),",
+            "PickOutcome::Draft(draft) => on_pick(draft),",
             "PickOutcome::Say(why) => notice::post(why),",
         ] {
-            assert!(production.contains(arm), "{arm}");
+            assert!(picker.contains(arm), "{arm}");
         }
-        assert!(production.contains("let can_pick = FILE_PICKER_AVAILABLE || demo;"), "the button is off where there is no dialog");
+        assert!(stage.contains("let can_pick = FILE_PICKER_AVAILABLE || demo;"), "the button is off where there is no dialog");
     }
 
     #[test]

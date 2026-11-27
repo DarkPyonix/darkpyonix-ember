@@ -141,6 +141,17 @@ impl Diagnostics {
         out
     }
 
+    /// How many error markers there are, counting no further than `take`
+    /// (`markerService.read({ severities: MarkerSeverity.Error, take })`).
+    pub fn error_count(&self, take: usize) -> usize {
+        self.by_doc
+            .values()
+            .flat_map(|owners| owners.values().flatten())
+            .filter(|t| t.marker.severity == 8)
+            .take(take)
+            .count()
+    }
+
     /// `$clear(owner)`. Returns the uri keys that had markers from `owner`.
     pub fn clear(&mut self, owner: &str) -> Vec<String> {
         let mut touched = Vec::new();

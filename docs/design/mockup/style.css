@@ -24,13 +24,15 @@
  --fs-xl:18px;--lh-xl:26px;--fs-2xl:28px;--lh-2xl:34px;--fs-3xl:32px;--lh-3xl:40px;--fs-4xl:40px;--lh-4xl:44px;
  --fw-regular:400;--fw-medium:500;--fw-semibold:600;--ls-tight:-.02em;--ls-normal:0;
  --pad-card:var(--sp4) var(--sp5);--pad-row:var(--sp3) var(--sp4);--gap-card:var(--sp4);--gap-block:var(--sp3);
- --h-btn:40px;--h-ctl:32px;--h-pill:24px;--h-pill-sm:20px;}
+ --h-btn:40px;--h-ctl:32px;--h-pill:24px;--h-pill-sm:20px;
+ --brand-mark:#e8642f;}
 :root[data-theme=dark]{--bg:#151514;--surface:#1f1f1d;--surface-2:#252523;--line:#2f2e2b;--text:#f0eee9;--text-2:#c3bfb7;--muted:#8b877f;
  --hover:#2a2927;--sel:#2f2e2b;--ink:#f0eee9;--ink-text:#151514;
  --c-blue:#6b95e0;--c-orange:#e6a76a;--c-sky:#8fb1df;--c-grey:#8d8b86;--c-red:#e07264;--c-green:#6fb287;
  --c-blue-soft:#1e2a3f;--c-orange-soft:#3a2c1d;--c-sky-soft:#1f2834;--c-grey-soft:#2a2927;--c-red-soft:#3b221e;--c-green-soft:#1d3125;
  --track:#2f2e2b;
- --shadow:0 1px 2px rgba(0,0,0,.3),0 2px 8px rgba(0,0,0,.2);--shadow-lg:0 10px 32px rgba(0,0,0,.45);}
+ --shadow:0 1px 2px rgba(0,0,0,.3),0 2px 8px rgba(0,0,0,.2);--shadow-lg:0 10px 32px rgba(0,0,0,.45);
+ --brand-mark:#ff8a4c;}
 *{box-sizing:border-box}
 html,body{margin:0;height:100%}
 body{background:var(--bg);color:var(--text);font:var(--fw-regular) var(--fs-md)/1.5 var(--font);-webkit-font-smoothing:antialiased}
@@ -582,3 +584,19 @@ span.mp-k{background:none}
 @media (max-width:560px){.cs-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .mp-prof{color:var(--text-2)}
 .logo.logo-img{background:none;border-radius:0;object-fit:contain}
+
+/* ---------- app bar mark (owner 2026-11-27, D58) ----------
+   The simplified DarkPyonix mark: one flat colour (--brand-mark), no tile behind it. The full logo (gradient phoenix) is kept
+   for the Ember editor's top left (BRAND.full) and the taskbar/dock icon only. Pressing the mark opens the Home dashboard;
+   the sidebar toggle is its own button again. */
+.logo.logo-mark{background:none;border-radius:0;color:var(--brand-mark);display:inline-grid;place-items:center;flex:none}
+.logo.logo-mark>svg{width:100%;height:100%;display:block}
+.logobtn{width:36px;height:36px;display:grid;place-items:center;border-radius:var(--r-sm);margin:-2px}
+.logobtn:hover,.logobtn:focus-visible{background:var(--hover)}
+.logobtn:hover .logo,.logobtn:focus-visible .logo{visibility:visible}
+.logobtn .lg-ico{display:none!important}
+.brand .sidetoggle{display:grid!important}
+.brand .sidetoggle svg.i{width:18px;height:18px;display:block}
+@media (max-width:1279px){
+.brand .sidetoggle{width:36px;height:30px}
+}

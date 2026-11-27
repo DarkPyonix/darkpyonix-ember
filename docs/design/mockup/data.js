@@ -131,10 +131,11 @@ window.EMBER_DEMO = {
 
 /* ---- appended data blocks: one block per owner, never edit another block ----
    window.EMBER_DEMO.vcs = {...};          // version-control agent
-   window.EMBER_DEMO.integrations = {...}; // home+integrations agent
+   window.EMBER_DEMO.integrations = {...}; // integrations, shown on the Tools screen (tools.js)
+   window.EMBER_DEMO.tools = {...};        // MCP servers, server CLIs and per-project, per-agent access (tools.js)
    Screens read them as Ember.data.vcs / Ember.data.integrations (Ember.data is the live state). */
 
-/* ===== home+integrations agent block (home.js). Do not edit from other screens. ===== */
+/* ===== integrations block (tools.js since 2026-11-27, D58; was on the Home dashboard). Do not edit from other screens. ===== */
 window.EMBER_DEMO.integrations = {
  list: [
   {id:"github", name:"GitHub", glyph:"git", state:"on", account:"DarkPyonix", sync:"1분 전", scope:"저장소 4개 · PR, Actions, 이슈",
@@ -529,3 +530,39 @@ window.EMBER_DEMO.modes = {
  E.profiles=function(){var S=src(); return S.A.profiles.map(function(p){return shape(p,S)})};
  E.profileFor=function(h){var S=src(), id=(S.A.harnessProfile||{})[h], p=S.A.profiles.filter(function(x){return x.id===id})[0]; return p?shape(p,S):null};
  window.emberProfileFor=E.profileFor})();
+
+/* ===== tools block (tools.js, INTENT D58, owner 2026-11-27). Integrations stay in EMBER_DEMO.integrations above.
+   access[toolKey] = {def, projects:{projectId:state}, agents:{sessionId:state}}; state is allow, ask or deny.
+   toolKey is "int:<id>", "mcp:<id>" or "cli:<id>". A member without an entry follows its project; the stricter side wins. ===== */
+window.EMBER_DEMO.tools = {
+ mcp: [
+  {id:"playwright", name:"Playwright", transport:"stdio", cmd:"npx @playwright/mcp", tools:21, state:"on", note:"브라우저를 열고 페이지를 다룹니다"},
+  {id:"github-mcp", name:"GitHub MCP", transport:"http", cmd:"https://api.githubcopilot.com/mcp", tools:38, state:"on", note:"GitHub 연동의 토큰을 씁니다"},
+  {id:"postgres", name:"Postgres (읽기 전용)", transport:"stdio", cmd:"uv run mcp-server-postgres", tools:4, state:"warn", note:"접속 문자열이 바뀌어 다시 확인해야 합니다"},
+  {id:"figma", name:"Figma", transport:"http", cmd:"http://127.0.0.1:3845/mcp", tools:7, state:"off", note:"Figma 데스크톱 앱이 켜져 있어야 합니다"}
+ ],
+ clis: [
+  {id:"gh", name:"gh", ver:"2.62.0", path:"/opt/homebrew/bin/gh", auth:"DarkPyonix 로그인", state:"on", nodes:{"mac-mini":"PATH","macbook-pro":"PATH","ws-linux-01":"PATH","win-desktop":"없음"}},
+  {id:"gcloud", name:"gcloud", ver:"497.0.0", path:"~/google-cloud-sdk/bin/gcloud", auth:"ncmnd13 · darkpyonix-prod", state:"on", nodes:{"mac-mini":"PATH","macbook-pro":"없음","ws-linux-01":"EMBER_TOOL_GCLOUD","win-desktop":"없음"}},
+  {id:"docker", name:"docker", ver:"27.3.1", path:"/usr/local/bin/docker", auth:"로그인 없음", state:"on", nodes:{"mac-mini":"PATH","macbook-pro":"PATH","ws-linux-01":"PATH","win-desktop":"PATH"}},
+  {id:"kubectl", name:"kubectl", ver:"1.31.2", path:"/opt/homebrew/bin/kubectl", auth:"컨텍스트 dev-cluster", state:"warn", nodes:{"mac-mini":"PATH","macbook-pro":"없음","ws-linux-01":"없음","win-desktop":"없음"}},
+  {id:"uv", name:"uv", ver:"0.5.4", path:"~/.local/bin/uv", auth:"인증 필요 없음", state:"on", nodes:{"mac-mini":"PATH","macbook-pro":"PATH","ws-linux-01":"PATH","win-desktop":"PATH"}}
+ ],
+ access: {
+  "int:github": {def:"ask", projects:{ember:"allow", core:"allow", pyx:"allow", site:"ask", unsorted:"deny"}, agents:{s12:"ask", s17:"deny"}},
+  "int:calendar": {def:"deny", projects:{ember:"allow", unsorted:"allow"}, agents:{s9:"allow"}},
+  "int:slack": {def:"ask", projects:{ember:"allow", core:"allow"}, agents:{}},
+  "int:discord": {def:"deny", projects:{}, agents:{}},
+  "int:mail": {def:"deny", projects:{unsorted:"ask"}, agents:{s9:"allow"}},
+  "int:linear": {def:"deny", projects:{}, agents:{}},
+  "mcp:playwright": {def:"ask", projects:{ember:"allow", site:"allow"}, agents:{s5:"deny"}},
+  "mcp:github-mcp": {def:"ask", projects:{ember:"allow", core:"allow"}, agents:{}},
+  "mcp:postgres": {def:"deny", projects:{core:"ask"}, agents:{s7:"allow"}},
+  "mcp:figma": {def:"deny", projects:{ember:"ask"}, agents:{s2:"allow"}},
+  "cli:gh": {def:"allow", projects:{unsorted:"ask"}, agents:{s12:"ask"}},
+  "cli:gcloud": {def:"deny", projects:{site:"allow", core:"ask"}, agents:{s17:"allow"}},
+  "cli:docker": {def:"ask", projects:{ember:"allow", core:"allow"}, agents:{}},
+  "cli:kubectl": {def:"deny", projects:{core:"ask"}, agents:{}},
+  "cli:uv": {def:"allow", projects:{}, agents:{}}
+ }
+};

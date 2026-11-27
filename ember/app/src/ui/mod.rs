@@ -23,6 +23,7 @@ pub(crate) mod editor_debug;
 pub(crate) mod editor_debug_hover;
 pub(crate) mod editor_debug_view;
 pub(crate) mod editor_debug_tasks;
+pub(crate) mod editor_task_problems;
 pub mod enrol_flow;
 pub mod device_scope;
 pub mod editor_icons;

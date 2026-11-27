@@ -16,14 +16,27 @@
 //!    again for a type the result changed to (`debugConfigurationManager.resolveConfigurationByProviders`);
 //! 4. the variables Ember can answer are substituted ([`launch::VarContext`]);
 //! 5. `preLaunchTask`, through the window's task runner ([`DebugUpdate::RunTask`]); a task that
-//!    fails asks whether to debug anyway ([`DebugUpdate::TaskFailed`]), as
-//!    `debugTaskRunner.runTaskAndCheckErrors` does;
+//!    fails, or leaves error markers in the problems, asks whether to debug anyway
+//!    ([`DebugUpdate::TaskFailed`]) unless `debug.onTaskErrors` answers first ([`OnTaskErrors`]),
+//!    as `debugTaskRunner.runTaskAndCheckErrors` does;
 //! 6. `$resolveDebugConfigurationWithSubstitutedVariables` through the same chain;
 //! 7. `$startDASession`: the extension host creates and starts the adapter.
 //!
 //! `postDebugTask` runs when the session ends, and nothing waits for it. A start with `noDebug`
 //! (Run Without Debugging) sends no breakpoints, as `debugService.sendBreakpoints` skips such
 //! sessions.
+//!
+//! **Compounds** (`debugService.startDebugging`): the compound's own `preLaunchTask` runs once,
+//! through `runTaskAndCheckErrors`, before any of its configurations starts; a failure ends the
+//! start. Each configuration then starts as above, with its own `preLaunchTask`. With `stopAll`
+//! the sessions share a compound root: stopping one stops the others (`DebugCompoundRoot`).
+//!
+//! **Restart** (`debugService.restartSession`): a restart the user asks for runs the
+//! configuration's `preRestartTask` and `postDebugTask` (`runTask`), then its `preLaunchTask` and
+//! `postRestartTask` (`runTaskAndCheckErrors`), and a failure stops the restart. An adapter with
+//! `supportsRestartRequest` runs them before it is sent `restart`; any other session stops first
+//! and starts again after them. A restart the adapter asks for (`terminated` with `restart`) runs
+//! no tasks and passes the value on as `__restart`.
 //!
 //! **DAP**, in the order `debugSession.ts` drives it: `initialize`; `launch` or `attach`; on the
 //! `initialized` event `setBreakpoints` per file, `setFunctionBreakpoints`,
@@ -34,10 +47,10 @@
 //!
 //! **What is not done.** The visualizer methods of the actor stay unimplemented (the actor
 //! router counts them). There is no terminal in this window, so `runInTerminal` is refused and
-//! the adapter has to use its internal console. The `preLaunchTask` of a compound, and the
-//! `preRestartTask` and `postRestartTask` of a restart, are not run; the setting
-//! `debug.onTaskErrors` is not read (the question is always asked). The platform-specific blocks
-//! of a configuration (`windows`, `osx`, `linux`) are not merged.
+//! the adapter has to use its internal console. A restart starts from the configuration as it was
+//! written and resolves it again, where Code-OSS reuses the resolved one unless `launch.json`
+//! changed. The platform-specific blocks of a configuration (`windows`, `osx`, `linux`) are not
+//! merged.
 
 pub mod breakpoints;
 pub mod hover;
@@ -166,6 +179,8 @@ pub struct ConfigInfo {
 
 /// How a task the session layer asked for ended ([`DebugUpdate::RunTask`]): what
 /// `debugTaskRunner.runTask` resolves with, and the errors the problems view holds after it.
+/// The session counts the error markers it holds itself ([`Env::error_markers`]) and takes the
+/// larger of that and `errors`, so the window may send 0.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TaskOutcome {
     /// The task's process ended. `code` is `None` when it ended without one (stopped by the user
@@ -175,6 +190,54 @@ pub enum TaskOutcome {
     Ready { errors: usize },
     /// The task could not be found, run or tracked: the message, Code-OSS's error dialog.
     Failed { message: String },
+}
+
+/// The setting `debug.onTaskErrors`: what a `preLaunchTask` that ended badly does before any
+/// question (`debugTaskRunner.runTaskAndCheckErrors`). A task that could not run is not covered:
+/// it always gets the error dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OnTaskErrors {
+    /// Start the session anyway.
+    DebugAnyway,
+    /// Open the problems view; the start is abandoned.
+    ShowErrors,
+    /// Ask (the default).
+    #[default]
+    Prompt,
+    /// Abandon the start.
+    Abort,
+}
+
+impl OnTaskErrors {
+    /// The setting's value; anything else is the default, `prompt`.
+    pub fn from_setting(value: Option<&Value>) -> Self {
+        match value.and_then(Value::as_str) {
+            Some("debugAnyway") => Self::DebugAnyway,
+            Some("showErrors") => Self::ShowErrors,
+            Some("abort") => Self::Abort,
+            _ => Self::Prompt,
+        }
+    }
+
+    /// The value written to settings.json.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DebugAnyway => "debugAnyway",
+            Self::ShowErrors => "showErrors",
+            Self::Prompt => "prompt",
+            Self::Abort => "abort",
+        }
+    }
+
+    /// What "Remember my choice in user settings" writes for a button of the warning: Debug
+    /// Anyway, Abort, else Show Errors, as Code-OSS maps them.
+    pub fn remembered(choice: TaskChoice) -> Self {
+        match choice {
+            TaskChoice::DebugAnyway => Self::DebugAnyway,
+            TaskChoice::Abort | TaskChoice::Cancel => Self::Abort,
+            TaskChoice::ShowErrors | TaskChoice::ConfigureTask => Self::ShowErrors,
+        }
+    }
 }
 
 /// The buttons of the question a failed `preLaunchTask` asks ([`DebugUpdate::TaskFailed`]).
@@ -263,6 +326,10 @@ pub enum DebugUpdate {
         choices: Vec<TaskChoice>,
         error: bool,
     },
+    /// `debug.onTaskErrors` is `showErrors` and the `preLaunchTask` of a start ended badly: open
+    /// the problems view (`viewsService.openView(Markers.MARKERS_VIEW_ID)`); the start is
+    /// abandoned.
+    ShowProblems,
     /// The answer to [`DebugRequest::SetVariable`]: the new value, or why it was refused. The
     /// window loads the variables again either way, as Code-OSS's `updateViews` does.
     VariableSet {
@@ -448,6 +515,11 @@ pub enum DebugRequest {
 pub struct Env {
     /// Path of the file in the active editor, for `${file}`.
     pub active_file: Option<String>,
+    /// The setting `debug.onTaskErrors`.
+    pub on_task_errors: OnTaskErrors,
+    /// The error markers the problems hold, counted up to 2, as `runTaskAndCheckErrors` reads
+    /// `markerService.read({ severities: Error, take: 2 })`.
+    pub error_markers: usize,
 }
 
 // ---- what the core executes -------------------------------------------------------------------
@@ -543,6 +615,12 @@ struct Origin {
     notify: Notify,
     no_debug: bool,
     vars: VarContext,
+    /// The compound whose `stopAll` ties this session to the others it started
+    /// (`DebugCompoundRoot`).
+    compound: Option<u64>,
+    /// The `preLaunchTask` already ran in a restart's tasks (`restartSession`), so the start does
+    /// not run it again.
+    skip_pre_launch: bool,
 }
 
 #[derive(Debug)]
@@ -621,11 +699,85 @@ enum Dap {
 
 struct Ending {
     deadline: Instant,
-    /// A configuration to start once the session is gone.
-    restart: Option<Value>,
+    /// What starts once the session is gone.
+    restart: Option<Relaunch>,
     /// `$stopDebugging` requests waiting for the end.
     waiters: Vec<u32>,
 }
+
+/// A session that stopped to start again (`restartSession` without `supportsRestartRequest`):
+/// the configuration, and the restart's tasks to run before it starts (none for a restart the
+/// adapter asked for with `terminated`).
+#[derive(Debug, Clone)]
+struct Relaunch {
+    config: Value,
+    tasks: Vec<ChainTask>,
+}
+
+/// A task of a compound or a restart, outside a configuration's own start: the label (`Err` for
+/// a task identifier, which the task runner cannot look up), and whether it goes through
+/// `runTaskAndCheckErrors` (`checked`) or only `runTask`.
+#[derive(Debug, Clone, PartialEq)]
+struct ChainTask {
+    label: Result<String, ()>,
+    checked: bool,
+}
+
+/// What follows a [`Chain`]'s tasks when every one went well.
+#[derive(Debug)]
+enum ChainThen {
+    /// Start the configurations of a compound; the first answers whoever waits.
+    Compound { configs: Vec<Value>, origin: Origin },
+    /// Send the adapter `restart` (`supportsRestartRequest`).
+    RestartRequest { session: String },
+    /// Start a stopped session's configuration again.
+    Relaunch { config: Value, origin: Origin },
+}
+
+/// Tasks run one after another before something starts: a compound's `preLaunchTask`
+/// (`startDebugging`), or a restart's `preRestartTask`, `postDebugTask`, `preLaunchTask` and
+/// `postRestartTask` (`restartSession`'s `runTasks`).
+#[derive(Debug)]
+struct Chain {
+    tasks: VecDeque<ChainTask>,
+    /// The task running, or the one whose question is open.
+    current: Option<ChainTask>,
+    asking: bool,
+    then: ChainThen,
+}
+
+/// The task `key` of a configuration: `None` when it has none, `Err` for a task identifier.
+fn task_ref(config: &Value, key: &str) -> Option<Result<String, ()>> {
+    task_label(config.get(key))
+}
+
+/// A task reference as written: a label, `Err` for a task identifier, `None` for none.
+fn task_label(value: Option<&Value>) -> Option<Result<String, ()>> {
+    match value {
+        None | Some(Value::Null) => None,
+        Some(Value::String(label)) if label.is_empty() => None,
+        Some(Value::String(label)) => Some(Ok(label.clone())),
+        Some(_) => Some(Err(())),
+    }
+}
+
+/// The tasks `restartSession` runs for a restart the user asked for, in its order:
+/// `preRestartTask` and `postDebugTask` through `runTask`, then `preLaunchTask` and
+/// `postRestartTask` through `runTaskAndCheckErrors`.
+fn restart_tasks(config: &Value) -> Vec<ChainTask> {
+    [
+        ("preRestartTask", false),
+        ("postDebugTask", false),
+        ("preLaunchTask", true),
+        ("postRestartTask", true),
+    ]
+    .into_iter()
+    .filter_map(|(key, checked)| task_ref(config, key).map(|label| ChainTask { label, checked }))
+    .collect()
+}
+
+/// The message of a task identifier the task runner cannot look up.
+const TASK_NOT_FOUND: &str = "Could not find the specified task.";
 
 struct Session {
     id: String,
@@ -658,6 +810,8 @@ struct Session {
     stack_after_threads: bool,
     notify: Notify,
     ending: Option<Ending>,
+    /// The compound root of a compound with `stopAll`.
+    compound: Option<u64>,
 }
 
 impl Session {
@@ -692,6 +846,11 @@ pub struct DebugState {
     provides: HashMap<u64, Provide>,
     /// Debug hovers looked up in a frame's scopes, by the id of their [`DebugRequest::Hover`].
     hovers: HashMap<u64, hover::HoverSearch>,
+    /// The tasks of compounds and restarts on their way, by the id their tasks carry
+    /// ([`DebugUpdate::RunTask`]'s `start`).
+    chains: HashMap<u64, Chain>,
+    /// Compound roots whose sessions were stopped together already (`DebugCompoundRoot.stopped`).
+    stopped_compounds: HashSet<u64>,
 }
 
 /// One [`DebugRequest::ProvideConfigurations`]: the activations, then every provider of the type,
@@ -721,8 +880,10 @@ fn is_read_only(v: &Value) -> bool {
 #[derive(Debug, PartialEq)]
 enum TaskCheck {
     Go,
-    /// Cancelled: the start ends without a question.
+    /// Cancelled, or `debug.onTaskErrors` is `abort`: the start ends without a question.
     Abandon,
+    /// `debug.onTaskErrors` is `showErrors`: the problems view opens and the start ends.
+    ShowErrors,
     Ask {
         message: String,
         choices: Vec<TaskChoice>,
@@ -730,7 +891,7 @@ enum TaskCheck {
     },
 }
 
-fn check_task(label: &str, outcome: &TaskOutcome) -> TaskCheck {
+fn check_task(label: &str, outcome: &TaskOutcome, policy: OnTaskErrors, error_markers: usize) -> TaskCheck {
     let (errors, code) = match outcome {
         TaskOutcome::Failed { message } => {
             return TaskCheck::Ask {
@@ -748,13 +909,18 @@ fn check_task(label: &str, outcome: &TaskOutcome) -> TaskCheck {
         TaskOutcome::Exited {
             code: Some(code),
             errors,
-        } => (*errors, Some(*code)),
-        TaskOutcome::Ready { errors } => (*errors, None),
+        } => ((*errors).max(error_markers), Some(*code)),
+        TaskOutcome::Ready { errors } => ((*errors).max(error_markers), None),
     };
-    // `successExitCode || (errorCount === 0 && !failureExitCode)`; a background task has no
-    // summary, so only its errors count.
-    if code == Some(0) || (errors == 0 && code.is_none()) {
+    // `successExitCode || onTaskErrors === 'debugAnyway' || (errorCount === 0 &&
+    // !failureExitCode)`; a background task has no summary, so only its errors count.
+    if code == Some(0) || policy == OnTaskErrors::DebugAnyway || (errors == 0 && code.is_none()) {
         return TaskCheck::Go;
+    }
+    match policy {
+        OnTaskErrors::ShowErrors => return TaskCheck::ShowErrors,
+        OnTaskErrors::Abort => return TaskCheck::Abandon,
+        _ => {}
     }
     let message = if errors > 1 {
         format!("Errors exist after running preLaunchTask '{label}'.")
@@ -948,6 +1114,8 @@ impl DebugState {
             cached: HashSet::new(),
             provides: HashMap::new(),
             hovers: HashMap::new(),
+            chains: HashMap::new(),
+            stopped_compounds: HashSet::new(),
         }
     }
 
@@ -1161,7 +1329,9 @@ impl DebugState {
                 let origin = self.origin(None, Notify::Nobody, None, no_debug, env);
                 self.begin_selected(selector, origin, &mut out);
             }
-            DebugRequest::TaskDone { start, outcome } => self.task_done(start, outcome, &mut out),
+            DebugRequest::TaskDone { start, outcome } => {
+                self.task_done(start, outcome, env, &mut out)
+            }
             DebugRequest::AnswerTask { start, choice } => {
                 self.answer_task(start, choice, &mut out)
             }
@@ -1181,9 +1351,7 @@ impl DebugState {
                 frame_id,
                 &mut out,
             ),
-            DebugRequest::Stop { session: Some(id) } => {
-                self.disconnect(&id, None, None, None, &mut out)
-            }
+            DebugRequest::Stop { session: Some(id) } => self.stop_session(&id, None, &mut out),
             DebugRequest::Stop { session: None } => self.stop_all(&mut out),
             DebugRequest::Restart { session } => self.restart(&session, &mut out),
             DebugRequest::Continue { session, thread_id } => {
@@ -1418,6 +1586,8 @@ impl DebugState {
             notify,
             no_debug,
             vars,
+            compound: None,
+            skip_pre_launch: false,
         }
     }
 
@@ -1708,45 +1878,69 @@ impl DebugState {
                 return out;
             }
         };
-        let mut configs: Vec<Value> = Vec::new();
         let wanted = match &st.selector {
             Some(ConfigSelector::Name(n)) => n.clone(),
             Some(ConfigSelector::Index(i)) => format!("#{i}"),
             _ => String::new(),
         };
-        match &st.selector {
-            Some(ConfigSelector::Name(n)) => {
-                if let Some(c) = file.find(n) {
-                    configs.push(c.clone());
-                } else if let Some(compound) = file.compound(n) {
-                    configs.extend(
-                        compound
-                            .configurations
-                            .iter()
-                            .filter_map(|name| file.find(name))
-                            .cloned(),
-                    );
+        let origin = st.origin;
+        if let Some(ConfigSelector::Name(n)) = &st.selector {
+            if file.find(n).is_none() {
+                if let Some(compound) = file.compound(n) {
+                    self.begin_compound(&file, compound, origin, &mut out);
+                    return out;
                 }
             }
-            Some(ConfigSelector::Index(i)) => configs.extend(file.configurations.get(*i).cloned()),
-            _ => {}
         }
-        if configs.is_empty() {
+        let config = match &st.selector {
+            Some(ConfigSelector::Name(n)) => file.find(n).cloned(),
+            Some(ConfigSelector::Index(i)) => file.configurations.get(*i).cloned(),
+            _ => None,
+        };
+        let Some(config) = config else {
             let message = format!("There is no configuration {wanted} in launch.json.");
-            self.start_failed(st.origin.notify, message, &mut out);
+            self.start_failed(origin.notify, message, &mut out);
             return out;
-        }
-        let mut origin = st.origin;
-        for config in configs {
-            // Only the first configuration of a compound answers the caller.
-            let notify = std::mem::take(&mut origin.notify);
-            let each = Origin {
-                notify,
-                ..origin.clone()
-            };
-            self.begin_config(config, each, &mut out);
-        }
+        };
+        self.begin_config(config, origin, &mut out);
         out
+    }
+
+    /// A compound (`startDebugging`): its configurations are looked up, its own `preLaunchTask`
+    /// runs once through `runTaskAndCheckErrors` and a failure ends the start, then every
+    /// configuration starts with its own `preLaunchTask`. With `stopAll` they share a compound
+    /// root, so stopping one stops the others. A configuration with the compound's own name is
+    /// skipped, as Code-OSS skips it.
+    fn begin_compound(
+        &mut self,
+        file: &LaunchFile,
+        compound: &launch::Compound,
+        mut origin: Origin,
+        out: &mut Vec<Out>,
+    ) {
+        let mut configs = Vec::new();
+        for name in compound.configurations.iter().filter(|n| **n != compound.name) {
+            match file.find(name) {
+                Some(c) => configs.push(c.clone()),
+                None => {
+                    let message =
+                        format!("Could not find launch configuration '{name}' in the workspace.");
+                    self.start_failed(origin.notify, message, out);
+                    return;
+                }
+            }
+        }
+        if compound.stop_all {
+            origin.compound = Some(self.next_start_id());
+        }
+        let tasks: Vec<ChainTask> = task_label(compound.pre_launch_task.as_ref())
+            .map(|label| ChainTask {
+                label,
+                checked: true,
+            })
+            .into_iter()
+            .collect();
+        self.run_chain(tasks, ChainThen::Compound { configs, origin }, out);
     }
 
     fn begin_config(&mut self, mut config: Value, origin: Origin, out: &mut Vec<Out>) {
@@ -1874,12 +2068,11 @@ impl DebugState {
                         // `debugService.createSession` runs the task after the substitution and
                         // before the second chain of providers.
                         // A label, or `Err` for a task identifier (`{ "type": ..., ... }`): the
-                        // task runner finds tasks by label only.
-                        let task = match st.config.get("preLaunchTask") {
-                            None | Some(Value::Null) => None,
-                            Some(Value::String(label)) if label.is_empty() => None,
-                            Some(Value::String(label)) => Some(Ok(label.clone())),
-                            Some(_) => Some(Err(())),
+                        // task runner finds tasks by label only. A restart ran it already.
+                        let task = if st.origin.skip_pre_launch {
+                            None
+                        } else {
+                            task_ref(&st.config, "preLaunchTask")
                         };
                         match task {
                             None => {}
@@ -1894,9 +2087,9 @@ impl DebugState {
                             Some(Err(())) => {
                                 st.phase = Phase::Task;
                                 let outcome = TaskOutcome::Failed {
-                                    message: "Could not find the specified task.".to_owned(),
+                                    message: TASK_NOT_FOUND.to_owned(),
                                 };
-                                self.task_checked(st, outcome, out);
+                                self.task_checked(st, outcome, &Env::default(), out);
                                 return;
                             }
                         }
@@ -1975,6 +2168,7 @@ impl DebugState {
             stack_after_threads: false,
             notify,
             ending: None,
+            compound: st.origin.compound,
         });
         if self.active.is_none() || st.origin.parent.is_none() {
             self.active = Some(id.clone());
@@ -1992,14 +2186,18 @@ impl DebugState {
     // ---- the preLaunchTask ---------------------------------------------------------------------
 
     /// What the `preLaunchTask` of `st` ended with: the start goes on, asks, or is abandoned.
-    fn task_checked(&mut self, st: &mut Start, outcome: TaskOutcome, out: &mut Vec<Out>) {
+    fn task_checked(&mut self, st: &mut Start, outcome: TaskOutcome, env: &Env, out: &mut Vec<Out>) {
         let label = str_of(&st.config, "preLaunchTask").unwrap_or_default();
-        match check_task(&label, &outcome) {
+        match check_task(&label, &outcome, env.on_task_errors, env.error_markers) {
             TaskCheck::Go => {
                 st.phase = Phase::Resolve;
                 self.advance(st, out);
             }
             TaskCheck::Abandon => self.abandon(st, out),
+            TaskCheck::ShowErrors => {
+                out.push(Out::Ui(DebugUpdate::ShowProblems));
+                self.abandon(st, out);
+            }
             TaskCheck::Ask {
                 message,
                 choices,
@@ -2024,17 +2222,33 @@ impl DebugState {
         st.phase = Phase::Done;
     }
 
-    fn task_done(&mut self, start: u64, outcome: TaskOutcome, out: &mut Vec<Out>) {
+    fn task_done(&mut self, start: u64, outcome: TaskOutcome, env: &Env, out: &mut Vec<Out>) {
+        if let Some(chain) = self.chains.remove(&start) {
+            self.chain_task_done(start, chain, outcome, env, out);
+            return;
+        }
         let Some(mut st) = self.starts.remove(&start) else {
             return;
         };
         if st.phase == Phase::Task {
-            self.task_checked(&mut st, outcome, out);
+            self.task_checked(&mut st, outcome, env, out);
         }
         self.keep(st);
     }
 
     fn answer_task(&mut self, start: u64, choice: TaskChoice, out: &mut Vec<Out>) {
+        if let Some(mut chain) = self.chains.remove(&start) {
+            if !chain.asking {
+                self.chains.insert(start, chain);
+            } else if choice == TaskChoice::DebugAnyway {
+                chain.asking = false;
+                chain.current = None;
+                self.chain_next(start, chain, &Env::default(), out);
+            } else {
+                self.chain_abandon(chain, None, out);
+            }
+            return;
+        }
         let Some(mut st) = self.starts.remove(&start) else {
             return;
         };
@@ -2048,6 +2262,138 @@ impl DebugState {
             }
         }
         self.keep(st);
+    }
+
+    // ---- the tasks of a compound or a restart --------------------------------------------------
+
+    /// Run `tasks` one after another, then `then`.
+    fn run_chain(&mut self, tasks: Vec<ChainTask>, then: ChainThen, out: &mut Vec<Out>) {
+        let id = self.next_start_id();
+        let chain = Chain {
+            tasks: tasks.into(),
+            current: None,
+            asking: false,
+            then,
+        };
+        self.chain_next(id, chain, &Env::default(), out);
+    }
+
+    /// The next task of `chain`, or what follows them all.
+    fn chain_next(&mut self, id: u64, mut chain: Chain, env: &Env, out: &mut Vec<Out>) {
+        let Some(task) = chain.tasks.pop_front() else {
+            self.chain_then(chain.then, out);
+            return;
+        };
+        match task.label.clone() {
+            Ok(label) => {
+                out.push(Out::Ui(DebugUpdate::RunTask {
+                    label,
+                    start: Some(id),
+                }));
+                chain.current = Some(task);
+                self.chains.insert(id, chain);
+            }
+            Err(()) => {
+                chain.current = Some(task);
+                let outcome = TaskOutcome::Failed {
+                    message: TASK_NOT_FOUND.to_owned(),
+                };
+                self.chain_task_done(id, chain, outcome, env, out);
+            }
+        }
+    }
+
+    /// How the running task of `chain` ended. A task of `runTask` stops the chain only when it
+    /// could not run (Code-OSS's rejected promise, shown as an error); one of
+    /// `runTaskAndCheckErrors` is checked as a configuration's `preLaunchTask` is.
+    fn chain_task_done(
+        &mut self,
+        id: u64,
+        mut chain: Chain,
+        outcome: TaskOutcome,
+        env: &Env,
+        out: &mut Vec<Out>,
+    ) {
+        let Some(task) = chain.current.clone().filter(|_| !chain.asking) else {
+            self.chains.insert(id, chain);
+            return;
+        };
+        if !task.checked {
+            if let TaskOutcome::Failed { message } = outcome {
+                self.chain_abandon(chain, Some(message), out);
+            } else {
+                chain.current = None;
+                self.chain_next(id, chain, env, out);
+            }
+            return;
+        }
+        let label = task.label.clone().unwrap_or_default();
+        match check_task(&label, &outcome, env.on_task_errors, env.error_markers) {
+            TaskCheck::Go => {
+                chain.current = None;
+                self.chain_next(id, chain, env, out);
+            }
+            TaskCheck::Abandon => self.chain_abandon(chain, None, out),
+            TaskCheck::ShowErrors => {
+                out.push(Out::Ui(DebugUpdate::ShowProblems));
+                self.chain_abandon(chain, None, out);
+            }
+            TaskCheck::Ask {
+                message,
+                choices,
+                error,
+            } => {
+                chain.asking = true;
+                out.push(Out::Ui(DebugUpdate::TaskFailed {
+                    start: id,
+                    message,
+                    choices,
+                    error,
+                }));
+                self.chains.insert(id, chain);
+            }
+        }
+    }
+
+    /// The chain ends without starting anything: a compound's caller hears `false`
+    /// (`TaskRunResult.Failure`); a restart does not happen, and a session that stopped for it
+    /// stays stopped. `message` is a task that could not run.
+    fn chain_abandon(&self, chain: Chain, message: Option<String>, out: &mut Vec<Out>) {
+        if let Some(message) = message {
+            out.push(Out::Ui(DebugUpdate::StartFailed { message }));
+        }
+        if let ChainThen::Compound { origin, .. } = chain.then {
+            self.resolve_notify(origin.notify, false, out);
+        }
+    }
+
+    fn chain_then(&mut self, then: ChainThen, out: &mut Vec<Out>) {
+        match then {
+            ChainThen::Compound { configs, mut origin } => {
+                // Only the first configuration of a compound answers the caller; a compound with
+                // none left succeeds, as `[].every(...)` is true.
+                let none = configs.is_empty();
+                for config in configs {
+                    let notify = std::mem::take(&mut origin.notify);
+                    let each = Origin {
+                        notify,
+                        ..origin.clone()
+                    };
+                    self.begin_config(config, each, out);
+                }
+                self.resolve_notify(std::mem::take(&mut origin.notify), none, out);
+            }
+            ChainThen::RestartRequest { session } => {
+                let Some(i) = self.idx(&session) else { return };
+                let s = &mut self.sessions[i];
+                if s.state == SessionState::Terminated || s.ending.is_some() {
+                    return;
+                }
+                let args = json!({ "arguments": s.configuration.clone() });
+                send_dap(s, "restart", args, Dap::Other, out);
+            }
+            ChainThen::Relaunch { config, origin } => self.begin_config(config, origin, out),
+        }
     }
 
     // ---- setting a variable -------------------------------------------------------------------
@@ -2652,19 +2998,20 @@ impl DebugState {
                 }
             }
             "terminated" => {
-                let restart = body.get("restart").filter(|r| !r.is_null()).map(|r| {
+                // `restart` asks for an automatic restart (`restartSession(session, restartData)`):
+                // no tasks run, and the value reaches the next `launch` or `attach` as
+                // `__restart`, uninterpreted, as the protocol says.
+                let restart = body.get("restart").filter(|r| !r.is_null() && **r != Value::Bool(false)).map(|r| {
                     let mut config = self.sessions[i].unresolved.clone();
-                    if let (Some(target), Some(patch)) = (config.as_object_mut(), r.as_object()) {
-                        for (k, v) in patch {
-                            target.insert(k.clone(), v.clone());
-                        }
+                    if let Some(target) = config.as_object_mut() {
+                        target.insert("__restart".to_owned(), r.clone());
                     }
-                    config
+                    Relaunch {
+                        config,
+                        tasks: Vec::new(),
+                    }
                 });
-                match restart {
-                    Some(config) => self.disconnect(sid, Some(false), Some(config), None, out),
-                    None => self.disconnect(sid, Some(false), None, None, out),
-                }
+                self.disconnect(sid, Some(false), restart, None, out);
             }
             "exited" | "loadedSource" | "module" | "process" | "progressStart"
             | "progressUpdate" | "progressEnd" | "invalidated" | "memory" => {}
@@ -2715,6 +3062,8 @@ impl DebugState {
                     notify: Notify::Dap { handle, request_seq: seq },
                     no_debug,
                     vars: s.vars.clone(),
+                    compound: s.compound,
+                    skip_pre_launch: false,
                 };
                 self.begin_config(config, origin, out);
             }
@@ -2772,6 +3121,27 @@ impl DebugState {
         self.finish_session(sid, out);
     }
 
+    /// Stop one session as the user or an extension asks (`session.terminate`): with a compound
+    /// root of `stopAll`, the compound's other sessions stop too, once
+    /// (`DebugCompoundRoot.sessionStopped`). A session that ends by itself does not stop them.
+    fn stop_session(&mut self, sid: &str, waiter: Option<u32>, out: &mut Vec<Out>) {
+        let root = self.idx(sid).and_then(|i| self.sessions[i].compound);
+        self.disconnect(sid, None, None, waiter, out);
+        let Some(root) = root else { return };
+        if !self.stopped_compounds.insert(root) {
+            return;
+        }
+        let others: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|s| s.compound == Some(root) && s.id != sid && s.state != SessionState::Terminated)
+            .map(|s| s.id.clone())
+            .collect();
+        for other in others {
+            self.disconnect(&other, None, None, None, out);
+        }
+    }
+
     fn stop_all(&mut self, out: &mut Vec<Out>) {
         let ids: Vec<String> = self
             .sessions
@@ -2791,7 +3161,7 @@ impl DebugState {
         &mut self,
         sid: &str,
         terminate: Option<bool>,
-        restart: Option<Value>,
+        restart: Option<Relaunch>,
         waiter: Option<u32>,
         out: &mut Vec<Out>,
     ) {
@@ -2835,10 +3205,12 @@ impl DebugState {
         }
         let terminate =
             terminate.unwrap_or(s.request == "launch") && s.cap("supportTerminateDebuggee");
+        // `terminate(true)` and `disconnect(true)` of a restart tell the adapter so.
+        let restarting = restart.is_some();
         let args = if terminate {
-            json!({ "restart": false, "terminateDebuggee": true })
+            json!({ "restart": restarting, "terminateDebuggee": true })
         } else {
-            json!({ "restart": false })
+            json!({ "restart": restarting })
         };
         send_dap(s, "disconnect", args, Dap::Disconnect, out);
         s.ending = Some(Ending {
@@ -2848,19 +3220,28 @@ impl DebugState {
         });
     }
 
+    /// A restart the user asked for (`restartSession` without restart data). The restart's tasks
+    /// come from the session's configuration: `preRestartTask` and `postDebugTask` through
+    /// `runTask`, then `preLaunchTask` and `postRestartTask` through `runTaskAndCheckErrors`. An
+    /// adapter with `supportsRestartRequest` runs them first and is then sent `restart`; any
+    /// other session stops first, runs them, and starts its configuration again without running
+    /// its `preLaunchTask` a second time. A task that fails stops the restart.
     fn restart(&mut self, sid: &str, out: &mut Vec<Out>) {
         let Some(i) = self.idx(sid) else { return };
-        let s = &mut self.sessions[i];
+        let s = &self.sessions[i];
         if s.state == SessionState::Terminated || s.ending.is_some() {
             return;
         }
+        let tasks = restart_tasks(&s.configuration);
+        let config = s.unresolved.clone();
         if s.da_started && s.cap("supportsRestartRequest") {
-            let args = json!({ "arguments": s.configuration.clone() });
-            send_dap(s, "restart", args, Dap::Other, out);
+            let then = ChainThen::RestartRequest {
+                session: sid.to_owned(),
+            };
+            self.run_chain(tasks, then, out);
             return;
         }
-        let config = s.unresolved.clone();
-        self.disconnect(sid, None, Some(config), None, out);
+        self.disconnect(sid, None, Some(Relaunch { config, tasks }), None, out);
     }
 
     /// The end of a session: the extension host stops the adapter and hears of the end, waiting
@@ -2878,19 +3259,20 @@ impl DebugState {
         self.hovers.retain(|_, h| h.session != sid);
         let notify = std::mem::take(&mut s.notify);
         let ending = s.ending.take();
-        let (handle, da_started, parent, folder, vars) = (
+        let (handle, da_started, parent, folder, vars, compound) = (
             s.handle,
             s.da_started,
             s.parent.clone(),
             s.folder.clone(),
             s.vars.clone(),
+            s.compound,
         );
         let post_task = str_of(&s.configuration, "postDebugTask").filter(|t| !t.is_empty());
         if da_started {
             out.push(Out::Rpc(wire::stop_da_session(handle)));
         }
         // `onDidEndAdapter` runs the `postDebugTask` and waits for nothing but its failure; a
-        // restart runs it too (`restartSession`), before the start runs the `preLaunchTask`.
+        // restart the user asked for runs it again among its tasks, as `restartSession` does.
         if let Some(label) = post_task.filter(|_| da_started) {
             out.push(Out::Ui(DebugUpdate::RunTask { label, start: None }));
         }
@@ -2936,15 +3318,19 @@ impl DebugState {
                     result: Ok(Reply::Empty),
                 });
             }
-            if let Some(config) = ending.restart {
+            if let Some(Relaunch { config, tasks }) = ending.restart {
+                // `launchOrAttachToSession` after the tasks: the `preLaunchTask` ran among them,
+                // or not at all for a restart the adapter asked for.
                 let origin = Origin {
                     parent,
                     folder,
                     notify: Notify::Nobody,
                     no_debug: false,
                     vars,
+                    compound,
+                    skip_pre_launch: true,
                 };
-                self.begin_config(config, origin, out);
+                self.run_chain(tasks, ChainThen::Relaunch { config, origin }, out);
             }
         }
         for child in children {
@@ -3011,7 +3397,13 @@ impl DebugState {
                 .and_then(|p| self.idx(p))
                 .is_some_and(|i| self.sessions[i].no_debug()),
         };
-        let origin = self.origin(parent, Notify::Ext { req }, folder, no_debug, env);
+        // A child shares its parent's compound root (`compoundRoot: parentSession?.compoundRoot`).
+        let compound = parent
+            .as_deref()
+            .and_then(|p| self.idx(p))
+            .and_then(|i| self.sessions[i].compound);
+        let mut origin = self.origin(parent, Notify::Ext { req }, folder, no_debug, env);
+        origin.compound = compound;
         self.begin_selected(selector, origin, &mut out);
         out
     }
@@ -3020,7 +3412,7 @@ impl DebugState {
     pub fn ext_stop_debugging(&mut self, req: u32, session: Option<String>) -> Vec<Out> {
         let mut out = Vec::new();
         match session {
-            Some(id) => self.disconnect(&id, None, None, Some(req), &mut out),
+            Some(id) => self.stop_session(&id, Some(req), &mut out),
             None => {
                 self.stop_all(&mut out);
                 out.push(Out::Respond {

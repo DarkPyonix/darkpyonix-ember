@@ -608,6 +608,132 @@ impl TerminalState {
 pub struct TerminalSession {
     screen: screen::Screen,
     pub state: TerminalState,
+    /// The output as lines, for a task's problem matchers (FR-L31.42); only a task terminal keeps
+    /// them.
+    pub output_lines: Option<OutputLines>,
+}
+
+/// Escape sequence state of [`OutputLines`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum Escape {
+    #[default]
+    None,
+    /// After ESC.
+    Start,
+    /// A control sequence (`ESC [`), up to its final byte.
+    Csi,
+    /// An operating system command (`ESC ]`), up to BEL or `ESC \`.
+    Osc,
+    /// ESC inside an operating system command.
+    OscEsc,
+    /// One byte more (a character set designation such as `ESC ( B`).
+    One,
+}
+
+/// The most finished lines kept before the problem matchers take them.
+const OUTPUT_LINES_KEPT: usize = 10_000;
+
+/// A task's output as the lines the terminal finished, without escape sequences: what Code-OSS's
+/// `terminal.onLineData` gives the problem matchers (FR-L31.42). A carriage return not followed
+/// by a line feed starts the line again, as text written over it would replace it; trailing
+/// spaces are dropped, as `translateToString(true)` drops them.
+#[derive(Debug, Default)]
+pub struct OutputLines {
+    partial: Vec<u8>,
+    ready: std::collections::VecDeque<String>,
+    escape: Escape,
+    carriage_return: bool,
+    /// Bytes have arrived: a later snapshot (after a reconnect) repeats them and is not fed.
+    pub fed: bool,
+}
+
+impl OutputLines {
+    pub fn feed(&mut self, bytes: &[u8]) {
+        self.fed = true;
+        for &b in bytes {
+            match self.escape {
+                Escape::Start => {
+                    self.escape = match b {
+                        b'[' => Escape::Csi,
+                        b']' => Escape::Osc,
+                        b'(' | b')' | b'*' | b'+' => Escape::One,
+                        _ => Escape::None,
+                    };
+                    continue;
+                }
+                Escape::Csi => {
+                    if (0x40..=0x7e).contains(&b) {
+                        self.escape = Escape::None;
+                    }
+                    continue;
+                }
+                Escape::Osc => {
+                    self.escape = match b {
+                        0x07 => Escape::None,
+                        0x1b => Escape::OscEsc,
+                        _ => Escape::Osc,
+                    };
+                    continue;
+                }
+                Escape::OscEsc => {
+                    self.escape = if b == b'\\' { Escape::None } else { Escape::Osc };
+                    continue;
+                }
+                Escape::One => {
+                    self.escape = Escape::None;
+                    continue;
+                }
+                Escape::None => {}
+            }
+            match b {
+                0x1b => self.escape = Escape::Start,
+                b'\n' => {
+                    self.carriage_return = false;
+                    self.end_line();
+                }
+                b'\r' => self.carriage_return = true,
+                0x08 => {
+                    // Back over one character, all of its UTF-8 bytes.
+                    while self.partial.last().is_some_and(|c| c & 0xc0 == 0x80) {
+                        self.partial.pop();
+                    }
+                    self.partial.pop();
+                }
+                b'\t' => self.push(b),
+                c if c < 0x20 || c == 0x7f => {}
+                c => self.push(c),
+            }
+        }
+    }
+
+    fn push(&mut self, b: u8) {
+        if self.carriage_return {
+            self.carriage_return = false;
+            self.partial.clear();
+        }
+        self.partial.push(b);
+    }
+
+    fn end_line(&mut self) {
+        let line = String::from_utf8_lossy(&self.partial).trim_end_matches(' ').to_owned();
+        self.partial.clear();
+        if self.ready.len() == OUTPUT_LINES_KEPT {
+            self.ready.pop_front();
+        }
+        self.ready.push_back(line);
+    }
+
+    /// The process ended: a last line without a line break counts too.
+    pub fn finish(&mut self) {
+        if !self.partial.is_empty() {
+            self.end_line();
+        }
+    }
+
+    /// The finished lines since the last call.
+    pub fn take(&mut self) -> Vec<String> {
+        self.ready.drain(..).collect()
+    }
 }
 
 impl Default for TerminalSession {
@@ -618,7 +744,7 @@ impl Default for TerminalSession {
 
 impl TerminalSession {
     pub fn new() -> Self {
-        Self { screen: screen::Screen::new(80, 24), state: TerminalState::default() }
+        Self { screen: screen::Screen::new(80, 24), state: TerminalState::default(), output_lines: None }
     }
 
     fn refresh(&mut self) {
@@ -683,12 +809,18 @@ impl TerminalSession {
                 }
             }
             TermEvent::Snapshot { size, data } => {
+                if let Some(lines) = self.output_lines.as_mut().filter(|l| !l.fed) {
+                    lines.feed(&data);
+                }
                 self.screen = screen::Screen::new(size.cols, size.rows);
                 self.screen.feed(&data);
                 self.state.status = TerminalStatus::Connected;
                 self.refresh();
             }
             TermEvent::Output { data } => {
+                if let Some(lines) = self.output_lines.as_mut() {
+                    lines.feed(&data);
+                }
                 self.screen.feed(&data);
                 self.state.refusal = None;
                 self.refresh();
@@ -710,6 +842,9 @@ impl TerminalSession {
             TermEvent::Clients { clients } => self.state.clients = clients,
             TermEvent::Title { title } => self.state.title = title,
             TermEvent::Exit { code, signal } => {
+                if let Some(lines) = self.output_lines.as_mut() {
+                    lines.finish();
+                }
                 self.state.exit = Some((code, signal));
                 self.state.status = TerminalStatus::Disconnected;
             }
@@ -809,6 +944,18 @@ impl TerminalHandle {
         self.shared.pick.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
+    /// Whether `other` is a clone of this handle (the same attachment).
+    pub fn same(&self, other: &TerminalHandle) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared)
+    }
+
+    /// The lines of a task terminal's output since the last call (FR-L31.42); always empty for
+    /// another terminal.
+    pub fn take_output_lines(&self) -> Vec<String> {
+        let mut session = self.shared.session.lock().unwrap_or_else(|e| e.into_inner());
+        session.output_lines.as_mut().map(OutputLines::take).unwrap_or_default()
+    }
+
     /// Bumped on every change; the UI polls it to know when to re-read [`snapshot`](Self::snapshot).
     pub fn revision(&self) -> u64 {
         self.shared.revision.load(Ordering::Acquire)
@@ -906,8 +1053,12 @@ fn start_with(
     on_change: Option<ChangeCallback>,
 ) -> TerminalHandle {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut session = TerminalSession::new();
+    if launch.is_some() {
+        session.output_lines = Some(OutputLines::default());
+    }
     let shared = Arc::new(Shared {
-        session: Mutex::new(TerminalSession::new()),
+        session: Mutex::new(session),
         revision: AtomicU64::new(0),
         // The size until the panel measures itself (FR-L31.20, `ui::term_fit`).
         size: Mutex::new((80, 24)),

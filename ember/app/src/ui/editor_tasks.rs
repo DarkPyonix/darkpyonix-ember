@@ -10,8 +10,9 @@
 //!
 //! Not supported yet (the row says so and does not run): tasks of other types (task providers
 //! contributed by extensions, `npm`, `typescript`, ...), `dependsOn`, and variables other than the
-//! workspace and file ones. `problemMatcher`, `presentation` and the `windows` / `osx` / `linux`
-//! overrides are read past, not applied.
+//! workspace and file ones. `presentation` and the `windows` / `osx` / `linux` overrides are
+//! read past, not applied. `problemMatcher` runs the task's output through Code-OSS's problem
+//! matchers ([`super::editor_task_problems`], FR-L31.42).
 
 use std::collections::BTreeMap;
 
@@ -55,9 +56,11 @@ pub struct TaskDef {
     /// `group` (`build`, `test`, ...).
     pub group: Option<String>,
     pub is_default: bool,
-    /// `isBackground`: a watch task that does not exit. A debug start waits for such a task through
-    /// its problem matcher in Code-OSS; this runner reads no matcher (FR-L31.42).
+    /// `isBackground`: a watch task that does not exit. A debug start waits for such a task until
+    /// its problem matcher's `endsPattern` matches (FR-L31.42).
     pub is_background: bool,
+    /// `problemMatcher` as written: a `$name`, a definition, or a list of both (FR-L31.42).
+    pub problem_matcher: Option<Value>,
     /// Why this task cannot run here yet, in Korean.
     pub unsupported: Option<String>,
 }
@@ -260,6 +263,7 @@ pub fn parse_tasks_json(text: &str) -> Result<Vec<TaskDef>, String> {
             group,
             is_default,
             is_background: t.get("isBackground").and_then(|b| b.as_bool()).unwrap_or(false),
+            problem_matcher: t.get("problemMatcher").filter(|m| !m.is_null()).cloned(),
             unsupported,
         });
     }
@@ -540,6 +544,7 @@ pub mod view {
             let mut revision = revision;
             *revision.write() += 1;
         });
+        let cwd = l.cwd.clone();
         let handle = crate::terminal_stream::start_task_on(
             crate::terminal_stream::TermReach::for_base(&s.server_url),
             &s.computer,
@@ -547,6 +552,8 @@ pub mod view {
             term_launch(l),
             Some(on_change),
         );
+        // Its output goes through the task's problem matchers (FR-L31.42).
+        crate::ui::editor_task_problems::track(s, task, &handle, &cwd);
         // The earlier run's terminal is detached, not killed: it keeps running on the computer,
         // as a Code-OSS task terminal does until it is closed.
         RUN.with(|r| {

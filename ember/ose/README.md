@@ -177,40 +177,26 @@ OSE_REGRESS_MODE=deep OSE_REGRESS_OUT=.scratch/regress-deep ember/ose/regress.sh
   reports the page shown (`$onDidChangeWebviewPanelViewStates`) and ready, sends
   `{"command":"loadRepos","check":false}` with `$onMessage` and waits for a `$postMessage` whose
   `command` is `loadRepos` (Git Graph's `respondLoadRepos`, `src/gitGraphView.ts`).
-- **Debug** (`ms-python.debugpy`, not built): reports `not-run`, or `not-run: no python3` when the
-  machine has no `python3` (the check needs one for debugpy's adapter and the program). The
-  editor client answers every `MainThreadDebugService` call with a default reply and never calls
-  `ExtHostDebugService` (#445). What one session of `sample.py` with a breakpoint on line 2 needs,
-  as the workbench does it at 1.139.1:
-  1. Record what the extension host registers: `$registerDebugTypes(types)`,
-     `$registerDebugConfigurationProvider(type, triggerKind, hasProvide, hasResolve, hasResolve2, handle)`,
-     `$registerDebugAdapterDescriptorFactory(type, handle)` (and their `$unregister*`).
-  2. Resolve the configuration `{type: "debugpy", request: "launch", program, console: "internalConsole", stopOnEntry: false}`
-     through the provider's handle: `$resolveDebugConfiguration(handle, folder, config, token)`,
-     `$substituteVariables(folder, config)`, then
-     `$resolveDebugConfigurationWithSubstitutedVariables(handle, folder, config, token)`.
-  3. Start the adapter: `$startDASession(adapterHandle, IDebugSessionFullDto {id, type, name, parent, folderUri, configuration})`
-     (the extension host asks the descriptor factory itself), then `$acceptDebugSessionStarted(session)`.
-  4. Speak DAP through `$sendDAMessage(adapterHandle, message)` and receive `$acceptDAMessage(adapterHandle, message)`
-     (and `$acceptDAError`, `$acceptDAExit`): `initialize`, `launch`, wait for the `initialized`
-     event, `setBreakpoints` (source `sample.py`, line 2), `configurationDone`, wait for the
-     `stopped` event, `threads`, `stackTrace` (the top frame is `answer` at line 2), `disconnect`,
-     then `$stopDASession(adapterHandle)` and `$acceptDebugSessionTerminated(session)`.
-     A `runInTerminal` reverse request would need `$runInTerminal`; `internalConsole` avoids it.
-     Unverified: whether debugpy's resolver finds an interpreter through `ms-python.python` with
-     no workbench UI, or needs `"python": "<path of python3>"` in the configuration.
+- **Debugpy activation** is covered by the NFR-W1 activation run. It detects an activation
+  attempt in the extension host log and checks for reported failures. The NFR-W1 deep harness
+  records `not-run` for debugpy, with `no python3` as the reason if the runner lacks Python.
 
-  Shapes: [`extHost.protocol.ts`](https://github.com/microsoft/vscode/blob/1.139.1/src/vs/workbench/api/common/extHost.protocol.ts)
-  (`MainThreadDebugServiceShape` L2271, `ExtHostDebugServiceShape` L3320, the breakpoint and
-  session DTOs L3241-3318), [`extHostDebugService.ts`](https://github.com/microsoft/vscode/blob/1.139.1/src/vs/workbench/api/common/extHostDebugService.ts)
-  (`$startDASession` L597, `$sendDAMessage` L697) and
-  [`mainThreadDebugService.ts`](https://github.com/microsoft/vscode/blob/1.139.1/src/vs/workbench/api/browser/mainThreadDebugService.ts)
-  (the resolve calls L197-295, the adapter L508-517). Actor ids: `MainThreadDebugService` 14,
-  `ExtHostDebugService` 92 (`ember/editor-conn/src/rpc_ids.rs`).
+The separate `Live debugging with ms-python.debugpy (FR-L31.42)` CI step runs
+`fr_l31_42_live_python_stops_at_a_breakpoint_reads_a_variable_and_runs_on` on the four Unix
+targets. It starts an editor session against the built OSE server and installs Open VSX
+`ms-python.debugpy@2026.6.0` and `ms-python.python@2026.10.0`. It launches a Python file using
+a named configuration, observes a breakpoint stop, reads the local `x = 41`, and continues
+until the session ends with `42` in the console. The test exercises the editor session without
+opening an app window. Its result is in the CI step log.
 
-What the run does not show: behaviour after activation (a language server answering, a formatter
-formatting), an activation that starts and never finishes, and a comparison with the same
-extensions under Microsoft's build.
+`expected.json` records the manual macOS UI pass under `live_ui`. It includes breakpoint and
+watch restoration, the call stack, adapter exception filters, console output and session cleanup.
+The stopped-line tint and gutter arrow were missing (#1151).
+[Recorded macOS debugpy run](https://github.com/DarkPyonix/darkpyonix-ember/issues/445#issuecomment-7215358302)
+
+The activation run does not detect a silent hang after activation starts or verify features such
+as formatting and language server responses. An official-build comparison is pending the owner's
+decision in #84.
 
 ## Release check on a Raspberry Pi and a Mac
 

@@ -8,8 +8,8 @@
 #
 # Live checks (SPEC FR-W4 acceptance step 4, NFR-W1; #83, #84): the archive this run built is
 # downloaded, verified and unpacked, the Ember editor session's live tests run against it, and
-# the extension regression installs the pinned list and reads the extension host log, then
-# its deep run opens a webview and (once built) a debug session through the same client (#929).
+# the extension regression checks activation logs and opens a Git Graph webview. The separate
+# FR-L31.42 step drives a live debugpy session.
 name: OSE build
 
 on:
@@ -224,10 +224,12 @@ jobs:
           python-version: "3.12"
 
       - name: Live debugging with ms-python.debugpy (FR-L31.42)
-        # #445: a Python file stops at a breakpoint through the unmodified debugpy extension from
-        # Open VSX, a variable is read and the run continues. Not a gate until its first green run
-        # (gates change in their own PR); the leader flips it after that run.
+        # Use the Open VSX pair from the recorded #445 macOS editor run. This step exercises
+        # the editor session through the real extension host. Gate changes are separate.
         continue-on-error: true
+        env:
+          EMBER_DEBUGPY_EXTENSION: ms-python.debugpy@2026.6.0
+          EMBER_PYTHON_EXTENSION: ms-python.python@2026.10.0
         run: cargo test --locked --manifest-path ember/editor/Cargo.toml --test fr_l31_42_live_debug -- --ignored --nocapture
 
       - name: Live extension scan (FR-L31.14)
@@ -248,8 +250,7 @@ jobs:
         run: node ember/proxy/tests/live_detach_cdp.mjs
 
       - name: Extension regression (NFR-W1)
-        # Not yet a release gate: expected.json holds unverified entries until the first real run,
-        # and the owner has not confirmed the list (#84). Remove continue-on-error after that.
+        # The owner has yet to confirm the extension list and make this a release gate (#84).
         continue-on-error: true
         env:
           OSE_REGRESS_OUT: ${{ runner.temp }}/regress-out
@@ -257,8 +258,8 @@ jobs:
         run: ember/ose/regress.sh "${{ steps.ose.outputs.dir }}"
 
       - name: Extension deep checks (NFR-W1)
-        # The webview and debug checks of #929 through the same client. Not a gate until its first
-        # green run; the debug check reports not-run until the client has a debug service (#445).
+        # This harness checks Git Graph's webview and reports not-run for debugpy.
+        # The separate FR-L31.42 step drives the debug session.
         continue-on-error: true
         env:
           OSE_REGRESS_MODE: deep

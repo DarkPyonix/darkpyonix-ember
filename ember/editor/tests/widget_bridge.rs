@@ -851,9 +851,12 @@ fn fr_l31_42_bridge_keeps_a_focused_lower_frame_apart_from_the_top_frame() {
     }));
     assert_eq!(bridge.debug().stopped_line(&util), Some(9));
     assert_eq!(bridge.debug().focused_frame(), None, "the top frame is focused");
+    // The debug hover evaluates in the focused frame (Code-OSS `focusedStackFrame`).
+    assert_eq!(bridge.debug().focused_location().map(|at| (at.frame_id, at.uri)), Some((1, util.clone())));
 
     bridge.apply(sessions(stopped(), Some(2)));
     assert_eq!(bridge.debug().focused_line(&main), Some(4));
+    assert_eq!(bridge.debug().focused_location().map(|at| (at.frame_id, at.uri)), Some((2, main.clone())));
     assert_eq!(bridge.debug().focused_line(&util), None);
     assert_eq!(bridge.debug().stopped_line(&util), Some(9), "the top frame keeps its mark");
 
@@ -863,4 +866,5 @@ fn fr_l31_42_bridge_keeps_a_focused_lower_frame_apart_from_the_top_frame() {
     bridge.apply(sessions(SessionState::Running, Some(2)));
     assert_eq!(bridge.debug().focused_frame(), None, "running on clears both marks");
     assert_eq!(bridge.debug().stopped_at, None);
+    assert_eq!(bridge.debug().focused_location(), None, "no hover while running");
 }

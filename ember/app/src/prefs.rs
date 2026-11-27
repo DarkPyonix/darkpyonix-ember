@@ -89,6 +89,11 @@ pub struct Prefs {
     /// restricted mode. Older files have none: every folder asks once.
     #[serde(default)]
     pub workspace_trust: BTreeMap<String, bool>,
+    /// The debugger state each editor workspace keeps across a reopen (FR-L31.42), keyed by
+    /// [`crate::ui::workspace_trust::trust_key`] (computer and folder): Code-OSS's `DebugStorage`
+    /// in its workspace storage. Older files have none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub debug_storage: BTreeMap<String, DebugStore>,
     /// Extension ids disabled in the Ember 에디터, per computer id (FR-L31.14). Kept on the device
     /// because Code-OSS keeps its disabled list in the workbench's own storage, not on the server.
     /// Ids are stored in lower case and sorted.
@@ -102,6 +107,25 @@ pub struct Prefs {
     /// The relay for that reach, as `EMBER_RELAY_URL` takes it. `None`: the environment's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_relay: Option<String>,
+}
+
+/// What one editor workspace keeps of its debugger (FR-L31.42), as Code-OSS's `DebugStorage`
+/// keeps it under `debug.breakpoint`, `debug.functionbreakpoint`, `debug.exceptionbreakpoint`
+/// and `debug.watchexpressions`: the breakpoints with their condition, hit condition, log message
+/// and enabled flag, the function breakpoints, the exception filters chosen, and the watch
+/// expressions in their order.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DebugStore {
+    #[serde(flatten)]
+    pub breakpoints: ember_editor::debugger::storage::StoredBreakpoints,
+    #[serde(default, rename = "watchExpressions", skip_serializing_if = "Vec::is_empty")]
+    pub watch_expressions: Vec<String>,
+}
+
+impl DebugStore {
+    pub fn is_empty(&self) -> bool {
+        self.breakpoints.is_empty() && self.watch_expressions.is_empty()
+    }
 }
 
 fn format_default() -> u32 {
@@ -129,6 +153,7 @@ impl Default for Prefs {
             hot_exit_backup_days: hot_exit_backup_days_default(),
             editor_zoom_level: 0,
             workspace_trust: BTreeMap::new(),
+            debug_storage: BTreeMap::new(),
             disabled_extensions: BTreeMap::new(),
             server_peer: None,
             server_relay: None,
@@ -229,6 +254,32 @@ impl Prefs {
 
     pub fn set_character_style(&mut self, project: &str, style: crate::ui::characters::CharStyle) {
         self.character_styles.insert(project.to_string(), style);
+    }
+
+    /// The debugger state the workspace `folder` on `computer` kept (FR-L31.42); empty when it
+    /// kept none.
+    pub fn debug_store(&self, computer: &str, folder: &str) -> DebugStore {
+        let key = crate::ui::workspace_trust::trust_key(computer, folder);
+        self.debug_storage.get(&key).cloned().unwrap_or_default()
+    }
+
+    /// Change what the workspace keeps of its debugger. Returns whether anything changed, so a
+    /// caller saves the file only then; a workspace that keeps nothing has no entry (Code-OSS
+    /// removes a key that has nothing to store).
+    pub fn update_debug_store(&mut self, computer: &str, folder: &str, f: impl FnOnce(&mut DebugStore)) -> bool {
+        let key = crate::ui::workspace_trust::trust_key(computer, folder);
+        let before = self.debug_storage.get(&key).cloned().unwrap_or_default();
+        let mut after = before.clone();
+        f(&mut after);
+        if after == before {
+            return false;
+        }
+        if after.is_empty() {
+            self.debug_storage.remove(&key);
+        } else {
+            self.debug_storage.insert(key, after);
+        }
+        true
     }
 
     /// The extension ids disabled on `computer` (FR-L31.14), in lower case.
@@ -547,6 +598,55 @@ mod tests {
         back.set_extension_enabled("mini", "never.disabled", true);
         assert_eq!(back.disabled_extensions_for("local"), ["golang.go"]);
         assert!(!back.disabled_extensions.contains_key("mini"), "an empty list keeps no entry");
+    }
+
+    /// SPEC FR-L31.42, Code-OSS `DebugStorage`: the breakpoints, the exception filters chosen and
+    /// the watch expressions are kept per workspace (computer and folder) and survive a reopen;
+    /// a workspace with nothing keeps no entry, and older files have none.
+    #[test]
+    fn fr_l31_42_debug_store_round_trips_per_workspace() {
+        use ember_editor::debugger::storage::{StoredBreakpoint, StoredExceptionBreakpoint};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        std::fs::write(&path, br#"{"format":1}"#).unwrap();
+        let mut p = load(&path);
+        assert!(p.debug_store("mac", "/w").is_empty(), "older files keep nothing");
+        let changed = p.update_debug_store("mac", "/w/", |d| {
+            d.breakpoints.breakpoints.push(StoredBreakpoint {
+                path: "/w/a.py".into(),
+                line_number: 3,
+                column: None,
+                enabled: false,
+                condition: Some("x > 1".into()),
+                hit_condition: Some("2".into()),
+                log_message: Some("x={x}".into()),
+            });
+            d.breakpoints.exception_breakpoints.push(StoredExceptionBreakpoint {
+                filter: "raised".into(),
+                label: "Raised Exceptions".into(),
+                enabled: true,
+                supports_condition: false,
+                condition: None,
+            });
+            d.watch_expressions = vec!["x + 1".into(), "order.items".into()];
+        });
+        assert!(changed);
+        assert!(!p.update_debug_store("mac", "/w", |_| {}), "the same folder, no change");
+        save(&path, &p).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("\"lineNumber\": 3") && raw.contains("\"watchExpressions\""), "{raw}");
+        let back = load(&path);
+        let store = back.debug_store("mac", "/w");
+        assert_eq!(store.breakpoints.breakpoints[0].condition.as_deref(), Some("x > 1"));
+        assert!(store.breakpoints.exception_breakpoints[0].enabled);
+        assert_eq!(store.watch_expressions, ["x + 1", "order.items"]);
+        assert!(back.debug_store("mac", "/other").is_empty());
+        assert!(back.debug_store("mini", "/w").is_empty(), "another computer's folder");
+        let mut back = back;
+        assert!(back.update_debug_store("mac", "/w", |d| *d = DebugStore::default()));
+        assert!(back.debug_storage.is_empty());
+        save(&path, &back).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("debug_storage"));
     }
 
     #[test]

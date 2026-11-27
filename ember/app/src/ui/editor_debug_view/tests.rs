@@ -522,6 +522,18 @@ fn fr_l31_42_run_and_debug_window_adds_watches_and_function_breakpoints() {
     let field = dom.element_by_id("debug-watch-input").unwrap();
     dom.input(field, "x + 1");
     dom.submit(field);
+    let added = actions();
+    assert!(
+        added.contains(&ViewAction::WatchesChanged),
+        "the workspace keeps the new list (FR-L31.42)"
+    );
+    let added: Vec<DebugRequest> = added
+        .into_iter()
+        .filter_map(|a| match a {
+            ViewAction::Debug(r) => Some(r),
+            _ => None,
+        })
+        .collect();
     let [
         DebugRequest::Evaluate {
             expression,
@@ -529,7 +541,7 @@ fn fr_l31_42_run_and_debug_window_adds_watches_and_function_breakpoints() {
             frame_id,
             ..
         },
-    ] = <[DebugRequest; 1]>::try_from(requests()).unwrap()
+    ] = <[DebugRequest; 1]>::try_from(added).unwrap()
     else {
         panic!()
     };
@@ -711,4 +723,25 @@ fn fr_l31_42_variables_view_f2_sets_a_value() {
     dom.key_down(row, Key::F2, Code::F2, Modifiers::empty());
     dom.render();
     assert!(dom.element_by_id("debug-var-2-edit").is_none());
+}
+
+/// SPEC FR-L31.42, Code-OSS `DebugStorage.loadWatchExpressions`: a window opens with the watch
+/// expressions its workspace kept, in their order, and evaluates them when a thread stops.
+#[test]
+fn fr_l31_42_kept_watch_expressions_come_back_and_are_evaluated_at_a_stop() {
+    let mut v = DebugView::with_watches(&["x + 1".to_owned(), " ".to_owned(), "order.items".to_owned()]);
+    assert_eq!(v.watch_expressions(), ["x + 1", "order.items"], "an empty one is dropped");
+    assert!(v.watches().iter().all(|w| w.result.is_none()));
+    let fx = v.apply(&sessions(vec![session("s", paused(), Some(10))]));
+    let evaluated: Vec<&str> = fx
+        .requests
+        .iter()
+        .filter_map(|r| match r {
+            DebugRequest::Evaluate { expression, context: EvalContext::Watch, .. } => Some(expression.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(evaluated, ["x + 1", "order.items"]);
+    v.remove_watch(v.watches()[0].id);
+    assert_eq!(v.watch_expressions(), ["order.items"]);
 }

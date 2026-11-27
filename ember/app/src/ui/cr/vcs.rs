@@ -1470,7 +1470,7 @@ fn DiffViewAtWidth(file: &FileDiff, staging: &MutableState<Staging>, pane_width:
                                 Label(sign_str, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                             }) };
                             { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(4.0)) };
-                            { use ::compose_rust::ui::Text; Text!(&l.text, type_role = TypeRole::Mono, font_size = Fs::Xs2.size(), line_height = Fs::Xs2.line_height(), color = paint(p.text), max_lines = 1, word_break = compose_rust::WordBreak::KeepAll) };
+                            { use ::compose_rust::ui::Text; Text!(&l.text, type_role = crate::ui::fonts::text_role(TypeRole::Mono), font_size = Fs::Xs2.size(), line_height = Fs::Xs2.line_height(), color = paint(p.text), max_lines = 1, word_break = compose_rust::WordBreak::KeepAll) };
                             { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(SP[2])) };
                         }) };
                     }

@@ -27,8 +27,9 @@ use super::theme::Palette;
 // ---------------------------------------------------------------------------------------------
 
 // The prose and mono font stacks are the toolkit theme's: `ui::fonts::app_theme` registers the
-// bundled Inter, Pretendard and JetBrains Mono faces and sets them for every `TypeRole`
-// (compose-rust#374, Ember #216), so `Label` and `Txt` name no font of their own.
+// bundled Inter and Pretendard faces for every `TypeRole` but `Mono` (compose-rust#374, Ember
+// #216), and `ui::fonts::text_role` registers JetBrains Mono for `Mono` the first time a text
+// asks (NFR-L1, #1082), so `Label` and `Txt` name no font of their own.
 
 /// The app palette colour standing in for a toolkit colour role, so a screen that still names
 /// a role draws the mockup's tokens in both schemes.
@@ -979,7 +980,7 @@ pub fn MonoLabel(text: &str, fs: Fs, weight: Weight, color: Option<Paint>) {
     let color = color.unwrap_or_else(|| paint(theme.palette.text));
     { use ::compose_rust::ui::Text; Text!(
         text,
-        type_role = TypeRole::Mono,
+        type_role = crate::ui::fonts::text_role(TypeRole::Mono),
         font_size = fs.size(),
         line_height = fs.line_height(),
         font_weight = weight.value(),
@@ -993,7 +994,7 @@ fn MonoLine(text: &str, fs: Fs, weight: Weight, color: Option<Paint>) {
     { use ::compose_rust::ui::Text; Text!(
         text,
         word_break = WordBreak::KeepAll,
-        type_role = TypeRole::Mono,
+        type_role = crate::ui::fonts::text_role(TypeRole::Mono),
         font_size = fs.size(),
         line_height = fs.line_height(),
         font_weight = weight.value(),
@@ -1022,8 +1023,9 @@ pub fn Txt(
         None if type_role == TypeRole::Caption => paint(theme.palette.muted),
         None => paint(theme.palette.text),
     };
-    // The theme's monospace face: the bundled JetBrains Mono stack (`ui::fonts::mono_font`).
-    let mono_role = if mono { Some(TypeRole::Mono) } else { None };
+    // The theme's monospace face: the bundled JetBrains Mono stack, registered the first time a
+    // mono text asks (`ui::fonts::text_role`, NFR-L1).
+    let mono_role = if mono { Some(crate::ui::fonts::text_role(TypeRole::Mono)) } else { None };
     let overflow = overflow.or(max_lines.map(|_| TextOverflow::Ellipsis));
     { use ::compose_rust::ui::Text; Text!(
         text,
@@ -1231,7 +1233,7 @@ fn FieldNode(o: FieldOptions, modifier: Modifier) {
         placeholder_color = placeholder_color,
         multiline = o.multiline,
         enabled = o.enabled.unwrap_or(true),
-        type_role = o.type_role,
+        type_role = o.type_role.map(crate::ui::fonts::text_role),
         font_size = fs.size(),
         line_height = o.line_height.unwrap_or(fs.line_height()),
         letter_spacing = fs.letter_spacing(),
@@ -1363,7 +1365,7 @@ pub fn NameThenPillLines(name: &str, fs: Fs, weight: Weight, color: Option<Paint
                 { use ::compose_rust::ui::Box; Box!(modifier = Modifier::new().observe_size_every_dp(natural.token()), {
                     // The measuring copy: the name's own font, clear ink, out of the
                     // accessibility tree (a `hidden` container still exposes its text).
-                    let mono_role = if mono { Some(TypeRole::Mono) } else { None };
+                    let mono_role = if mono { Some(crate::ui::fonts::text_role(TypeRole::Mono)) } else { None };
                     { use ::compose_rust::ui::Text; Text!(
                         name,
                         word_break = WordBreak::KeepAll,

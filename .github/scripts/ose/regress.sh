@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Extension regression test for a packaged OSE build (SPEC NFR-W1, #84).
 #
-#   ember/ose/regress.sh <unpacked build dir>
-#   ember/ose/regress.sh --self-test        offline, no build needed
+#   .github/scripts/ose/regress.sh <unpacked build dir>
+#   .github/scripts/ose/regress.sh --self-test        offline, no build needed
 #
 # 1. installs every extension in regression/extensions.json from Open VSX with the server CLI, at
 #    its pinned version (id@version) when it has one

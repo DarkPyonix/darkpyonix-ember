@@ -45,7 +45,7 @@ use serde_json::{json, Value};
 use crate::computers::{Computers, LOCAL};
 use crate::ose::{extension_spec, valid_computer_id, InstallError, OseManager};
 
-/// The gallery the OSE installs from (`ember/ose/README.md`, `extensionsGallery`).
+/// The gallery the OSE installs from (`.github/scripts/ose/README.md`, `extensionsGallery`).
 pub const OPEN_VSX: &str = "https://open-vsx.org";
 /// Longest wait for one gallery search.
 pub const SEARCH_TIMEOUT: Duration = Duration::from_secs(10);

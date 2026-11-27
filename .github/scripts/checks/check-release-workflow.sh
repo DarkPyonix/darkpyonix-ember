@@ -68,12 +68,12 @@ if git ls-files 2>/dev/null | grep -Eiq '\.(jks|keystore)$'; then
 fi
 [ "$(grep -c 'contents: write' "$f")" = 1 ] || { echo "error: $f: only the publish job may have contents: write" >&2; fail=1; }
 # OSE install bundle in Ember release archives (FR-W4 acceptance step 6, #83).
-need 'ember/ose/VERSION' 'release must read ember/ose/VERSION for OSE_VERSION'
+need '.github/scripts/ose/VERSION' 'release must read .github/scripts/ose/VERSION for OSE_VERSION'
 need 'cp ember/server/scripts/install-ose\.sh "stage/\$name/"' 'release archives must bundle install-ose.sh'
 need 'stage/\$name/OSE_VERSION' 'release archives must bundle OSE_VERSION'
 for s in .github/scripts/release/check-tag-version.sh .github/scripts/release/pack-velopack.sh \
          .github/scripts/release/dry-run-summary.sh ember/app/scripts/build-android.sh \
-         ember/server/scripts/install-ose.sh ember/ose/VERSION; do
+         ember/server/scripts/install-ose.sh .github/scripts/ose/VERSION; do
     [ -f "$s" ] || { echo "error: $s missing" >&2; fail=1; }
 done
 grep -q 'scripts/package-velopack\.py' .github/scripts/release/pack-velopack.sh 2>/dev/null \

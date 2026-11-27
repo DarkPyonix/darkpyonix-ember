@@ -95,7 +95,7 @@ jobs:
           mkdir -p dist
           # install-ose.sh and OSE_VERSION name and fetch the OSE release that matches this
           # build (SPEC FR-W4 acceptance step 6, #83): both programs start OSE for the editor.
-          ose_release="ose-v$(tr -d '[:space:]' < ember/ose/VERSION)"
+          ose_release="ose-v$(tr -d '[:space:]' < .github/scripts/ose/VERSION)"
           pack() { # crate, program...
             crate="$1"; shift
             name="ember-${crate}-${TAG}-${TARGET}"
@@ -431,10 +431,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      # ember/ose/VERSION names the OSE release in the notes (#83).
+      # .github/scripts/ose/VERSION names the OSE release in the notes (#83).
       - uses: actions/checkout@v5
         with:
-          sparse-checkout: ember/ose/VERSION
+          sparse-checkout: .github/scripts/ose/VERSION
           sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@v5
         with:
@@ -461,7 +461,7 @@ jobs:
             debug) android="The Android APK (arm64-v8a) is debug-signed: it cannot be upgraded by a later release signed with another key; uninstall first (this deletes the app's data and device key)." ;;
             *) android="" ;;
           esac
-          ose_release="ose-v$(tr -d '[:space:]' < ember/ose/VERSION)"
+          ose_release="ose-v$(tr -d '[:space:]' < .github/scripts/ose/VERSION)"
           gh release create "$TAG" "${files[@]}" \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \

@@ -10,7 +10,7 @@
 //! window keeps, and typing goes through the bridge's `on_code_changed`, the same call the
 //! `CodeEditor`'s change event makes in `ember/app`. It types a YAML syntax error, waits for the
 //! error of the unmodified Open VSX extension `redhat.vscode-yaml` (pinned in
-//! `ember/ose/regression/extensions.json`, chosen by the leader, Q-E6) in the bridge's problems
+//! `.github/scripts/ose/regression/extensions.json`, chosen by the leader, Q-E6) in the bridge's problems
 //! list, saves, and checks that the file on disk is the bridge's text. It needs the network to
 //! install the extension from Open VSX, as the `NFR-W1` run does.
 #![cfg(unix)]
@@ -33,7 +33,7 @@ struct Server {
     root: PathBuf,
 }
 
-/// The server settings of the NFR-W1 run (`ember/ose/regress.sh`): Open VSX extensions carry no
+/// The server settings of the NFR-W1 run (`.github/scripts/ose/regress.sh`): Open VSX extensions carry no
 /// Microsoft signature, and `--install-extension` refuses them unless signature checks are off.
 /// Written before the install as well as before the server starts. Returns the server data dir.
 fn write_server_settings(root: &Path) -> PathBuf {

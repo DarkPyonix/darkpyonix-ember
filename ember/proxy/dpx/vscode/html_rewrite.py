@@ -31,7 +31,7 @@ DETACH_CONFIGURATION_DEFAULTS = {"workbench.editor.dragToOpenWindow": False}
 # the theme labels in extensions/vscode-darkpyonix-theme/package.json (a theme without an `id` is
 # selected by its label). Dark is the default because Ember's own client opens dark. A user's own
 # `workbench.colorTheme` still wins; the same defaults are baked into OSE's staged copy of the theme
-# (ember/ose/stage-extensions.sh), so an OSE opened without the proxy looks the same.
+# (.github/scripts/ose/stage-extensions.sh), so an OSE opened without the proxy looks the same.
 THEME_CONFIGURATION_DEFAULTS = {
     "workbench.colorTheme": "DarkPyonix Dark",
     "workbench.preferredDarkColorTheme": "DarkPyonix Dark",

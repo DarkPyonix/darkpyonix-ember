@@ -8,7 +8,9 @@ FR-W4). It is the **VS Code web server ("REH web")** compiled by DarkPyonix from
 Microsoft's VS Code (`code serve-web`, Microsoft Marketplace).
 
 OSE is wrapped, never patched (E4): the only change to the upstream tree is `product.json`.
-Behaviour changes for the IDE window come from `ember/proxy/`.
+On the desktop no proxy sits in the VS Code target's path (INTENT D55): the IDE window reaches the
+computer's OSE at the DarkPyonix manager's editor endpoint through the server's relay, and Ember's
+design reaches VS Code only as the colour theme (`FR-W6`).
 
 | File | What it is |
 | ---- | ---------- |
@@ -48,7 +50,7 @@ the matching tag (`ose-v<the tag in VERSION>`); running `./install-ose.sh` besid
 the archive for the machine with curl, checks it against the release's `SHA256SUMS`, unpacks it into
 `~/.local/share` and prints the launcher path. The OSE manager finds it there without
 `EMBER_OSE_SERVER`. When no OSE is found, the IDE target's reason and the extension routes say so and
-name this step. In a checkout, `ember/server/scripts/install-ose.sh` reads `ember/ose/VERSION`.
+name this step. In a checkout, `ember/server/scripts/install-ose.sh` reads `.github/scripts/ose/VERSION`.
 
 Old "OSE build" runs with no jobs (2026-11-06 to 11-14, all `pull_request` on `release`): the
 release-sync pull requests (#964 and earlier) were opened by `github-actions[bot]`, and the
@@ -124,7 +126,7 @@ every `open` file and stays connected for `OSE_REGRESS_SETTLE` seconds (default 
 ```sh
 export EMBER_OSE_SERVER="$(ember/editor-conn/scripts/fetch-ose-artifact.sh)"
 export OSE_REGRESS_CLIENT='cargo test --locked --manifest-path ember/editor/Cargo.toml --test nfr_w1_extension_regression -- --ignored --nocapture'
-OSE_REGRESS_OUT=.scratch/regress ember/ose/regress.sh "$(dirname "$(dirname "$EMBER_OSE_SERVER")")"
+OSE_REGRESS_OUT=.scratch/regress .github/scripts/ose/regress.sh "$(dirname "$(dirname "$EMBER_OSE_SERVER")")"
 ```
 
 `OSE_REGRESS_OUT` keeps `results.json` (the status of every listed extension), `installed.txt` and
@@ -142,7 +144,7 @@ a new session, and so a new extension host, for every entry with an `open` file.
 in the activation run.
 
 ```sh
-OSE_REGRESS_MODE=per-extension OSE_REGRESS_OUT=.scratch/regress-per-ext ember/ose/regress.sh "$(dirname "$(dirname "$EMBER_OSE_SERVER")")"
+OSE_REGRESS_MODE=per-extension OSE_REGRESS_OUT=.scratch/regress-per-ext .github/scripts/ose/regress.sh "$(dirname "$(dirname "$EMBER_OSE_SERVER")")"
 ```
 
 Status today: the list is the five extensions the leader approved on 2026-11-15: two language
@@ -168,7 +170,7 @@ page. Each check writes `pass`, `fail` or `not-run` with a reason to `OSE_REGRES
 `deep.json`. Only a `fail` where `pass` is expected fails the run; `not-run` prints a warning.
 
 ```sh
-OSE_REGRESS_MODE=deep OSE_REGRESS_OUT=.scratch/regress-deep ember/ose/regress.sh "$(dirname "$(dirname "$EMBER_OSE_SERVER")")"
+OSE_REGRESS_MODE=deep OSE_REGRESS_OUT=.scratch/regress-deep .github/scripts/ose/regress.sh "$(dirname "$(dirname "$EMBER_OSE_SERVER")")"
 ```
 
 - **Webview** (`mhutchie.git-graph`, passed on all four Unix targets in CI run 45000437147,
@@ -226,7 +228,7 @@ tag=ose-v1.139.1    # the release to check
 server="$(OSE_RELEASE=$tag ember/editor-conn/scripts/fetch-ose-artifact.sh)"
 
 # 2. The automated part: product.json, start, Open VSX search, install.
-ember/ose/smoke.sh "$(dirname "$(dirname "$server")")"
+.github/scripts/ose/smoke.sh "$(dirname "$(dirname "$server")")"
 
 # 3. The part that needs a person. Open the printed URL in a browser.
 export DPX_OSE_SERVER="$server"

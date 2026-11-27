@@ -457,7 +457,7 @@ async fn live_session_explorer_create_rename_delete() {
 
 /// SPEC FR-E12 (#32 phase A step 2): hover, CodeLens and inline completion from a real extension
 /// reach the session through the extension host and Ember's bridges. The probe extension
-/// (`ember/ose/regression/probe/`, packed by `pack.py`) answers each with a fixed marker.
+/// (`.github/scripts/ose/regression/probe/`, packed by `pack.py`) answers each with a fixed marker.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "needs a real OSE server: EMBER_OSE_SERVER=<unpacked build>/bin/dpx-ose-server, and python3"]
 async fn live_session_probe_hover_codelens_inline() {
@@ -475,7 +475,7 @@ async fn live_session_probe_hover_codelens_inline() {
 
     // Pack and install the probe the way the regression harness installs extensions.
     let vsix = root.join("ember-probe.vsix");
-    let pack = Path::new(env!("CARGO_MANIFEST_DIR")).join("../ose/regression/probe/pack.py");
+    let pack = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/scripts/ose/regression/probe/pack.py");
     let st = Command::new("python3").arg("-I").arg(&pack).arg(&vsix).status().expect("python3");
     assert!(st.success(), "pack.py failed");
     let ext = root.join("ext");

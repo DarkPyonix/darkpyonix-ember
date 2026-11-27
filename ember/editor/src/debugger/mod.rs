@@ -55,6 +55,7 @@
 pub mod breakpoints;
 pub mod hover;
 pub mod launch;
+pub mod source;
 pub mod storage;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -121,7 +122,8 @@ pub struct ThreadInfo {
 pub struct FrameInfo {
     pub id: i64,
     pub name: String,
-    /// The file of the frame, on the workspace's server; `None` for a source without a path.
+    /// The file of the frame, on the workspace's server ([`source::source_uri`]); `None` for a
+    /// source without a path or one the adapter serves itself (`sourceReference`).
     pub uri: Option<UriComponents>,
     pub source_name: Option<String>,
     /// 1-based.
@@ -1209,10 +1211,9 @@ impl DebugState {
         self.sessions.iter().position(|s| s.id == id)
     }
 
-    fn uri_of(&self, path: &str) -> Option<UriComponents> {
-        self.workspace
-            .as_ref()
-            .map(|w| UriComponents::new(w.scheme.clone(), w.authority.clone(), path))
+    /// The workspace file a DAP `source` names (#1151, Code-OSS's `Source.uri`).
+    fn uri_of(&self, source: Option<&Value>) -> Option<UriComponents> {
+        source::source_uri(source?, self.workspace.as_ref())
     }
 
     fn session_ref(&self, i: usize) -> SessionRef {
@@ -2578,10 +2579,7 @@ impl DebugState {
             .filter_map(|f| {
                 let id = f.get("id")?.as_i64()?;
                 let source = f.get("source");
-                let uri = source
-                    .and_then(|s| s.get("path"))
-                    .and_then(Value::as_str)
-                    .and_then(|p| self.uri_of(p));
+                let uri = self.uri_of(source);
                 Some(FrameInfo {
                     id,
                     name: str_of(f, "name").unwrap_or_default(),
@@ -2964,10 +2962,7 @@ impl DebugState {
                     return;
                 }
                 let source = body.get("source");
-                let uri = source
-                    .and_then(|s| s.get("path"))
-                    .and_then(Value::as_str)
-                    .and_then(|p| self.uri_of(p));
+                let uri = self.uri_of(source);
                 let entry = ConsoleEntry {
                     category,
                     text: str_of(&body, "output").unwrap_or_default(),

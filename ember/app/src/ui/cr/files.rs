@@ -1978,6 +1978,13 @@ mod tests {
     }
 
     #[test]
+    fn fr_l27_5_a_phone_chip_keeps_a_name_that_fits_the_mockup_cap() {
+        let inner = chip_avail(390.0);
+        assert_eq!(shown_label("win-desktop", true, 16.0, inner), "win-desktop 오프라인");
+        assert_eq!(shown_label("studio-workstation", false, 16.0, inner), "studio-workstation");
+    }
+
+    #[test]
     fn fr_l27_the_sample_fills_every_section() {
         let (m, offers) = sample_model();
         assert!(m.ready && !m.devices.is_empty() && !m.transfers.is_empty() && !m.received.is_empty());
@@ -2076,6 +2083,16 @@ mod tests {
             }))
         });
         texts(&decode_batch(host.rebuild().expect("rebuild")).expect("decode"))
+    }
+
+    #[test]
+    fn fr_l27_2_the_devices_card_names_the_sending_device() {
+        let _guard = crate::services::test_guard();
+        let (model, _) = sample_model();
+        let sender = if is_demo() { "mac-mini".to_string() } else { crate::terminal_stream::device_name() };
+        let all = screen_texts(model);
+        assert!(all.iter().any(|t| t == "보내는 장비"), "sending-device label: {all:?}");
+        assert!(all.contains(&sender), "missing sending device {sender}: {all:?}");
     }
 
     // FR-L27.9 (#786)

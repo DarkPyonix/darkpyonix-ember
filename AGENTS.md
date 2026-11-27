@@ -53,7 +53,7 @@ copied. If a task seems to need a path outside the repository, ask first.
 root holds one product folder like core; the previous root set was never approved.] A new root
 entry is added only after the user approves it, and the approval is recorded beside it with the
 date and the user's quote. Rust crates live in `ember/<name>/`, the VS Code Web wrapper in
-`ember/proxy/`, the OSE build pipeline in `ember/ose/`, shared test vectors in `ember/vectors/`,
+`ember/proxy/`, the OSE build pipeline in `.github/scripts/ose/` [user, 2026-11-27: "아니 근데 왜 빌드하는 코드를 크레이트 폴더에 넣는데? script에 넣어야지"], shared test vectors in `ember/vectors/`,
 and CI scripts and repository checks in `.github/scripts/`.
 
 ## Git

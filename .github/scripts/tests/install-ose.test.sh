@@ -44,8 +44,8 @@ out2="$(env OSE_BASE_URL="file:///nonexistent" OSE_TARGET=linux-x64 OSE_INSTALL_
 [ "$out2" = "$out" ] || fail "reuse printed $out2"
 ok "an installed release is reused"
 
-# 3. In a checkout the release comes from ember/ose/VERSION.
-want="ose-v$(tr -d '[:space:]' < "$root/ember/ose/VERSION")"
+# 3. In a checkout the release comes from .github/scripts/ose/VERSION.
+want="ose-v$(tr -d '[:space:]' < "$root/.github/scripts/ose/VERSION")"
 if env OSE_BASE_URL="file://$work/rel" OSE_TARGET=linux-x64 OSE_INSTALL_DIR="$work/i3" "$script" >/dev/null 2>"$work/err"; then
   fail "a release that is not in the fake folder installed"
 fi

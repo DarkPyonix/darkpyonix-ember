@@ -11,7 +11,7 @@ awk '/stage-extensions.sh/{s=NR} /gulp core-ci/{g=NR} END{exit !(s && g && s<g)}
 
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/src/extensions" "$tmp/nb"
-repo="$(cd "$here/../.." && pwd)"
+repo="$(cd "$here/../../.." && pwd)"
 created=0
 if [ ! -f "$repo/extensions/vscode-darkpyonix/dist/extension.js" ]; then
   mkdir -p "$repo/extensions/vscode-darkpyonix/dist"

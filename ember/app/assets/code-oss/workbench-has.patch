@@ -1,6 +1,6 @@
 Ember rewrites of Code-OSS :has() rules into state classes (issues #142, #143, INTENT D23).
 The renderer's stylo does not parse :has(), so each rule would be dropped. The chrome rsx sets
-the class instead. Applied by ember/ose/vendor-workbench-css.sh with `patch -p1`.
+the class instead. Applied by .github/scripts/ose/vendor-workbench-css.sh with `patch -p1`.
 
   views.css            .monaco-list-row:has(.actions .action-item)       -> .monaco-list-row.has-actions
                        (3 rules: :hover, .selected, .focused stay as they are)

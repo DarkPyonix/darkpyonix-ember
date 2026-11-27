@@ -47,7 +47,7 @@ pub const ENV_TOKEN: &str = "DARKPYONIX_TOKEN";
 /// The runtime both Ember targets use (the manager also has `vsc`, which Ember does not choose).
 pub const OSE_RUNTIME: &str = "ose";
 /// The OSE release the node asks the manager to install (`darkpyonix editor install --runtime ose
-/// --release <this>`, SPEC FR-W7a). It follows `ember/ose` (`ember/ose/VERSION` with the `ose-v`
+/// --release <this>`, SPEC FR-W7a). It follows `.github/scripts/ose` (`.github/scripts/ose/VERSION` with the `ose-v`
 /// prefix of its release tags); change both together.
 pub const OSE_RELEASE: &str = "ose-v1.139.1";
 /// Longest wait for `GET /api/editor`.
@@ -753,10 +753,10 @@ mod tests {
         assert!(relays.open_relay(&a).is_ok(), "a released place is free again");
     }
 
-    /// FR-W7a (D56): the pinned OSE release follows `ember/ose/VERSION`.
+    /// FR-W7a (D56): the pinned OSE release follows `.github/scripts/ose/VERSION`.
     #[test]
     fn fr_w7a_ose_release_follows_ember_ose_version() {
-        let version = include_str!("../../ose/VERSION").trim();
+        let version = include_str!("../../../.github/scripts/ose/VERSION").trim();
         assert_eq!(OSE_RELEASE, format!("ose-v{version}"));
     }
 

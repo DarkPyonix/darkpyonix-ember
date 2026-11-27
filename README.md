@@ -151,7 +151,7 @@ settings and what each program stores.
 
 ```
 darkpyonix-ember/
-├─ ember/                the product: one cargo project per crate, plus OSE, the proxy and test vectors
+├─ ember/                the product: one cargo project per crate, plus the proxy and test vectors
 │  ├─ server/            ember-server: wraps agent CLIs, stores sessions, pushes updates
 │  ├─ node/              ember-node: carries out tool actions on each computer
 │  ├─ app/               ember-app: launcher and conversation UI on dioxus-compose
@@ -162,8 +162,8 @@ darkpyonix-ember/
 │  ├─ editor-conn/       Rust client for a Code-OSS server
 │  ├─ editor/            editor core session layer (planned editor, #32)
 │  ├─ proxy/             the VS Code Web wrapping layer (Python, FastAPI)
-│  ├─ ose/               OSE: DarkPyonix's build of Code-OSS, the default IDE-window runtime
 │  └─ vectors/           recorded transcript and bridge test vectors
+├─ .github/scripts/ose/ the OSE build pipeline: DarkPyonix's build of Code-OSS, the default IDE-window runtime
 ├─ docs/
 │  └─ guide/             the user guide, served at darkpyonix.dev/darkpyonix-ember
 ├─ extensions/           vscode-darkpyonix, vscode-darkpyonix-theme, intellij-darkpyonix

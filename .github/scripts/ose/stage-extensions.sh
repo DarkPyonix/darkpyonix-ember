@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Stage the DarkPyonix editor extensions as built-in extensions of a Code-OSS checkout (SPEC FR-W6).
 #
-#   ember/ose/stage-extensions.sh <code-oss checkout>
+#   .github/scripts/ose/stage-extensions.sh <code-oss checkout>
 #
 # Upstream's gulp build packages every folder in <checkout>/extensions/ that has a package.json,
 # so copying the runtime files there makes the extension built in (installed by default, present on
@@ -9,7 +9,7 @@
 # OSE_EXT_SKIP_BUILD=1 reuses an existing dist/ (used by check-extensions.sh).
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo="$(cd "$here/../.." && pwd)"
+repo="$(cd "$here/../../.." && pwd)"
 src="${1:?usage: $0 <code-oss checkout>}"
 [ -d "$src/extensions" ] || { echo "error: $src/extensions not found" >&2; exit 1; }
 

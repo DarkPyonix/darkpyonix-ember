@@ -2,7 +2,7 @@
 #
 #   transport-isolation  .github/scripts/checks/check-transport-isolation.sh (SPEC FR-N5), when present
 #   editor-conn-pin      ember/editor-conn/src/rpc_ids.rs + PINNED_VERSION/PINNED_COMMIT match the
-#                        Code-OSS tag in ember/ose/VERSION (regenerated with gen_rpc_ids.sh), and
+#                        Code-OSS tag in .github/scripts/ose/VERSION (regenerated with gen_rpc_ids.sh), and
 #                        src/actors/generated.rs matches extHost.protocol.ts at PINNED_COMMIT
 #                        (scripts/gen-actors/gen.sh --check), and every SUPPORTED_BUILDS commit
 #                        is admitted by scripts/gen-actors/compare.sh (FR-E10), when present
@@ -153,14 +153,14 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
-      - name: Regenerate rpc_ids.rs at the ember/ose/VERSION tag and compare
+      - name: Regenerate rpc_ids.rs at the .github/scripts/ose/VERSION tag and compare
         run: |
           set -euo pipefail
-          if [ ! -f ember/editor-conn/scripts/gen_rpc_ids.sh ] || [ ! -f ember/ose/VERSION ]; then
-            echo "ember/editor-conn/scripts/gen_rpc_ids.sh or ember/ose/VERSION not present on this ref; skipping"
+          if [ ! -f ember/editor-conn/scripts/gen_rpc_ids.sh ] || [ ! -f .github/scripts/ose/VERSION ]; then
+            echo "ember/editor-conn/scripts/gen_rpc_ids.sh or .github/scripts/ose/VERSION not present on this ref; skipping"
             exit 0
           fi
-          tag="$(tr -d '[:space:]' < ember/ose/VERSION)"
+          tag="$(tr -d '[:space:]' < .github/scripts/ose/VERSION)"
           src="$RUNNER_TEMP/vscode"
           # Shallow, blobless, sparse: only src/vs is needed (the script scans it for
           # createProxyIdentifier calls).
@@ -184,7 +184,7 @@ jobs:
             fail=1
           fi
           if ! grep -qx "pub const PINNED_VERSION: &str = \"$tag\";" ember/editor-conn/src/lib.rs; then
-            echo "::error file=ember/editor-conn/src/lib.rs::PINNED_VERSION is not \"$tag\" (ember/ose/VERSION)"
+            echo "::error file=ember/editor-conn/src/lib.rs::PINNED_VERSION is not \"$tag\" (.github/scripts/ose/VERSION)"
             fail=1
           fi
           if ! grep -qx "pub const PINNED_COMMIT: &str = \"$commit\";" ember/editor-conn/src/lib.rs; then

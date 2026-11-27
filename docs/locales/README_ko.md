@@ -150,7 +150,7 @@ HTTP 리스너에는 로그인이 없습니다. 그래서 루프백(기본값)�
 
 ```
 darkpyonix-ember/
-├─ ember/                크레이트마다 별도 cargo 프로젝트, 그리고 OSE, 프록시, 테스트 벡터
+├─ ember/                크레이트마다 별도 cargo 프로젝트, 그리고 프록시와 테스트 벡터
 │  ├─ server/            ember-server: 에이전트 CLI 를 감싸고, 세션을 저장하고, 업데이트를 푸시
 │  ├─ node/              ember-node: 각 컴퓨터에서 도구 동작을 수행
 │  ├─ app/               ember-app: dioxus-compose 위의 런처와 대화 UI
@@ -161,8 +161,8 @@ darkpyonix-ember/
 │  ├─ editor-conn/       Code-OSS 서버용 Rust 클라이언트
 │  ├─ editor/            에디터 코어 세션 계층 (계획된 에디터, #32)
 │  ├─ proxy/             VS Code Web 래핑 계층 (Python, FastAPI)
-│  ├─ ose/               OSE: DarkPyonix 가 빌드한 Code-OSS, IDE 창의 기본 런타임
 │  └─ vectors/           기록한 대화 기록과 브리지 테스트 벡터
+├─ .github/scripts/ose/ OSE 빌드 파이프라인: DarkPyonix 가 빌드한 Code-OSS, IDE 창의 기본 런타임
 ├─ docs/
 │  └─ guide/             사용자 가이드, darkpyonix.dev/darkpyonix-ember 에서 제공
 ├─ extensions/           vscode-darkpyonix, vscode-darkpyonix-theme, intellij-darkpyonix

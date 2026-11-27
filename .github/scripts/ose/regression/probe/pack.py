@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Packs the probe extension into a .vsix for `--install-extension` (SPEC FR-E12, #32).
 
-    python3 -I ember/ose/regression/probe/pack.py <out.vsix>
+    python3 -I .github/scripts/ose/regression/probe/pack.py <out.vsix>
 
 A .vsix is a zip with the extension under `extension/`, an `extension.vsixmanifest` and a
 `[Content_Types].xml`, as `vsce package` writes it. No Node tooling is needed.

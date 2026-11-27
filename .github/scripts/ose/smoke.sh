@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Smoke-test a packaged OSE build (SPEC FR-W4 acceptance, automated part).
 #
-#   ember/ose/smoke.sh <unpacked build dir>     e.g. ember/ose/.work/dpx-ose-1.139.1-linux-x64
+#   .github/scripts/ose/smoke.sh <unpacked build dir>     e.g. .github/scripts/ose/.work/dpx-ose-1.139.1-linux-x64
 #
-#   1. product.json passes ember/ose/check-product.sh (Open VSX, telemetry off, no MS marketplace)
+#   1. product.json passes .github/scripts/ose/check-product.sh (Open VSX, telemetry off, no MS marketplace)
 #   2. the server starts with the flags ember/proxy/dpx launches it with and serves the workbench
 #   3. an Open VSX search through the gallery URL in product.json returns results
 #   4. the server CLI installs an extension from Open VSX (OSE_SMOKE_EXTENSION)

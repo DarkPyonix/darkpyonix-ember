@@ -2,23 +2,23 @@
 # Build DarkPyonix OSE: the Code-OSS (MIT) VS Code web server ("REH web"), renamed and pointed at
 # Open VSX, packaged as a self-contained tar.gz (it bundles its own Node).
 #
-#   ember/ose/build.sh [--target linux-x64|linux-arm64|darwin-arm64|darwin-x64|windows-x64] [--tag <code-oss tag>]
+#   .github/scripts/ose/build.sh [--target linux-x64|linux-arm64|darwin-arm64|darwin-x64|windows-x64] [--tag <code-oss tag>]
 #                [--work <dir>] [--out <dir>] [--skip-install] [--smoke]
-#   ember/ose/build.sh --product-only      # cheap: fetch only product.json, apply overrides, check
+#   .github/scripts/ose/build.sh --product-only      # cheap: fetch only product.json, apply overrides, check
 #
 # Meant for CI (.github/workflows/test-ose.yml). A full build takes tens of minutes and ~8 GB of RAM,
 # so it refuses to run outside CI unless OSE_ALLOW_LOCAL_BUILD=1 is set.
 #
-# Steps (each mirrors a documented upstream step; see ember/ose/README.md for sources):
-#   1. fetch    shallow-clone microsoft/vscode at the tag in ember/ose/VERSION
-#   2. product  merge ember/ose/product.overrides.json into product.json, drop Microsoft-only keys,
-#               then ember/ose/check-product.sh
+# Steps (each mirrors a documented upstream step; see .github/scripts/ose/README.md for sources):
+#   1. fetch    shallow-clone microsoft/vscode at the tag in .github/scripts/ose/VERSION
+#   2. product  merge .github/scripts/ose/product.overrides.json into product.json, drop Microsoft-only keys,
+#               then .github/scripts/ose/check-product.sh
 #      stage-extensions.sh copies the notebook and theme into extensions/ (built in, FR-W6)
 #   3. install  (Linux) build/npm/preinstall.ts first, then npm ci (npm + package-lock.json, not yarn)
 #   4. build    gulp core-ci -> compile-copilot-extension-build -> stage the Copilot SDK into
 #               .build/extensions/copilot -> gulp vscode-reh-web-<platform>-<arch>-min-ci
 #   5. package  dpx-ose-<tag>-<target>.tar.gz + .sha256, product check on the packaged output
-#   6. smoke    (--smoke) ember/ose/smoke.sh on the packaged server
+#   6. smoke    (--smoke) .github/scripts/ose/smoke.sh on the packaged server
 #
 # Windows (windows-x64, #83, docs/INTENT.md D49): the same script under Git Bash on a Windows
 # runner; the gulp platform is win32 and the launcher is bin/dpx-ose-server.cmd.
@@ -68,7 +68,7 @@ if [ "$PRODUCT_ONLY" = 1 ]; then
   mkdir -p "$WORK/product-check"
   curl -fsSL "https://raw.githubusercontent.com/microsoft/vscode/$TAG/product.json" \
     -o "$WORK/product-check/product.json"
-  log "product.json for $TAG + ember/ose/product.overrides.json"
+  log "product.json for $TAG + .github/scripts/ose/product.overrides.json"
   apply_product "$WORK/product-check/product.json"
   exit 0
 fi
@@ -152,7 +152,7 @@ if [ "${want_node%%.*}" != "${have_node%%.*}" ]; then
 fi
 
 # --- 2. product.json -------------------------------------------------------------------------
-log "apply ember/ose/product.overrides.json"
+log "apply .github/scripts/ose/product.overrides.json"
 apply_product "$SRC/product.json"
 
 # --- 3. install ------------------------------------------------------------------------------

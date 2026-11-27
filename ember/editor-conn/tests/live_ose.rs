@@ -1,5 +1,5 @@
 //! End-to-end test against a real OSE server (Code-OSS [`PINNED_VERSION`], the build CI makes from
-//! `ember/ose/VERSION`). Ignored by default and gated on `EMBER_OSE_SERVER`:
+//! `.github/scripts/ose/VERSION`). Ignored by default and gated on `EMBER_OSE_SERVER`:
 //!
 //! ```sh
 //! export EMBER_OSE_SERVER="$(ember/editor-conn/scripts/fetch-ose-artifact.sh)"   # .../bin/dpx-ose-server
@@ -16,7 +16,7 @@
 //! 0. Start `dpx-ose-server` with the flags `ember/proxy/dpx` uses (`--host 127.0.0.1 --port P
 //!    --without-connection-token --accept-server-license-terms --server-data-dir D
 //!    --telemetry-level off`) on a free port, with `extensions.verifySignature: false` in
-//!    `D/data/Machine/settings.json` like `ember/ose/smoke.sh`, in its own process group; wait for the
+//!    `D/data/Machine/settings.json` like `.github/scripts/ose/smoke.sh`, in its own process group; wait for the
 //!    port.
 //! 1. `verify_server` (`GET /version`) → commit must equal [`PINNED_COMMIT`].
 //! 2. Management connection over plain TCP (`skipWebSocketFrames`): handshake, IPC client,
@@ -170,7 +170,7 @@ struct Server {
 impl Server {
     fn start(bin: &Path, root: &Path) -> Self {
         let data = root.join("data");
-        // ember/ose/smoke.sh and ember/proxy/dpx/vscode/runtime.py: Code-OSS has no Marketplace signature
+        // .github/scripts/ose/smoke.sh and ember/proxy/dpx/vscode/runtime.py: Code-OSS has no Marketplace signature
         // verifier, so OSE runs with signature verification off.
         let machine = data.join("data").join("Machine");
         std::fs::create_dir_all(&machine).unwrap();

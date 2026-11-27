@@ -3,10 +3,10 @@
 //! The tests:
 //!
 //! * `nfr_w1_regression_data_is_consistent` runs everywhere. It reads
-//!   `ember/ose/regression/extensions.json` and `expected.json` and checks what
-//!   `ember/ose/regress.sh` relies on: the same ids in both, a pinned version or `null`, and an
-//!   `open` file that exists in `ember/ose/regression/workspace/`.
-//! * `nfr_w1_regression_client` is the activation client of `ember/ose/regress.sh`. The extension
+//!   `.github/scripts/ose/regression/extensions.json` and `expected.json` and checks what
+//!   `.github/scripts/ose/regress.sh` relies on: the same ids in both, a pinned version or `null`, and an
+//!   `open` file that exists in `.github/scripts/ose/regression/workspace/`.
+//! * `nfr_w1_regression_client` is the activation client of `.github/scripts/ose/regress.sh`. The extension
 //!   host of an OSE only starts when a client connects, so the harness starts the server with the
 //!   listed extensions installed and then runs this test, which connects an `EditorSession`,
 //!   opens every `open` file (that sends `$activateByEvent("onLanguage:<id>")`) and waits. It
@@ -15,7 +15,7 @@
 //!
 //! ```sh
 //! export OSE_REGRESS_CLIENT='cargo test --locked --manifest-path ember/editor/Cargo.toml --test nfr_w1_extension_regression -- --ignored --nocapture'
-//! ember/ose/regress.sh "$(dirname "$(dirname "$EMBER_OSE_SERVER")")"
+//! .github/scripts/ose/regress.sh "$(dirname "$(dirname "$EMBER_OSE_SERVER")")"
 //! ```
 //!
 //! * `nfr_w1_deep_checks` is the deep client (#929), run by the same command when the harness has
@@ -46,7 +46,7 @@ use ember_editor::{EditorSession, SessionConfig, SessionUpdate};
 use serde_json::{json, Value};
 
 fn regression_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../ose/regression")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/scripts/ose/regression")
 }
 
 fn read_json(name: &str) -> Value {
@@ -379,7 +379,7 @@ async fn activation_session(addr: &str, ws: &Path, label: &str, opens: &[&Entry]
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "the activation client of ember/ose/regress.sh: needs OSE_REGRESS_ADDR and OSE_REGRESS_WS"]
+#[ignore = "the activation client of .github/scripts/ose/regress.sh: needs OSE_REGRESS_ADDR and OSE_REGRESS_WS"]
 async fn nfr_w1_regression_client() {
     let (Some(addr), Some(ws)) = (std::env::var("OSE_REGRESS_ADDR").ok(), std::env::var_os("OSE_REGRESS_WS").map(PathBuf::from)) else {
         eprintln!("[regress-client] OSE_REGRESS_ADDR or OSE_REGRESS_WS not set; skipping");
@@ -619,7 +619,7 @@ async fn webview_check(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "the deep client of ember/ose/regress.sh (OSE_REGRESS_MODE=deep): needs OSE_REGRESS_ADDR and OSE_REGRESS_WS"]
+#[ignore = "the deep client of .github/scripts/ose/regress.sh (OSE_REGRESS_MODE=deep): needs OSE_REGRESS_ADDR and OSE_REGRESS_WS"]
 async fn nfr_w1_deep_checks() {
     if std::env::var("OSE_REGRESS_MODE").as_deref() != Ok("deep") {
         eprintln!("[regress-deep] OSE_REGRESS_MODE is not deep; skipping");

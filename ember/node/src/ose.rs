@@ -58,7 +58,7 @@ pub const INSTALL_TIMEOUT: Duration = Duration::from_secs(120);
 /// The most captured output returned for one install (stdout then stderr).
 pub const OUTPUT_CAP: usize = 16 * 1024;
 /// The server CLI flags this module passes. `--server-data-dir`, `--install-extension` and
-/// `--extensions-dir` are documented in `ember/ose/README.md` and used by `ember/ose/smoke.sh`.
+/// `--extensions-dir` are documented in `.github/scripts/ose/README.md` and used by `.github/scripts/ose/smoke.sh`.
 /// `--accept-server-license-terms` is used by every start and by smoke.sh's install step.
 const FLAG_DATA_DIR: &str = "--server-data-dir";
 const FLAG_EXTENSIONS_DIR: &str = "--extensions-dir";
@@ -314,7 +314,7 @@ fn make_private_dir(path: &Path) -> std::io::Result<()> {
 }
 
 /// The variables an OSE child gets from the server's environment. Everything else (server tokens,
-/// other secrets) is dropped. `ember/ose/smoke.sh` and `regress.sh` set no variable of their own
+/// other secrets) is dropped. `.github/scripts/ose/smoke.sh` and `regress.sh` set no variable of their own
 /// and call the launcher with the caller's environment, so nothing beyond this list is known to
 /// be needed. More names come only from [`PASSTHROUGH_VAR`] (#471).
 const ENV_ALLOWLIST: [&str; 6] = ["HOME", "PATH", "LANG", "LC_ALL", "TMPDIR", "USER"];

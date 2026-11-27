@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
 # Vendor the Code-OSS workbench CSS Ember needs (INTENT D23, issue #143).
 #
-#   ember/ose/vendor-workbench-css.sh                 fetch at the pinned commit, write pristine/
+#   .github/scripts/ose/vendor-workbench-css.sh                 fetch at the pinned commit, write pristine/
 #                                                     copies, apply workbench-has.patch to make the
 #                                                     files Ember loads
-#   ember/ose/vendor-workbench-css.sh --check         offline: pristine/ + patch == vendored files
-#   ember/ose/vendor-workbench-css.sh --verify-pristine   network: pristine/ == upstream at the commit
+#   .github/scripts/ose/vendor-workbench-css.sh --check         offline: pristine/ + patch == vendored files
+#   .github/scripts/ose/vendor-workbench-css.sh --verify-pristine   network: pristine/ == upstream at the commit
 #
 # The commit is PINNED_COMMIT in ember/editor-conn/src/lib.rs, the same pin the OSE build uses
-# (release tag in ember/ose/VERSION). pristine/ holds upstream plus a header, so CI needs no
+# (release tag in .github/scripts/ose/VERSION). pristine/ holds upstream plus a header, so CI needs no
 # network. workbench-has.patch is Ember's only edit: it turns :has() rules into state classes
 # (issue #142), because the renderer's stylo does not parse :has().
 # Needs: bash, curl, patch, diff. Downloads go to .scratch/vendor-workbench-css/.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
-root="$(cd "$here/../.." && pwd)"
+root="$(cd "$here/../../.." && pwd)"
 out="$root/ember/app/assets/code-oss"
 commit="$(sed -n 's/^pub const PINNED_COMMIT: &str = "\([0-9a-f]\{40\}\)";.*/\1/p' "$root/ember/editor-conn/src/lib.rs")"
 [ -n "$commit" ] || { echo "cannot read PINNED_COMMIT" >&2; exit 2; }
@@ -30,7 +30,7 @@ actionWidget.css src/vs/platform/actionWidget/browser/actionWidget.css
 header() { # name srcpath
   printf '/* Vendored from microsoft/vscode (Code-OSS), MIT License. Copyright (c) 2015 - present Microsoft Corporation.\n'
   printf ' * Source: %s\n * Commit: %s\n' "$2" "$commit"
-  printf ' * License: LICENSE-Code-OSS.txt in this folder. Do not edit by hand; see ember/ose/vendor-workbench-css.sh. */\n'
+  printf ' * License: LICENSE-Code-OSS.txt in this folder. Do not edit by hand; see .github/scripts/ose/vendor-workbench-css.sh. */\n'
 }
 
 fetch_pristine() { # destdir

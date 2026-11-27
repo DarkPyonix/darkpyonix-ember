@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Installs the DarkPyonix OSE release that matches this Ember build (SPEC FR-W4 acceptance step 6,
 # #83). Ships next to ember-server and ember-node in their release archives, with an OSE_VERSION
-# file naming the OSE release (ose-v<Code-OSS tag>); in a checkout it reads ember/ose/VERSION.
+# file naming the OSE release (ose-v<Code-OSS tag>); in a checkout it reads .github/scripts/ose/VERSION.
 #
 #   ./install-ose.sh            download, verify, unpack; prints the launcher path
 #
@@ -11,14 +11,14 @@
 # (ember/node/src/ose.rs, server_binary). The launcher path is the only line on stdout.
 #
 # Environment (all optional):
-#   OSE_RELEASE      the release tag (default: OSE_VERSION beside this script, else ose-v<ember/ose/VERSION>)
+#   OSE_RELEASE      the release tag (default: OSE_VERSION beside this script, else ose-v<.github/scripts/ose/VERSION>)
 #   OSE_TARGET       linux-x64 | linux-arm64 | darwin-arm64 | darwin-x64 (default: this machine)
 #   OSE_INSTALL_DIR  where to unpack (default: ~/.local/share)
 #   OSE_BASE_URL     release download base (default: https://github.com/DarkPyonix/darkpyonix-ember/releases/download)
 #   OSE_FORCE=1      download again even when this release is already unpacked
 #
 # Windows has no server release yet; there, unpack the windows-x64 archive into %LOCALAPPDATA% by
-# hand (ember/ose/README.md).
+# hand (.github/scripts/ose/README.md).
 set -euo pipefail
 
 log() { echo "install-ose: $*" >&2; }
@@ -32,10 +32,10 @@ release="${OSE_RELEASE:-}"
 if [ -z "$release" ]; then
   if [ -f "$here/OSE_VERSION" ]; then
     release="$(tr -d '[:space:]' < "$here/OSE_VERSION")"
-  elif [ -f "$here/../../ose/VERSION" ]; then
-    release="ose-v$(tr -d '[:space:]' < "$here/../../ose/VERSION")"
+  elif [ -f "$here/../../../.github/scripts/ose/VERSION" ]; then
+    release="ose-v$(tr -d '[:space:]' < "$here/../../../.github/scripts/ose/VERSION")"
   else
-    die "no OSE_VERSION beside this script and no ember/ose/VERSION; set OSE_RELEASE=ose-v<tag>"
+    die "no OSE_VERSION beside this script and no .github/scripts/ose/VERSION; set OSE_RELEASE=ose-v<tag>"
   fi
 fi
 case "$release" in
@@ -47,7 +47,7 @@ if [ -z "${OSE_TARGET:-}" ]; then
   case "$(uname -s)" in
     Darwin) os=darwin ;;
     Linux) os=linux ;;
-    *) die "unsupported OS $(uname -s); unpack the archive by hand (ember/ose/README.md)" ;;
+    *) die "unsupported OS $(uname -s); unpack the archive by hand (.github/scripts/ose/README.md)" ;;
   esac
   case "$(uname -m)" in
     arm64 | aarch64) arch=arm64 ;;

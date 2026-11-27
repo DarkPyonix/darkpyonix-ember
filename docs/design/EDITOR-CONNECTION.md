@@ -31,16 +31,16 @@ build OSE ourselves, we always know the exact server commit. That fact carries m
 ## 2. Pinned source
 
 All citations are to `microsoft/vscode` at tag **`1.139.1`**, commit
-**`04c0d99f4fb0d8afe6ce4f0c58e31e183ac3e4b1`**: the release OSE is built from (`ember/ose/VERSION`).
+**`04c0d99f4fb0d8afe6ce4f0c58e31e183ac3e4b1`**: the release OSE is built from (`.github/scripts/ose/VERSION`).
 Paths are relative to `src/vs/`. Line numbers are at that commit.
 
 The pin has one source of truth per side, and they are checked against each other:
 
-- `ember/ose/VERSION` names the tag OSE is built from (`ember/ose/build.sh`).
+- `.github/scripts/ose/VERSION` names the tag OSE is built from (`.github/scripts/ose/build.sh`).
 - `ember_editor_conn::PINNED_VERSION` / `PINNED_COMMIT` (`ember/editor-conn/src/lib.rs`) name the tag and
   commit the crate's tables and citations come from. The unit test `pin_matches_ose_version` fails
-  if `PINNED_VERSION` differs from `ember/ose/VERSION`; the CI job `editor-conn-pin`
-  (`.github/workflows/test.yml`) clones the `ember/ose/VERSION` tag, re-runs `gen_rpc_ids.sh`, and
+  if `PINNED_VERSION` differs from `.github/scripts/ose/VERSION`; the CI job `editor-conn-pin`
+  (`.github/workflows/test.yml`) clones the `.github/scripts/ose/VERSION` tag, re-runs `gen_rpc_ids.sh`, and
   fails if `rpc_ids.rs`, `PINNED_VERSION` or `PINNED_COMMIT` differ (§5).
 - At connect time, `handshake::verify_server` compares the server's `GET /version` with
   `PINNED_COMMIT` (§3.4).
@@ -439,7 +439,7 @@ back to 1.139.1 (§2); 1.139.1 → 1.141.0 changed neither the proxy table nor t
 
 1. **Pin per OSE build.** We build OSE ourselves (`INTENT.md` D10), so each Ember release names
    one Code-OSS commit. `ember-editor-conn` carries the tag and commit its tables came from
-   (`PINNED_VERSION`, `PINNED_COMMIT`), tied to `ember/ose/VERSION` by a unit test and by CI (§2).
+   (`PINNED_VERSION`, `PINNED_COMMIT`), tied to `.github/scripts/ose/VERSION` by a unit test and by CI (§2).
 2. **Generate, don't hand-write.** `ember/editor-conn/scripts/gen_rpc_ids.sh` regenerates the proxy
    table from `extHost.protocol.ts`. It fails if `createProxyIdentifier` appears in another file,
    because then module load order would decide the numbering. The next step is to generate the
@@ -454,9 +454,9 @@ back to 1.139.1 (§2); 1.139.1 → 1.141.0 changed neither the proxy table nor t
      public release tag: the tags are public, and the table is only the identifier order. Unknown
      commits fall back.
 4. **CI.** Done for the pinned tag: the `editor-conn-pin` job in `.github/workflows/test.yml`
-   shallow-clones `microsoft/vscode` at the `ember/ose/VERSION` tag, runs `gen_rpc_ids.sh`, and fails
+   shallow-clones `microsoft/vscode` at the `.github/scripts/ose/VERSION` tag, runs `gen_rpc_ids.sh`, and fails
    if `ember/editor-conn/src/rpc_ids.rs` or `PINNED_VERSION` / `PINNED_COMMIT` differ. So bumping
-   `ember/ose/VERSION` without regenerating the table fails the PR. Still to do: a canary that fetches
+   `.github/scripts/ose/VERSION` without regenerating the table fails the PR. Still to do: a canary that fetches
    each *new* upstream release tag, regenerates the table, diffs ids and subset signatures, and
    opens an issue on any change. That turns `PROJECT.md` Q2 into a tracked number, not a surprise.
 5. **Fail loud.** Any reply to an unknown method, a `ReplyErr` "Unknown actor", or a decode
@@ -478,7 +478,7 @@ runtime turns "protocol stability" from a research risk into a release-engineeri
    `bin/dpx-ose-server` of an unpacked OSE build; `ember/editor-conn/scripts/fetch-ose-artifact.sh`
    downloads the newest `ose` workflow artifact for the current platform and prints that path).
    It starts the server on a free port with `--without-connection-token` and a temp
-   `--server-data-dir` (with `extensions.verifySignature: false`, as `ember/ose/smoke.sh`), then over
+   `--server-data-dir` (with `extensions.verifySignature: false`, as `.github/scripts/ose/smoke.sh`), then over
    plain TCP: `verify_server`; management handshake, IPC, `getEnvironmentData`, the
    `remoteFilesystem` commands and a watch event; `scanExtensions` (the built-in
    `vscode.json-language-features` must be listed); the extension-host bootstrap, both

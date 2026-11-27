@@ -16,7 +16,7 @@
       "expect": "pass",
       "deep": {
         "expect": "not-built",
-        "reason": "the Ember editor client has no debug service yet: MainThreadDebugService gets default replies and no DAP messages are relayed (#445, ember/ose/README.md)"
+        "reason": "the Ember editor client has no debug service yet: MainThreadDebugService gets default replies and no DAP messages are relayed (#445, .github/scripts/ose/README.md)"
       }
     },
     "mhutchie.git-graph": {

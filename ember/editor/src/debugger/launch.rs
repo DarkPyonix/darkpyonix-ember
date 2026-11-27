@@ -18,6 +18,11 @@ pub struct Compound {
     pub name: String,
     /// The names of the configurations that start together.
     pub configurations: Vec<String>,
+    /// The task run once before any of them starts (`ICompound.preLaunchTask`): a label, or a
+    /// task identifier object as written.
+    pub pre_launch_task: Option<Value>,
+    /// Stopping one of them stops the others (`ICompound.stopAll`).
+    pub stop_all: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -74,9 +79,16 @@ pub fn parse_launch_json(text: &str) -> Result<LaunchFile, String> {
                             _ => None,
                         })
                         .collect();
+                    let pre_launch_task = c
+                        .get("preLaunchTask")
+                        .filter(|t| !t.is_null())
+                        .cloned();
+                    let stop_all = c.get("stopAll").and_then(Value::as_bool).unwrap_or(false);
                     Some(Compound {
                         name,
                         configurations,
+                        pre_launch_task,
+                        stop_all,
                     })
                 })
                 .collect()
@@ -298,6 +310,8 @@ mod tests {
             file.compound("Both").unwrap().configurations,
             vec!["Run".to_owned(), "Attach".to_owned()]
         );
+        assert_eq!(file.compound("Both").unwrap().pre_launch_task, None);
+        assert!(!file.compound("Both").unwrap().stop_all);
         assert_eq!(parse_launch_json("").unwrap(), LaunchFile::default());
         assert_eq!(
             parse_launch_json("// only a comment\n").unwrap(),
@@ -305,6 +319,24 @@ mod tests {
         );
         let err = parse_launch_json("{ \"configurations\": [").unwrap_err();
         assert!(err.contains("launch.json"), "{err}");
+    }
+
+    #[test]
+    fn fr_l31_42_a_compound_keeps_its_pre_launch_task_and_stop_all() {
+        let text = r#"{
+            "configurations": [],
+            "compounds": [
+                { "name": "Both", "configurations": ["A", "B"], "preLaunchTask": "build", "stopAll": true },
+                { "name": "Typed", "configurations": ["A"], "preLaunchTask": { "type": "npm", "script": "x" } },
+            ],
+        }"#;
+        let file = parse_launch_json(text).unwrap();
+        let both = file.compound("Both").unwrap();
+        assert_eq!(both.pre_launch_task, Some(json!("build")));
+        assert!(both.stop_all);
+        let typed = file.compound("Typed").unwrap();
+        assert_eq!(typed.pre_launch_task, Some(json!({ "type": "npm", "script": "x" })));
+        assert!(!typed.stop_all);
     }
 
     #[test]

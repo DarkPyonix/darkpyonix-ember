@@ -27,10 +27,13 @@
 //! the 실행 window's 작업 중지 does. Code-OSS draws it as a progress notification; the toolkit has no
 //! animation yet (dioxus-compose#46), so its bar does not move.
 //!
-//! Not built: the error dialog's "Remember my choice for this task", which Code-OSS keeps in the
-//! workspace's storage.
+//! The error dialog (a task that could not run) has "Remember my choice for this task" instead:
+//! the answer is kept per workspace by the dialog's message, as `debugTaskRunner` keeps it in the
+//! workspace's storage, and the next time the same message comes the answer is given without the
+//! dialog (Configure Task still opens `tasks.json`).
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use dioxus_compose::html::prelude::dioxus_elements::Key;
@@ -83,6 +86,27 @@ pub(crate) fn waiting_outcome(choice: TaskChoice) -> TaskOutcome {
 /// the key and its value.
 pub(crate) fn remembered_setting(choice: TaskChoice) -> (&'static str, &'static str) {
     ("debug.onTaskErrors", ember_editor::debugger::OnTaskErrors::remembered(choice).as_str())
+}
+
+/// The number `debugTaskRunner` stores for an answer of the error dialog (`DebugChoice`: 0 Debug
+/// Anyway, 1 Configure Task, 2 Cancel); the warning's answers are not stored this way.
+pub(crate) fn task_choice_code(choice: TaskChoice) -> Option<u8> {
+    match choice {
+        TaskChoice::DebugAnyway => Some(0),
+        TaskChoice::ConfigureTask => Some(1),
+        TaskChoice::Cancel => Some(2),
+        TaskChoice::ShowErrors | TaskChoice::Abort => None,
+    }
+}
+
+/// The answer this workspace remembered for the error dialog's `message`, if it did.
+pub(crate) fn remembered_task_choice(choices: &BTreeMap<String, u8>, message: &str) -> Option<TaskChoice> {
+    match choices.get(message)? {
+        0 => Some(TaskChoice::DebugAnyway),
+        1 => Some(TaskChoice::ConfigureTask),
+        2 => Some(TaskChoice::Cancel),
+        _ => None,
+    }
 }
 
 /// The question of a failed `preLaunchTask` while it is open.
@@ -209,8 +233,20 @@ pub(crate) fn on_debug(s: &Shared, update: &DebugUpdate) -> bool {
             true
         }
         DebugUpdate::TaskFailed { start, message, choices, error } => {
-            let mut debug = s.debug;
-            debug.write().task_prompt = Some(TaskPrompt { start: *start, message: message.clone(), choices: choices.clone(), error: *error });
+            // The error dialog is not asked again for a message whose answer was remembered.
+            let remembered = if *error {
+                let store = crate::services::services().ui.prefs.get_untracked().debug_store(&s.computer, &s.folder);
+                remembered_task_choice(&store.task_error_choices, message).filter(|c| choices.contains(c))
+            } else {
+                None
+            };
+            match remembered {
+                Some(choice) => give_answer(s, *start, choice),
+                None => {
+                    let mut debug = s.debug;
+                    debug.write().task_prompt = Some(TaskPrompt { start: *start, message: message.clone(), choices: choices.clone(), error: *error });
+                }
+            }
             true
         }
         DebugUpdate::ShowProblems => {
@@ -309,7 +345,8 @@ pub(crate) fn poll(s: &Shared) {
 
 /// The answer to the open question: the session layer hears it, Show Errors and Configure Task
 /// open what Code-OSS opens, and a checked "Remember my choice" of the warning writes
-/// `debug.onTaskErrors` to the user's settings (`configurationService.updateValue`).
+/// `debug.onTaskErrors` to the user's settings (`configurationService.updateValue`); that of the
+/// error dialog keeps the answer for the message in this workspace (`debug.taskerrorchoice`).
 pub(crate) fn answer(s: &Shared, choice: TaskChoice, remember: bool) {
     let mut debug = s.debug;
     let Some(prompt) = debug.write().task_prompt.take() else { return };
@@ -321,7 +358,20 @@ pub(crate) fn answer(s: &Shared, choice: TaskChoice, remember: bool) {
             value: Some(serde_json::Value::String(value.to_owned())),
         });
     }
-    s.host.send(HostCommand::Debug(DebugRequest::AnswerTask { start: prompt.start, choice }));
+    if remember && prompt.error {
+        if let Some(code) = task_choice_code(choice) {
+            let message = prompt.message.clone();
+            super::editor_debug::store(s, move |d| {
+                d.task_error_choices.insert(message, code);
+            });
+        }
+    }
+    give_answer(s, prompt.start, choice);
+}
+
+/// Tell the session layer the answer for start `start`, and open what the answer opens.
+fn give_answer(s: &Shared, start: u64, choice: TaskChoice) {
+    s.host.send(HostCommand::Debug(DebugRequest::AnswerTask { start, choice }));
     match choice {
         TaskChoice::ShowErrors => show_problems(s),
         TaskChoice::ConfigureTask => open_tasks_json(s),
@@ -358,9 +408,18 @@ pub(crate) fn answer_waiting(s: &Shared, choice: TaskChoice) {
 /// The checkbox of the warning (`remember`), in Korean.
 pub(crate) const REMEMBER_LABEL: &str = "사용자 설정에 내 선택 기억";
 
+/// The checkbox of the error dialog (`rememberTask`, "Remember my choice for this task"), in Korean.
+pub(crate) const REMEMBER_TASK_LABEL: &str = "이 작업에 대한 내 선택 기억";
+
+/// The checkbox's label: the warning's, or the error dialog's.
+pub(crate) fn remember_label(error: bool) -> &'static str {
+    if error { REMEMBER_TASK_LABEL } else { REMEMBER_LABEL }
+}
+
 /// Code-OSS's dialog for a failed `preLaunchTask`: the message and its buttons, the last one the
-/// cancel button (Escape and a click outside choose it), and for the warning the "Remember my
-/// choice in user settings" checkbox. `choose` hears the button and whether the box is checked.
+/// cancel button (Escape and a click outside choose it), and the checkbox: "Remember my choice in
+/// user settings" for the warning, "Remember my choice for this task" for the error dialog.
+/// `choose` hears the button and whether the box is checked.
 #[component]
 pub(crate) fn TaskPromptSheet(prompt: TaskPrompt, choose: EventHandler<(TaskChoice, bool)>) -> Element {
     let mut remember = dioxus_compose::prelude::use_signal(|| false);
@@ -369,6 +428,7 @@ pub(crate) fn TaskPromptSheet(prompt: TaskPrompt, choose: EventHandler<(TaskChoi
     let buttons: Vec<(usize, TaskChoice, &'static str)> =
         prompt.choices.iter().copied().enumerate().map(|(i, c)| (i, c, choice_label(c))).collect();
     let checked = *remember.read();
+    let remember_text = remember_label(prompt.error);
     rsx! {
         div { class: "modal", role: "presentation",
             onclick: move |_| choose.call((cancel, *remember.peek())),
@@ -382,19 +442,17 @@ pub(crate) fn TaskPromptSheet(prompt: TaskPrompt, choose: EventHandler<(TaskChoi
                 onclick: move |event| event.stop_propagation(),
                 div { class: "card-b",
                     b { "{prompt.message}" }
-                    if !prompt.error {
-                        // The mockup's square check (`ed-scm-cb`), as the commit box's amend uses it;
-                        // the row takes the click.
-                        div { id: "debug-task-remember", style: "display:flex; align-items:center; gap:6px; font-size:var(--fs-xs); color:var(--text-2); cursor:pointer;",
-                            onclick: move |_| {
-                                let now = *remember.peek();
-                                remember.set(!now);
-                            },
-                            button { class: if checked { "ed-scm-cb on" } else { "ed-scm-cb" }, role: "checkbox", "aria-checked": "{checked}", "aria-label": "{REMEMBER_LABEL}",
-                                if checked { {super::editor_workbench::page::icon_px("check-w", 12)} }
-                            }
-                            span { "{REMEMBER_LABEL}" }
+                    // The mockup's square check (`ed-scm-cb`), as the commit box's amend uses it;
+                    // the row takes the click.
+                    div { id: "debug-task-remember", style: "display:flex; align-items:center; gap:6px; font-size:var(--fs-xs); color:var(--text-2); cursor:pointer;",
+                        onclick: move |_| {
+                            let now = *remember.peek();
+                            remember.set(!now);
+                        },
+                        button { class: if checked { "ed-scm-cb on" } else { "ed-scm-cb" }, role: "checkbox", "aria-checked": "{checked}", "aria-label": "{remember_text}",
+                            if checked { {super::editor_workbench::page::icon_px("check-w", 12)} }
                         }
+                        span { "{remember_text}" }
                     }
                     div { class: "ed-confirm-acts",
                         for (i, choice, label) in buttons {

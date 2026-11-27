@@ -5,8 +5,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use ember_editor::problem_matcher::{
-    ApplyTo, CollectorEvent, FileLocation, FilePrefix, LocationKind, PatternSet, ProblemCollector, ProblemMatcher, Registry,
-    TaskSeverity,
+    search_file_location, ApplyTo, CollectorEvent, FileLocation, FilePrefix, LocationKind, PatternSet, ProblemCollector,
+    ProblemMatcher, Registry, TaskSeverity,
 };
 use ember_editor_conn::exthost::MarkerData;
 use serde_json::{json, Value};
@@ -260,9 +260,66 @@ fn fr_l31_42_file_locations_follow_get_resource() {
     let search = matcher(json!(["search", { "include": ["${workspaceFolder}/src"] }]));
     assert_eq!(search.file_location, FileLocation::Search);
     assert_eq!(search.file_prefix, FilePrefix::Search { include: vec!["/w/src".into()], exclude: vec![] });
-    assert_eq!(search.resource("/w/src/a.rs").as_deref(), Some("/w/src/a.rs"), "no search: the name is taken as absolute");
+    assert_eq!(search.resource("/w/src/a.rs").as_deref(), Some("/w/src/a.rs"), "no file list: the name is taken as absolute");
     // `["relative"]` alone is no file location, so the definition is refused.
     assert!(r.resolve(Some(&json!({ "fileLocation": ["relative"], "pattern": { "regexp": "^(.*):(\\d+): (.*)$" } })), &mut errors).is_empty());
+}
+
+// `fileLocation` `search` (`searchForFileLocation`): each include folder depth first, a folder's
+// files before its subfolders, an excluded folder not entered, the first path ending with the
+// name; nothing found, or no file list yet, takes the name as absolute.
+#[test]
+fn fr_l31_42_file_location_search_looks_through_the_workspace_files() {
+    let files: Vec<String> = [
+        "/w/src/deep/nested/util.c",
+        "/w/src/zeta/main.c",
+        "/w/src/util.c",
+        "/w/vendor/lib/x.c",
+        "/w/out/gen/x.c",
+        "/w/other/main.c",
+        "/w/a/sub/main.c",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let inc = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    // A folder's own file comes before one in a subfolder.
+    assert_eq!(search_file_location("util.c", &inc(&["/w/src"]), &[], &files).as_deref(), Some("/w/src/util.c"));
+    // Subfolders in name order, each searched whole before the next.
+    assert_eq!(search_file_location("main.c", &inc(&["/w"]), &[], &files).as_deref(), Some("/w/a/sub/main.c"));
+    // A name with folders in it matches the end of the path.
+    assert_eq!(search_file_location("zeta/main.c", &inc(&["/w"]), &[], &files).as_deref(), Some("/w/src/zeta/main.c"));
+    // The include folders in turn; an excluded folder is skipped with everything below it.
+    assert_eq!(search_file_location("x.c", &inc(&["/w/out", "/w/vendor"]), &inc(&["/w/out"]), &files).as_deref(), Some("/w/vendor/lib/x.c"));
+    assert_eq!(search_file_location("x.c", &inc(&["/w"]), &inc(&["/w/out/gen", "/w/vendor/lib"]), &files), None);
+    assert_eq!(search_file_location("missing.c", &inc(&["/w"]), &[], &files), None);
+
+    // Through the matcher: the list arrives from the window; without it, or with no match, the
+    // name is taken as absolute.
+    let def = json!({ "owner": "cc", "fileLocation": ["search", { "include": ["${workspaceFolder}"], "exclude": ["${workspaceFolder}/out"] }], "pattern": { "regexp": "^(.*):(\\d+): (.*)$", "file": 1, "line": 2, "message": 3 } });
+    let mut m = Registry::builtin().resolve(Some(&def), &mut Vec::new()).remove(0);
+    m.resolve_prefix(|p| p.replace("${workspaceFolder}", "/w"));
+    assert_eq!(m.resource("util.c").as_deref(), Some("/util.c"), "no list yet");
+    let mut c = ProblemCollector::new(vec![m], false, BTreeMap::new());
+    assert!(c.uses_search());
+    c.set_search_files(std::sync::Arc::new(files.clone()));
+    for l in ["util.c:3: broken", "x.c:1: odd", "nowhere.c:2: lost"] {
+        c.process_line(l);
+    }
+    c.done();
+    let paths: Vec<String> = c
+        .take_events()
+        .into_iter()
+        .filter_map(|e| match e {
+            CollectorEvent::Markers { path, .. } => Some(path),
+            _ => None,
+        })
+        .collect();
+    assert!(paths.contains(&"/w/src/util.c".to_owned()), "{paths:?}");
+    assert!(paths.contains(&"/w/vendor/lib/x.c".to_owned()), "the excluded out/ is not searched: {paths:?}");
+    assert!(paths.contains(&"/nowhere.c".to_owned()), "{paths:?}");
+    let plain = ProblemCollector::new(vec![builtin("go")], false, BTreeMap::new());
+    assert!(!plain.uses_search());
 }
 
 // Severity: a severity group's word, `E`/`W`/`I`, `hint` and `note`; else the matcher's

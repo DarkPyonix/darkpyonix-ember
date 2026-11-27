@@ -204,6 +204,18 @@ impl DebugView {
         })
     }
 
+    /// The frame the window focuses while the shown session is stopped, Code-OSS's
+    /// `focusedStackFrame`: a lower frame the window selected, else the top frame. `None` while
+    /// nothing is stopped or the focused frame has no file. The debug hover evaluates here.
+    pub fn focused_location(&self) -> Option<StoppedLocation> {
+        let top = self.stopped_at.as_ref()?;
+        let session = self.active_session()?;
+        match session.frame_id {
+            Some(frame) if frame != top.frame_id => self.focused_frame(),
+            _ => Some(top.clone()),
+        }
+    }
+
     /// The 1-based line of the focused lower frame ([`Self::focused_frame`]) in `uri`.
     pub fn focused_line(&self, uri: &UriComponents) -> Option<u32> {
         self.focused_frame().filter(|at| at.uri == *uri).map(|at| at.line)

@@ -1526,3 +1526,147 @@ fn fr_l31_42_set_variable_follows_the_adapter_capabilities() {
         "{commands:?}"
     );
 }
+
+/// The answer to hover `id`, once it came.
+fn hover_answer(rig: &Rig, id: u64) -> Option<Result<EvalResult, String>> {
+    rig.ui.iter().rev().find_map(|u| match u {
+        DebugUpdate::Evaluated { id: got, result, .. } if *got == id => Some(result.clone()),
+        _ => None,
+    })
+}
+
+fn hover(rig: &mut Rig, id: u64, expression: &str) {
+    let session = rig.session_id();
+    rig.debug(DebugRequest::Hover {
+        id,
+        session,
+        frame_id: 10,
+        uri: uri("/w/main.py"),
+        line: 2,
+        column: 5,
+        expression: expression.into(),
+    });
+}
+
+/// SPEC FR-L31.42, Code-OSS `DebugHoverComputer.evaluate`: an adapter with
+/// `supportsEvaluateForHovers` evaluates the hovered expression in the `hover` context, with the
+/// hovered place.
+#[test]
+fn fr_l31_42_debug_hover_evaluates_in_the_hover_context_when_the_adapter_can() {
+    let mut rig = Rig::fixture();
+    rig.adapter.caps = json!({"supportsEvaluateForHovers": true});
+    rig.toggle(2);
+    rig.start_python();
+    hover(&mut rig, 41, "x");
+    assert_eq!(
+        rig.dap_request("evaluate")["arguments"],
+        json!({
+            "expression": "x",
+            "frameId": 10,
+            "context": "hover",
+            "line": 2,
+            "column": 5,
+            "source": {"name": "main.py", "path": "/w/main.py"},
+        })
+    );
+    assert_eq!(
+        hover_answer(&rig, 41),
+        Some(Ok(EvalResult {
+            result: "42".into(),
+            type_name: Some("int".into()),
+            variables_reference: 0
+        }))
+    );
+}
+
+/// SPEC FR-L31.42, Code-OSS `findExpressionInStackFrame`: without `supportsEvaluateForHovers` the
+/// expression is looked up by name in the frame's scopes, and a name that is not there shows
+/// nothing (an error, so the window shows the language hover).
+#[test]
+fn fr_l31_42_debug_hover_without_evaluate_for_hovers_looks_the_name_up_in_the_scopes() {
+    let mut rig = Rig::fixture();
+    rig.toggle(2);
+    rig.start_python();
+    let before = rig.dap.len();
+    hover(&mut rig, 42, "x");
+    let asked: Vec<String> = rig.dap[before..]
+        .iter()
+        .map(|m| m["command"].as_str().unwrap_or("").to_owned())
+        .collect();
+    assert_eq!(asked, ["scopes", "variables"], "no evaluate request");
+    assert_eq!(rig.dap_request("scopes")["arguments"], json!({"frameId": 10}));
+    assert_eq!(
+        hover_answer(&rig, 42),
+        Some(Ok(EvalResult {
+            result: "41".into(),
+            type_name: Some("int".into()),
+            variables_reference: 0
+        }))
+    );
+    // The lookup's variables are not the Variables view's.
+    assert!(!rig.ui.iter().any(|u| matches!(u, DebugUpdate::Variables { .. })));
+
+    hover(&mut rig, 43, "nothere");
+    assert!(matches!(hover_answer(&rig, 43), Some(Err(_))));
+    hover(&mut rig, 44, "x.y");
+    assert!(
+        matches!(hover_answer(&rig, 44), Some(Err(_))),
+        "x has no children to look y up in"
+    );
+}
+
+/// SPEC FR-L31.42, Code-OSS `DebugStorage`: the breakpoints a window kept come back into the
+/// registry in the workspace's files, the extension host hears of them, and a session gets them.
+#[test]
+fn fr_l31_42_restored_breakpoints_join_the_registry_and_reach_the_adapter() {
+    use ember_editor::debugger::storage::{StoredBreakpoint, StoredBreakpoints, StoredFunctionBreakpoint};
+    let mut rig = Rig::fixture();
+    let stored = StoredBreakpoints {
+        breakpoints: vec![StoredBreakpoint {
+            path: "/w/main.py".into(),
+            line_number: 2,
+            column: None,
+            enabled: true,
+            condition: Some("x > 1".into()),
+            hit_condition: None,
+            log_message: None,
+        }],
+        function_breakpoints: vec![StoredFunctionBreakpoint {
+            name: "main".into(),
+            enabled: true,
+            condition: None,
+            hit_condition: None,
+            log_message: None,
+        }],
+        exception_breakpoints: Vec::new(),
+    };
+    rig.debug(DebugRequest::RestoreBreakpoints(stored.clone()));
+    let source = rig
+        .ui
+        .iter()
+        .rev()
+        .find_map(|u| match u {
+            DebugUpdate::Breakpoints { source, .. } => Some(source.clone()),
+            _ => None,
+        })
+        .expect("the registry is reported");
+    assert_eq!(source.len(), 1);
+    assert_eq!(source[0].uri, uri("/w/main.py"), "the workspace's authority");
+    assert_eq!(source[0].condition.as_deref(), Some("x > 1"));
+    assert_eq!(rig.calls_of("$acceptBreakpointsDelta").len(), 1);
+
+    // Restoring the same again changes nothing.
+    rig.calls.clear();
+    rig.debug(DebugRequest::RestoreBreakpoints(stored));
+    assert!(rig.calls_of("$acceptBreakpointsDelta").is_empty());
+
+    rig.start_python();
+    let set = rig.dap_request("setBreakpoints");
+    assert_eq!(set["arguments"]["lines"], json!([2]));
+    assert_eq!(set["arguments"]["breakpoints"][0]["condition"], "x > 1");
+    assert_eq!(
+        rig.dap_request("setFunctionBreakpoints")["arguments"]["breakpoints"][0]["name"],
+        "main"
+    );
+    assert!(matches!(rig.sessions()[0].state, SessionState::Stopped { .. }));
+}

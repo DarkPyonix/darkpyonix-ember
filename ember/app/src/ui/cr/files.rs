@@ -31,7 +31,7 @@ use crate::ui::files::{choose_target, chip_avail, chip_label, chip_rows, chip_te
 use super::compat::Banner;
 use crate::model::Tone;
 use super::characters::{CharState, Character};
-use super::components::{EmberSheetSized, AppButton, ButtonKind, Clickable, EmberCard, EmberSheet, FilterChip, InkIconButton, Label, NamedClickable, Pill, PillTone};
+use super::components::{EmberSheetSized, AppButton, ButtonKind, Clickable, EmberCard, EmberSheet, FilterChip, InkIconButton, Label, NamedClickable, NamedDisabled, Pill, PillTone};
 use super::home::{fit_label, text_px, Cols, Part};
 use super::notice;
 use super::project::{HeaderGap, ThemeButton};
@@ -78,17 +78,6 @@ pub fn device_cols(width_dp: f32) -> usize {
     } else {
         2
     }
-}
-
-/// Narrowest an agent tile can be and still show its two buttons, "대화 열기" and "보내기"
-/// (24 dp padding, 2 dp border, about 98 + 4 + 90 dp of buttons, with some air).
-pub const AGENT_TILE_MIN_W: f32 = 232.0;
-
-/// Columns of the agent tiles (FR-L27): as many as keep every tile at least
-/// [`AGENT_TILE_MIN_W`] wide, at most four. `avail` is the card's inner width. At 768 dp four
-/// tiles were 142 dp and the "보내기" button was cut to a line.
-pub fn agent_cols(avail: f32, gap: f32) -> usize {
-    (((avail + gap) / (AGENT_TILE_MIN_W + gap)).floor() as usize).clamp(1, 4)
 }
 
 /// Width of one tile of a grid of `cols` columns in `avail` with `gap` between.
@@ -423,24 +412,35 @@ pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<Cre
         { use ::compose_rust::ui::ScrollColumn; ScrollColumn!(modifier = Modifier::new().fill_max_width().fill_max_height(), {
             { use ::compose_rust::ui::Column; Column!(spacing = SP[4], modifier = Modifier::new().fill_max_width().padding(pad), {
                 if skip.show(EST_HEAD) {
-                    // On a phone the header keeps the menu button's room beside the title (FR-L27.10).
-                    // At 768 dp and above the actions sit beside the title on one row (#487).
-                    HeaderGap("파일", "연결된 모든 장비 사이에서 파일을 주고받습니다. 휴대폰과 태블릿도 포함됩니다.", compact, w < 700.0, 6.0, compact, || {
-                        // The share button is named "공유 시트 열기" (compose-rust v0.0.7, #460).
+                    // On a phone the header keeps the menu button's room beside the title.
+                    let tablet = !compact && w <= 900.0;
+                    let secondary = || {
                         ShareButton(compact, {
                             let o = share_open.clone();
                             move || o.set(true)
                         });
                         ThemeButton(&ui);
+                    };
+                    let primary = || {
                         let s = st.sheet.clone();
                         let open = move || s.set(Some(SendDraft::default()));
                         if compact {
-                            // A round ink button, icon only (`.lbl{display:none}`).
                             InkIconButton(IconRole::Send, open);
                         } else {
                             AppButton("보내기", Some(IconRole::Send), ButtonKind::Primary, false, true, false, open);
                         }
-                    });
+                    };
+                    { use ::compose_rust::ui::Column; Column!(spacing = SP[2], modifier = Modifier::new().fill_max_width(), {
+                        HeaderGap("파일", "연결된 모든 장비 사이에서 파일을 주고받습니다. 휴대폰과 태블릿도 포함됩니다.", compact, compact, 6.0, compact, || {
+                            secondary();
+                            if !tablet {
+                                primary();
+                            }
+                        });
+                        if tablet {
+                            primary();
+                        }
+                    }) };
                     // The lost server, said on the screen and not only in the send sheet (FR-L27.9).
                     if let Some(line) = server_status(&live_model) {
                         Banner(&line, Tone::Error);
@@ -711,16 +711,20 @@ fn Stage(model: &FilesModel, members: &[CrewMember], extras: &Extras, st: &State
             // The card's inner width, for the spanning tiles to line up with the columns.
             let avail = super::home::content_width(w, page_pad(w)) - 2.0 * PAD_CARD_H;
             if devices {
-                // The mockup's header (the sending device and its scan note) is 41 px high (#487).
-                { use ::compose_rust::ui::Box; Box!(alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width().height(41.0), {
-                    let lost = model.lost;
-                    super::home::CardHead(ICON_DESKTOP, "보내는 장비", move || {
-                        if lost {
-                            Pill("오프라인", PillTone::Red, true);
-                        } else if ready {
-                            Pill("근처 장비 탐색 중", PillTone::Green, true);
-                        }
-                    });
+                let demo = is_demo();
+                let sender = if demo { "mac-mini".to_string() } else { crate::terminal_stream::device_name() };
+                { use ::compose_rust::ui::Row; Row!(spacing = SP[2], alignment = Alignment::CenterStart, modifier = Modifier::new().fill_max_width(), {
+                    NavIcon(ICON_DESKTOP, p.text_2.to_argb(), 28.0);
+                    { use ::compose_rust::ui::Column; Column!(modifier = Modifier::new().weight(1.0), {
+                        Label("보내는 장비", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                        Label(&sender, Fs::Xl, Weight::Semibold, None, Some(1));
+                    }) };
+                    if model.lost {
+                        Pill("오프라인", PillTone::Red, true);
+                    } else if demo {
+                        super::home::Dot(p.green.strong);
+                        Label("근처 장비를 찾는 중입니다", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+                    }
                 }) };
                 if model.devices.is_empty() {
                     Label(empty_text(crate::ui::files::Section::Devices, ready), Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
@@ -740,12 +744,7 @@ fn Stage(model: &FilesModel, members: &[CrewMember], extras: &Extras, st: &State
                             let presence = d.presence;
                             let lost = model.lost;
                             let demo = is_demo();
-                            // #786: when the server is lost after loading, device tiles show 오프라인
-                            // while transfer and history lists stay on screen.
-                            let mut tile_device = d.clone();
-                            if lost {
-                                tile_device.presence = Presence::Offline;
-                            }
+                            let tile_device = d.clone();
                             Box::new(move || {
                                 DeviceTile(&tile_device, extras.devices.get(&tile_device.id), move |_| {
                                     if let Some(why) = tile_tap_notice(lost, presence, &d_name) {
@@ -781,7 +780,7 @@ fn Stage(model: &FilesModel, members: &[CrewMember], extras: &Extras, st: &State
                 if members.is_empty() {
                     Label(empty_text(crate::ui::files::Section::Agents, ready), Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
                 }
-                let a_cols = agent_cols(avail, SP[2]);
+                let a_cols = cols;
                 let text_w = tile_width(avail, a_cols, SP[2]) - 2.0 * SP[2] - 2.0;
                 TileGrid(
                     a_cols,
@@ -812,21 +811,8 @@ fn Stage(model: &FilesModel, members: &[CrewMember], extras: &Extras, st: &State
                                 files: vec![demo_files()[0].to_string()],
                             }));
                         } else {
-                            // The platform's own dialog (compose-rust#483). Its one answer
-                            // arrives later on the UI thread and decides what the sheet does.
                             let s = s.clone();
-                            compose_rust::FileDialog::open_files().title(FILE_DIALOG_TITLE).show(move |result| {
-                                let outcome = match result {
-                                    compose_rust::FileDialogResult::Chosen { paths, .. } => pick_outcome(Some(paths), true),
-                                    compose_rust::FileDialogResult::Cancelled => pick_outcome(None, true),
-                                    compose_rust::FileDialogResult::Unavailable => pick_outcome(None, false),
-                                };
-                                match outcome {
-                                    PickOutcome::Draft(draft) => s.set(Some(draft)),
-                                    PickOutcome::Nothing => {}
-                                    PickOutcome::Say(why) => notice::post(why),
-                                }
-                            });
+                            pick_send_files(move |draft| s.set(Some(draft)));
                         }
                     });
                     if !can_pick {
@@ -835,6 +821,21 @@ fn Stage(model: &FilesModel, members: &[CrewMember], extras: &Extras, st: &State
                 }) };
             }
         }) };
+    });
+}
+
+fn pick_send_files(on_pick: impl FnOnce(SendDraft) + 'static) {
+    compose_rust::FileDialog::open_files().title(FILE_DIALOG_TITLE).show(move |result| {
+        let outcome = match result {
+            compose_rust::FileDialogResult::Chosen { paths, .. } => pick_outcome(Some(paths), true),
+            compose_rust::FileDialogResult::Cancelled => pick_outcome(None, true),
+            compose_rust::FileDialogResult::Unavailable => pick_outcome(None, false),
+        };
+        match outcome {
+            PickOutcome::Draft(draft) => on_pick(draft),
+            PickOutcome::Nothing => {}
+            PickOutcome::Say(why) => notice::post(why),
+        }
     });
 }
 
@@ -1283,20 +1284,17 @@ fn HistoryRow(h: &HistoryEntry) {
 /// A receiver chip of the send sheet (`.fl-tg`): an outlined pill with the device glyph or the
 /// agent's character; the selected one takes the `ink` border, an offline one is dimmed. It is
 /// the container's `on_click` (compose-rust#372) and says whether it is selected (v0.0.7, #429).
-fn TargetChip(label: &str, icon: TargetIcon, selected: bool, disabled: bool, on_click: impl FnMut() + 'static) {
+fn TargetChip(label: &str, name: &str, icon: TargetIcon, selected: bool, disabled: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let fill = if selected { p.sel } else { p.surface };
     let border = if selected { p.ink } else { p.line };
-    let mut m = Modifier::new()
+    let m = Modifier::new()
         .height(H_CTL)
         .background(paint(fill))
         .border(1.0, paint(border))
         .shape_role(ShapeRole::Full)
         .selected(selected);
-    if disabled {
-        m = m.alpha(0.5).disabled(true);
-    }
-    Clickable(m, Alignment::CenterStart, on_click, || {
+    let content = || {
         { use ::compose_rust::ui::Row; Row!(alignment = Alignment::CenterStart, {
             { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(12.0)) };
             match &icon {
@@ -1317,7 +1315,13 @@ fn TargetChip(label: &str, icon: TargetIcon, selected: bool, disabled: bool, on_
             Label(label, Fs::Sm, Weight::Regular, Some(paint(text_color)), Some(1));
             { use ::compose_rust::ui::Spacer; Spacer!(modifier = Modifier::new().width(12.0)) };
         }) };
-    });
+    };
+    if disabled {
+        let name = format!("{name} {}", crate::ui::files::OFFLINE_TAG);
+        NamedDisabled(&name, m.alpha(0.5), Alignment::CenterStart, content);
+    } else {
+        NamedClickable(name, m, Alignment::CenterStart, on_click, content);
+    }
 }
 
 /// The chip text: the name cut to fit, with the offline tag for an offline device.
@@ -1406,7 +1410,7 @@ pub(super) fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], 
                             TargetIcon::Kind(k) => TargetIcon::Kind(*k),
                             TargetIcon::Agent(m) => TargetIcon::Agent(m.clone()),
                         };
-                        TargetChip(&shown, icon, *sel, is_disabled, move || {
+                        TargetChip(&shown, label, icon, *sel, is_disabled, move || {
                             match choose_target(&base, &devs, target.clone()) {
                                 Ok(next) => s.set(Some(next)),
                                 Err(note) => notice::post(note),
@@ -1417,6 +1421,18 @@ pub(super) fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], 
             }
             Label("파일", Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
             Label(&files_line(d.files.len(), FILE_PICKER_AVAILABLE || demo), Fs::Sm, Weight::Regular, None, Some(2));
+            if FILE_PICKER_AVAILABLE && !demo {
+                let sheet = st.sheet.clone();
+                AppButton("파일 고르기", Some(IconRole::Add), ButtonKind::Default, true, !lost, false, move || {
+                    let sheet = sheet.clone();
+                    pick_send_files(move |picked| {
+                        if let Some(mut draft) = sheet.get_untracked() {
+                            draft.files = picked.files;
+                            sheet.set(Some(draft));
+                        }
+                    });
+                });
+            }
             if demo {
                 { use ::compose_rust::ui::ScrollRow; ScrollRow!(modifier = Modifier::new().fill_max_width().height(H_CTL), {
                     for fname in demo_files() {
@@ -1870,24 +1886,9 @@ mod tests {
     }
 
     #[test]
-    fn fr_l27_agent_tiles_keep_room_for_both_buttons_at_every_width() {
-        let gap = SP[2];
-        // 1440: 4 across; 1024: 3; 768: 2; 390: one full-width row.
-        assert_eq!(stage_avail(1440.0), 1102.0);
-        assert_eq!(stage_avail(1024.0), 864.0);
-        assert_eq!(stage_avail(768.0), 608.0);
-        assert_eq!(stage_avail(390.0), 318.0);
-        let cols: Vec<usize> = [1440.0, 1024.0, 768.0, 390.0].iter().map(|w| agent_cols(stage_avail(*w), gap)).collect();
-        assert_eq!(cols, vec![4, 3, 2, 1]);
-        for w in [390.0, 560.0, 640.0, 768.0, 900.0, 1024.0, 1100.0, 1280.0, 1440.0, 1920.0] {
-            let avail = stage_avail(w);
-            let c = agent_cols(avail, gap);
-            assert!((1..=4).contains(&c), "{w}");
-            assert!(tile_width(avail, c, gap) >= AGENT_TILE_MIN_W || c == 1, "{w}: tile {}", tile_width(avail, c, gap));
-        }
-        // Where the old four columns left 142 dp, the tile is now wide enough for both buttons.
-        assert!(tile_width(stage_avail(768.0), 4, gap) < AGENT_TILE_MIN_W);
-        assert!(tile_width(stage_avail(768.0), 2, gap) >= 292.0);
+    fn fr_l27_the_agent_grid_uses_the_mockup_device_columns() {
+        let cols: Vec<_> = [1440.0, 1024.0, 768.0, 390.0].into_iter().map(device_cols).collect();
+        assert_eq!(cols, vec![4, 4, 4, 2]);
     }
 
     #[test]
@@ -1982,6 +1983,24 @@ mod tests {
         let inner = chip_avail(390.0);
         assert_eq!(shown_label("win-desktop", true, 16.0, inner), "win-desktop 오프라인");
         assert_eq!(shown_label("studio-workstation", false, 16.0, inner), "studio-workstation");
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn fr_l27_5_a_real_send_sheet_offers_the_native_picker() {
+        let _guard = crate::services::test_guard();
+        let mut host = Host::new(|| {
+            Box::new(Recomposer::new(|| {
+                let st = remember(|| State {
+                    sheet: mutable_state_of(Some(SendDraft::default())),
+                    ..State::new()
+                });
+                SendSheet(&st, &[], &[], true, false, 768.0);
+            }))
+        });
+        let raw = host.rebuild().expect("rebuild");
+        let all = texts(&decode_batch(raw).expect("decode"));
+        assert!(all.iter().any(|value| value == "파일 고르기"), "picker missing: {all:?}");
     }
 
     #[test]
@@ -2312,6 +2331,6 @@ mod tests {
         assert!(all.iter().any(|t| t == "전송 기록"), "history list kept when server is lost");
         let src = include_str!("files.rs");
         assert!(src.contains("HeaderGap(\"파일\""), "header exists");
-        assert!(src.contains("w < 700.0"), "768 header keeps actions beside the title");
+        assert!(src.contains("if tablet {\n                            primary();"), "768 send wraps below the secondary actions");
     }
 }

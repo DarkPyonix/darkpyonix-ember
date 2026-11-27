@@ -1219,3 +1219,5 @@ Agent CLIs never run on a phone; they run on ember-server. *[user, 2026-11-27, c
 **Extensions** (`extensions/`): `intellij-darkpyonix` (with the DarkPyonix theme), `vscode-darkpyonix`, `vscode-darkpyonix-theme`.
 
 **Client screens** *[user, 2026-11-27]*: the integration parts of the main page's dashboard move to the Tools section. The dashboard opens by pulling the main page down (overscroll at the top; pulled all the way it pours out) and by pressing the DarkPyonix logo, not by scrolling down. The app bar logo is a simplified mark; the full DarkPyonix logo is used only at the Ember editor's top left and as the app's taskbar/dock icon.
+
+**Webviews** *[user, 2026-11-27: "아니 뭔 소리야 extended에 있어야지. 그리고 그걸 compose-rust랑 dioxus-compose에 넣어야지. 왜 자꾸 웹뷰를 안쓴다는 말을 과대 해석하는거지? 개들 UI 구현을 웹뷰로 하면 안된다는거지 웹뷰가 없어도 된다는 말이 아니잖아"]*: "no webview" means a toolkit's own UI is never drawn with a webview; it does not mean the toolkits offer no webview. The OS webview host (WKWebView, WebView2, WebKitGTK, Android WebView) belongs in compose-multiplatform-core-extended and is exposed as a widget by compose-rust and dioxus-compose. Ember's `ember/ide-webview` moves onto that widget.

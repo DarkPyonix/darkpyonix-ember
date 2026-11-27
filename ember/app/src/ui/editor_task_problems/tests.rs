@@ -114,3 +114,37 @@ fn fr_l31_42_the_task_output_is_read_line_by_line() {
     assert_eq!(lines.take(), ["done K"]);
     assert!(lines.fed);
 }
+
+// A matcher with `fileLocation` `search` gets the quick open index's files, again only when the
+// index changed, and a problem's file name is found in them.
+#[test]
+fn fr_l31_42_a_searching_matcher_gets_the_quick_open_files() {
+    use crate::ui::palette::{file_items, Item, Payload};
+    let tasks = r#"{ "version": "2.0.0", "tasks": [
+        { "label": "cc", "type": "shell", "command": "make",
+          "problemMatcher": { "owner": "cc", "fileLocation": ["search", { "include": ["${workspaceFolder}"] }],
+              "pattern": { "regexp": "^(.*):(\\d+): (.*)$", "file": 1, "line": 2, "message": 3 } } } ] }"#;
+    let def = parse_tasks_json(tasks).unwrap().remove(0);
+    let (matchers, errors) = matchers_for(&Registry::builtin(), &def, &ctx(), "/w");
+    assert!(errors.is_empty(), "{errors:?}");
+    let mut collector = ProblemCollector::new(matchers, false, BTreeMap::new());
+    assert!(collector.uses_search());
+
+    let mut items = file_items("/w", &["/w/src/lib/util.c".to_owned(), "/w/README.md".to_owned()]);
+    items.push(Item { payload: Payload::GotoLine { line: 1, column: None }, title: ":1".into(), hint: String::new(), enabled: true });
+    assert_eq!(index_paths(&items), ["/w/README.md", "/w/src/lib/util.c"], "files only, in the index's order");
+
+    // An empty index is not handed over; a new one is, once.
+    assert!(refresh_search_files(&mut collector, Arc::new(Vec::new()), None).is_none());
+    let index = Arc::new(items);
+    let seen = refresh_search_files(&mut collector, index.clone(), None);
+    assert!(seen.as_ref().is_some_and(|s| Arc::ptr_eq(s, &index)));
+    let again = refresh_search_files(&mut collector, index.clone(), seen.clone());
+    assert!(again.as_ref().is_some_and(|s| Arc::ptr_eq(s, &index)));
+
+    let mut known = BTreeMap::new();
+    let mut status = TrackStatus::default();
+    let changes = feed(&mut collector, vec!["util.c:4: broken".into()], true, Vec::new(), &mut known, &mut status);
+    let paths: Vec<&str> = changes.iter().flat_map(|(_, e)| e.iter().map(|(p, _)| p.as_str())).collect();
+    assert_eq!(paths, ["/w/src/lib/util.c"], "{changes:?}");
+}

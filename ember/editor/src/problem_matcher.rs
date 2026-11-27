@@ -14,11 +14,17 @@
 //! search does ([`crate::search`]). Nothing here does I/O: a collector returns what Code-OSS tells
 //! the marker service ([`CollectorEvent`]), and the window hands that to the session's problems.
 //!
+//! `fileLocation` `search` (`searchForFileLocation`) looks through a list of the workspace's files
+//! the window hands the matcher ([`ProblemMatcher::search_files`]): each `include` folder depth
+//! first, a folder's own files before its subfolders, an `exclude` folder skipped with everything
+//! below it, and the first file whose path ends with the name wins. Without the list, or when
+//! nothing matches, the name is taken as absolute, as Code-OSS does when its search finds nothing.
+//!
 //! What differs, and why: `fileLocation` `autoDetect` checks no file, because the collector has no
 //! file system; a relative name is joined to the prefix and an absolute one is kept, which is
-//! what Code-OSS's check finds when the file is there. `search` is not built: the name is taken as
-//! absolute, as Code-OSS does when its search finds nothing. The variables an `endsPattern`
-//! captures are not kept, because no task variable reads them yet.
+//! what Code-OSS's check finds when the file is there. A folder's entries are searched in name
+//! order, where Code-OSS takes the order the file system lists them in. The variables an
+//! `endsPattern` captures are not kept, because no task variable reads them yet.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
@@ -266,6 +272,9 @@ pub struct ProblemMatcher {
     pub severity: Option<TaskSeverity>,
     pub watching: Option<Watching>,
     pub deprecated: bool,
+    /// The workspace's files, for `fileLocation` `search`; `None` until the window has listed
+    /// them ([`ProblemCollector::set_search_files`]).
+    pub search_files: Option<Arc<Vec<String>>>,
 }
 
 impl ProblemMatcher {
@@ -290,7 +299,14 @@ impl ProblemMatcher {
             _ => None,
         };
         let full = match self.file_location {
-            FileLocation::Absolute | FileLocation::Search => filename.to_owned(),
+            FileLocation::Absolute => filename.to_owned(),
+            FileLocation::Search => match (&self.file_prefix, &self.search_files) {
+                (FilePrefix::Search { include, exclude }, Some(files)) => {
+                    search_file_location(filename, include, exclude, files)
+                        .unwrap_or_else(|| filename.to_owned())
+                }
+                _ => filename.to_owned(),
+            },
             FileLocation::Relative => format!("{}/{filename}", prefix?),
             FileLocation::AutoDetect => match prefix {
                 Some(p) if !is_absolute(filename) => format!("{p}/{filename}"),
@@ -300,6 +316,54 @@ impl ProblemMatcher {
         let full = normalize(&full).replace('\\', "/");
         Some(if full.starts_with('/') { full } else { format!("/{full}") })
     }
+}
+
+/// `searchForFileLocation`: the first of `files` below an `include` folder whose path ends with
+/// `filename`, in the order Code-OSS's walk meets them: the include folders in turn, and in each
+/// folder its files (by name) before its subfolders (by name, each searched whole before the
+/// next). A folder that is one of `exclude` is not entered.
+pub fn search_file_location(filename: &str, include: &[String], exclude: &[String], files: &[String]) -> Option<String> {
+    let trim = |p: &str| {
+        let t = p.trim_end_matches('/');
+        if t.is_empty() { "/".to_owned() } else { t.to_owned() }
+    };
+    let exclude: Vec<String> = exclude.iter().map(|e| trim(e)).collect();
+    for dir in include {
+        let dir = trim(dir);
+        if exclude.contains(&dir) {
+            continue;
+        }
+        let base = if dir == "/" { String::new() } else { dir.clone() };
+        // The walk order as a key: at each level a file (0) comes before a folder (1), then names.
+        let mut hits: Vec<_> = files
+            .iter()
+            .filter_map(|path| {
+                let rest = path.strip_prefix(&base)?.strip_prefix('/')?;
+                let segments: Vec<&str> = rest.split('/').collect();
+                let (name, folders) = segments.split_last()?;
+                // A file inside an excluded folder is never reached.
+                let mut folder = base.clone();
+                for f in folders {
+                    folder.push('/');
+                    folder.push_str(f);
+                    if exclude.contains(&folder) {
+                        return None;
+                    }
+                }
+                if !path.ends_with(filename) {
+                    return None;
+                }
+                let mut key: Vec<(u8, &str)> = folders.iter().map(|f| (1, *f)).collect();
+                key.push((0, *name));
+                Some((key, path))
+            })
+            .collect();
+        hits.sort();
+        if let Some((_, path)) = hits.into_iter().next() {
+            return Some(path.clone());
+        }
+    }
+    None
 }
 
 fn is_absolute(path: &str) -> bool {
@@ -708,6 +772,28 @@ impl ProblemCollector {
     /// The highest marker severity found since the last pass began (8 is an error).
     pub fn max_severity(&self) -> Option<u8> {
         self.max_severity
+    }
+
+    /// Whether a matcher uses `fileLocation` `search`, so the window lists the workspace's files.
+    pub fn uses_search(&self) -> bool {
+        self.line_matchers.values().flatten().any(|m| m.matcher.file_location == FileLocation::Search)
+            || self.backgrounds.iter().any(|m| m.file_location == FileLocation::Search)
+    }
+
+    /// The workspace's files for the matchers with `fileLocation` `search`
+    /// ([`search_file_location`]); a problem found after this is looked up in them.
+    pub fn set_search_files(&mut self, files: Arc<Vec<String>>) {
+        let set = |m: &mut Arc<ProblemMatcher>| {
+            if m.file_location == FileLocation::Search {
+                Arc::make_mut(m).search_files = Some(files.clone());
+            }
+        };
+        for lm in self.line_matchers.values_mut().flatten() {
+            set(&mut lm.matcher);
+        }
+        for m in &mut self.backgrounds {
+            set(m);
+        }
     }
 
     /// The paths of the open documents, for `applyTo`.
@@ -1173,6 +1259,7 @@ impl Registry {
                 severity,
                 watching: None,
                 deprecated: false,
+                search_files: None,
             });
         }
         let Some(mut result) = result else {
@@ -1414,6 +1501,7 @@ impl Registry {
                     severity,
                     watching: None,
                     deprecated,
+                    search_files: None,
                 },
             );
         }

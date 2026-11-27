@@ -12,6 +12,12 @@
 //! began makes the task active (`TaskEventKind.Active`) and one that ended makes it ready
 //! (`TaskEventKind.Inactive`).
 //!
+//! A matcher with `fileLocation` `search` looks a file name up in the workspace's files. The list
+//! is the quick open index ([`HostCommand::IndexFiles`]), which a run with such a matcher starts
+//! when there is none yet, and which reaches the collector as it grows. It skips the folders quick
+//! open skips (`.git`, `node_modules` and the like) and stops at 20 000 files; a name it does not
+//! hold is taken as absolute, as Code-OSS does when its search finds nothing.
+//!
 //! What differs: the problems a run reports are delivered on the window's next render instead of
 //! after Code-OSS's 3 s quiet delay, and the "background task but uses a problem matcher without a
 //! background pattern" line Code-OSS writes to its task output channel is a notice, because Ember
@@ -19,6 +25,7 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use ember_editor::problem_matcher::{CollectorEvent, ProblemCollector, ProblemMatcher, Registry};
 use dioxus_compose::html::prelude::dioxus_signals::ReadableExt;
@@ -120,6 +127,32 @@ struct Tracked {
     handle: TerminalHandle,
     collector: ProblemCollector,
     status: TrackStatus,
+    /// The quick open index the collector's `search` matchers last got; `None` for a run whose
+    /// matchers do not search, or before the index has anything.
+    index: Option<FileIndex>,
+}
+
+/// The quick open index as the host keeps it.
+type FileIndex = Arc<Vec<crate::ui::palette::Item>>;
+
+/// The paths of the quick open index's files, for `fileLocation` `search`.
+pub(crate) fn index_paths(items: &[crate::ui::palette::Item]) -> Vec<String> {
+    items
+        .iter()
+        .filter_map(|item| match &item.payload {
+            crate::ui::palette::Payload::File(path) => Some(path.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Hand a searching collector the index when it changed since `seen`. Returns the index it has.
+fn refresh_search_files(collector: &mut ProblemCollector, items: FileIndex, seen: Option<FileIndex>) -> Option<FileIndex> {
+    if items.is_empty() || seen.as_ref().is_some_and(|s| Arc::ptr_eq(s, &items)) {
+        return seen;
+    }
+    collector.set_search_files(Arc::new(index_paths(&items)));
+    Some(items)
 }
 
 thread_local! {
@@ -159,11 +192,22 @@ pub(crate) fn track(s: &Shared, task: &TaskDef, handle: &TerminalHandle, cwd: &s
             task.label
         ));
     }
+    let mut index = None;
+    if collector.uses_search() {
+        let (items, running) = {
+            let state = s.host.state.lock().unwrap();
+            (state.file_items.clone(), state.index_running)
+        };
+        if items.is_empty() && !running {
+            s.host.send(HostCommand::IndexFiles);
+        }
+        index = refresh_search_files(&mut collector, items, None);
+    }
     collector.about_to_start();
     let mut status = TrackStatus::default();
     let changes = KNOWN.with_borrow_mut(|known| apply_events(collector.take_events(), known, &mut status));
     send(s, changes);
-    TRACKED.with_borrow_mut(|t| t.push(Tracked { handle: handle.clone(), collector, status }));
+    TRACKED.with_borrow_mut(|t| t.push(Tracked { handle: handle.clone(), collector, status, index }));
 }
 
 /// Move the run in `handle` on with the terminal state `state`, and say where its passes are.
@@ -171,12 +215,16 @@ pub(crate) fn track(s: &Shared, task: &TaskDef, handle: &TerminalHandle, cwd: &s
 /// reach the session before its outcome does.
 pub(crate) fn step(s: &Shared, handle: &TerminalHandle, state: &TerminalState) -> TrackStatus {
     let open = open_documents(s);
+    let items = s.host.state.lock().unwrap().file_items.clone();
     let (changes, status) = TRACKED.with_borrow_mut(|tracked| {
         let Some(i) = tracked.iter().position(|t| t.handle.same(handle)) else {
             return (Vec::new(), TrackStatus::default());
         };
         let exited = state.exit.is_some() || (state.error.is_some() && state.needs_reconnect());
         let t = &mut tracked[i];
+        if t.collector.uses_search() {
+            t.index = refresh_search_files(&mut t.collector, items, t.index.take());
+        }
         let lines = t.handle.take_output_lines();
         let changes = KNOWN.with_borrow_mut(|known| feed(&mut t.collector, lines, exited, open, known, &mut t.status));
         let status = t.status;

@@ -517,6 +517,12 @@ impl EditorHost {
                     }
                 }
                 let _ = session.debug(ember_editor::debugger::DebugRequest::ListConfigurations);
+                // The breakpoints the workspace kept (FR-L31.42, Code-OSS `DebugStorage`), on the first
+                // connection and after a reconnect, whose session starts with an empty registry.
+                let kept = crate::services::services().ui.prefs.get_untracked().debug_store(&target.computer, &target.folder).breakpoints;
+                if !kept.is_empty() {
+                    let _ = session.debug(ember_editor::debugger::DebugRequest::RestoreBreakpoints(kept));
+                }
                 *revision.write() += 1;
                 let mut index_task: Option<tokio::task::JoinHandle<()>> = None;
                 // The newest search the window asked for: a debounced one that is no longer it is dropped.

@@ -222,7 +222,11 @@ fn init(target: EditorTarget) {
     let revision = use_hook(|| SyncSignal::<u64>::new_maybe_sync_in_scope(0, root));
     let host = use_hook(|| EditorHost::start(target.clone(), revision));
     let debug = use_hook(|| Signal::new_in_scope(super::editor_debug::DebugControls::default(), root));
-    let debug_view = use_hook(|| Signal::new_in_scope(super::editor_debug_view::DebugView::default(), root));
+    // The watch expressions the workspace kept when it last closed (FR-L31.42, Code-OSS `DebugStorage`).
+    let debug_view = use_hook(|| {
+        let kept = crate::services::services().ui.prefs.get_untracked().debug_store(&target.computer, &target.folder);
+        Signal::new_in_scope(super::editor_debug_view::DebugView::with_watches(&kept.watch_expressions), root)
+    });
     let tabs = use_hook(|| Signal::new_in_scope(EditorTabs::default(), root));
     let directory = use_hook(|| Signal::new_in_scope(target.folder.clone(), root));
     let expanded = use_hook(|| Signal::new_in_scope(std::collections::HashSet::<String>::new(), root));
@@ -427,6 +431,8 @@ fn editor_pane() -> Element {
     } else {
         HOVER_ASKED.with(|cell| cell.set(None));
     }
+    // FR-L31.42: the debug hover's card is placed the same way.
+    super::editor_debug_hover::view::place(&s, &uri, &handle);
     let version = {
         let mut map = s.editor_versions.borrow_mut();
         let current = map.entry(generation).or_insert(doc.version);
@@ -521,7 +527,9 @@ fn editor_pane() -> Element {
         on_caret_rect: move |e: compose_rust::code::CaretRect| crate::ui::editor_language::view::set_caret_rect(&caret_s, e.rect),
         on_change: move |e: compose_rust::code::CodeChange| { keep_edited_tab(&change_s, &change_uri.path); let event = change_s.bridge.borrow_mut().on_code_changed(&change_uri, e.version, WidgetRange::new(pos(e.range.start), pos(e.range.end)), e.text); if let Some((_, _, WidgetEvent::CodeChanged { version, .. })) = &event { change_s.editor_versions.borrow_mut().insert(generation, *version); } send(&change_s, event); crate::ui::editor_states::view::edited(&change_s, &change_uri.path); },
         on_save: move |e: compose_rust::code::SaveRequest| { if !crate::ui::editor_states::view::manual_save_allowed(&save_s, &save_uri.path) { return; } let event = save_s.bridge.borrow().on_save_requested(&save_uri, e.version); send(&save_s, event); save_s.scm.refresh(); },
-        on_hover: move |e: compose_rust::code::CodeHover| { let phase = match e.phase { compose_rust::schema::HoverPhase::Rest => EditorHoverPhase::Rest, _ => EditorHoverPhase::Leave }; let event = hover_s.bridge.borrow().on_code_hovered(&hover_uri, e.decoration.unwrap_or(0), pos(e.position), phase); send(&hover_s, event); },
+        // FR-L31.42: while a thread is stopped the debug hover takes the rest first (Code-OSS shows it
+        // instead of the language hover).
+        on_hover: move |e: compose_rust::code::CodeHover| { let phase = match e.phase { compose_rust::schema::HoverPhase::Rest => EditorHoverPhase::Rest, _ => EditorHoverPhase::Leave }; if super::editor_debug_hover::view::code_hover(&hover_s, &hover_uri, e.decoration.unwrap_or(0), pos(e.position), phase) { return; } let event = hover_s.bridge.borrow().on_code_hovered(&hover_uri, e.decoration.unwrap_or(0), pos(e.position), phase); send(&hover_s, event); },
         on_decoration_click: move |id| {
             if !super::editor_debug::activate_gutter(&click_s, &click_uri, id) {
                 let event = click_s.bridge.borrow().on_decoration_activated(&click_uri, id);
@@ -1976,6 +1984,7 @@ pub mod page {
                         {crate::ui::editor_notifications::view::layer(&s)}
                         {crate::ui::editor_language::view::overlay(&s)}
                         {hover_card(&s)}
+                        {crate::ui::editor_debug_hover::view::card(&s)}
                     }
                     {status_bar(&s, &agent_state, &branch, current.as_deref().filter(|_| active.is_some()), line, col, active.as_ref().map_or(4, |d| d.tab_width))}
                 }

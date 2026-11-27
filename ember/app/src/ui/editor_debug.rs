@@ -13,6 +13,10 @@
 //! Without Debugging, a start with `noDebug`) also come from the focused code editor
 //! ([`code_key_action`]), which keeps the keys it does not pass on. The `preLaunchTask` and
 //! `postDebugTask` go through the task runner ([`super::editor_debug_tasks`]).
+//!
+//! The breakpoint registry is kept per workspace as it changes ([`store`], Code-OSS's
+//! `DebugStorage`), and put back when the session connects. The debug hover is
+//! [`super::editor_debug_hover`].
 
 use compose_rust::code::{Decoration, Decorations, GutterDecoration, GutterDecorations};
 use compose_rust::schema::ColorRole;
@@ -26,6 +30,7 @@ use ember_editor::debugger::{
     ConfigInfo, ConfigSelector, DebugRequest, DebugUpdate, SessionInfo, SessionState,
     SourceBreakpoint,
 };
+use ember_editor::debugger::storage::StoredBreakpoints;
 use ember_editor_conn::uri::UriComponents;
 
 use super::editor_settings::{KeyResolution, resolve_key};
@@ -146,6 +151,24 @@ pub(crate) fn on_debug(s: &Shared, update: &DebugUpdate) {
     if let Some(at) = reveal_target(before.as_ref(), view.stopped_at.as_ref()) {
         super::editor_debug_view::reveal(s, &at.uri, at.line, at.column);
     }
+    // The workspace keeps the registry as it changes, as Code-OSS's `storeBreakpoints` does.
+    if let DebugUpdate::Breakpoints { source, functions, exception_filters } = update {
+        let stored = StoredBreakpoints::from_lists(source, functions, exception_filters);
+        store(s, |d| d.breakpoints = stored);
+    }
+    super::editor_debug_hover::view::on_debug(s, update);
+}
+
+/// Change what this workspace keeps of its debugger across a reopen (FR-L31.42, Code-OSS's
+/// `DebugStorage`, per computer and folder) and write the prefs file only when it changed: the
+/// registry is reported again for every answer of an adapter.
+pub(crate) fn store(s: &Shared, f: impl FnOnce(&mut crate::prefs::DebugStore)) {
+    let ui = &crate::services::services().ui;
+    let mut probe = ui.prefs.get_untracked();
+    if probe.update_debug_store(&s.computer, &s.folder, f) {
+        let kept = probe.debug_storage;
+        ui.update_prefs(move |p| p.debug_storage = kept);
+    }
 }
 
 /// The stopped location to open and scroll to: a new one, each time a thread stops (Code-OSS
@@ -195,7 +218,12 @@ pub(crate) fn decorations(
     version: u32,
     existing: Decorations,
 ) -> Decorations {
-    stopped_line_decorations(uri, version, &s.debug.read().view, existing)
+    let tinted = stopped_line_decorations(uri, version, &s.debug.read().view, existing);
+    // The debug hover's expression (Code-OSS `hoverHighlight`).
+    match super::editor_debug_hover::view::highlight(uri, version) {
+        Some(hover) => Decorations::new(tinted.decorations().into_iter().chain([hover])),
+        None => tinted,
+    }
 }
 
 /// The name a key offered by the focused code editor has in the keymap table: the function keys
@@ -284,7 +312,10 @@ pub(crate) fn code_key(s: &Shared, event: &compose_rust::KeyEvent) -> bool {
 pub(crate) fn on_update(s: &Shared, update: &ember_editor::SessionUpdate) {
     let mut debug = s.debug;
     match update {
-        ember_editor::SessionUpdate::ConnectionLost { .. } => debug.set(DebugControls::default()),
+        ember_editor::SessionUpdate::ConnectionLost { .. } => {
+            debug.set(DebugControls::default());
+            super::editor_debug_hover::view::hide(s);
+        }
         ember_editor::SessionUpdate::Saved { uri }
             if uri.path == format!("{}/.vscode/launch.json", s.folder.trim_end_matches('/')) =>
         {

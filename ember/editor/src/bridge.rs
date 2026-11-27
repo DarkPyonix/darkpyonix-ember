@@ -10,6 +10,7 @@ use ember_editor_conn::uri::UriComponents;
 use crate::codelens::CommandDto;
 use crate::coords::{utf16_to_byte, WidgetPos, WidgetRange};
 use crate::engine::{ExternalChange, SessionUpdate};
+use crate::debugger::source::same_resource;
 use crate::debugger::{DebugUpdate, FrameInfo, SessionInfo, SessionState, SourceBreakpoint, ThreadInfo};
 use crate::folding::{compute_indent_folds, merge_folds, FoldRegion};
 use crate::hover::HoverPopup;
@@ -182,9 +183,10 @@ impl DebugView {
         self.breakpoints.iter().filter(move |bp| bp.uri == *uri)
     }
 
-    /// The 1-based line the shown session is stopped at in `uri`.
+    /// The 1-based line the shown session is stopped at in `uri`. The frame's file and the
+    /// document are compared as Code-OSS's `extUri.isEqual` does (#1151).
     pub fn stopped_line(&self, uri: &UriComponents) -> Option<u32> {
-        self.stopped_at.as_ref().filter(|at| at.uri == *uri).map(|at| at.line)
+        self.stopped_at.as_ref().filter(|at| same_resource(&at.uri, uri)).map(|at| at.line)
     }
 
     /// The frame the window focuses when it is not the top one: Code-OSS marks it apart from the
@@ -218,7 +220,7 @@ impl DebugView {
 
     /// The 1-based line of the focused lower frame ([`Self::focused_frame`]) in `uri`.
     pub fn focused_line(&self, uri: &UriComponents) -> Option<u32> {
-        self.focused_frame().filter(|at| at.uri == *uri).map(|at| at.line)
+        self.focused_frame().filter(|at| same_resource(&at.uri, uri)).map(|at| at.line)
     }
 
     fn apply(&mut self, update: &DebugUpdate) {

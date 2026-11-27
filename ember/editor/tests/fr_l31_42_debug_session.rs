@@ -58,6 +58,9 @@ struct Adapter {
     swallow_disconnect: bool,
     /// Extra capabilities the `initialize` response offers.
     caps: Value,
+    /// The `source` of the top frame, as the extension host hands it on; `main.py` by its path
+    /// when `None`.
+    frame_source: Option<Value>,
 }
 
 impl Adapter {
@@ -110,10 +113,16 @@ impl Adapter {
                 req,
                 json!({"threads": [{"id": 1, "name": "MainThread"}]}),
             )],
-            "stackTrace" => vec![resp(
-                req,
-                json!({"stackFrames": [{"id": 10, "name": "<module>", "source": {"name": "main.py", "path": "/w/main.py"}, "line": 2, "column": 1}], "totalFrames": 1}),
-            )],
+            "stackTrace" => {
+                let source = self
+                    .frame_source
+                    .clone()
+                    .unwrap_or_else(|| json!({"name": "main.py", "path": "/w/main.py"}));
+                vec![resp(
+                    req,
+                    json!({"stackFrames": [{"id": 10, "name": "<module>", "source": source, "line": 2, "column": 1}], "totalFrames": 1}),
+                )]
+            }
             "scopes" => vec![resp(
                 req,
                 json!({"scopes": [{"name": "Locals", "variablesReference": 100, "expensive": false}]}),
@@ -755,6 +764,82 @@ fn fr_l31_42_the_bridge_passes_debug_updates_and_keeps_the_session_the_stop_and_
     assert!(bridge.debug().threads.is_empty());
     // The breakpoints outlive the session, as in Code-OSS.
     assert_eq!(bridge.debug().breakpoints_in(&main).count(), 1);
+}
+
+// #1151: debugpy reports `source.path` as a plain absolute path. The OSE's extension host turns
+// it into a URI before it reaches the window (`convertToVSCPaths(message, true)`), and its URI
+// transformer gives that the editor's `vscode-remote` scheme and authority, so the frame's file
+// arrives as a marshalled URI object. The open document is the workspace's remote URI. The stop
+// marks that document, and opening the stopped file is opening the same document again.
+#[test]
+fn fr_l31_42_a_frame_given_by_path_marks_and_opens_the_remote_document() {
+    let main = uri("/w/main.py");
+    let sources = [
+        // What the OSE hands on for debugpy's `"path": "/w/main.py"`.
+        json!({"name": "main.py", "path": {"$mid": 1, "scheme": "vscode-remote", "authority": AUTH, "path": "/w/main.py", "external": format!("vscode-remote://{AUTH}/w/main.py")}}),
+        // A host without the URI transformer: the server's own `file` URI.
+        json!({"name": "main.py", "path": {"$mid": 1, "scheme": "file", "authority": "", "path": "/w/main.py"}}),
+        // The plain path, spelled the way an adapter may spell it.
+        json!({"name": "main.py", "path": "/w/./main.py"}),
+        json!({"name": "main.py", "path": "/w//main.py"}),
+        json!({"name": "main.py", "path": format!("vscode-remote://{AUTH}/w/main.py")}),
+    ];
+    for source in sources {
+        let mut rig = Rig::fixture();
+        rig.adapter.frame_source = Some(source.clone());
+        let mut bridge = WidgetBridge::new();
+        rig.toggle(2);
+        rig.start_python();
+        let id = rig.session_id();
+        bridge_takes(&mut bridge, &mut rig);
+        let view = bridge.debug();
+        assert_eq!(view.stopped_line(&main), Some(2), "{source}");
+        let at = view.stopped_at.clone().unwrap_or_else(|| panic!("no stop for {source}"));
+        assert_eq!(at.uri, main, "the frame's file is the open document's URI: {source}");
+        assert_eq!(view.focused_location().map(|f| f.uri), Some(main.clone()), "{source}");
+
+        // Opening the stopped file finds the open document: nothing is read from the server again.
+        let fx = rig.core.handle(rig.now, Input::Open { uri: at.uri.clone() });
+        assert!(
+            !fx.iter().any(|e| matches!(e, Effect::ReadFile { .. })),
+            "the stopped file opened a second document for {source}: {fx:?}"
+        );
+
+        // A lower frame given the same way is the focused frame, marked in the same document.
+        let frames = vec![
+            ember_editor::debugger::FrameInfo {
+                id: 10,
+                name: "greet".into(),
+                uri: Some(at.uri.clone()),
+                source_name: Some("main.py".into()),
+                line: 2,
+                column: 1,
+                hint: None,
+            },
+            ember_editor::debugger::FrameInfo {
+                id: 11,
+                name: "<module>".into(),
+                uri: ember_editor::debugger::source::source_uri(&source, Some(&uri("/w"))),
+                source_name: Some("main.py".into()),
+                line: 3,
+                column: 1,
+                hint: None,
+            },
+        ];
+        let mut sessions = bridge.debug().sessions.clone();
+        sessions[0].frame_id = Some(11);
+        bridge.apply(SessionUpdate::Debug(DebugUpdate::Sessions { sessions, active: Some(id.clone()) }));
+        bridge.apply(SessionUpdate::Debug(DebugUpdate::CallStack {
+            session: id.clone(),
+            thread_id: 1,
+            frames,
+            total_frames: Some(2),
+        }));
+        let view = bridge.debug();
+        assert_eq!(view.focused_frame().map(|f| (f.frame_id, f.line)), Some((11, 3)), "{source}");
+        assert_eq!(view.focused_line(&main), Some(3), "{source}");
+        assert_eq!(view.stopped_line(&main), Some(2), "{source}");
+    }
 }
 
 #[test]

@@ -24,6 +24,7 @@ use dioxus_core::EventHandler;
 use ember_editor::DebugView;
 use ember_editor::coords::WidgetPos;
 use ember_editor::debugger::hover::expression_at;
+use ember_editor::debugger::source::same_resource;
 use ember_editor::debugger::{DebugRequest, EvalResult, VariableInfo};
 use ember_editor_conn::uri::UriComponents;
 
@@ -150,7 +151,7 @@ impl DebugHover {
         }
         // Only while a thread is stopped, and only in the file of the focused frame
         // (`showHover`: `sf.source.uri` is the model's).
-        let Some(focus) = view.focused_location().filter(|f| f.uri == *uri) else {
+        let Some(focus) = view.focused_location().filter(|f| same_resource(&f.uri, uri)) else {
             self.hide();
             return RestStep::Language;
         };
@@ -309,7 +310,7 @@ impl DebugHover {
         let live = |t: &HoverTarget| {
             focus
                 .as_ref()
-                .is_some_and(|f| f.session == t.session && f.frame_id == t.frame_id && f.uri == t.uri)
+                .is_some_and(|f| f.session == t.session && f.frame_id == t.frame_id && same_resource(&f.uri, &t.uri))
         };
         if self.shown.as_ref().is_some_and(|s| !live(&s.target))
             || self.pending.as_ref().is_some_and(|(_, t)| !live(t))

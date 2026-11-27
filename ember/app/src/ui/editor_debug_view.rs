@@ -245,6 +245,22 @@ impl DebugView {
         &self.watches
     }
 
+    /// A window that opens with the watch expressions its workspace kept (FR-L31.42, Code-OSS
+    /// `DebugStorage.loadWatchExpressions`); they are evaluated when a thread stops.
+    pub fn with_watches(expressions: &[String]) -> Self {
+        let mut view = Self::default();
+        for expression in expressions {
+            view.add_watch(expression);
+        }
+        view
+    }
+
+    /// The watch expressions in their order, as the workspace keeps them
+    /// (`storeWatchExpressions`).
+    pub fn watch_expressions(&self) -> Vec<String> {
+        self.watches.iter().map(|w| w.expression.clone()).collect()
+    }
+
     pub fn console(&self) -> &[ConsoleLine] {
         &self.console
     }
@@ -936,7 +952,7 @@ impl DebugView {
 }
 
 /// The disclosure arrow of a tree row, as the explorer tree draws it.
-fn chevron(open: bool) -> Element {
+pub(crate) fn chevron(open: bool) -> Element {
     if open {
         icon_tone("chev-dn", 12, "muted")
     } else {
@@ -1076,6 +1092,8 @@ pub(crate) enum ViewAction {
     /// Show the 확장 window to find a debugger.
     FindDebuggers,
     Hide,
+    /// A watch expression was added or removed: the workspace keeps the new list (FR-L31.42).
+    WatchesChanged,
 }
 
 fn act(s: &Shared, action: ViewAction) {
@@ -1089,6 +1107,10 @@ fn act(s: &Shared, action: ViewAction) {
         ViewAction::Hide => {
             let mut stripes = s.stripes;
             stripes.write().hide(super::editor::Side::Left);
+        }
+        ViewAction::WatchesChanged => {
+            let expressions = s.debug_view.peek().watch_expressions();
+            super::editor_debug::store(s, |d| d.watch_expressions = expressions);
         }
     }
 }
@@ -1338,7 +1360,7 @@ fn RunDebugWindow(
                         button { id: "debug-watch-add", class: "ed-ib", title: "식 추가", "aria-label": "식 추가",
                             onclick: move |_| { watch_input.set(Some(String::new())); if !sections[1] { toggle_section(1); } }, {icon("plus")} }
                         button { class: "ed-ib", title: "모든 식 제거", "aria-label": "모든 식 제거", disabled: no_watches,
-                            onclick: move |_| view.write().remove_all_watches(), {icon("trash")} }
+                            onclick: move |_| { view.write().remove_all_watches(); act.call(ViewAction::WatchesChanged); }, {icon("trash")} }
                     },
                     div { role: "tree", "aria-label": "조사식",
                         for (w, children, expanded) in watches.into_iter() {
@@ -1367,7 +1389,7 @@ fn RunDebugWindow(
                                         span { class: "{value_class}", "{value}" }
                                         div { class: "spacer" }
                                         button { id: "debug-watch-remove-{wid}", class: "ed-ib ed-dbg-rowbtn", title: "식 제거", "aria-label": "식 제거",
-                                            onclick: move |e| { e.stop_propagation(); view.write().remove_watch(wid); }, {icon("close")} }
+                                            onclick: move |e| { e.stop_propagation(); view.write().remove_watch(wid); act.call(ViewAction::WatchesChanged); }, {icon("close")} }
                                     }
                                     VarRows { view, rows: children, act, prefix: "debug-watch-{wid}-var" }
                                 }
@@ -1381,6 +1403,7 @@ fn RunDebugWindow(
                                 let text = watch_input.read().clone().unwrap_or_default();
                                 let request = view.write().add_watch(&text);
                                 if let Some(request) = request { act.call(ViewAction::Debug(request)); }
+                                act.call(ViewAction::WatchesChanged);
                                 watch_input.set(None);
                             },
                             input { id: "debug-watch-input", class: "ed-dbg-input", placeholder: "조사할 식", value: "{text}", autofocus: true,

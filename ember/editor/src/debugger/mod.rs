@@ -40,7 +40,9 @@
 //! of a configuration (`windows`, `osx`, `linux`) are not merged.
 
 pub mod breakpoints;
+pub mod hover;
 pub mod launch;
+pub mod storage;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
@@ -421,6 +423,24 @@ pub enum DebugRequest {
         filter: String,
         enabled: bool,
     },
+    /// The debug hover (`DebugHoverWidget.showAt`): the value of `expression` in frame `frame_id`,
+    /// hovered at the 1-based `line` and `column` of `uri` ([`hover::expression_at`]). An adapter
+    /// with `supportsEvaluateForHovers` is sent `evaluate` with the context `hover`; for any
+    /// other the expression is looked up in the frame's scopes ([`hover::HoverSearch`]). Answered
+    /// with [`DebugUpdate::Evaluated`] of the same `id`; an error there means there is nothing to
+    /// show, and the window shows the language hover instead.
+    Hover {
+        id: u64,
+        session: String,
+        frame_id: i64,
+        uri: UriComponents,
+        line: u32,
+        column: u32,
+        expression: String,
+    },
+    /// Put back the breakpoints a window kept when it last closed ([`storage`], Code-OSS's
+    /// `DebugStorage`), in files of the workspace.
+    RestoreBreakpoints(storage::StoredBreakpoints),
 }
 
 /// What the core knows that a request may need.
@@ -574,6 +594,15 @@ enum Dap {
     Evaluate {
         id: u64,
     },
+    /// The scopes of a hover's frame, for a [`hover::HoverSearch`].
+    HoverScopes {
+        id: u64,
+    },
+    /// The variables a [`hover::HoverSearch`] asked at `depth`.
+    HoverVariables {
+        id: u64,
+        depth: usize,
+    },
     /// `setVariable` or `setExpression` of variable `name` in container `reference`.
     SetVariable {
         reference: i64,
@@ -661,6 +690,8 @@ pub struct DebugState {
     cached: HashSet<String>,
     /// [`DebugRequest::ProvideConfigurations`] in progress, by id.
     provides: HashMap<u64, Provide>,
+    /// Debug hovers looked up in a frame's scopes, by the id of their [`DebugRequest::Hover`].
+    hovers: HashMap<u64, hover::HoverSearch>,
 }
 
 /// One [`DebugRequest::ProvideConfigurations`]: the activations, then every provider of the type,
@@ -743,6 +774,50 @@ fn check_task(label: &str, outcome: &TaskOutcome) -> TaskCheck {
         ],
         error: false,
     }
+}
+
+/// The scopes of a `scopes` response body.
+fn parse_scopes(body: &Value) -> Vec<ScopeInfo> {
+    body.get("scopes")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .map(|s| ScopeInfo {
+                    name: str_of(s, "name").unwrap_or_default(),
+                    variables_reference: s
+                        .get("variablesReference")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0),
+                    expensive: s
+                        .get("expensive")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The variables of a `variables` response body.
+fn parse_variables(body: &Value) -> Vec<VariableInfo> {
+    body.get("variables")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .map(|v| VariableInfo {
+                    name: str_of(v, "name").unwrap_or_default(),
+                    value: str_of(v, "value").unwrap_or_default(),
+                    type_name: str_of(v, "type"),
+                    variables_reference: v
+                        .get("variablesReference")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0),
+                    evaluate_name: str_of(v, "evaluateName"),
+                    read_only: is_read_only(v),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn u32_of(v: &Value, key: &str) -> Option<u32> {
@@ -872,6 +947,7 @@ impl DebugState {
             active: None,
             cached: HashSet::new(),
             provides: HashMap::new(),
+            hovers: HashMap::new(),
         }
     }
 
@@ -1286,6 +1362,27 @@ impl DebugState {
                     &mut out,
                 );
             }
+            DebugRequest::Hover {
+                id,
+                session,
+                frame_id,
+                uri,
+                line,
+                column,
+                expression,
+            } => self.hover(id, &session, frame_id, &uri, line, column, &expression, &mut out),
+            DebugRequest::RestoreBreakpoints(stored) => {
+                if let Some(base) = self.workspace.clone() {
+                    let (ids, touched) = self.breakpoints.restore(&stored, &base);
+                    if !touched.is_empty() {
+                        let mut delta = BreakpointsDelta::default();
+                        for id in &ids {
+                            delta.added.extend(self.breakpoints.dto(id));
+                        }
+                        self.breakpoints_changed(delta, touched, &mut out);
+                    }
+                }
+            }
             DebugRequest::SetExceptionFilter { filter, enabled } => {
                 if self.breakpoints.set_filter_enabled(&filter, enabled) {
                     self.breakpoints_changed(
@@ -1342,6 +1439,89 @@ impl DebugState {
             Dap::Other
         };
         send_dap(s, command, json!({ "threadId": thread_id }), tag, out);
+    }
+
+    // ---- the debug hover ------------------------------------------------------------------------
+
+    /// [`DebugRequest::Hover`]: `evaluate` in the `hover` context, or the lookup in the frame's
+    /// scopes for an adapter without `supportsEvaluateForHovers` (`DebugHoverComputer.evaluate`).
+    #[allow(clippy::too_many_arguments)]
+    fn hover(
+        &mut self,
+        id: u64,
+        session: &str,
+        frame_id: i64,
+        uri: &UriComponents,
+        line: u32,
+        column: u32,
+        expression: &str,
+        out: &mut Vec<Out>,
+    ) {
+        let Some(i) = self.idx(session) else {
+            out.push(Out::Ui(DebugUpdate::Evaluated {
+                id,
+                session: session.to_owned(),
+                result: Err("debug session not found".to_owned()),
+            }));
+            return;
+        };
+        let s = &mut self.sessions[i];
+        if s.cap("supportsEvaluateForHovers") {
+            let name = uri.path.rsplit('/').next().unwrap_or(&uri.path);
+            let args = json!({
+                "expression": expression,
+                "frameId": frame_id,
+                "context": EvalContext::Hover.as_str(),
+                "line": line,
+                "column": column,
+                "source": { "name": name, "path": uri.path },
+            });
+            send_dap(s, "evaluate", args, Dap::Evaluate { id }, out);
+            return;
+        }
+        self.hovers
+            .insert(id, hover::HoverSearch::new(session.to_owned(), expression));
+        send_dap(
+            s,
+            "scopes",
+            json!({ "frameId": frame_id }),
+            Dap::HoverScopes { id },
+            out,
+        );
+    }
+
+    /// Ask what a hover search wants next, or answer the hover when it has ended.
+    fn hover_step(
+        &mut self,
+        sid: &str,
+        id: u64,
+        steps: Vec<hover::SearchStep>,
+        done: Option<hover::SearchResult>,
+        out: &mut Vec<Out>,
+    ) {
+        if let Some(i) = self.idx(sid) {
+            for hover::SearchStep::Variables { reference, depth } in steps {
+                send_dap(
+                    &mut self.sessions[i],
+                    "variables",
+                    json!({ "variablesReference": reference }),
+                    Dap::HoverVariables { id, depth },
+                    out,
+                );
+            }
+        }
+        if let Some(result) = done {
+            self.hovers.remove(&id);
+            out.push(Out::Ui(DebugUpdate::Evaluated {
+                id,
+                session: sid.to_owned(),
+                result: result.map(|v| EvalResult {
+                    result: v.value,
+                    type_name: v.type_name,
+                    variables_reference: v.variables_reference,
+                }),
+            }));
+        }
     }
 
     // ---- breakpoint changes -------------------------------------------------------------------
@@ -2245,25 +2425,7 @@ impl DebugState {
                 if !success {
                     return;
                 }
-                let scopes = body
-                    .get("scopes")
-                    .and_then(Value::as_array)
-                    .map(|a| {
-                        a.iter()
-                            .map(|s| ScopeInfo {
-                                name: str_of(s, "name").unwrap_or_default(),
-                                variables_reference: s
-                                    .get("variablesReference")
-                                    .and_then(Value::as_i64)
-                                    .unwrap_or(0),
-                                expensive: s
-                                    .get("expensive")
-                                    .and_then(Value::as_bool)
-                                    .unwrap_or(false),
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                let scopes = parse_scopes(&body);
                 out.push(Out::Ui(DebugUpdate::Scopes {
                     session: sid.to_owned(),
                     frame_id,
@@ -2271,28 +2433,7 @@ impl DebugState {
                 }));
             }
             Dap::Variables { reference } => {
-                let variables: Vec<VariableInfo> = if success {
-                    body.get("variables")
-                        .and_then(Value::as_array)
-                        .map(|a| {
-                            a.iter()
-                                .map(|v| VariableInfo {
-                                    name: str_of(v, "name").unwrap_or_default(),
-                                    value: str_of(v, "value").unwrap_or_default(),
-                                    type_name: str_of(v, "type"),
-                                    variables_reference: v
-                                        .get("variablesReference")
-                                        .and_then(Value::as_i64)
-                                        .unwrap_or(0),
-                                    evaluate_name: str_of(v, "evaluateName"),
-                                    read_only: is_read_only(v),
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default()
-                } else {
-                    Vec::new()
-                };
+                let variables = if success { parse_variables(&body) } else { Vec::new() };
                 let error = (!success).then_some(error);
                 out.push(Out::Ui(DebugUpdate::Variables {
                     session: sid.to_owned(),
@@ -2319,6 +2460,25 @@ impl DebugState {
                     session: sid.to_owned(),
                     result,
                 }));
+            }
+            Dap::HoverScopes { id } => {
+                let scopes: Vec<(i64, bool)> = if success {
+                    parse_scopes(&body)
+                        .iter()
+                        .map(|s| (s.variables_reference, s.expensive))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                let Some(search) = self.hovers.get_mut(&id) else { return };
+                let (steps, done) = search.scopes(&scopes);
+                self.hover_step(sid, id, steps, done, out);
+            }
+            Dap::HoverVariables { id, depth } => {
+                let variables = if success { parse_variables(&body) } else { Vec::new() };
+                let Some(search) = self.hovers.get_mut(&id) else { return };
+                let (steps, done) = search.variables(depth, &variables);
+                self.hover_step(sid, id, steps, done, out);
             }
             Dap::SetVariable { reference, name } => {
                 let result = if success {
@@ -2715,6 +2875,7 @@ impl DebugState {
         let s = &mut self.sessions[i];
         s.state = SessionState::Terminated;
         s.pending.clear();
+        self.hovers.retain(|_, h| h.session != sid);
         let notify = std::mem::take(&mut s.notify);
         let ending = s.ending.take();
         let (handle, da_started, parent, folder, vars) = (

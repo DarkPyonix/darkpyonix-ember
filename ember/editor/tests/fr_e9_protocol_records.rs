@@ -95,11 +95,14 @@ fn fr_e9_acked_and_out_calls_are_answered_and_neither_counted_nor_recorded() {
 
 // Q-E8 (c): the session's fallback reply is the ledger's answer for that method, not one blanket
 // rule: a JSON value, a rejection, or by the declared result (`[]` for an array, else `undefined`).
+/// One fallback case: actor, method, arguments, and the reply (or the rejection) expected.
+type FallbackCase = (&'static str, &'static str, Vec<Value>, Result<Reply, Option<Value>>);
+
 #[test]
 fn fr_e9_fallback_reply_is_chosen_per_method_from_the_ledger() {
     let t0 = Instant::now();
     let mut c = core(t0);
-    let cases: Vec<(&'static str, &str, Vec<Value>, Result<Reply, Option<Value>>)> = vec![
+    let cases: Vec<FallbackCase> = vec![
         // `answer`: Code-OSS's BrowserPowerService constants.
         ("MainThreadPower", "$isOnBatteryPower", vec![], Ok(Reply::Json(json!(false)))),
         ("MainThreadPower", "$getCurrentThermalState", vec![], Ok(Reply::Json(json!("unknown")))),

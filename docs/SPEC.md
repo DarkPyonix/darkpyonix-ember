@@ -834,19 +834,18 @@ for every target (linux-x64, linux-arm64, darwin-arm64, darwin-x64, and windows-
    "DarkPyonix OSE" and the Code-OSS version. The commands and the record of each run are in
    `ember/ose/README.md` ("Release check on a Raspberry Pi and a Mac").
 
-6. **An Ember install finds or fetches the matching OSE.** *[provisional, 2026-11-21, #83]* The
-   `ember-server` and `ember-node` archives of an Ember release carry `install-ose.sh` and an
-   `OSE_VERSION` file naming the OSE release built from `ember/ose/VERSION` (`ose-v<tag>`).
-   `install-ose.sh` downloads `dpx-ose-<tag>-<target>.tar.gz` and `SHA256SUMS` of that release
-   with curl (no `gh`, no GitHub login), refuses an archive that `SHA256SUMS` does not list or match,
-   unpacks it into `~/.local/share` (where the OSE manager looks when `EMBER_OSE_SERVER` is unset)
-   and prints the launcher path. When no OSE is found, the IDE target's `reason` and the
-   extension routes' 503 say `OSE server binary is not installed` followed by this step
-   (`install-ose.sh` beside `ember-server`, or `EMBER_OSE_SERVER`). Rejected: putting OSE inside the
-   server archive, because it would add about 100 MB to every server download and tie an OSE rebuild
-   to an Ember release. Test `.github/scripts/tests/install-ose.test.sh` (offline, a `file://`
-   release). Not yet verified: a fresh install against the published release showing the `ember`
-   target available and the editor opening (needs the first `ose-v*` release).
+6. **An Ember install finds or fetches the matching OSE.** *[provisional, 2026-11-21, #83]*
+   The release workflow puts `OSE_VERSION` (`ose-v<tag>` from `ember/ose/VERSION`) beside
+   `ember-server` and `ember-node`. Install that release on the editor computer with
+   `darkpyonix editor install --runtime ose --release "$(cat OSE_VERSION)"`. Under D55 the
+   manager installs and launches the editor. When the manager reports OSE missing, the IDE
+   target's reason gives the pinned install command and the launch API keeps
+   `503 ose_not_installed` (`fr_w4b_manager_refusal_maps_to_codes`).
+   The standalone `install-ose.sh` beside the release binaries is for direct OSE use. It
+   checks the downloaded archive against the matching release's `SHA256SUMS`, unpacks under
+   `~/.local/share` and prints the launcher path (`.github/scripts/tests/install-ose.test.sh`).
+   A fresh manager-backed install still needs the live check that the `ember` target is
+   available and the editor opens.
 
 Steps 1–4 run in CI on every build. Development CI runs when the leader dispatches it; a tag
 `ose-v*` runs the same jobs.

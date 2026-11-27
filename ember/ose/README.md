@@ -42,19 +42,27 @@ that run's archives, checks them against their checksums and publishes a GitHub 
 archives and `SHA256SUMS`, so the release holds exactly the files the build produced. A release
 does not expire, unlike the 14-day workflow artifacts.
 
-An Ember install gets its OSE from that release (FR-W4 acceptance step 6, #83). The `ember-server`
-and `ember-node` archives of an Ember release carry `install-ose.sh` and an `OSE_VERSION` file with
-the matching tag (`ose-v<the tag in VERSION>`); running `./install-ose.sh` beside them downloads
-the archive for the machine with curl, checks it against the release's `SHA256SUMS`, unpacks it into
-`~/.local/share` and prints the launcher path. The OSE manager finds it there without
-`EMBER_OSE_SERVER`. When no OSE is found, the IDE target's reason and the extension routes say so and
-name this step. In a checkout, `ember/server/scripts/install-ose.sh` reads `ember/ose/VERSION`.
+The Ember release workflow writes the matching OSE tag into `OSE_VERSION` beside
+`ember-server` and `ember-node`. On the computer that runs the editor, install that release
+with the DarkPyonix Manager CLI (FR-W4 acceptance step 6, #83):
 
-Old "OSE build" runs with no jobs (2026-11-06 to 11-14, all `pull_request` on `release`): the
-release-sync pull requests (#964 and earlier) were opened by `github-actions[bot]`, and the
-workflow then still had a `pull_request` trigger. GitHub held those runs for approval
-(`action_required`) and later recorded them as failed with no jobs. No build failed. The trigger is
-gone since development CI became dispatch-only (`ci.yml` calls this workflow), so they do not recur.
+```sh
+darkpyonix editor install --runtime ose --release "$(cat OSE_VERSION)"
+```
+
+Ember asks the manager for its editor endpoint. If the manager reports that OSE is missing,
+the Ember target gives the install command with the exact tag. `install-ose.sh` is the
+standalone installer for smoke tests and clients that launch OSE directly. It verifies the
+archive against the release's `SHA256SUMS` and unpacks it into `~/.local/share`.
+
+On 2026-11-14, GitHub queued 15 `pull_request` runs of “OSE build” for bot updates to the
+`release` PR. Each run expired while waiting for approval, before any runner started.
+Commit `8f070a9c` removed this PR trigger. The leader's `ci.yml` dispatch calls
+`test-ose.yml`, and an `ose-v*` tag triggers it directly. The first tag build in run 45879395393
+published all five platform archives and `SHA256SUMS`.
+[Expired PR run](https://github.com/DarkPyonix/darkpyonix-ember/actions/runs/43588264216) ·
+[Tag build](https://github.com/DarkPyonix/darkpyonix-ember/actions/runs/45879395393) ·
+[OSE v1.139.1 release](https://github.com/DarkPyonix/darkpyonix-ember/releases/tag/ose-v1.139.1)
 
 After the build, the **Live checks** job runs once per target on the same runner type
 (`docs/SPEC.md`, FR-W4 acceptance step 4). It downloads the archive the run built, verifies the

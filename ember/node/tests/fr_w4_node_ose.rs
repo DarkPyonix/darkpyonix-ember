@@ -385,7 +385,10 @@ async fn fr_w4b_manager_refusal_maps_to_codes() {
     match &e {
         ClientError::Api { status: 503, body } => {
             assert_eq!(body.code, ErrorCode::OseNotInstalled);
-            assert_eq!(body.error, "the ose editor server is not installed");
+            let release = include_str!("../../ose/VERSION").trim();
+            let command = format!("darkpyonix editor install --runtime ose --release ose-v{release}");
+            assert!(body.error.starts_with("the ose editor server is not installed"), "{body:?}");
+            assert!(body.error.contains(&command), "{body:?}");
         }
         other => panic!("{other:?}"),
     }

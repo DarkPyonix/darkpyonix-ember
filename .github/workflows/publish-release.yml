@@ -93,8 +93,8 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           mkdir -p dist
-          # install-ose.sh and OSE_VERSION name and fetch the OSE release that matches this
-          # build (SPEC FR-W4 acceptance step 6, #83): both programs start OSE for the editor.
+          # OSE_VERSION names the matching release for the DarkPyonix Manager CLI.
+          # install-ose.sh downloads the same release for direct OSE use.
           ose_release="ose-v$(tr -d '[:space:]' < ember/ose/VERSION)"
           pack() { # crate, program...
             crate="$1"; shift
@@ -466,7 +466,7 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --title "Ember ${TAG#v}" \
-            --notes "ember-server and ember-node for macOS arm64, Linux x86_64 and Linux aarch64, and the client app when built, by run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}. macOS builds are ad hoc signed, not notarized: clear quarantine with xattr -dr com.apple.quarantine. Setup.exe is unsigned. ${android} Installed with Setup.exe, the Velopack .dmg or the Velopack .AppImage, the app updates itself from this feed. The editor needs DarkPyonix OSE ${ose_release}: run ./install-ose.sh from the ember-server or ember-node folder (https://github.com/${GITHUB_REPOSITORY}/releases/tag/${ose_release}). See the install guide."
+            --notes "ember-server and ember-node for macOS arm64, Linux x86_64 and Linux aarch64, and the client app when built, by run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}. macOS builds are ad hoc signed, not notarized: clear quarantine with xattr -dr com.apple.quarantine. Setup.exe is unsigned. ${android} Installed with Setup.exe, the Velopack .dmg or the Velopack .AppImage, the app updates itself from this feed. The editor needs DarkPyonix OSE ${ose_release}: on the editor computer, run darkpyonix editor install --runtime ose --release ${ose_release} (https://github.com/${GITHUB_REPOSITORY}/releases/tag/${ose_release}). See the install guide."
 
   dry-run:
     # Lists every packed file with size and sha256 and fails when a target or channel lacks one a

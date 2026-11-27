@@ -24,8 +24,8 @@
 //!   writes `{"deep": pass|fail|not-run, "reason"}` to `$OSE_REGRESS_DEEP/<id>.json`; the harness
 //!   compares those with `expected.json`. The webview check runs the view command, waits for the
 //!   panel and its HTML, reports the page shown and ready, sends the entry's message and waits for
-//!   the answer. The debug check is not built (the client has no debug service, #445): it reports
-//!   `not-run`, and `not-run: no python3` when the machine has no `python3`.
+//!   the answer. This harness reports `not-run` for debugpy. The separate
+//!   `fr_l31_42_live_debug` integration test drives a real debug session.
 //!
 //! Environment the harness sets: `OSE_REGRESS_ADDR` (`127.0.0.1:<port>` of the running server),
 //! `OSE_REGRESS_WS` (a copy of `regression/workspace/` on the server's machine), `OSE_REGRESS_MODE`
@@ -511,12 +511,8 @@ fn fr_e9_per_extension_records_add_up_across_sessions() {
     assert_eq!(startup.to_json(), json!([{ "actor": "MainThreadSecretState", "method": "$getPassword", "count": 2, "extensions": ["a.ext"] }]));
 }
 
-/// What the editor client still needs before the debug check can run (#445). Kept in one place so
-/// the reason in `deep.json` and the README list stay the same.
-const DEBUG_NOT_BUILT: &str = "the Ember editor client has no debug service yet: MainThreadDebugService \
-($registerDebugTypes, $registerDebugConfigurationProvider, $registerDebugAdapterDescriptorFactory, $acceptDAMessage) \
-gets default replies and ExtHostDebugService ($resolveDebugConfiguration, $startDASession, $sendDAMessage, $stopDASession) \
-is never called, so no DAP request reaches debugpy (#445)";
+const DEBUG_NOT_BUILT: &str =
+    "this harness does not drive a debug session; see the separate fr_l31_42_live_debug integration test";
 
 fn has_python3() -> bool {
     std::process::Command::new("python3").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)

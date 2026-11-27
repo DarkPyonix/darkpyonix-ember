@@ -11,8 +11,9 @@ use std::time::{Duration, Instant};
 
 use ember_editor::debugger::{
     ConfigSelector, DebugRequest, DebugUpdate, EvalContext, EvalResult, SessionInfo, SessionState,
-    TaskChoice, TaskOutcome,
+    OnTaskErrors, TaskChoice, TaskOutcome,
 };
+use ember_editor::{SettingsLayer, SettingsScopes};
 use ember_editor::languages::LanguageRegistry;
 use ember_editor::{BridgeAction, CoreOptions, Effect, Input, SessionCore, SessionUpdate, WidgetBridge};
 use ember_editor_conn::rpc::{Arg, IncomingRequest, Reply};
@@ -51,7 +52,8 @@ fn event(name: &str, body: Value) -> Value {
 /// A debug adapter that behaves as debugpy does.
 #[derive(Default)]
 struct Adapter {
-    held_launch: Option<Value>,
+    /// The `launch` or `attach` request of each adapter handle, answered at `configurationDone`.
+    held_launch: HashMap<i64, Value>,
     armed: bool,
     swallow_disconnect: bool,
     /// Extra capabilities the `initialize` response offers.
@@ -59,7 +61,7 @@ struct Adapter {
 }
 
 impl Adapter {
-    fn answer(&mut self, req: &Value) -> Vec<Value> {
+    fn answer(&mut self, handle: i64, req: &Value) -> Vec<Value> {
         let args = &req["arguments"];
         match req["command"].as_str().unwrap_or("") {
             "initialize" => {
@@ -81,7 +83,7 @@ impl Adapter {
                 json!({"value": args["value"], "type": "int", "variablesReference": 0}),
             )],
             "launch" | "attach" => {
-                self.held_launch = Some(req.clone());
+                self.held_launch.insert(handle, req.clone());
                 vec![event("initialized", json!({}))]
             }
             "setBreakpoints" => {
@@ -93,7 +95,7 @@ impl Adapter {
             "setFunctionBreakpoints" => vec![resp(req, json!({"breakpoints": []}))],
             "configurationDone" => {
                 let mut out = vec![resp(req, json!({}))];
-                if let Some(launch) = self.held_launch.take() {
+                if let Some(launch) = self.held_launch.remove(&handle) {
                     out.push(resp(&launch, Value::Null));
                 }
                 if self.armed {
@@ -261,7 +263,7 @@ impl Rig {
                                 self.dap_all.push(message.clone());
                                 if message["type"] == "request" {
                                     self.dap.push(message.clone());
-                                    for answer in self.adapter.answer(&message) {
+                                    for answer in self.adapter.answer(handle, &message) {
                                         let input = self.request(
                                             "$acceptDAMessage",
                                             vec![json!(handle), answer],
@@ -1527,6 +1529,98 @@ fn fr_l31_42_set_variable_follows_the_adapter_capabilities() {
     );
 }
 
+/// A rig whose user settings say `"debug.onTaskErrors": <value>`.
+fn rig_with_on_task_errors(value: &str) -> Rig {
+    let mut rig = Rig::fixture();
+    rig.core.set_settings(SettingsScopes {
+        user: SettingsLayer::from_values(vec![("debug.onTaskErrors".to_owned(), json!(value))]),
+        ..Default::default()
+    });
+    rig
+}
+
+// `debug.onTaskErrors` decides before the question, as `runTaskAndCheckErrors` reads it:
+// `debugAnyway` starts the session, `showErrors` opens the problems view and abandons the start,
+// `abort` abandons it, and `prompt` (the default) asks.
+#[test]
+fn fr_l31_42_on_task_errors_decides_before_the_question() {
+    let outcome = |value: &str| {
+        let mut rig = rig_with_on_task_errors(value);
+        let start = rig.start_with_tasks();
+        rig.task_done(start, TaskOutcome::Exited { code: Some(1), errors: 0 });
+        let started = rig.methods().contains(&"$startDASession");
+        let shown = rig.ui.contains(&DebugUpdate::ShowProblems);
+        (rig.task_question().is_some(), started, shown)
+    };
+    assert_eq!(outcome("debugAnyway"), (false, true, false));
+    assert_eq!(outcome("showErrors"), (false, false, true));
+    assert_eq!(outcome("abort"), (false, false, false));
+    assert_eq!(outcome("prompt"), (true, false, false));
+    assert_eq!(outcome("anything else"), (true, false, false), "an unknown value is the default");
+
+    // A clean exit starts whatever the setting says; a task that could not run always gets the
+    // error dialog, which the setting does not cover.
+    let mut rig = rig_with_on_task_errors("abort");
+    let start = rig.start_with_tasks();
+    rig.task_done(start, TaskOutcome::Exited { code: Some(0), errors: 0 });
+    assert!(rig.methods().contains(&"$startDASession"));
+    let mut rig = rig_with_on_task_errors("debugAnyway");
+    let start = rig.start_with_tasks();
+    rig.task_done(start, TaskOutcome::Failed { message: "The task 'build' could not run.".into() });
+    assert!(rig.task_question().is_some_and(|(_, _, _, error)| error));
+
+    assert_eq!(OnTaskErrors::from_setting(None), OnTaskErrors::Prompt);
+    for v in [OnTaskErrors::DebugAnyway, OnTaskErrors::ShowErrors, OnTaskErrors::Prompt, OnTaskErrors::Abort] {
+        assert_eq!(OnTaskErrors::from_setting(Some(&json!(v.as_str()))), v);
+    }
+}
+
+// "Remember my choice in user settings" writes what Code-OSS writes for each button.
+#[test]
+fn fr_l31_42_remember_my_choice_maps_the_buttons_to_the_setting() {
+    assert_eq!(OnTaskErrors::remembered(TaskChoice::DebugAnyway).as_str(), "debugAnyway");
+    assert_eq!(OnTaskErrors::remembered(TaskChoice::Abort).as_str(), "abort");
+    assert_eq!(OnTaskErrors::remembered(TaskChoice::ShowErrors).as_str(), "showErrors");
+}
+
+fn error_marker(line: u32) -> Value {
+    json!({ "severity": 8, "message": "broken", "startLineNumber": line, "startColumn": 1, "endLineNumber": line, "endColumn": 2 })
+}
+
+// The errors of a `preLaunchTask` are the error markers the problems hold (up to two), what its
+// problem matchers reported among them, as `markerService.read({ severities: Error, take: 2 })`.
+#[test]
+fn fr_l31_42_the_error_markers_of_the_problems_count_for_the_pre_launch_task() {
+    let mut rig = Rig::fixture();
+    let start = rig.start_with_tasks();
+    let markers = serde_json::from_value(json!([error_marker(1)])).unwrap();
+    rig.feed(Input::TaskMarkers { owner: "go".into(), entries: vec![(uri("/w/main.go"), Some(markers))] });
+    rig.task_done(start, TaskOutcome::Exited { code: Some(1), errors: 0 });
+    let (_, message, _, _) = rig.task_question().expect("a question");
+    assert_eq!(message, "Error exists after running preLaunchTask 'build'.");
+
+    // A background task that reached its ready point with errors in the problems.
+    let mut rig = Rig::fixture();
+    let start = rig.start_with_tasks();
+    let markers = serde_json::from_value(json!([error_marker(1), error_marker(2), error_marker(3)])).unwrap();
+    rig.feed(Input::TaskMarkers { owner: "watch".into(), entries: vec![(uri("/w/a.ts"), Some(markers))] });
+    rig.task_done(start, TaskOutcome::Ready { errors: 0 });
+    let (_, message, choices, error) = rig.task_question().expect("a question");
+    assert_eq!(message, "Errors exist after running preLaunchTask 'build'.");
+    assert_eq!(choices, vec![TaskChoice::DebugAnyway, TaskChoice::ShowErrors, TaskChoice::Abort]);
+    assert!(!error);
+
+    // Removed again (`None`), they no longer count.
+    let mut rig = Rig::fixture();
+    let start = rig.start_with_tasks();
+    let markers = serde_json::from_value(json!([error_marker(1)])).unwrap();
+    rig.feed(Input::TaskMarkers { owner: "go".into(), entries: vec![(uri("/w/main.go"), Some(markers))] });
+    rig.feed(Input::TaskMarkers { owner: "go".into(), entries: vec![(uri("/w/main.go"), None)] });
+    rig.task_done(start, TaskOutcome::Ready { errors: 0 });
+    assert_eq!(rig.task_question(), None);
+    assert!(rig.methods().contains(&"$startDASession"));
+}
+
 /// The answer to hover `id`, once it came.
 fn hover_answer(rig: &Rig, id: u64) -> Option<Result<EvalResult, String>> {
     rig.ui.iter().rev().find_map(|u| match u {
@@ -1669,4 +1763,283 @@ fn fr_l31_42_restored_breakpoints_join_the_registry_and_reach_the_adapter() {
         "main"
     );
     assert!(matches!(rig.sessions()[0].state, SessionState::Stopped { .. }));
+}
+
+// ---- compounds and restarts (`debugService.startDebugging`, `restartSession`) -------------------
+
+const COMPOUND_LAUNCH_JSON: &str = r#"{
+    "configurations": [
+        { "name": "A", "type": "debugpy", "request": "launch", "program": "/w/a.py", "preLaunchTask": "buildA" },
+        { "name": "B", "type": "debugpy", "request": "launch", "program": "/w/b.py" },
+        { "name": "C", "type": "debugpy", "request": "launch", "program": "/w/c.py" },
+    ],
+    "compounds": [
+        { "name": "Both", "configurations": ["A", "B"], "preLaunchTask": "prep" },
+        { "name": "Tied", "configurations": ["B", "C"], "stopAll": true },
+        { "name": "Loose", "configurations": ["B", "C"] },
+        { "name": "Broken", "configurations": ["B", "Nope"] },
+    ],
+}"#;
+
+fn compound_rig() -> Rig {
+    let mut rig = Rig::fixture();
+    rig.files
+        .insert("/w/.vscode/launch.json".into(), COMPOUND_LAUNCH_JSON.into());
+    rig
+}
+
+fn start_named(rig: &mut Rig, name: &str) {
+    rig.debug(DebugRequest::Start {
+        selector: ConfigSelector::Name(name.into()),
+        no_debug: false,
+    });
+}
+
+fn live_sessions(rig: &Rig) -> Vec<SessionInfo> {
+    rig.sessions()
+        .into_iter()
+        .filter(|s| s.state != SessionState::Terminated)
+        .collect()
+}
+
+fn disconnects(rig: &Rig) -> usize {
+    rig.dap.iter().filter(|m| m["command"] == "disconnect").count()
+}
+
+// The compound's own `preLaunchTask` runs once, before any configuration is resolved; then each
+// configuration starts with its own `preLaunchTask`.
+#[test]
+fn fr_l31_42_a_compound_runs_its_pre_launch_task_once_before_its_configurations() {
+    let mut rig = compound_rig();
+    start_named(&mut rig, "Both");
+    let runs = rig.task_runs();
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert_eq!(runs[0].0, "prep");
+    let prep = runs[0].1.expect("the compound waits for its task");
+    assert!(
+        !rig.methods().contains(&"$resolveDebugConfiguration"),
+        "no configuration starts before the compound's task: {:?}",
+        rig.methods()
+    );
+
+    rig.task_done(prep, TaskOutcome::Exited { code: Some(0), errors: 0 });
+    let runs = rig.task_runs();
+    assert_eq!(runs.len(), 2, "{runs:?}");
+    assert_eq!(runs[1].0, "buildA", "A runs its own preLaunchTask");
+    assert_eq!(rig.calls_of("$startDASession").len(), 1, "B, which has no task, starts");
+    let build_a = runs[1].1.unwrap();
+    rig.task_done(build_a, TaskOutcome::Exited { code: Some(0), errors: 0 });
+    assert_eq!(rig.calls_of("$startDASession").len(), 2);
+    assert_eq!(live_sessions(&rig).len(), 2);
+    assert_eq!(
+        rig.task_runs().iter().filter(|(l, _)| l == "prep").count(),
+        1,
+        "the compound's task ran once"
+    );
+}
+
+// A compound's task that ends badly asks `runTaskAndCheckErrors`'s question; an abort ends the
+// whole start, and an extension's `$startDebugging` hears `false`.
+#[test]
+fn fr_l31_42_a_failed_compound_pre_launch_task_starts_none_of_its_configurations() {
+    let mut rig = compound_rig();
+    let req = rig.ext("$startDebugging", vec![Value::Null, json!("Both"), json!({})]);
+    let prep = rig.task_runs()[0].1.unwrap();
+    rig.task_done(prep, TaskOutcome::Exited { code: Some(1), errors: 0 });
+    let (asked, message, choices, error) = rig.task_question().expect("a question");
+    assert_eq!(asked, prep);
+    assert_eq!(message, "The preLaunchTask 'prep' terminated with exit code 1.");
+    assert_eq!(choices, vec![TaskChoice::DebugAnyway, TaskChoice::ShowErrors, TaskChoice::Abort]);
+    assert!(!error);
+    rig.debug(DebugRequest::AnswerTask { start: prep, choice: TaskChoice::Abort });
+    assert!(!rig.methods().contains(&"$resolveDebugConfiguration"));
+    assert!(!rig.methods().contains(&"$startDASession"));
+    assert!(matches!(rig.response(req), Ok(Reply::Json(Value::Bool(false)))), "{:?}", rig.response(req));
+
+    // Debug Anyway goes on with the configurations.
+    let mut rig = compound_rig();
+    start_named(&mut rig, "Both");
+    let prep = rig.task_runs()[0].1.unwrap();
+    rig.task_done(prep, TaskOutcome::Failed { message: "Could not find the task 'prep'.".into() });
+    let (_, _, choices, error) = rig.task_question().expect("the error dialog");
+    assert!(error);
+    assert_eq!(choices, vec![TaskChoice::DebugAnyway, TaskChoice::ConfigureTask, TaskChoice::Cancel]);
+    rig.debug(DebugRequest::AnswerTask { start: prep, choice: TaskChoice::DebugAnyway });
+    assert_eq!(rig.calls_of("$startDASession").len(), 1, "B started");
+    assert_eq!(rig.task_runs().last().unwrap().0, "buildA");
+
+    // A compound naming a configuration that does not exist starts nothing.
+    let mut rig = compound_rig();
+    start_named(&mut rig, "Broken");
+    assert!(rig.ui.iter().any(|u| matches!(u, DebugUpdate::StartFailed { message } if message == "Could not find launch configuration 'Nope' in the workspace.")), "{:?}", rig.ui);
+    assert!(!rig.methods().contains(&"$startDASession"));
+}
+
+// `stopAll`: stopping one session of the compound stops the others; without it, only that one.
+#[test]
+fn fr_l31_42_stop_all_stops_the_whole_compound() {
+    let mut rig = compound_rig();
+    start_named(&mut rig, "Tied");
+    let live = live_sessions(&rig);
+    assert_eq!(live.len(), 2, "{live:?}");
+    rig.debug(DebugRequest::Stop { session: Some(live[0].id.clone()) });
+    assert_eq!(disconnects(&rig), 2, "both sessions were asked to disconnect");
+    assert!(live_sessions(&rig).is_empty(), "{:?}", rig.sessions());
+
+    let mut rig = compound_rig();
+    start_named(&mut rig, "Loose");
+    let live = live_sessions(&rig);
+    assert_eq!(live.len(), 2);
+    rig.debug(DebugRequest::Stop { session: Some(live[0].id.clone()) });
+    assert_eq!(disconnects(&rig), 1);
+    let left = live_sessions(&rig);
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].id, live[1].id);
+
+    // An extension's `$stopDebugging` of one session stops the compound too.
+    let mut rig = compound_rig();
+    start_named(&mut rig, "Tied");
+    let live = live_sessions(&rig);
+    rig.ext("$stopDebugging", vec![json!(live[1].id)]);
+    assert_eq!(disconnects(&rig), 2);
+}
+
+/// Start a configuration with every task a restart reads, and let its `preLaunchTask` succeed.
+fn start_with_restart_tasks(rig: &mut Rig) {
+    rig.debug(DebugRequest::Start {
+        selector: ConfigSelector::Config(json!({
+            "name": "Restartable",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "/w/main.py",
+            "preLaunchTask": "build",
+            "postDebugTask": "cleanup",
+            "preRestartTask": "prerestart",
+            "postRestartTask": "postrestart",
+        })),
+        no_debug: false,
+    });
+    let start = rig.task_runs()[0].1.unwrap();
+    rig.task_done(start, TaskOutcome::Exited { code: Some(0), errors: 0 });
+    assert_eq!(live_sessions(rig).len(), 1);
+}
+
+/// Finish every task the session layer is waiting for, one at a time, each with exit code 0.
+fn finish_waiting_tasks(rig: &mut Rig, from: usize) {
+    let mut done = from;
+    loop {
+        let runs = rig.task_runs();
+        let Some((_, Some(start))) = runs.get(done).cloned() else {
+            if done < runs.len() {
+                done += 1;
+                continue;
+            }
+            return;
+        };
+        done += 1;
+        rig.task_done(start, TaskOutcome::Exited { code: Some(0), errors: 0 });
+    }
+}
+
+// Without `supportsRestartRequest` the session stops (`restart: true`), then the restart's tasks
+// run in `restartSession`'s order, then the configuration starts again without its
+// `preLaunchTask` a second time.
+#[test]
+fn fr_l31_42_restart_runs_the_restart_tasks_in_code_oss_order_then_starts_again() {
+    let mut rig = Rig::fixture();
+    start_with_restart_tasks(&mut rig);
+    let first = rig.session_id();
+    rig.debug(DebugRequest::Restart { session: first });
+    assert_eq!(rig.dap_request("disconnect")["arguments"]["restart"], true);
+    finish_waiting_tasks(&mut rig, 1);
+    let labels: Vec<(String, bool)> = rig
+        .task_runs()
+        .into_iter()
+        .map(|(l, s)| (l, s.is_some()))
+        .collect();
+    assert_eq!(
+        labels,
+        vec![
+            ("build".to_owned(), true),
+            // `onDidEndAdapter`: nothing waits for it.
+            ("cleanup".to_owned(), false),
+            ("prerestart".to_owned(), true),
+            ("cleanup".to_owned(), true),
+            ("build".to_owned(), true),
+            ("postrestart".to_owned(), true),
+        ]
+    );
+    assert_eq!(rig.calls_of("$startDASession").len(), 2, "started again after the tasks");
+    assert_eq!(live_sessions(&rig).len(), 1);
+}
+
+// With `supportsRestartRequest` the tasks run first and the adapter is then sent `restart` with
+// the configuration; a `postRestartTask` that fails and is aborted keeps the restart from going.
+#[test]
+fn fr_l31_42_restart_request_waits_for_the_restart_tasks() {
+    let mut rig = Rig::fixture();
+    rig.adapter.caps = json!({"supportsRestartRequest": true});
+    start_with_restart_tasks(&mut rig);
+    let first = rig.session_id();
+    rig.debug(DebugRequest::Restart { session: first.clone() });
+    assert!(!rig.dap_commands().contains(&"restart".to_owned()), "the tasks come first");
+    assert!(!rig.dap_commands().contains(&"disconnect".to_owned()));
+    assert_eq!(rig.task_runs()[1].0, "prerestart");
+    finish_waiting_tasks(&mut rig, 1);
+    let restart = rig.dap_request("restart");
+    assert_eq!(restart["arguments"]["arguments"]["program"], "/w/main.py");
+    let labels: Vec<String> = rig.task_runs().into_iter().map(|(l, _)| l).collect();
+    assert_eq!(labels, ["build", "prerestart", "cleanup", "build", "postrestart"]);
+    assert_eq!(rig.session_id(), first, "the same session goes on");
+
+    let mut rig = Rig::fixture();
+    rig.adapter.caps = json!({"supportsRestartRequest": true});
+    start_with_restart_tasks(&mut rig);
+    let first = rig.session_id();
+    rig.debug(DebugRequest::Restart { session: first });
+    for _ in 0..3 {
+        let start = rig.task_runs().last().unwrap().1.unwrap();
+        rig.task_done(start, TaskOutcome::Exited { code: Some(0), errors: 0 });
+    }
+    let (start, label) = {
+        let runs = rig.task_runs();
+        let last = runs.last().unwrap().clone();
+        (last.1.unwrap(), last.0)
+    };
+    assert_eq!(label, "postrestart");
+    rig.task_done(start, TaskOutcome::Exited { code: Some(1), errors: 0 });
+    let (asked, message, _, _) = rig.task_question().expect("runTaskAndCheckErrors asks");
+    assert_eq!(asked, start);
+    assert_eq!(message, "The preLaunchTask 'postrestart' terminated with exit code 1.");
+    rig.debug(DebugRequest::AnswerTask { start, choice: TaskChoice::Abort });
+    assert!(!rig.dap_commands().contains(&"restart".to_owned()));
+}
+
+// A `preRestartTask` that cannot run stops the restart with its message; the session goes on.
+#[test]
+fn fr_l31_42_a_restart_task_that_cannot_run_stops_the_restart() {
+    let mut rig = Rig::fixture();
+    rig.adapter.caps = json!({"supportsRestartRequest": true});
+    start_with_restart_tasks(&mut rig);
+    let first = rig.session_id();
+    rig.debug(DebugRequest::Restart { session: first });
+    let start = rig.task_runs()[1].1.unwrap();
+    rig.task_done(start, TaskOutcome::Failed { message: "Could not find the task 'prerestart'.".into() });
+    assert!(rig.ui.iter().any(|u| matches!(u, DebugUpdate::StartFailed { message } if message == "Could not find the task 'prerestart'.")));
+    assert_eq!(rig.task_runs().len(), 2, "no further task runs");
+    assert!(!rig.dap_commands().contains(&"restart".to_owned()));
+    assert_eq!(live_sessions(&rig).len(), 1);
+}
+
+// A restart the adapter asks for (`terminated` with `restart`) runs no tasks and hands the value
+// to the next `launch` as `__restart`.
+#[test]
+fn fr_l31_42_an_automatic_restart_runs_no_tasks_and_passes_restart_on() {
+    let mut rig = Rig::fixture();
+    start_with_restart_tasks(&mut rig);
+    rig.adapter_says(1, event("terminated", json!({"restart": {"port": 5678}})));
+    assert_eq!(rig.calls_of("$startDASession").len(), 2);
+    assert_eq!(rig.dap_request("launch")["arguments"]["__restart"], json!({"port": 5678}));
+    let labels: Vec<String> = rig.task_runs().into_iter().map(|(l, _)| l).collect();
+    assert_eq!(labels, ["build", "cleanup"], "only the ended adapter's postDebugTask");
 }

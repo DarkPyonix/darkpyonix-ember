@@ -941,8 +941,9 @@ pub fn contributed_settings(extensions: &[Value]) -> Vec<SettingSchema> {
 }
 
 /// The settings the workbench registers itself in Code-OSS and Ember therefore registers: the
-/// ones the editor acts on ([`EditorSettings`]) and the two the session already told the
-/// extension host about. Defaults are Code-OSS's.
+/// ones the editor acts on ([`EditorSettings`]), the two the session already told the
+/// extension host about, and the two debug settings a `preLaunchTask` reads (FR-L31.42).
+/// Defaults are Code-OSS's.
 pub fn ember_settings() -> Vec<SettingSchema> {
     let enumeration = |names: &[&str]| SettingKind::Enum(names.iter().map(|s| (*s).to_owned()).collect());
     let row = |key: &str, kind: SettingKind, default: Value, scope: u8, description: &str| SettingSchema {
@@ -974,6 +975,21 @@ pub fn ember_settings() -> Vec<SettingSchema> {
             "변경한 파일을 자동으로 저장합니다.",
         ),
         row("files.autoSaveDelay", SettingKind::Integer, json!(1000), 6, "자동 저장까지 기다리는 시간(밀리초)입니다."),
+        // Code-OSS's `debug.contribution.ts` registers both with no scope, so they are window settings.
+        row(
+            "debug.onTaskErrors",
+            enumeration(&["debugAnyway", "showErrors", "prompt", "abort"]),
+            json!("prompt"),
+            4,
+            "preLaunchTask를 실행한 뒤 오류가 있을 때 할 일입니다.",
+        ),
+        row(
+            "debug.hideSlowPreLaunchWarning",
+            SettingKind::Boolean,
+            json!(false),
+            4,
+            "preLaunchTask가 오래 실행될 때 보이는 경고를 숨깁니다.",
+        ),
         row(
             "files.exclude",
             SettingKind::Other,

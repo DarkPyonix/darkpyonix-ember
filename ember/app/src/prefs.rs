@@ -113,18 +113,22 @@ pub struct Prefs {
 /// keeps it under `debug.breakpoint`, `debug.functionbreakpoint`, `debug.exceptionbreakpoint`
 /// and `debug.watchexpressions`: the breakpoints with their condition, hit condition, log message
 /// and enabled flag, the function breakpoints, the exception filters chosen, and the watch
-/// expressions in their order.
+/// expressions in their order. It also keeps the answers of the task error dialog's "Remember my
+/// choice for this task", by the dialog's message, as `debugTaskRunner` keeps them under
+/// `debug.taskerrorchoice` in the workspace's storage (0 Debug Anyway, 1 Configure Task, 2 Cancel).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DebugStore {
     #[serde(flatten)]
     pub breakpoints: ember_editor::debugger::storage::StoredBreakpoints,
     #[serde(default, rename = "watchExpressions", skip_serializing_if = "Vec::is_empty")]
     pub watch_expressions: Vec<String>,
+    #[serde(default, rename = "taskErrorChoice", skip_serializing_if = "BTreeMap::is_empty")]
+    pub task_error_choices: BTreeMap<String, u8>,
 }
 
 impl DebugStore {
     pub fn is_empty(&self) -> bool {
-        self.breakpoints.is_empty() && self.watch_expressions.is_empty()
+        self.breakpoints.is_empty() && self.watch_expressions.is_empty() && self.task_error_choices.is_empty()
     }
 }
 
@@ -629,6 +633,7 @@ mod tests {
                 condition: None,
             });
             d.watch_expressions = vec!["x + 1".into(), "order.items".into()];
+            d.task_error_choices.insert("Could not find the task 'build'.".into(), 0);
         });
         assert!(changed);
         assert!(!p.update_debug_store("mac", "/w", |_| {}), "the same folder, no change");
@@ -640,6 +645,8 @@ mod tests {
         assert_eq!(store.breakpoints.breakpoints[0].condition.as_deref(), Some("x > 1"));
         assert!(store.breakpoints.exception_breakpoints[0].enabled);
         assert_eq!(store.watch_expressions, ["x + 1", "order.items"]);
+        assert_eq!(store.task_error_choices.get("Could not find the task 'build'."), Some(&0));
+        assert!(raw.contains("\"taskErrorChoice\""), "{raw}");
         assert!(back.debug_store("mac", "/other").is_empty());
         assert!(back.debug_store("mini", "/w").is_empty(), "another computer's folder");
         let mut back = back;

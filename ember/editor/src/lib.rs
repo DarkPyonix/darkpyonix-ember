@@ -50,6 +50,7 @@ pub mod folding;
 pub mod diagnostics;
 pub mod paths;
 pub mod output;
+pub mod problem_matcher;
 pub mod document;
 pub mod highlight;
 pub mod hover;

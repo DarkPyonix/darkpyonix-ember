@@ -230,6 +230,8 @@ pub struct EditorSession {
     running: Vec<crate::extensions::InstalledExtension>,
     /// The debuggers the running extensions contribute (FR-L31.42).
     debuggers: Vec<crate::debugger::launch::DebuggerContribution>,
+    /// The problem matchers of tasks: Code-OSS's and the running extensions' (FR-L31.42).
+    problem_matchers: std::sync::Arc<crate::problem_matcher::Registry>,
     task: Option<JoinHandle<()>>,
     /// The settings the extension host was started with (FR-L31.17).
     settings: SettingsScopes,
@@ -369,6 +371,7 @@ impl EditorSession {
         drop(scanned);
         let running = crate::extensions::parse_installed(&extensions);
         let debuggers = crate::debugger::launch::contributed_debuggers(&extensions);
+        let problem_matchers = std::sync::Arc::new(crate::problem_matcher::Registry::with_extensions(&extensions));
         let fs = Arc::new(RemoteFs::new(ipc.clone()));
         let changes = fs.subscribe_changes().await?;
 
@@ -494,7 +497,7 @@ impl EditorSession {
         }
 
         let app_language = config.app_language.clone();
-        Ok((Self { tx, authority, workspace_path, fs, ipc, app_language, installed, running, debuggers, task: Some(task), settings, catalogue, machine_settings_path, workspace_settings_error, machine_settings_error, user_files: config.user_files.clone() }, updates_rx))
+        Ok((Self { tx, authority, workspace_path, fs, ipc, app_language, installed, running, debuggers, problem_matchers, task: Some(task), settings, catalogue, machine_settings_path, workspace_settings_error, machine_settings_error, user_files: config.user_files.clone() }, updates_rx))
     }
 
     /// Every extension the connect-time scan found, disabled ones included (FR-L31.14).
@@ -890,6 +893,18 @@ impl EditorSession {
     /// A request of the debugging window; answered with [`SessionUpdate::Debug`].
     pub fn debug(&self, request: crate::debugger::DebugRequest) -> Result<(), Error> {
         self.send(Command::Input(Input::Debug(request)))
+    }
+
+    /// What the problem matchers of a task found (FR-L31.42): the markers of `owner` per path of
+    /// the project, `None` removing them. They join the problems as an extension's would.
+    pub fn task_markers(&self, owner: String, entries: Vec<(String, Option<Vec<ember_editor_conn::exthost::MarkerData>>)>) -> Result<(), Error> {
+        let entries = entries.into_iter().map(|(path, markers)| (self.document_uri(&path), markers)).collect();
+        self.send(Command::Input(Input::TaskMarkers { owner, entries }))
+    }
+
+    /// The problem matchers Code-OSS ships and the running extensions contribute (FR-L31.42).
+    pub fn problem_matchers(&self) -> &std::sync::Arc<crate::problem_matcher::Registry> {
+        &self.problem_matchers
     }
 
     /// Start the configuration of `.vscode/launch.json` that `selector` names. Answered with

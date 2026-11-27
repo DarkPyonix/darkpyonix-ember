@@ -518,6 +518,8 @@ fn editor_pane() -> Element {
         // one column, and the mockup's 8px above the first line and below the last scrolls with it.
         fixed_gutter_columns: crate::ui::fonts::CODE_FIXED_GUTTER_COLUMNS,
         content_padding_dp: Some(crate::ui::fonts::CODE_CONTENT_PADDING),
+        // FR-L31.27 (#477): `liga 0` and `calt 0`, so `->` is two glyphs as in the mockup (compose-rust#1080).
+        font_feature_settings: crate::ui::fonts::CODE_FONT_FEATURES,
         colors: crate::ui::fonts::CODE_EDITOR_COLORS,
         // FR-L31.13: the language chords from the focused code (compose-rust#554), Cmd/Ctrl+click to a
         // definition (compose-rust#555) and the caret a list opens under (compose-rust#553).

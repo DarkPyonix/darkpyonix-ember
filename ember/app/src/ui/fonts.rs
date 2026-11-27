@@ -192,6 +192,13 @@ pub const CODE_FIXED_GUTTER_COLUMNS: bool = true;
 /// `.ed-code{padding:var(--sp2) 0}`, 8px (`style.css:19` `--sp2:8px`) inside what scrolls, so it
 /// scrolls away with the text as the mockup's does. The code editor's `content_padding_dp`.
 pub const CODE_CONTENT_PADDING: (f32, f32) = (8.0, 8.0);
+/// The OpenType features the code text is set with (FR-L31.27, #477): `liga 0` and `calt 0`, so
+/// `->`, `=>` and `!=` are two glyphs a column each, as the mockup draws them. JetBrains Mono
+/// joins them by default; the mockup's `.ed-code` (`editor.css:68`) names no feature and its
+/// pages load no JetBrains Mono face, so they draw in the fallback face, which has no
+/// ligatures. dioxus-compose's `font_feature_settings` on `CodeEditor` (compose-rust#1080).
+pub const CODE_FONT_FEATURES: [compose_rust::FontFeature; 2] =
+    [compose_rust::FontFeature::NO_LIGATURES, compose_rust::FontFeature::new(b"calt", 0)];
 
 /// The colours of the code editor's own parts (FR-L31.27): line numbers in `muted`
 /// (`editor.css:71`), the caret line's number in `text` (`editor.css:72`). A part is a role of
@@ -414,6 +421,54 @@ mod tests {
         );
         // Folding stays: the editor is still given the document's folds.
         assert!(workbench.contains("folds: crate::ui::editor::folds_from("), "the file's CodeEditor still folds");
+    }
+
+    /// FR-L31.27 (#477): the code text is set without ligatures, `liga 0` and `calt 0`, so `->`
+    /// is two glyphs as the mockup draws it, and the code editor node carries both records
+    /// (compose-rust#1080).
+    #[test]
+    fn fr_l31_27_the_code_editor_draws_no_ligatures() {
+        use compose_rust::protocol::{decode_batch, Mutation, PropertyValue};
+        use compose_rust::schema::{PropertyKind, WidgetKind};
+        let named: Vec<([u8; 4], u32)> = CODE_FONT_FEATURES.iter().map(|f| (f.tag, f.value)).collect();
+        assert_eq!(named, [(*b"liga", 0), (*b"calt", 0)]);
+        // The mockup's code area names no feature of its own.
+        let css = include_str!("../../assets/editor/editor.css");
+        assert!(!css.contains("font-feature-settings") && !css.contains("font-variant-ligatures"));
+
+        fn unligated() -> dioxus_compose::prelude::Element {
+            use dioxus_compose::prelude::*;
+            rsx! { CodeEditor { text: "a -> b => c != d", font_feature_settings: CODE_FONT_FEATURES } }
+        }
+        let mut host = dioxus_compose::Host::new(unligated);
+        let batch = decode_batch(host.rebuild().unwrap()).unwrap();
+        let editor = batch
+            .iter()
+            .find_map(|mutation| match mutation {
+                Mutation::Create { node_id, widget: WidgetKind::CodeEditor } => Some(*node_id),
+                _ => None,
+            })
+            .expect("a code editor node");
+        let features = batch
+            .iter()
+            .find_map(|mutation| match mutation {
+                Mutation::SetProp { node_id, property: PropertyKind::FontFeatureSettings, value: PropertyValue::Bytes(bytes) }
+                    if *node_id == editor =>
+                {
+                    Some(bytes.to_vec())
+                }
+                _ => None,
+            })
+            .expect("the code editor carries font feature settings");
+        assert_eq!(features, b"liga\0\0\0\0calt\0\0\0\0".to_vec());
+
+        // Both code editors (the file's and the diff's working-tree side) are given them.
+        for (file, source) in [("editor_workbench.rs", include_str!("editor_workbench.rs")), ("editor_scm.rs", include_str!("editor_scm.rs"))] {
+            assert!(
+                source.contains("font_feature_settings: crate::ui::fonts::CODE_FONT_FEATURES"),
+                "{file} passes the code font features to its CodeEditor"
+            );
+        }
     }
 
     /// FR-L31.28 (design review E2, #895): the caret line's band is the mockup's `surface-2`

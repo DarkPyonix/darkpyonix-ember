@@ -2474,6 +2474,8 @@ pub mod diff_editor_view {
             // FR-L31.27: the same code type, row pitch and line number column as the file's editor.
             font_size: Some(crate::ui::fonts::CODE_FONT_SIZE), line_height: Some(crate::ui::fonts::CODE_LINE_HEIGHT),
             gutter_min_width: Some(crate::ui::fonts::CODE_GUTTER_MIN_WIDTH), gutter_padding: Some(crate::ui::fonts::CODE_GUTTER_PADDING), text_inset: Some(crate::ui::fonts::CODE_TEXT_INSET),
+            // FR-L31.27 (#477): the file editor's code without ligatures (compose-rust#1080).
+            font_feature_settings: crate::ui::fonts::CODE_FONT_FEATURES,
             colors: crate::ui::fonts::CODE_EDITOR_COLORS,
             on_change: move |e: compose_rust::code::CodeChange| {
                 let event = change_s.bridge.borrow_mut().on_code_changed(&change_uri, e.version, WidgetRange::new(pos(e.range.start), pos(e.range.end)), e.text);

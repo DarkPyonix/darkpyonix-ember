@@ -22,7 +22,19 @@ impl SessionCore {
             .as_ref()
             .and_then(|key| self.docs.get(key))
             .map(|doc| doc.uri.path.clone());
-        Env { active_file }
+        let on_task_errors = crate::debugger::OnTaskErrors::from_setting(
+            self.settings.as_ref().and_then(|s| s.value("debug.onTaskErrors", None)).as_ref(),
+        );
+        let error_markers = self.diagnostics.error_count(2);
+        Env { active_file, on_task_errors, error_markers }
+    }
+
+    /// The problems a task's problem matchers found (FR-L31.42): `$changeMany` of `owner`, from the
+    /// window instead of the extension host, as Code-OSS's task system writes the marker service.
+    pub(super) fn on_task_markers(&mut self, owner: &str, entries: Vec<(ember_editor_conn::uri::UriComponents, Option<Vec<ember_editor_conn::exthost::MarkerData>>)>) {
+        let keys = self.diagnostics.change_many(owner, entries);
+        self.touched.extend(keys);
+        self.ui(SessionUpdate::Problems { problems: self.diagnostics.problems() });
     }
 
     /// Run `f` on the debug state at the current time and execute what it returns.

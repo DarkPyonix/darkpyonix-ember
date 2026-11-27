@@ -5,8 +5,11 @@ use dioxus_core::use_hook;
 use std::cell::RefCell;
 
 thread_local! {
-    static CHOSEN: RefCell<Vec<TaskChoice>> = const { RefCell::new(Vec::new()) };
+    static CHOSEN: RefCell<Vec<(TaskChoice, bool)>> = const { RefCell::new(Vec::new()) };
+    static WAITED: RefCell<Vec<TaskChoice>> = const { RefCell::new(Vec::new()) };
 }
+
+const IDLE: TrackStatus = TrackStatus { began: false, ready: false };
 
 const TASKS: &str = r#"{
     "version": "2.0.0",
@@ -49,23 +52,23 @@ fn running() -> TerminalState {
 #[test]
 fn fr_l31_42_the_task_terminal_gives_the_outcome() {
     let short = Duration::from_millis(100);
-    assert_eq!(outcome_of("build", &running(), false, Duration::from_secs(60)), None, "a task that runs is waited for");
+    assert_eq!(outcome_of("build", &running(), false, Duration::from_secs(60), IDLE), None, "a task that runs is waited for");
     let exited = |code, signal| TerminalState { exit: Some((code, signal)), ..running() };
-    assert_eq!(outcome_of("build", &exited(Some(0), None), false, short), Some(TaskOutcome::Exited { code: Some(0), errors: 0 }));
-    assert_eq!(outcome_of("build", &exited(Some(2), None), false, short), Some(TaskOutcome::Exited { code: Some(2), errors: 0 }));
-    assert_eq!(outcome_of("build", &exited(None, Some(15)), false, short), Some(TaskOutcome::Exited { code: None, errors: 0 }));
+    assert_eq!(outcome_of("build", &exited(Some(0), None), false, short, IDLE), Some(TaskOutcome::Exited { code: Some(0), errors: 0 }));
+    assert_eq!(outcome_of("build", &exited(Some(2), None), false, short, IDLE), Some(TaskOutcome::Exited { code: Some(2), errors: 0 }));
+    assert_eq!(outcome_of("build", &exited(None, Some(15)), false, short, IDLE), Some(TaskOutcome::Exited { code: None, errors: 0 }));
 
     let failed = TerminalState { error: Some("refused".into()), status: TerminalStatus::Disconnected, ..Default::default() };
-    assert!(matches!(outcome_of("build", &failed, false, short), Some(TaskOutcome::Failed { message }) if message.starts_with("The task 'build' could not run")));
+    assert!(matches!(outcome_of("build", &failed, false, short, IDLE), Some(TaskOutcome::Failed { message }) if message.starts_with("The task 'build' could not run")));
     let retrying = TerminalState { reconnect: Some(crate::terminal_stream::ReconnectLine::Reconnecting), ..failed.clone() };
-    assert_eq!(outcome_of("build", &retrying, false, short), None, "an automatic reconnect is waited for");
+    assert_eq!(outcome_of("build", &retrying, false, short, IDLE), None, "an automatic reconnect is waited for");
 
-    assert_eq!(outcome_of("watch", &running(), true, short), None);
+    assert_eq!(outcome_of("watch", &running(), true, short, IDLE), None);
     assert!(matches!(
-        outcome_of("watch", &running(), true, BACKGROUND_WAIT),
+        outcome_of("watch", &running(), true, BACKGROUND_WAIT, IDLE),
         Some(TaskOutcome::Failed { message }) if message.contains("has not exited and doesn't have a 'problemMatcher' defined")
     ));
-    assert_eq!(outcome_of("watch", &exited(Some(0), None), true, BACKGROUND_WAIT), Some(TaskOutcome::Exited { code: Some(0), errors: 0 }));
+    assert_eq!(outcome_of("watch", &exited(Some(0), None), true, BACKGROUND_WAIT, IDLE), Some(TaskOutcome::Exited { code: Some(0), errors: 0 }));
 }
 
 fn sheet() -> Element {
@@ -74,6 +77,16 @@ fn sheet() -> Element {
         message: "The preLaunchTask 'build' terminated with exit code 2.".into(),
         choices: vec![TaskChoice::DebugAnyway, TaskChoice::ShowErrors, TaskChoice::Abort],
         error: false,
+    });
+    rsx! { TaskPromptSheet { prompt, choose: move |c| CHOSEN.with_borrow_mut(|v| v.push(c)) } }
+}
+
+fn error_sheet() -> Element {
+    let prompt = use_hook(|| TaskPrompt {
+        start: 4,
+        message: "Could not find the task 'build'.".into(),
+        choices: vec![TaskChoice::DebugAnyway, TaskChoice::ConfigureTask, TaskChoice::Cancel],
+        error: true,
     });
     rsx! { TaskPromptSheet { prompt, choose: move |c| CHOSEN.with_borrow_mut(|v| v.push(c)) } }
 }
@@ -96,10 +109,78 @@ fn fr_l31_42_the_task_question_offers_code_oss_buttons() {
     click(&mut dom, "debug-task-choice-2");
     assert_eq!(
         CHOSEN.with_borrow_mut(std::mem::take),
-        [TaskChoice::DebugAnyway, TaskChoice::ShowErrors, TaskChoice::Abort]
+        [(TaskChoice::DebugAnyway, false), (TaskChoice::ShowErrors, false), (TaskChoice::Abort, false)]
     );
     assert_eq!(
         [TaskChoice::DebugAnyway, TaskChoice::ShowErrors, TaskChoice::ConfigureTask, TaskChoice::Abort, TaskChoice::Cancel].map(choice_label),
         ["그래도 디버그", "오류 표시", "작업 구성", "중단", "취소"]
     );
+}
+
+fn status(began: bool, ready: bool) -> TrackStatus {
+    TrackStatus { began, ready }
+}
+
+// A background task is ready when a pass of its matcher ends; one whose matcher began a pass is
+// tracked and gets no untracked-task error after 5 s; one whose matcher never began does.
+#[test]
+fn fr_l31_42_a_background_task_is_ready_at_its_ends_pattern() {
+    let short = Duration::from_millis(100);
+    assert_eq!(outcome_of("watch", &running(), true, short, status(true, true)), Some(TaskOutcome::Ready { errors: 0 }));
+    assert_eq!(outcome_of("watch", &running(), true, Duration::from_secs(60), status(true, false)), None, "active: waited for");
+    assert!(matches!(
+        outcome_of("watch", &running(), true, BACKGROUND_WAIT, status(false, false)),
+        Some(TaskOutcome::Failed { message }) if message == "The task 'watch' has not exited and doesn't have a 'problemMatcher' defined. Make sure to define a problem matcher for watch tasks."
+    ));
+    assert_eq!(outcome_of("watch", &running(), true, BACKGROUND_WAIT - short, status(false, false)), None, "not before 5 s");
+    // A task that is not background ends with its process, whatever its matcher says.
+    assert_eq!(outcome_of("build", &running(), false, short, status(true, true)), None);
+}
+
+// The waiting card is due after 10 s unless `debug.hideSlowPreLaunchWarning` is on; Debug Anyway
+// is a success, Configure Task and Abort a cancelled task.
+#[test]
+fn fr_l31_42_the_waiting_card_comes_after_10_s() {
+    assert!(!slow_warning_due(Duration::from_secs(9), false));
+    assert!(slow_warning_due(SLOW_WAIT, false));
+    assert!(!slow_warning_due(Duration::from_secs(60), true));
+    assert_eq!(waiting_message("build"), "Waiting for preLaunchTask 'build'...");
+    assert_eq!(WAITING_CHOICES, [TaskChoice::DebugAnyway, TaskChoice::ConfigureTask, TaskChoice::Abort]);
+    assert_eq!(waiting_outcome(TaskChoice::DebugAnyway), TaskOutcome::Exited { code: Some(0), errors: 0 });
+    assert_eq!(waiting_outcome(TaskChoice::Abort), TaskOutcome::Exited { code: None, errors: 0 });
+    assert_eq!(waiting_outcome(TaskChoice::ConfigureTask), TaskOutcome::Exited { code: None, errors: 0 });
+}
+
+fn waiting() -> Element {
+    rsx! { WaitingCard { label: "build".to_string(), choose: move |c| WAITED.with_borrow_mut(|v| v.push(c)) } }
+}
+
+#[test]
+fn fr_l31_42_the_waiting_card_offers_code_oss_buttons() {
+    let mut dom = HtmlDom::new(waiting);
+    dom.layout(1000.0, 800.0, 1.0);
+    assert!(dom.element_by_id("debug-task-waiting").is_some());
+    for i in 0..3 {
+        click(&mut dom, &format!("debug-task-waiting-{i}"));
+    }
+    assert_eq!(WAITED.with_borrow_mut(std::mem::take), WAITING_CHOICES);
+}
+
+// "Remember my choice in user settings": the warning's checkbox goes with the button, and the
+// answer writes `debug.onTaskErrors` as Code-OSS does; the error dialog has no such box here.
+#[test]
+fn fr_l31_42_remember_my_choice_goes_with_the_answer_and_names_the_setting() {
+    let mut dom = HtmlDom::new(sheet);
+    dom.layout(1000.0, 800.0, 1.0);
+    click(&mut dom, "debug-task-remember");
+    click(&mut dom, "debug-task-choice-2");
+    assert_eq!(CHOSEN.with_borrow_mut(std::mem::take), [(TaskChoice::Abort, true)]);
+
+    let mut dom = HtmlDom::new(error_sheet);
+    dom.layout(1000.0, 800.0, 1.0);
+    assert!(dom.element_by_id("debug-task-remember").is_none());
+
+    assert_eq!(remembered_setting(TaskChoice::DebugAnyway), ("debug.onTaskErrors", "debugAnyway"));
+    assert_eq!(remembered_setting(TaskChoice::ShowErrors), ("debug.onTaskErrors", "showErrors"));
+    assert_eq!(remembered_setting(TaskChoice::Abort), ("debug.onTaskErrors", "abort"));
 }

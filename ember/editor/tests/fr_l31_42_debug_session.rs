@@ -11,8 +11,9 @@ use std::time::{Duration, Instant};
 
 use ember_editor::debugger::{
     ConfigSelector, DebugRequest, DebugUpdate, EvalContext, EvalResult, SessionInfo, SessionState,
-    TaskChoice, TaskOutcome,
+    OnTaskErrors, TaskChoice, TaskOutcome,
 };
+use ember_editor::{SettingsLayer, SettingsScopes};
 use ember_editor::languages::LanguageRegistry;
 use ember_editor::{BridgeAction, CoreOptions, Effect, Input, SessionCore, SessionUpdate, WidgetBridge};
 use ember_editor_conn::rpc::{Arg, IncomingRequest, Reply};
@@ -1525,6 +1526,98 @@ fn fr_l31_42_set_variable_follows_the_adapter_capabilities() {
         !commands.iter().any(|c| c == "setVariable" || c == "setExpression"),
         "{commands:?}"
     );
+}
+
+/// A rig whose user settings say `"debug.onTaskErrors": <value>`.
+fn rig_with_on_task_errors(value: &str) -> Rig {
+    let mut rig = Rig::fixture();
+    rig.core.set_settings(SettingsScopes {
+        user: SettingsLayer::from_values(vec![("debug.onTaskErrors".to_owned(), json!(value))]),
+        ..Default::default()
+    });
+    rig
+}
+
+// `debug.onTaskErrors` decides before the question, as `runTaskAndCheckErrors` reads it:
+// `debugAnyway` starts the session, `showErrors` opens the problems view and abandons the start,
+// `abort` abandons it, and `prompt` (the default) asks.
+#[test]
+fn fr_l31_42_on_task_errors_decides_before_the_question() {
+    let outcome = |value: &str| {
+        let mut rig = rig_with_on_task_errors(value);
+        let start = rig.start_with_tasks();
+        rig.task_done(start, TaskOutcome::Exited { code: Some(1), errors: 0 });
+        let started = rig.methods().contains(&"$startDASession");
+        let shown = rig.ui.contains(&DebugUpdate::ShowProblems);
+        (rig.task_question().is_some(), started, shown)
+    };
+    assert_eq!(outcome("debugAnyway"), (false, true, false));
+    assert_eq!(outcome("showErrors"), (false, false, true));
+    assert_eq!(outcome("abort"), (false, false, false));
+    assert_eq!(outcome("prompt"), (true, false, false));
+    assert_eq!(outcome("anything else"), (true, false, false), "an unknown value is the default");
+
+    // A clean exit starts whatever the setting says; a task that could not run always gets the
+    // error dialog, which the setting does not cover.
+    let mut rig = rig_with_on_task_errors("abort");
+    let start = rig.start_with_tasks();
+    rig.task_done(start, TaskOutcome::Exited { code: Some(0), errors: 0 });
+    assert!(rig.methods().contains(&"$startDASession"));
+    let mut rig = rig_with_on_task_errors("debugAnyway");
+    let start = rig.start_with_tasks();
+    rig.task_done(start, TaskOutcome::Failed { message: "The task 'build' could not run.".into() });
+    assert!(rig.task_question().is_some_and(|(_, _, _, error)| error));
+
+    assert_eq!(OnTaskErrors::from_setting(None), OnTaskErrors::Prompt);
+    for v in [OnTaskErrors::DebugAnyway, OnTaskErrors::ShowErrors, OnTaskErrors::Prompt, OnTaskErrors::Abort] {
+        assert_eq!(OnTaskErrors::from_setting(Some(&json!(v.as_str()))), v);
+    }
+}
+
+// "Remember my choice in user settings" writes what Code-OSS writes for each button.
+#[test]
+fn fr_l31_42_remember_my_choice_maps_the_buttons_to_the_setting() {
+    assert_eq!(OnTaskErrors::remembered(TaskChoice::DebugAnyway).as_str(), "debugAnyway");
+    assert_eq!(OnTaskErrors::remembered(TaskChoice::Abort).as_str(), "abort");
+    assert_eq!(OnTaskErrors::remembered(TaskChoice::ShowErrors).as_str(), "showErrors");
+}
+
+fn error_marker(line: u32) -> Value {
+    json!({ "severity": 8, "message": "broken", "startLineNumber": line, "startColumn": 1, "endLineNumber": line, "endColumn": 2 })
+}
+
+// The errors of a `preLaunchTask` are the error markers the problems hold (up to two), what its
+// problem matchers reported among them, as `markerService.read({ severities: Error, take: 2 })`.
+#[test]
+fn fr_l31_42_the_error_markers_of_the_problems_count_for_the_pre_launch_task() {
+    let mut rig = Rig::fixture();
+    let start = rig.start_with_tasks();
+    let markers = serde_json::from_value(json!([error_marker(1)])).unwrap();
+    rig.feed(Input::TaskMarkers { owner: "go".into(), entries: vec![(uri("/w/main.go"), Some(markers))] });
+    rig.task_done(start, TaskOutcome::Exited { code: Some(1), errors: 0 });
+    let (_, message, _, _) = rig.task_question().expect("a question");
+    assert_eq!(message, "Error exists after running preLaunchTask 'build'.");
+
+    // A background task that reached its ready point with errors in the problems.
+    let mut rig = Rig::fixture();
+    let start = rig.start_with_tasks();
+    let markers = serde_json::from_value(json!([error_marker(1), error_marker(2), error_marker(3)])).unwrap();
+    rig.feed(Input::TaskMarkers { owner: "watch".into(), entries: vec![(uri("/w/a.ts"), Some(markers))] });
+    rig.task_done(start, TaskOutcome::Ready { errors: 0 });
+    let (_, message, choices, error) = rig.task_question().expect("a question");
+    assert_eq!(message, "Errors exist after running preLaunchTask 'build'.");
+    assert_eq!(choices, vec![TaskChoice::DebugAnyway, TaskChoice::ShowErrors, TaskChoice::Abort]);
+    assert!(!error);
+
+    // Removed again (`None`), they no longer count.
+    let mut rig = Rig::fixture();
+    let start = rig.start_with_tasks();
+    let markers = serde_json::from_value(json!([error_marker(1)])).unwrap();
+    rig.feed(Input::TaskMarkers { owner: "go".into(), entries: vec![(uri("/w/main.go"), Some(markers))] });
+    rig.feed(Input::TaskMarkers { owner: "go".into(), entries: vec![(uri("/w/main.go"), None)] });
+    rig.task_done(start, TaskOutcome::Ready { errors: 0 });
+    assert_eq!(rig.task_question(), None);
+    assert!(rig.methods().contains(&"$startDASession"));
 }
 
 /// The answer to hover `id`, once it came.

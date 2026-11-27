@@ -158,6 +158,9 @@ pub enum Input {
     SecretState { req: u32, result: Result<crate::secret_state::SecretReply, String> },
     /// A request of the debugging window; answered with [`SessionUpdate::Debug`].
     Debug(crate::debugger::DebugRequest),
+    /// What the problem matchers of a task found (FR-L31.42): the markers of `owner` per file,
+    /// `None` removing them, as `MainThreadDiagnostics.$changeMany` gives them.
+    TaskMarkers { owner: String, entries: Vec<(UriComponents, Option<Vec<ember_editor_conn::exthost::MarkerData>>)> },
     /// Result of reading one persisted extension storage file (`MainThreadStorage`).
     StorageRead { shared: bool, extension_id: String, result: Result<Option<Vec<u8>>, String> },
     /// Result of moving a corrupt extension storage file aside to `*.corrupt.<millis>-<seq>`.
@@ -590,6 +593,7 @@ impl SessionCore {
             }
             Input::SecretState { req, result } => self.on_secret_state_result(req, result),
             Input::Debug(request) => self.on_debug_request(request),
+            Input::TaskMarkers { owner, entries } => self.on_task_markers(&owner, entries),
             Input::StorageRead { shared, extension_id, result } => {
                 let next = self.next_token + 1;
                 let outcome = self.storage.on_read_done(self.now, shared, &extension_id, result, || next);

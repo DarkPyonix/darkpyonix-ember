@@ -16,8 +16,9 @@
 //!    again for a type the result changed to (`debugConfigurationManager.resolveConfigurationByProviders`);
 //! 4. the variables Ember can answer are substituted ([`launch::VarContext`]);
 //! 5. `preLaunchTask`, through the window's task runner ([`DebugUpdate::RunTask`]); a task that
-//!    fails asks whether to debug anyway ([`DebugUpdate::TaskFailed`]), as
-//!    `debugTaskRunner.runTaskAndCheckErrors` does;
+//!    fails, or leaves error markers in the problems, asks whether to debug anyway
+//!    ([`DebugUpdate::TaskFailed`]) unless `debug.onTaskErrors` answers first ([`OnTaskErrors`]),
+//!    as `debugTaskRunner.runTaskAndCheckErrors` does;
 //! 6. `$resolveDebugConfigurationWithSubstitutedVariables` through the same chain;
 //! 7. `$startDASession`: the extension host creates and starts the adapter.
 //!
@@ -35,8 +36,7 @@
 //! **What is not done.** The visualizer methods of the actor stay unimplemented (the actor
 //! router counts them). There is no terminal in this window, so `runInTerminal` is refused and
 //! the adapter has to use its internal console. The `preLaunchTask` of a compound, and the
-//! `preRestartTask` and `postRestartTask` of a restart, are not run; the setting
-//! `debug.onTaskErrors` is not read (the question is always asked). The platform-specific blocks
+//! `preRestartTask` and `postRestartTask` of a restart, are not run. The platform-specific blocks
 //! of a configuration (`windows`, `osx`, `linux`) are not merged.
 
 pub mod breakpoints;
@@ -166,6 +166,8 @@ pub struct ConfigInfo {
 
 /// How a task the session layer asked for ended ([`DebugUpdate::RunTask`]): what
 /// `debugTaskRunner.runTask` resolves with, and the errors the problems view holds after it.
+/// The session counts the error markers it holds itself ([`Env::error_markers`]) and takes the
+/// larger of that and `errors`, so the window may send 0.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TaskOutcome {
     /// The task's process ended. `code` is `None` when it ended without one (stopped by the user
@@ -175,6 +177,54 @@ pub enum TaskOutcome {
     Ready { errors: usize },
     /// The task could not be found, run or tracked: the message, Code-OSS's error dialog.
     Failed { message: String },
+}
+
+/// The setting `debug.onTaskErrors`: what a `preLaunchTask` that ended badly does before any
+/// question (`debugTaskRunner.runTaskAndCheckErrors`). A task that could not run is not covered:
+/// it always gets the error dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OnTaskErrors {
+    /// Start the session anyway.
+    DebugAnyway,
+    /// Open the problems view; the start is abandoned.
+    ShowErrors,
+    /// Ask (the default).
+    #[default]
+    Prompt,
+    /// Abandon the start.
+    Abort,
+}
+
+impl OnTaskErrors {
+    /// The setting's value; anything else is the default, `prompt`.
+    pub fn from_setting(value: Option<&Value>) -> Self {
+        match value.and_then(Value::as_str) {
+            Some("debugAnyway") => Self::DebugAnyway,
+            Some("showErrors") => Self::ShowErrors,
+            Some("abort") => Self::Abort,
+            _ => Self::Prompt,
+        }
+    }
+
+    /// The value written to settings.json.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DebugAnyway => "debugAnyway",
+            Self::ShowErrors => "showErrors",
+            Self::Prompt => "prompt",
+            Self::Abort => "abort",
+        }
+    }
+
+    /// What "Remember my choice in user settings" writes for a button of the warning: Debug
+    /// Anyway, Abort, else Show Errors, as Code-OSS maps them.
+    pub fn remembered(choice: TaskChoice) -> Self {
+        match choice {
+            TaskChoice::DebugAnyway => Self::DebugAnyway,
+            TaskChoice::Abort | TaskChoice::Cancel => Self::Abort,
+            TaskChoice::ShowErrors | TaskChoice::ConfigureTask => Self::ShowErrors,
+        }
+    }
 }
 
 /// The buttons of the question a failed `preLaunchTask` asks ([`DebugUpdate::TaskFailed`]).
@@ -263,6 +313,10 @@ pub enum DebugUpdate {
         choices: Vec<TaskChoice>,
         error: bool,
     },
+    /// `debug.onTaskErrors` is `showErrors` and the `preLaunchTask` of a start ended badly: open
+    /// the problems view (`viewsService.openView(Markers.MARKERS_VIEW_ID)`); the start is
+    /// abandoned.
+    ShowProblems,
     /// The answer to [`DebugRequest::SetVariable`]: the new value, or why it was refused. The
     /// window loads the variables again either way, as Code-OSS's `updateViews` does.
     VariableSet {
@@ -448,6 +502,11 @@ pub enum DebugRequest {
 pub struct Env {
     /// Path of the file in the active editor, for `${file}`.
     pub active_file: Option<String>,
+    /// The setting `debug.onTaskErrors`.
+    pub on_task_errors: OnTaskErrors,
+    /// The error markers the problems hold, counted up to 2, as `runTaskAndCheckErrors` reads
+    /// `markerService.read({ severities: Error, take: 2 })`.
+    pub error_markers: usize,
 }
 
 // ---- what the core executes -------------------------------------------------------------------
@@ -721,8 +780,10 @@ fn is_read_only(v: &Value) -> bool {
 #[derive(Debug, PartialEq)]
 enum TaskCheck {
     Go,
-    /// Cancelled: the start ends without a question.
+    /// Cancelled, or `debug.onTaskErrors` is `abort`: the start ends without a question.
     Abandon,
+    /// `debug.onTaskErrors` is `showErrors`: the problems view opens and the start ends.
+    ShowErrors,
     Ask {
         message: String,
         choices: Vec<TaskChoice>,
@@ -730,7 +791,7 @@ enum TaskCheck {
     },
 }
 
-fn check_task(label: &str, outcome: &TaskOutcome) -> TaskCheck {
+fn check_task(label: &str, outcome: &TaskOutcome, policy: OnTaskErrors, error_markers: usize) -> TaskCheck {
     let (errors, code) = match outcome {
         TaskOutcome::Failed { message } => {
             return TaskCheck::Ask {
@@ -748,13 +809,18 @@ fn check_task(label: &str, outcome: &TaskOutcome) -> TaskCheck {
         TaskOutcome::Exited {
             code: Some(code),
             errors,
-        } => (*errors, Some(*code)),
-        TaskOutcome::Ready { errors } => (*errors, None),
+        } => ((*errors).max(error_markers), Some(*code)),
+        TaskOutcome::Ready { errors } => ((*errors).max(error_markers), None),
     };
-    // `successExitCode || (errorCount === 0 && !failureExitCode)`; a background task has no
-    // summary, so only its errors count.
-    if code == Some(0) || (errors == 0 && code.is_none()) {
+    // `successExitCode || onTaskErrors === 'debugAnyway' || (errorCount === 0 &&
+    // !failureExitCode)`; a background task has no summary, so only its errors count.
+    if code == Some(0) || policy == OnTaskErrors::DebugAnyway || (errors == 0 && code.is_none()) {
         return TaskCheck::Go;
+    }
+    match policy {
+        OnTaskErrors::ShowErrors => return TaskCheck::ShowErrors,
+        OnTaskErrors::Abort => return TaskCheck::Abandon,
+        _ => {}
     }
     let message = if errors > 1 {
         format!("Errors exist after running preLaunchTask '{label}'.")
@@ -1161,7 +1227,9 @@ impl DebugState {
                 let origin = self.origin(None, Notify::Nobody, None, no_debug, env);
                 self.begin_selected(selector, origin, &mut out);
             }
-            DebugRequest::TaskDone { start, outcome } => self.task_done(start, outcome, &mut out),
+            DebugRequest::TaskDone { start, outcome } => {
+                self.task_done(start, outcome, env, &mut out)
+            }
             DebugRequest::AnswerTask { start, choice } => {
                 self.answer_task(start, choice, &mut out)
             }
@@ -1896,7 +1964,7 @@ impl DebugState {
                                 let outcome = TaskOutcome::Failed {
                                     message: "Could not find the specified task.".to_owned(),
                                 };
-                                self.task_checked(st, outcome, out);
+                                self.task_checked(st, outcome, &Env::default(), out);
                                 return;
                             }
                         }
@@ -1992,14 +2060,18 @@ impl DebugState {
     // ---- the preLaunchTask ---------------------------------------------------------------------
 
     /// What the `preLaunchTask` of `st` ended with: the start goes on, asks, or is abandoned.
-    fn task_checked(&mut self, st: &mut Start, outcome: TaskOutcome, out: &mut Vec<Out>) {
+    fn task_checked(&mut self, st: &mut Start, outcome: TaskOutcome, env: &Env, out: &mut Vec<Out>) {
         let label = str_of(&st.config, "preLaunchTask").unwrap_or_default();
-        match check_task(&label, &outcome) {
+        match check_task(&label, &outcome, env.on_task_errors, env.error_markers) {
             TaskCheck::Go => {
                 st.phase = Phase::Resolve;
                 self.advance(st, out);
             }
             TaskCheck::Abandon => self.abandon(st, out),
+            TaskCheck::ShowErrors => {
+                out.push(Out::Ui(DebugUpdate::ShowProblems));
+                self.abandon(st, out);
+            }
             TaskCheck::Ask {
                 message,
                 choices,
@@ -2024,12 +2096,12 @@ impl DebugState {
         st.phase = Phase::Done;
     }
 
-    fn task_done(&mut self, start: u64, outcome: TaskOutcome, out: &mut Vec<Out>) {
+    fn task_done(&mut self, start: u64, outcome: TaskOutcome, env: &Env, out: &mut Vec<Out>) {
         let Some(mut st) = self.starts.remove(&start) else {
             return;
         };
         if st.phase == Phase::Task {
-            self.task_checked(&mut st, outcome, out);
+            self.task_checked(&mut st, outcome, env, out);
         }
         self.keep(st);
     }

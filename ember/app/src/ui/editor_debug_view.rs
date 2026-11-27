@@ -440,7 +440,7 @@ impl DebugView {
                 }
             }
             // The editor's run controls take these (`editor_debug`).
-            DebugUpdate::RunTask { .. } | DebugUpdate::TaskFailed { .. } => {}
+            DebugUpdate::RunTask { .. } | DebugUpdate::TaskFailed { .. } | DebugUpdate::ShowProblems => {}
         }
         fx
     }

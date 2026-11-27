@@ -116,6 +116,9 @@ pub enum HostCommand {
     ActiveOutputChannel(Option<String>),
     /// Read the project's `.vscode/tasks.json` for the 실행 window (FR-L31.16).
     LoadTasks,
+    /// What a task's problem matchers found (FR-L31.42): the markers of `owner` per path, `None`
+    /// removing them, for the problems and the squiggles.
+    TaskMarkers { owner: String, entries: Vec<(String, Option<Vec<ember_editor_conn::exthost::MarkerData>>)> },
     /// Read the extension scan again on the management connection (FR-L31.14): after an install,
     /// an uninstall, or on the panel's refresh.
     RescanExtensions,
@@ -172,6 +175,9 @@ pub struct HostState {
     pub extensions: crate::ui::editor_extensions::ExtensionScan,
     /// The debuggers the running extensions contribute, for creating `launch.json` (FR-L31.42).
     pub debuggers: Vec<ember_editor::debugger::launch::DebuggerContribution>,
+    /// The problem matchers of tasks: Code-OSS's and the running extensions' (FR-L31.42); `None`
+    /// before the first connection, when only the built-ins are known.
+    pub problem_matchers: Option<std::sync::Arc<ember_editor::problem_matcher::Registry>>,
     /// The settings of every scope, the list the settings view shows and the user's key bindings (FR-L31.17).
     pub settings: crate::ui::editor_settings::SettingsState,
     /// The language features' sheet, messages and symbols (FR-L31.13).
@@ -505,6 +511,7 @@ impl EditorHost {
                     // The scan of this connection, on the first one and after a reconnect (FR-L31.14).
                     state.extensions.connected(session.installed_extensions().to_vec(), session.running_extensions());
                     state.debuggers = session.debuggers().to_vec();
+                    state.problem_matchers = Some(session.problem_matchers().clone());
                     if attempt == 1 && crate::ui::editor_extensions::capture_hook().is_some_and(|c| c.adds_samples()) {
                         state.extensions.add_capture_samples();
                     }
@@ -684,6 +691,7 @@ impl EditorHost {
                             Some(HostCommand::Replace { id, request }) => { let _ = session.replace(id, request); }
                             Some(HostCommand::Language(request)) => { let _ = session.language(request); }
                             Some(HostCommand::Debug(request)) => { let _ = session.debug(request); }
+                            Some(HostCommand::TaskMarkers { owner, entries }) => { let _ = session.task_markers(owner, entries); }
                             Some(HostCommand::OpenLaunchJson { text }) => {
                                 match ensure_launch_json(&session, &root, &text).await {
                                     Ok(path) => {

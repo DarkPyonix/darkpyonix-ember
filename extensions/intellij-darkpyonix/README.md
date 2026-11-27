@@ -49,6 +49,12 @@ Settings: *Settings | Tools | DarkPyonix* (CLI path, spawn arguments, dedicated 
 and token, Python for new kernels, nickname, attach-on-open, queue-when-busy). The client id
 is generated once per installation.
 
+## Colour themes (FR-W6a)
+
+The plugin also brings **DarkPyonix Dark** and **DarkPyonix Light** (Settings > Appearance & Behavior > Appearance > Theme). Each is a UI theme (`src/main/resources/themes/DarkPyonix<Variant>.theme.json`) with its editor colour scheme (`DarkPyonix<Variant>.icls`). As in VS Code, this is Ember's design as colours only; the IDE keeps its own UI shapes.
+
+Every colour comes from the VS Code theme in `../vscode-darkpyonix-theme/themes/`. A named colour in the `.theme.json` is called after the VS Code key it copies, and the `ui` section only names those. `ThemeColoursTest` fails on a colour the VS Code theme does not have, so a change to the palette is made in the VS Code theme first and copied here.
+
 ## Layout
 
 ```

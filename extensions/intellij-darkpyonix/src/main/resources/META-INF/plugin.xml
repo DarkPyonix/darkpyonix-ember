@@ -25,6 +25,9 @@
         <toolWindow id="DarkPyonix" anchor="right" secondary="false" icon="AllIcons.Actions.Execute"
                     factoryClass="dev.darkpyonix.intellij.toolwindow.OutputsToolWindowFactory"/>
         <notificationGroup id="DarkPyonix" displayType="BALLOON"/>
+        <!-- Ember's colours as an IDE theme, taken from the VS Code theme (FR-W6a). -->
+        <themeProvider id="dev.darkpyonix.theme.dark" path="/themes/DarkPyonixDark.theme.json"/>
+        <themeProvider id="dev.darkpyonix.theme.light" path="/themes/DarkPyonixLight.theme.json"/>
         <applicationConfigurable parentId="tools" id="dev.darkpyonix.intellij.settings" displayName="DarkPyonix"
                                  instance="dev.darkpyonix.intellij.settings.DarkPyonixConfigurable"/>
     </extensions>

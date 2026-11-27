@@ -1531,10 +1531,9 @@ pub fn chip_rows(widths: &[f32], gap: f32, avail: f32) -> Vec<Vec<usize>> {
     rows
 }
 
-/// A pessimistic text width for the chips: 16 dp per Korean (non-ASCII) glyph and 9 dp per ASCII
-/// char, so a chip is never wider on screen than modelled and the rows wrap early, not late.
+/// A conservative width for recipient labels at the sheet's small text size.
 pub fn chip_text_px(text: &str) -> f32 {
-    text.chars().map(|c| if c.is_ascii() { 9.0 } else { 16.0 }).sum()
+    text.chars().map(|c| if c.is_ascii() { 8.0 } else { 14.0 }).sum()
 }
 
 /// `text` cut with an ellipsis so [`chip_text_px`] stays within `max_px`.
@@ -1559,10 +1558,10 @@ pub fn chip_width_est(label: &str, glyph: f32) -> f32 {
     12.0 + glyph + 8.0 + chip_text_px(label) + 12.0
 }
 
-/// The widest a chip's text may be in a row `avail` wide: the mockup's 200 px cap, and also so that
-/// two chips always fit one row (each at most `(avail - 8) / 2` wide, the gap being 8).
+/// The text room under the mockup's 200 px cap and the sheet's available width. Longer chips
+/// may take their own row, leaving room for more of the recipient name.
 pub fn chip_text_max_for(avail: f32, glyph: f32) -> f32 {
-    chip_text_max(glyph).min((avail - 8.0) / 2.0 - 12.0 - glyph - 8.0 - 12.0)
+    chip_text_max(glyph).min(avail - chip_width_est("", glyph)).max(0.0)
 }
 
 /// The text of a receiver chip: the name, cut to fit, plus the offline tag for an offline device
@@ -2246,10 +2245,10 @@ mod tests {
 
     // FR-L27.5
     #[test]
-    fn fr_l27_5_pessimistic_chip_rows_never_overflow_and_two_always_fit() {
+    fn fr_l27_5_chip_rows_never_overflow_with_long_names() {
         let avail = chip_avail(390.0);
-        assert_eq!(chip_text_max_for(avail, 16.0), 99.0);
-        assert_eq!(chip_text_max_for(avail, 22.0), 93.0);
+        assert_eq!(chip_text_max_for(avail, 16.0), 152.0);
+        assert_eq!(chip_text_max_for(avail, 22.0), 146.0);
         assert_eq!(chip_text_max_for(chip_avail(1440.0), 16.0), chip_text_max(16.0));
         let names = ["이 컴퓨터", "스튜디오 PC", "second-project-codex", "second-project-claude", "a"];
         for (width, expect_more) in [(390.0, false), (700.0, true)] {
@@ -2259,14 +2258,13 @@ mod tests {
                 let glyph = if i >= 2 { 22.0 } else { 16.0 };
                 let label = chip_label(n, i == 1, chip_text_max_for(avail, glyph), fit_chip_text);
                 let w = chip_width_est(&label, glyph);
-                assert!(w <= (avail - 8.0) / 2.0 + 0.01, "{width} {n}: {w}");
+                assert!(w <= 200.0, "{width} {n}: {w}");
                 widths.push(w);
             }
             let rows = chip_rows(&widths, 8.0, avail);
             for r in &rows {
                 let sum: f32 = r.iter().map(|&i| widths[i]).sum::<f32>() + 8.0 * (r.len() as f32 - 1.0);
                 assert!(sum <= avail, "{width}: {sum}");
-                assert!(r.len() >= 2 || rows.len() == 1 || r != &rows[0], "{width}");
             }
             assert_eq!(rows.iter().any(|r| r.len() >= 3), expect_more, "{width}: {rows:?}");
         }

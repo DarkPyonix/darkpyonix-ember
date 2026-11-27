@@ -92,17 +92,24 @@ function toggleSide(){var app=$(".app"); if(matchMedia("(max-width:1279px)").mat
    runtime OSE by default or official VS Code), JetBrains Gateway (a command to the Gateway installed on that computer). Old cursor/zed fall back to ember. */
 var IDEN={ember:["Ember 에디터","Ember 자체 에디터 코어, 네이티브 창"],vscode:["VS Code","그 컴퓨터의 code serve-web을 Ember IDE 창에서 웹으로 엽니다, 런타임 OSE"],jetbrains:["JetBrains Gateway","그 컴퓨터에 설치된 Gateway에 열기 명령을 보냅니다"]};
 function ideChoice(){var k=lsGet("ember-mock-ide","ember"); if(!IDEN[k]){k="ember"; lsSet("ember-mock-ide",k)} return k}
-/* brand: the one place for the sidebar mark and the favicon. The logo swap (REQUESTS logo:) changes only these two values. */
-var BRAND={mark:'<img class="logo logo-img" src="logo/phoenix-fold/mark-sm.svg" width="32" height="32" alt="Ember">',
+/* brand: the one place for the app bar mark, the full logo and the favicon.
+   Owner 2026-11-27 (D58): the app bar uses a simplified, flat, single-colour DarkPyonix mark (logo/phoenix-fold/mark-simple.svg,
+   inlined here so it takes currentColor). The full logo (BRAND.full) appears only at the Ember editor's top left and as the
+   app's taskbar/dock icon (the favicon stands in for that icon in the mockup). */
+var BRAND_MARK_D="M210 371C276 371 333 324 338 262C341 232 326 214 305 194C289 179 287 172 296 166C306 160 320 160 334 164C322 150 312 145 304 136C292 121 272 116 244 121C230 124 219 123 207 118C209 128 214 134 222 141C210 148 202 160 186 165C192 170 199 172 205 174C200 198 205 214 220 232C233 246 233 256 226 264C214 277 192 274 178 264C145 240 138 203 158 166C186 120 196 94 178 56C174 46 174 36 175 25C150 38 142 60 134 88C129 106 125 113 114 121C117 110 117 102 115 95C84 132 62 175 64 222C67 305 136 371 210 371Z";
+function brandMark(size,cls){size=size||28; return '<span class="logo logo-mark sq-off'+(cls?" "+cls:"")+'" style="width:'+size+'px;height:'+size+'px" role="img" aria-label="DarkPyonix"><svg viewBox="27.9 24.9 346.8 346.8" aria-hidden="true"><path fill="currentColor" d="'+BRAND_MARK_D+'"/></svg></span>'}
+var BRAND={mark:brandMark(28),
+ full:'<img class="logo logo-img" src="logo/phoenix-fold/mark-sm.svg" width="32" height="32" alt="DarkPyonix">',
  favicon:"logo/phoenix-fold/favicon.svg"};
 (function(){var l=document.querySelector('link[rel="icon"]'); if(!l){l=document.createElement("link"); l.rel="icon"; document.head.appendChild(l)} l.href=BRAND.favicon})();
 function shell(active,inner){
  var unreadRooms=D.rooms.reduce(function(a,r){return a+r.unread},0);
  var waiting=D.sessions.filter(function(s){return s.status==="wait"}).length;
- var MORE=["routines","vcs","agents","files"];
+ var MORE=["routines","vcs","agents","tools","files"];
  function nav(k,icon,label,href,extra){return '<a class="nav tab'+(MORE.indexOf(k)>=0?" more-item":"")+(k===active?" on":"")+'" href="'+href+'" title="'+label+'"'+(k===active?' aria-current="page"':"")+'>'+I(icon)+'<span class="lbl">'+label+'</span>'+(extra||"")+'</a>'}
  return '<div class="app'+(sideCollapsed()?" collapsed":"")+'"><aside class="side">'+
-  '<div class="brand"><button class="logobtn" data-act="side" title="사이드바 접기/펼치기" aria-label="사이드바 접기/펼치기">'+BRAND.mark+'<span class="lg-ico i-close">'+I("sidebar-close")+'</span><span class="lg-ico i-open">'+I("sidebar-open")+'</span></button><div><b>Ember</b><small>darkpyonix</small></div></div>'+
+  '<div class="brand"><button class="logobtn" data-act="dash" title="대시보드 열기 (오늘의 팀)" aria-label="대시보드 열기">'+BRAND.mark+'</button><div><b>Ember</b><small>darkpyonix</small></div>'+
+  '<button class="sidetoggle" data-act="side" title="사이드바 접기/펼치기" aria-label="사이드바 접기/펼치기"><span class="i-close">'+I("sidebar-close")+'</span><span class="i-open">'+I("sidebar-open")+'</span></button></div>'+
   nav("home","home","홈","home.html")+
   nav("project","folder","프로젝트","project.html",'<span class="count">'+D.projects.length+'</span>')+
   nav("sessions","grid","세션","conversation.html#p:"+lastProj(),waiting?'<span class="redbadge" title="승인 대기">'+waiting+'</span>':"")+
@@ -110,8 +117,9 @@ function shell(active,inner){
   nav("routines","repeat","루틴","routines.html",'<span class="count">'+(D.routines||[]).filter(function(r){return r.enabled}).length+'</span>')+
   nav("vcs","git","버전 관리","vcs.html")+
   nav("agents","cpu","에이전트","agents.html")+
+  nav("tools","wrench","도구","tools.html")+
   nav("files","arrows-right-left","파일","files.html",(function(){var n=((D.files||window.EMBER_DEMO.files||{}).transfers||[]).filter(function(x){return x.state==="run"}).length; return n?'<span class="count">'+n+'</span>':""})())+
-  '<button class="nav tab morebtn'+(MORE.indexOf(active)>=0?" on":"")+'" data-act="moretabs" title="더보기" aria-label="더보기: 루틴, 버전 관리, 에이전트, 파일" aria-haspopup="dialog">'+I("more")+'<span class="lbl">더보기</span></button>'+
+  '<button class="nav tab morebtn'+(MORE.indexOf(active)>=0?" on":"")+'" data-act="moretabs" title="더보기" aria-label="더보기: 루틴, 버전 관리, 에이전트, 도구, 파일" aria-haspopup="dialog">'+I("more")+'<span class="lbl">더보기</span></button>'+
   '<div class="spacer"></div>'+
   '<div class="sidetools" role="group" aria-label="도구">'+
   '<button class="tool" data-act="theme" title="테마 전환" aria-label="테마: '+THEME_UI[themePref()][1]+', 눌러서 다음으로">'+I(THEME_UI[themePref()][0])+'<span class="lbl">테마: '+THEME_UI[themePref()][1]+'</span></button>'+
@@ -291,6 +299,7 @@ document.addEventListener("click",function(e){
   else if(act==="reset") resetDemo();
   else if(act==="platform") togglePlatform();
   else if(act==="side") toggleSide();
+  else if(act==="dash"){ if(Ember.dash&&screenName()==="home") Ember.dash.toggle(); else location.href="home.html#dash"}
   else if(act==="pmenu"){a.parentNode.classList.toggle("open")}
   else if(act==="settings") toast("설정 (데모)");
   else if(act==="closemodal"){var md=$(".modal"); if(md){if(sc.onModalClose) sc.onModalClose(md); md.remove()}}
@@ -300,7 +309,7 @@ document.addEventListener("click",function(e){
   else if(act==="search"){var sb=$(".searchbox"); sb.classList.toggle("open"); if(sb.classList.contains("open")) sb.querySelector("input").focus()}
   else if(act==="ide"){var ideK=ideChoice(); toast("IDE 열기: "+IDEN[ideK][0]+" ("+IDEN[ideK][1]+")")}
   else if(act==="assign") toast("컴퓨터 할당 창 (데모)");
-  else if(act==="moretabs"){var cur=screenName(); sheet('<div class="sheet-h"><b class="sheet-t">더보기</b><div class="sheet-acts"></div><button class="icon-btn sm" data-act="closemodal" aria-label="닫기">'+I("close")+'</button></div><nav class="more-list" aria-label="더보기">'+[["routines","repeat","루틴","routines.html"],["vcs","git","버전 관리","vcs.html"],["agents","cpu","에이전트","agents.html"],["files","arrows-right-left","파일","files.html"]].map(function(x){return '<a class="list-row'+(x[0]===cur?" on":"")+'" href="'+x[3]+'"'+(x[0]===cur?' aria-current="page"':"")+'><div class="tile">'+I(x[1])+'</div><span class="t spacer">'+x[2]+'</span>'+I("chev")+'</a>'}).join("")+'</nav>',"moremodal")}
+  else if(act==="moretabs"){var cur=screenName(); sheet('<div class="sheet-h"><b class="sheet-t">더보기</b><div class="sheet-acts"></div><button class="icon-btn sm" data-act="closemodal" aria-label="닫기">'+I("close")+'</button></div><nav class="more-list" aria-label="더보기">'+[["routines","repeat","루틴","routines.html"],["vcs","git","버전 관리","vcs.html"],["agents","cpu","에이전트","agents.html"],["tools","wrench","도구","tools.html"],["files","arrows-right-left","파일","files.html"]].map(function(x){return '<a class="list-row'+(x[0]===cur?" on":"")+'" href="'+x[3]+'"'+(x[0]===cur?' aria-current="page"':"")+'><div class="tile">'+I(x[1])+'</div><span class="t spacer">'+x[2]+'</span>'+I("chev")+'</a>'}).join("")+'</nav>',"moremodal")}
   else if(act==="computer") toast(a.dataset.id+": 세부 화면 (데모)");
   return}
  if((a=t.closest("[data-href]"))) location.href=a.dataset.href;
@@ -310,7 +319,7 @@ document.addEventListener("keydown",function(e){if(e.key==="Escape"){var m=$(".m
 function boot(){var sc=Ember.screens[screenName()]; if(sc&&sc.render) sc.render()}
 document.addEventListener("DOMContentLoaded",boot);
 /* everything a screen needs, also reachable as globals */
-["D","save","resetDemo","toggleTheme","I","esc","$","nowTime","toast","proj","sess","maxT","ST","pill","sdot","av","VC","vendorOf","bot","mname","lastProj","lsGet","lsSet","shell","head","card","sessRows","compRows","sorted","newSession","activity","member","mtile","ORDER","projSessions","lastMsg","stackAv","sheet","closeSheet","render","boot","toggleSide","squircle","squircleAll","squirclePath","sqRefresh","donut","teamSegs","togglePlatform","ripple","themePref","updateThemeButtons","BRAND","IDEN","ideChoice"].forEach(function(k){try{Ember[k]=eval(k)}catch(err){}});
+["D","save","resetDemo","toggleTheme","I","esc","$","nowTime","toast","proj","sess","maxT","ST","pill","sdot","av","VC","vendorOf","bot","mname","lastProj","lsGet","lsSet","shell","head","card","sessRows","compRows","sorted","newSession","activity","member","mtile","ORDER","projSessions","lastMsg","stackAv","sheet","closeSheet","render","boot","toggleSide","squircle","squircleAll","squirclePath","sqRefresh","donut","teamSegs","togglePlatform","ripple","themePref","updateThemeButtons","BRAND","brandMark","IDEN","ideChoice"].forEach(function(k){try{Ember[k]=eval(k)}catch(err){}});
 /* ---------- model picker (v10 addition 4, v11 ref10 layout) and permission mode picker (v11) ----------
    Ember.modelPicker.html(opts) / mount(el, opts) / value(el): chip "harness · model · effort".
        opts: {harness, model, effort, account, project, name, onChange(v)}; v = {harness, model, modelName, effort, account, project, profile, label}.

@@ -1,0 +1,223 @@
+{
+  "name": "DarkPyonix Light",
+  "dark": false,
+  "author": "DarkPyonix",
+  "editorScheme": "/themes/DarkPyonixLight.icls",
+  "colors": {
+    "badge.background": "#C65F3C",
+    "badge.foreground": "#F5EFE0",
+    "button.background": "#C65F3C",
+    "button.foreground": "#F5EFE0",
+    "button.hoverBackground": "#D87D5C",
+    "dropdown.background": "#EFE6D6",
+    "dropdown.border": "#D3C5AE",
+    "dropdown.foreground": "#3E2E22",
+    "focusBorder": "#C65F3C",
+    "input.background": "#EFE6D6",
+    "input.border": "#D3C5AE",
+    "input.foreground": "#3E2E22",
+    "input.placeholderForeground": "#A89883",
+    "list.activeSelectionBackground": "#C65F3C",
+    "list.activeSelectionForeground": "#F5EFE0",
+    "list.highlightForeground": "#E8A887",
+    "list.hoverBackground": "#E8DECA",
+    "list.inactiveSelectionBackground": "#E8DECA",
+    "panel.border": "#D3C5AE",
+    "peekViewResult.matchHighlightBackground": "#C65F3C40",
+    "progressBar.background": "#C65F3C",
+    "scrollbarSlider.background": "#D3C5AE80",
+    "scrollbarSlider.hoverBackground": "#D3C5AEA0",
+    "sideBar.background": "#E8DECA",
+    "sideBar.foreground": "#3E2E22",
+    "sideBarSectionHeader.background": "#DFD3BB",
+    "statusBar.background": "#E8DECA",
+    "statusBarItem.hoverBackground": "#D3C5AE",
+    "tab.activeBackground": "#F5EFE0",
+    "tab.activeBorder": "#C65F3C",
+    "tab.activeForeground": "#C65F3C",
+    "tab.border": "#E8DECA",
+    "tab.inactiveBackground": "#E8DECA",
+    "titleBar.activeBackground": "#E8DECA",
+    "titleBar.activeForeground": "#3E2E22",
+    "titleBar.inactiveBackground": "#E8DECA",
+    "titleBar.inactiveForeground": "#A89883",
+    "tree.indentGuidesStroke": "#D3C5AE"
+  },
+  "ui": {
+    "*": {
+      "background": "sideBar.background",
+      "foreground": "sideBar.foreground",
+      "selectionBackground": "list.activeSelectionBackground",
+      "selectionForeground": "list.activeSelectionForeground",
+      "selectionInactiveBackground": "list.inactiveSelectionBackground",
+      "selectionBackgroundInactive": "list.inactiveSelectionBackground",
+      "hoverBackground": "list.hoverBackground",
+      "borderColor": "panel.border",
+      "separatorColor": "panel.border",
+      "focusColor": "focusBorder",
+      "infoForeground": "input.placeholderForeground",
+      "disabledForeground": "titleBar.inactiveForeground",
+      "inactiveBackground": "sideBar.background"
+    },
+    "Borders": {
+      "color": "panel.border",
+      "ContrastBorderColor": "panel.border"
+    },
+    "Button": {
+      "default.startBackground": "button.background",
+      "default.endBackground": "button.background",
+      "default.foreground": "button.foreground",
+      "default.focusColor": "focusBorder"
+    },
+    "ActionButton": {
+      "hoverBackground": "statusBarItem.hoverBackground"
+    },
+    "ComboBox": {
+      "background": "dropdown.background",
+      "nonEditableBackground": "dropdown.background",
+      "foreground": "dropdown.foreground"
+    },
+    "Component": {
+      "focusColor": "focusBorder",
+      "focusedBorderColor": "focusBorder",
+      "borderColor": "input.border"
+    },
+    "Counter": {
+      "background": "badge.background",
+      "foreground": "badge.foreground"
+    },
+    "DefaultTabs": {
+      "background": "tab.inactiveBackground",
+      "underlineColor": "tab.activeBorder",
+      "underlinedTabBackground": "tab.activeBackground",
+      "underlinedTabForeground": "tab.activeForeground",
+      "borderColor": "tab.border"
+    },
+    "EditorTabs": {
+      "background": "tab.inactiveBackground",
+      "underlineColor": "tab.activeBorder",
+      "underlinedTabBackground": "tab.activeBackground",
+      "underlinedTabForeground": "tab.activeForeground",
+      "borderColor": "tab.border"
+    },
+    "FormattedTextField": {
+      "background": "input.background",
+      "foreground": "input.foreground"
+    },
+    "Label": {
+      "foreground": "sideBar.foreground",
+      "disabledForeground": "titleBar.inactiveForeground",
+      "infoForeground": "input.placeholderForeground"
+    },
+    "Link": {
+      "activeForeground": "list.highlightForeground",
+      "hoverForeground": "list.highlightForeground"
+    },
+    "List": {
+      "background": "sideBar.background",
+      "selectionBackground": "list.activeSelectionBackground",
+      "selectionForeground": "list.activeSelectionForeground",
+      "selectionInactiveBackground": "list.inactiveSelectionBackground",
+      "hoverBackground": "list.hoverBackground"
+    },
+    "MainToolbar": {
+      "background": "titleBar.activeBackground",
+      "inactiveBackground": "titleBar.inactiveBackground"
+    },
+    "Menu": {
+      "background": "dropdown.background",
+      "foreground": "dropdown.foreground",
+      "selectionBackground": "list.activeSelectionBackground",
+      "selectionForeground": "list.activeSelectionForeground"
+    },
+    "Notification": {
+      "background": "dropdown.background",
+      "borderColor": "dropdown.border"
+    },
+    "Panel": {
+      "background": "sideBar.background"
+    },
+    "PasswordField": {
+      "background": "input.background",
+      "foreground": "input.foreground"
+    },
+    "Popup": {
+      "background": "dropdown.background",
+      "borderColor": "dropdown.border",
+      "Header.activeBackground": "sideBarSectionHeader.background",
+      "Header.inactiveBackground": "sideBarSectionHeader.background"
+    },
+    "PopupMenu": {
+      "background": "dropdown.background",
+      "foreground": "dropdown.foreground",
+      "selectionBackground": "list.activeSelectionBackground",
+      "selectionForeground": "list.activeSelectionForeground"
+    },
+    "ProgressBar": {
+      "progressColor": "progressBar.background",
+      "indeterminateStartColor": "progressBar.background",
+      "indeterminateEndColor": "button.hoverBackground"
+    },
+    "ScrollBar": {
+      "thumbColor": "scrollbarSlider.background",
+      "hoverThumbColor": "scrollbarSlider.hoverBackground",
+      "Mac.thumbColor": "scrollbarSlider.background",
+      "Mac.hoverThumbColor": "scrollbarSlider.hoverBackground",
+      "Transparent.thumbColor": "scrollbarSlider.background",
+      "Transparent.hoverThumbColor": "scrollbarSlider.hoverBackground",
+      "Mac.Transparent.thumbColor": "scrollbarSlider.background",
+      "Mac.Transparent.hoverThumbColor": "scrollbarSlider.hoverBackground"
+    },
+    "SearchMatch": {
+      "startBackground": "peekViewResult.matchHighlightBackground",
+      "endBackground": "peekViewResult.matchHighlightBackground"
+    },
+    "Separator": {
+      "separatorColor": "panel.border"
+    },
+    "SidePanel": {
+      "background": "sideBar.background"
+    },
+    "StatusBar": {
+      "background": "statusBar.background",
+      "borderColor": "panel.border",
+      "Widget.hoverBackground": "statusBarItem.hoverBackground"
+    },
+    "Table": {
+      "background": "sideBar.background",
+      "selectionBackground": "list.activeSelectionBackground",
+      "selectionForeground": "list.activeSelectionForeground",
+      "selectionInactiveBackground": "list.inactiveSelectionBackground"
+    },
+    "TextArea": {
+      "background": "input.background",
+      "foreground": "input.foreground"
+    },
+    "TextField": {
+      "background": "input.background",
+      "foreground": "input.foreground"
+    },
+    "TitlePane": {
+      "background": "titleBar.activeBackground",
+      "inactiveBackground": "titleBar.inactiveBackground",
+      "foreground": "titleBar.activeForeground",
+      "inactiveForeground": "titleBar.inactiveForeground"
+    },
+    "ToolTip": {
+      "background": "dropdown.background",
+      "foreground": "dropdown.foreground"
+    },
+    "ToolWindow": {
+      "background": "sideBar.background",
+      "Header.background": "sideBarSectionHeader.background",
+      "Header.inactiveBackground": "sideBar.background"
+    },
+    "Tree": {
+      "background": "sideBar.background",
+      "selectionBackground": "list.activeSelectionBackground",
+      "selectionForeground": "list.activeSelectionForeground",
+      "selectionInactiveBackground": "list.inactiveSelectionBackground",
+      "hash": "tree.indentGuidesStroke"
+    }
+  }
+}

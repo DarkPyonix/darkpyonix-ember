@@ -26,9 +26,10 @@ Sizes: 1440x900, 1024x800, 768x900, 390x844. Themes: light and dark.
 It runs on macOS only for now, because it uses `screencapture`, CoreGraphics window ids and
 `sips`. It needs a display and the Screen Recording permission for the terminal that runs it. The
 CI job "Screen previews" (`.github/workflows/test-previews.yml`, #222) runs it on a hosted
-`macos-15` runner and uploads the images as the artifact `ember-previews-macos`; it has not run
-yet, so its capture step does not fail the run until the first green run. It pairs every capture
-with the mockup in `docs/design/mockup/` (committed with the owner's approval, 2026-11-21).
+`macos-15` runner and uploads the images as the artifact `ember-previews-macos`. A capture,
+render or join failure fails the job. The job still uploads any images and logs that were written.
+It pairs every capture with the mockup in `docs/design/mockup/` (committed with the owner's
+approval, 2026-11-21).
 
 ### How to run
 
@@ -107,8 +108,8 @@ a window capture (#222).
 지금은 macOS에서만 돈다. `screencapture`, CoreGraphics 창 id, `sips`를 쓰기 때문이다. 디스플레이와
 실행하는 터미널의 화면 기록 권한이 필요하다. CI 작업 "Screen previews"(`.github/workflows/test-previews.yml`,
 #222)가 호스팅 `macos-15` 러너에서 이 스크립트를 돌리고 이미지를 아티팩트 `ember-previews-macos`로 올린다.
-아직 돌린 적이 없어서 첫 성공 전까지 캡처 단계는 실행을 실패시키지 않는다. 모든 캡처를 `docs/design/mockup/`의
-목업(소유자 승인, 2026-11-21)과 짝짓는다.
+캡처, 렌더링, 이미지 합치기 중 하나라도 실패하면 작업이 실패한다. 그때도 이미 만들어진 이미지와 로그는
+올린다. 모든 캡처를 `docs/design/mockup/`의 목업(소유자 승인, 2026-11-21)과 짝짓는다.
 
 ### 실행 방법
 

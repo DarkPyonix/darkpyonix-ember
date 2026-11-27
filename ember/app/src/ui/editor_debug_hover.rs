@@ -21,7 +21,6 @@ use std::time::{Duration, Instant};
 use dioxus_compose::html::prelude::*;
 use dioxus_compose::prelude::{Props, component};
 use dioxus_core::EventHandler;
-use dioxus_compose::html::prelude::dioxus_signals::WritableExt;
 use ember_editor::DebugView;
 use ember_editor::coords::WidgetPos;
 use ember_editor::debugger::hover::expression_at;
@@ -469,6 +468,7 @@ pub(crate) mod view {
     use compose_rust::code::{CodeRange, Decoration};
     use compose_rust::schema::ColorRole;
     use dioxus_compose::html::prelude::*;
+    use dioxus_compose::html::prelude::dioxus_signals::WritableExt;
     use ember_editor::coords::WidgetPos;
     use ember_editor::debugger::DebugUpdate;
     use ember_editor::widget::HoverPhase;
